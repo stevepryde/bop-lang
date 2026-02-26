@@ -1,6 +1,6 @@
-# bop
+# bop-lang
 
-A small, dynamically-typed programming language, designed for learning to code.
+Bop is a small, dynamically-typed programming language, designed for learning to code.
 
 [Documentation](https://stevepryde.github.io/bop-lang/)
 
