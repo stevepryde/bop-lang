@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::String, vec::Vec};
+
 use crate::error::BopError;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -614,7 +617,7 @@ impl Lexer {
                     }
                     self.advance(); // consume }
                     if !current.is_empty() {
-                        parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                        parts.push(StringPart::Literal(core::mem::take(&mut current)));
                     }
                     parts.push(StringPart::Variable(var));
                 }

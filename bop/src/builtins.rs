@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::{String, ToString}, vec::Vec};
+
 use crate::error::BopError;
 use crate::memory::bop_would_exceed;
 use crate::value::Value;
@@ -55,12 +58,12 @@ pub fn builtin_str(args: &[Value], line: u32) -> Result<Value, BopError> {
 pub fn builtin_int(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("int", args, 1, line)?;
     match &args[0] {
-        Value::Number(n) => Ok(Value::Number(n.trunc())),
+        Value::Number(n) => Ok(Value::Number(*n as i64 as f64)),
         Value::Str(s) => {
             let n: f64 = s.parse().map_err(|_| {
                 error(line, format!("Can't convert \"{}\" to a number", s))
             })?;
-            Ok(Value::Number(n.trunc()))
+            Ok(Value::Number(n as i64 as f64))
         }
         Value::Bool(b) => Ok(Value::Number(if *b { 1.0 } else { 0.0 })),
         _ => Err(error(
@@ -218,7 +221,7 @@ pub fn check_string_concat_memory(a_len: usize, b_len: usize, line: u32) -> Resu
 
 /// Pre-flight check for array concat
 pub fn check_array_concat_memory(a_len: usize, b_len: usize, line: u32) -> Result<(), BopError> {
-    let result_bytes = (a_len + b_len) * std::mem::size_of::<Value>();
+    let result_bytes = (a_len + b_len) * core::mem::size_of::<Value>();
     if bop_would_exceed(result_bytes) {
         Err(error_with_hint(
             line,

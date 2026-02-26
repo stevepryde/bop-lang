@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::{String, ToString}, vec::Vec};
+
 use crate::builtins::{error, expect_number};
 use crate::error::BopError;
 use crate::value::{Value, values_equal};
@@ -81,10 +84,10 @@ pub fn array_method(
             let mut new_arr = arr.to_vec();
             new_arr.sort_by(|a, b| match (a, b) {
                 (Value::Number(x), Value::Number(y)) => {
-                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                    x.partial_cmp(y).unwrap_or(core::cmp::Ordering::Equal)
                 }
                 (Value::Str(x), Value::Str(y)) => x.cmp(y),
-                _ => std::cmp::Ordering::Equal,
+                _ => core::cmp::Ordering::Equal,
             });
             Ok((Value::None, Some(Value::new_array(new_arr))))
         }

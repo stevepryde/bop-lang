@@ -1,4 +1,12 @@
-use std::collections::HashMap;
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::{String, ToString}, vec, vec::Vec};
+
+use alloc_import::collections::BTreeMap;
+
+#[cfg(feature = "std")]
+use std as alloc_import;
+#[cfg(not(feature = "std"))]
+use alloc as alloc_import;
 
 use crate::builtins::{self, error, error_with_hint};
 use crate::error::BopError;
@@ -28,8 +36,8 @@ struct FnDef {
 // ─── Evaluator ─────────────────────────────────────────────────────────────
 
 pub struct Evaluator<'h, H: BopHost> {
-    scopes: Vec<HashMap<String, Value>>,
-    functions: HashMap<String, FnDef>,
+    scopes: Vec<BTreeMap<String, Value>>,
+    functions: BTreeMap<String, FnDef>,
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
@@ -41,8 +49,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     pub fn new(host: &'h mut H, limits: BopLimits) -> Self {
         crate::memory::bop_memory_init(limits.max_memory);
         Self {
-            scopes: vec![HashMap::new()],
-            functions: HashMap::new(),
+            scopes: vec![BTreeMap::new()],
+            functions: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -87,7 +95,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     // ─── Scope ─────────────────────────────────────────────────────
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(BTreeMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -813,7 +821,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
         // Clean scope for function (no outer variables)
         self.call_depth += 1;
-        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+        let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
         for (param, arg) in func.params.iter().zip(args) {
             self.define(param.clone(), arg);
         }

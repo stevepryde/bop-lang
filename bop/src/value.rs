@@ -6,6 +6,9 @@
 //! call `bop_alloc`. This is enforced by the type system — code outside
 //! this module cannot access the private inner fields.
 
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::{String, ToString}, vec::Vec};
+
 use crate::memory::{bop_alloc, bop_dealloc};
 
 // ─── Tracked newtypes ──────────────────────────────────────────────────────
@@ -48,13 +51,13 @@ impl Value {
     }
 
     pub fn new_array(items: Vec<Value>) -> Self {
-        bop_alloc(items.capacity() * std::mem::size_of::<Value>());
+        bop_alloc(items.capacity() * core::mem::size_of::<Value>());
         Value::Array(BopArray(items))
     }
 
     pub fn new_dict(entries: Vec<(String, Value)>) -> Self {
         let key_bytes: usize = entries.iter().map(|(k, _)| k.capacity()).sum();
-        bop_alloc(entries.capacity() * std::mem::size_of::<(String, Value)>() + key_bytes);
+        bop_alloc(entries.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
         Value::Dict(BopDict(entries))
     }
 }
@@ -79,13 +82,13 @@ impl Clone for Value {
             }
             Value::Array(arr) => {
                 let cloned = arr.0.clone(); // each element's Clone tracks itself
-                bop_alloc(cloned.capacity() * std::mem::size_of::<Value>());
+                bop_alloc(cloned.capacity() * core::mem::size_of::<Value>());
                 Value::Array(BopArray(cloned))
             }
             Value::Dict(d) => {
                 let cloned = d.0.clone(); // each Value's Clone tracks itself
                 let key_bytes: usize = cloned.iter().map(|(k, _)| k.capacity()).sum();
-                bop_alloc(cloned.capacity() * std::mem::size_of::<(String, Value)>() + key_bytes);
+                bop_alloc(cloned.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
                 Value::Dict(BopDict(cloned))
             }
         }
@@ -99,11 +102,11 @@ impl Drop for Value {
         match self {
             Value::Str(s) => bop_dealloc(s.0.capacity()),
             Value::Array(arr) => {
-                bop_dealloc(arr.0.capacity() * std::mem::size_of::<Value>());
+                bop_dealloc(arr.0.capacity() * core::mem::size_of::<Value>());
             }
             Value::Dict(d) => {
                 let key_bytes: usize = d.0.iter().map(|(k, _)| k.capacity()).sum();
-                bop_dealloc(d.0.capacity() * std::mem::size_of::<(String, Value)>() + key_bytes);
+                bop_dealloc(d.0.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
             }
             _ => {}
         }
@@ -112,11 +115,11 @@ impl Drop for Value {
 
 // ─── Display ───────────────────────────────────────────────────────────────
 
-impl std::fmt::Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Value {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Value::Number(n) => {
-                if *n == n.trunc() && n.is_finite() {
+                if *n == (*n as i64 as f64) && *n - *n == 0.0 {
                     write!(f, "{}", *n as i64)
                 } else {
                     write!(f, "{}", n)
@@ -149,8 +152,8 @@ impl std::fmt::Display for Value {
     }
 }
 
-impl std::fmt::Display for BopStr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for BopStr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -196,21 +199,21 @@ impl BopStr {
     }
 }
 
-impl std::ops::Deref for BopStr {
+impl core::ops::Deref for BopStr {
     type Target = str;
     fn deref(&self) -> &str {
         &self.0
     }
 }
 
-impl std::ops::Deref for BopArray {
+impl core::ops::Deref for BopArray {
     type Target = [Value];
     fn deref(&self) -> &[Value] {
         &self.0
     }
 }
 
-impl std::ops::Deref for BopDict {
+impl core::ops::Deref for BopDict {
     type Target = [(String, Value)];
     fn deref(&self) -> &[(String, Value)] {
         &self.0
@@ -223,8 +226,8 @@ impl BopArray {
     /// Take the inner Vec, leaving an empty array. Deallocates the buffer
     /// from the memory tracker since it's leaving Value's control.
     pub fn take(&mut self) -> Vec<Value> {
-        let taken = std::mem::take(&mut self.0);
-        bop_dealloc(taken.capacity() * std::mem::size_of::<Value>());
+        let taken = core::mem::take(&mut self.0);
+        bop_dealloc(taken.capacity() * core::mem::size_of::<Value>());
         taken
     }
 
@@ -249,7 +252,7 @@ impl BopDict {
             self.0.push((key, val));
             let new_cap = self.0.capacity();
             if new_cap > old_cap {
-                bop_alloc((new_cap - old_cap) * std::mem::size_of::<(String, Value)>());
+                bop_alloc((new_cap - old_cap) * core::mem::size_of::<(String, Value)>());
             }
         }
     }

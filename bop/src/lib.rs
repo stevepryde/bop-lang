@@ -1,3 +1,11 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 pub mod error;
 pub mod value;
 pub mod lexer;
@@ -53,9 +61,17 @@ pub trait BopHost {
     /// Called for unknown function names. Return `None` = not handled.
     fn call(&mut self, name: &str, args: &[Value], line: u32) -> Option<Result<Value, BopError>>;
 
-    /// Called by `print()`. Default: writes to stdout.
+    /// Called by `print()`. Default: writes to stdout (std only), panics (no-std).
     fn on_print(&mut self, message: &str) {
-        println!("{}", message);
+        #[cfg(feature = "std")]
+        {
+            println!("{}", message);
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = message;
+            panic!("BopHost::on_print must be implemented in no-std environments");
+        }
     }
 
     /// Hint text for "function not found" errors.

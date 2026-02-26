@@ -13,3 +13,7 @@ categories = ["compilers"]
 
 [lib]
 name = "bop"
+
+[features]
+default = ["std"]
+std = []

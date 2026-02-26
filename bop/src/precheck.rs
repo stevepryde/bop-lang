@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::format;
+
 use crate::error::BopError;
 
 const RESERVED_KEYWORDS: &[&str] = &[

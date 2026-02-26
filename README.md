@@ -75,7 +75,7 @@ Add `bop-lang` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bop-lang = "0.1"
+bop-lang = "0.2"
 ```
 
 ```rust
