@@ -8,6 +8,7 @@ A small, dynamically-typed programming language, designed for learning to code.
 
 ## Features
 
+- No dependencies
 - Simple, expressive syntax
 - Functions with recursion
 - Arrays, dictionaries, and string interpolation
