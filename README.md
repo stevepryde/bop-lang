@@ -9,11 +9,12 @@ A small, dynamically-typed programming language, designed for learning to code.
 ## Features
 
 - No dependencies
+- Supports std, no-std and WASM
 - Simple, expressive syntax
 - Functions with recursion
 - Arrays, dictionaries, and string interpolation
 - Built-in resource limits (step count, memory) for safe embedding
-- Embeddable via the `BopHost` trait
+- Embeddable via the `BopHost` trait (call your Rust functions from Bop)
 - Easy to learn, with helpful error messages
 
 ## Examples
