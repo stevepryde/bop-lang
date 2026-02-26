@@ -1,0 +1,19 @@
+[package]
+name = "bop-cli"
+description = "CLI and REPL for the Bop programming language"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["language", "interpreter", "scripting", "repl"]
+categories = ["compilers", "command-line-utilities"]
+
+[[bin]]
+name = "bop"
+path = "src/main.rs"
+
+[dependencies]
+bop = { version = "0.1.0", path = "../bop", package = "bop-lang" }

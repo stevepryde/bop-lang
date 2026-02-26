@@ -1,0 +1,15 @@
+[package]
+name = "bop-lang"
+description = "A small, dynamically-typed programming language"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["language", "interpreter", "scripting", "embedded"]
+categories = ["compilers"]
+
+[lib]
+name = "bop"
