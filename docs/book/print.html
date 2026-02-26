@@ -1,0 +1,1605 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>The Bop Language</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-a7066e9a.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-3d459e96.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">The Bop Language</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/stevepryde/bop-lang" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="welcome-to-bop"><a class="header" href="#welcome-to-bop">Welcome to Bop</a></h1>
+<p>Bop is a small, dynamically-typed programming language designed for embedding. It looks like real code — curly braces, functions, operators — but runs in a sandbox with bounded resources and no access to the filesystem or network.</p>
+<p>Bop isn’t Python, JavaScript, or any existing language, but it borrows familiar syntax so that the skills transfer. Variables, loops, functions, arrays, dictionaries — real programming concepts, zero setup.</p>
+<h2 id="quick-example"><a class="header" href="#quick-example">Quick example</a></h2>
+<pre><code class="language-bop">// Sum the numbers from 1 to 10
+let total = 0
+for i in range(1, 11) {
+  total += i
+}
+print("Sum: " + str(total))
+</code></pre>
+<h2 id="what-makes-bop-different"><a class="header" href="#what-makes-bop-different">What makes Bop different?</a></h2>
+<ul>
+<li><strong>Looks like real code</strong> — curly braces, functions, operators. Skills transfer to real languages.</li>
+<li><strong>Friendly errors</strong> — never cryptic, always helpful. (<code>"I don't know what 'pritn' is — did you mean 'print'?"</code>)</li>
+<li><strong>Sandboxed by design</strong> — no imports, no file I/O, no network access. All resource usage is bounded.</li>
+<li><strong>Embeddable</strong> — add custom functions and control execution through the <code>BopHost</code> trait.</li>
+</ul>
+<h2 id="where-to-start"><a class="header" href="#where-to-start">Where to start</a></h2>
+<p>If you’re new to Bop, start with the <strong>Basics</strong> section and work your way through. If you’re looking for a specific function or operator, jump straight to the <strong>Reference</strong> section. If you want to embed Bop in your own Rust project, see the <strong>Embedding</strong> chapter.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="syntax"><a class="header" href="#syntax">Syntax</a></h1>
+<p>Bop’s syntax is deliberately simple. If you’ve seen JavaScript or Python, most of it will look familiar.</p>
+<h2 id="blocks"><a class="header" href="#blocks">Blocks</a></h2>
+<p>Code blocks use curly braces <code>{ }</code> and only appear after control flow keywords (<code>if</code>, <code>else</code>, <code>while</code>, <code>for</code>, <code>repeat</code>, <code>fn</code>):</p>
+<pre><code class="language-bop">if count &gt; 3 {
+  print("That's a lot!")
+}
+</code></pre>
+<blockquote>
+<p><strong>Important:</strong> The opening <code>{</code> must be on the same line as its keyword. Bop automatically inserts semicolons at the end of lines, so putting <code>{</code> on the next line would cause a parse error.</p>
+</blockquote>
+<pre><code class="language-bop">// Good
+if count &gt; 3 {
+  print("Nice!")
+}
+
+// Bad — will cause an error
+if count &gt; 3
+{
+  print("Nice!")
+}
+</code></pre>
+<h2 id="statements"><a class="header" href="#statements">Statements</a></h2>
+<p>Statements end with a newline. Bop automatically inserts semicolons after lines ending in an identifier, literal, <code>true</code>, <code>false</code>, <code>none</code>, <code>break</code>, <code>continue</code>, <code>return</code>, <code>)</code>, <code>]</code>, or <code>}</code>.</p>
+<p>You can put multiple statements on one line with an explicit semicolon:</p>
+<pre><code class="language-bop">let x = 1; let y = 2
+</code></pre>
+<h2 id="comments"><a class="header" href="#comments">Comments</a></h2>
+<p>Line comments start with <code>//</code>. Everything after <code>//</code> on that line is ignored:</p>
+<pre><code class="language-bop">// This is a comment
+let x = 5   // So is this
+</code></pre>
+<h2 id="identifiers"><a class="header" href="#identifiers">Identifiers</a></h2>
+<p>Variable and function names start with a letter or underscore and can contain letters, digits, and underscores:</p>
+<pre><code class="language-bop">let my_var = 5
+let _count = 0
+let item3 = "hello"
+</code></pre>
+<h2 id="whitespace"><a class="header" href="#whitespace">Whitespace</a></h2>
+<p>Spaces and tabs are insignificant — use whatever indentation style you like. Only newlines matter (they end statements).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="types"><a class="header" href="#types">Types</a></h1>
+<p>Bop is dynamically typed — variables can hold any type, and types are checked at runtime. There are six types:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Type</th><th>Literals</th><th>Examples</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>number</strong></td><td>Digits, optional decimal</td><td><code>0</code>, <code>42</code>, <code>-7</code>, <code>3.14</code></td></tr>
+<tr><td><strong>string</strong></td><td>Double-quoted</td><td><code>"hello"</code>, <code>"got {n} items"</code></td></tr>
+<tr><td><strong>bool</strong></td><td>Keywords</td><td><code>true</code>, <code>false</code></td></tr>
+<tr><td><strong>none</strong></td><td>Keyword</td><td><code>none</code></td></tr>
+<tr><td><strong>array</strong></td><td>Square brackets</td><td><code>[1, 2, 3]</code>, <code>[]</code></td></tr>
+<tr><td><strong>dict</strong></td><td>Curly braces with colons</td><td><code>{"x": 10, "name": "Alice"}</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>You can check a value’s type at runtime with the <code>type()</code> function:</p>
+<pre><code class="language-bop">let x = 42
+print(type(x))    // "number"
+
+let s = "hello"
+print(type(s))    // "string"
+</code></pre>
+<h2 id="numbers"><a class="header" href="#numbers">Numbers</a></h2>
+<p>Bop has a single <code>number</code> type (64-bit floating point internally). Whole numbers display without a decimal point: <code>5</code> not <code>5.0</code>.</p>
+<pre><code class="language-bop">let score = 100
+let pi = 3.14
+let negative = -7
+</code></pre>
+<p>Division always produces a float result:</p>
+<pre><code class="language-bop">print(7 / 2)     // 3.5
+print(6 / 2)     // 3
+</code></pre>
+<p>Use <code>int()</code> to truncate the decimal part:</p>
+<pre><code class="language-bop">print(int(7 / 2))   // 3
+print(int(3.9))      // 3
+</code></pre>
+<h2 id="strings"><a class="header" href="#strings">Strings</a></h2>
+<p>Strings use double quotes only. Supported escape sequences: <code>\"</code>, <code>\\</code>, <code>\n</code>, <code>\t</code>, <code>\{</code>, <code>\}</code>.</p>
+<pre><code class="language-bop">let greeting = "Hello, world!"
+let with_newline = "Line 1\nLine 2"
+</code></pre>
+<p>Strings are indexable and iterable, but immutable — you can read characters but not change them in place:</p>
+<pre><code class="language-bop">let s = "hello"
+print(s[0])     // "h"
+print(s[-1])    // "o"
+
+for ch in s {
+  print(ch)     // "h", "e", "l", "l", "o"
+}
+</code></pre>
+<h3 id="string-interpolation"><a class="header" href="#string-interpolation">String interpolation</a></h3>
+<p>Use <code>{variable}</code> inside a string to insert a variable’s value. Only variable names are allowed inside <code>{}</code> — not expressions:</p>
+<pre><code class="language-bop">let name = "Alice"
+let count = 5
+print("Hello, {name}! You have {count} items.")
+</code></pre>
+<p>For computed values, store the result in a variable first:</p>
+<pre><code class="language-bop">let doubled = str(count * 2)
+print("Double: {doubled}")
+
+// Or use concatenation:
+print("Double: " + str(count * 2))
+</code></pre>
+<p>To include a literal <code>{</code> or <code>}</code> in a string, escape it with a backslash:</p>
+<pre><code class="language-bop">print("Use \{name\} for interpolation")
+// prints: Use {name} for interpolation
+</code></pre>
+<h2 id="booleans"><a class="header" href="#booleans">Booleans</a></h2>
+<p><code>true</code> and <code>false</code>. Used in conditions and comparisons:</p>
+<pre><code class="language-bop">let found = true
+let empty = false
+
+if found {
+  print("Got it!")
+}
+</code></pre>
+<h2 id="none"><a class="header" href="#none">None</a></h2>
+<p><code>none</code> represents the absence of a value. Functions that don’t explicitly return a value return <code>none</code>. It’s also what you get when looking up a missing dictionary key:</p>
+<pre><code class="language-bop">let stats = {"hp": 10}
+let missing = stats["armor"]
+print(missing)    // none
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="variables"><a class="header" href="#variables">Variables</a></h1>
+<p>Variables store values that you can use and change throughout your program.</p>
+<h2 id="declaring-variables"><a class="header" href="#declaring-variables">Declaring variables</a></h2>
+<p>Use <code>let</code> to create a new variable:</p>
+<pre><code class="language-bop">let x = 5
+let name = "Alice"
+let found = true
+let items = [1, 2, 3]
+let config = {"width": 10, "height": 5}
+</code></pre>
+<p><code>let</code> is required the first time — using an undeclared variable is an error. This catches typos early:</p>
+<pre><code class="language-bop">let count = 5
+conut = 10    // Error: I don't know what 'conut' is — did you mean 'count'?
+</code></pre>
+<h2 id="reassignment"><a class="header" href="#reassignment">Reassignment</a></h2>
+<p>After declaration, reassign with just <code>=</code>:</p>
+<pre><code class="language-bop">let score = 0
+score = 10
+score += 5     // score is now 15
+</code></pre>
+<p>Compound assignment operators work too: <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code>, <code>%=</code>.</p>
+<pre><code class="language-bop">let x = 10
+x += 3    // x = x + 3 → 13
+x -= 1    // x = x - 1 → 12
+x *= 2    // x = x * 2 → 24
+</code></pre>
+<h2 id="block-scoping"><a class="header" href="#block-scoping">Block scoping</a></h2>
+<p>Variables are block-scoped — a variable declared inside <code>{ }</code> is not visible outside:</p>
+<pre><code class="language-bop">let x = 1
+if true {
+  let y = 2       // y only exists inside this block
+  print(y)        // 2
+}
+// print(y)       // Error: I don't know what 'y' is
+</code></pre>
+<h2 id="shadowing"><a class="header" href="#shadowing">Shadowing</a></h2>
+<p>You can re-declare a variable with <code>let</code> in an inner block. The inner variable “shadows” the outer one:</p>
+<pre><code class="language-bop">let x = 1
+if true {
+  let x = 2     // shadows outer x
+  x = 3         // reassigns inner x
+  print(x)      // 3
+}
+print(x)         // 1 — outer x is unchanged
+</code></pre>
+<h2 id="copying-and-passing-values"><a class="header" href="#copying-and-passing-values">Copying and passing values</a></h2>
+<p>Every value in Bop is a <strong>copy</strong>. When you assign a variable, pass an argument to a function, or return a value, you get an independent copy — even for arrays and dicts. Changing the copy never affects the original.</p>
+<h3 id="assignment-copies"><a class="header" href="#assignment-copies">Assignment copies</a></h3>
+<pre><code class="language-bop">let a = [1, 2, 3]
+let b = a           // b is a separate copy
+b.push(4)
+print(a)            // [1, 2, 3] — unchanged
+print(b)            // [1, 2, 3, 4]
+</code></pre>
+<h3 id="function-arguments-are-copies"><a class="header" href="#function-arguments-are-copies">Function arguments are copies</a></h3>
+<p>When you pass a value to a function, the function gets its own copy. Modifying it inside the function has no effect on the caller’s variable:</p>
+<pre><code class="language-bop">fn try_to_modify(items) {
+  items.push(99)
+  print(items)       // [1, 2, 3, 99]
+}
+
+let original = [1, 2, 3]
+try_to_modify(original)
+print(original)      // [1, 2, 3] — unchanged
+</code></pre>
+<p>To get a modified value out of a function, <code>return</code> it:</p>
+<pre><code class="language-bop">fn add_item(items, val) {
+  items.push(val)
+  return items
+}
+
+let original = [1, 2, 3]
+original = add_item(original, 99)
+print(original)      // [1, 2, 3, 99]
+</code></pre>
+<p>This works the same way for all types — numbers, strings, bools, arrays, and dicts are all copied. There are no references or shared mutable state in Bop.</p>
+<h2 id="dynamic-typing"><a class="header" href="#dynamic-typing">Dynamic typing</a></h2>
+<p>Variables can hold any type. You can even change the type of a variable by reassigning it:</p>
+<pre><code class="language-bop">let val = 42
+print(type(val))    // "number"
+
+val = "hello"
+print(type(val))    // "string"
+</code></pre>
+<p>This flexibility is useful, but can be surprising if you’re not careful.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="if--else"><a class="header" href="#if--else">if / else</a></h1>
+<p>The <code>if</code> statement lets your program make decisions based on conditions.</p>
+<h2 id="basic-if"><a class="header" href="#basic-if">Basic if</a></h2>
+<pre><code class="language-bop">if count &gt; 3 {
+  print("That's a lot!")
+}
+</code></pre>
+<p>The condition does <strong>not</strong> need parentheses, but they’re allowed: <code>if (x &gt; 3) { ... }</code>. Braces are always required.</p>
+<h2 id="if--else-1"><a class="header" href="#if--else-1">if / else</a></h2>
+<pre><code class="language-bop">if temperature &gt; 30 {
+  print("It's hot!")
+} else {
+  print("Not too bad.")
+}
+</code></pre>
+<h2 id="if--else-if--else"><a class="header" href="#if--else-if--else">if / else if / else</a></h2>
+<p>Chain multiple conditions with <code>else if</code>:</p>
+<pre><code class="language-bop">if score &gt; 90 {
+  print("Excellent!")
+} else if score &gt; 70 {
+  print("Good job!")
+} else if score &gt; 50 {
+  print("Not bad!")
+} else {
+  print("Keep trying!")
+}
+</code></pre>
+<p>Only the first matching branch runs. If none match and there’s an <code>else</code>, that branch runs.</p>
+<h2 id="if-as-an-expression"><a class="header" href="#if-as-an-expression">if as an expression</a></h2>
+<p><code>if/else</code> can produce a value when used in expression position (e.g., after <code>=</code>):</p>
+<pre><code class="language-bop">let label = if count &gt; 3 { "lots" } else { "few" }
+print("You have {label} of items")
+</code></pre>
+<p>When used as an expression, both <code>if</code> and <code>else</code> branches are required. The last expression in each branch is the value.</p>
+<pre><code class="language-bop">let message = if x &gt; 0 {
+  "positive"
+} else {
+  "non-positive"
+}
+print(message)
+</code></pre>
+<h2 id="common-patterns"><a class="header" href="#common-patterns">Common patterns</a></h2>
+<h3 id="guard-clause"><a class="header" href="#guard-clause">Guard clause</a></h3>
+<pre><code class="language-bop">fn process(value) {
+  if value == none {
+    return
+  }
+  print("Processing: " + str(value))
+}
+</code></pre>
+<h3 id="classify-a-value"><a class="header" href="#classify-a-value">Classify a value</a></h3>
+<pre><code class="language-bop">fn classify(n) {
+  if n &gt; 0 {
+    return "positive"
+  } else if n &lt; 0 {
+    return "negative"
+  } else {
+    return "zero"
+  }
+}
+</code></pre>
+<h3 id="combine-conditions-with--and-"><a class="header" href="#combine-conditions-with--and-">Combine conditions with <code>&amp;&amp;</code> and <code>||</code></a></h3>
+<pre><code class="language-bop">if age &gt;= 18 &amp;&amp; has_ticket {
+  print("Welcome in!")
+}
+
+if x &lt; 0 || x &gt; 100 {
+  print("Out of range!")
+}
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
+<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
+<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
+<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
+<pre><code class="language-bop">repeat 4 {
+  print("Hello!")
+}
+</code></pre>
+<p>The count can be any expression:</p>
+<pre><code class="language-bop">let times = 3
+repeat times {
+  print("Again!")
+}
+</code></pre>
+<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
+<h2 id="while"><a class="header" href="#while">while</a></h2>
+<p>Loops as long as a condition is true:</p>
+<pre><code class="language-bop">let n = 1
+while n &lt;= 100 {
+  n *= 2
+}
+print(n)    // 128
+</code></pre>
+<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
+<pre><code class="language-bop">let total = 0
+let i = 1
+while true {
+  total += i
+  if total &gt; 100 {
+    break
+  }
+  i += 1
+}
+print("Sum exceeded 100 at i=" + str(i))
+</code></pre>
+<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
+<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
+let count = 0
+let n = 1
+while n &lt; 50 {
+  if n % 7 == 0 {
+    count += 1
+  }
+  n += 1
+}
+print("Found " + str(count))
+</code></pre>
+<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
+<p>Iterates over ranges, arrays, or dictionary keys.</p>
+<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
+<pre><code class="language-bop">for i in range(5) {
+  print(str(i))     // 0, 1, 2, 3, 4
+}
+</code></pre>
+<p>With a start value:</p>
+<pre><code class="language-bop">for i in range(2, 8) {
+  print(str(i))     // 2, 3, 4, 5, 6, 7
+}
+</code></pre>
+<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
+<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
+for fruit in fruits {
+  print(fruit)
+}
+</code></pre>
+<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
+<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
+for name in scores {
+  let s = str(scores[name])
+  print(name + ": " + s)
+}
+</code></pre>
+<h3 id="strings-1"><a class="header" href="#strings-1">Strings</a></h3>
+<p>You can iterate over the characters of a string:</p>
+<pre><code class="language-bop">let word = "hello"
+for ch in word {
+  print(ch)    // "h", "e", "l", "l", "o"
+}
+</code></pre>
+<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
+<p>Loops can be nested. This is useful for working with grids or combinations:</p>
+<pre><code class="language-bop">for row in range(3) {
+  for col in range(4) {
+    print("(" + str(row) + ", " + str(col) + ")")
+  }
+}
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="break--continue"><a class="header" href="#break--continue">break &amp; continue</a></h1>
+<p><code>break</code> and <code>continue</code> give you finer control over loops.</p>
+<h2 id="break"><a class="header" href="#break">break</a></h2>
+<p>Exits the loop immediately. Execution continues after the loop:</p>
+<pre><code class="language-bop">let i = 0
+while true {
+  if i &gt;= 10 {
+    break
+  }
+  i += 1
+}
+print("Stopped at " + str(i))
+</code></pre>
+<h3 id="searching-for-something"><a class="header" href="#searching-for-something">Searching for something</a></h3>
+<pre><code class="language-bop">let numbers = [4, 8, 15, 16, 23, 42]
+let found = false
+for n in numbers {
+  if n &gt; 20 {
+    found = true
+    break
+  }
+}
+
+if found {
+  print("Found a number greater than 20!")
+} else {
+  print("No number greater than 20.")
+}
+</code></pre>
+<h2 id="continue"><a class="header" href="#continue">continue</a></h2>
+<p>Skips the rest of the current iteration and jumps to the next one:</p>
+<pre><code class="language-bop">for i in range(10) {
+  if i % 2 == 0 {
+    continue
+  }
+  print(str(i))    // 1, 3, 5, 7, 9
+}
+</code></pre>
+<h3 id="filter-and-process"><a class="header" href="#filter-and-process">Filter and process</a></h3>
+<pre><code class="language-bop">let words = ["hello", "", "world", "", "bop"]
+for word in words {
+  if word == "" {
+    continue
+  }
+  print(word.upper())
+}
+</code></pre>
+<h2 id="which-loops-support-break-and-continue"><a class="header" href="#which-loops-support-break-and-continue">Which loops support break and continue?</a></h2>
+<p>All three loop types — <code>while</code>, <code>for...in</code>, and <code>repeat</code> — support both <code>break</code> and <code>continue</code>.</p>
+<pre><code class="language-bop">repeat 10 {
+  let n = rand(100)
+  if n &lt; 10 {
+    break
+  }
+  print(str(n))
+}
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> <code>break</code> and <code>continue</code> only affect the innermost loop. If you have nested loops and want to exit the outer one, use a variable flag or a function with <code>return</code>.</p>
+</blockquote>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="arrays-1"><a class="header" href="#arrays-1">Arrays</a></h1>
+<p>Arrays are ordered, mutable collections that can hold any mix of types.</p>
+<h2 id="creating-arrays"><a class="header" href="#creating-arrays">Creating arrays</a></h2>
+<pre><code class="language-bop">let items = [1, 2, 3]
+let empty = []
+let mixed = [1, "two", true, none]
+</code></pre>
+<h2 id="accessing-elements"><a class="header" href="#accessing-elements">Accessing elements</a></h2>
+<p>Arrays are 0-indexed. Negative indices count from the end:</p>
+<pre><code class="language-bop">let items = [10, 20, 30]
+print(items[0])     // 10
+print(items[2])     // 30
+print(items[-1])    // 30 (last element)
+print(items[-2])    // 20
+</code></pre>
+<p>Out-of-bounds access produces an error.</p>
+<h2 id="modifying-elements"><a class="header" href="#modifying-elements">Modifying elements</a></h2>
+<pre><code class="language-bop">let items = [10, 20, 30]
+items[0] = 99
+print(items)    // [99, 20, 30]
+</code></pre>
+<h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>arr.len()</code></td><td>number</td><td>Number of elements</td></tr>
+<tr><td><code>arr.push(val)</code></td><td>none</td><td>Append to end</td></tr>
+<tr><td><code>arr.pop()</code></td><td>value</td><td>Remove and return last element</td></tr>
+<tr><td><code>arr.has(val)</code></td><td>bool</td><td>Whether the array contains the value</td></tr>
+<tr><td><code>arr.index_of(val)</code></td><td>number or none</td><td>Index of first occurrence, or <code>none</code></td></tr>
+<tr><td><code>arr.insert(i, val)</code></td><td>none</td><td>Insert at index, shifting elements right</td></tr>
+<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at index, shifting elements left</td></tr>
+<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>New sub-array (both args optional)</td></tr>
+<tr><td><code>arr.reverse()</code></td><td>array</td><td>Reverse in place, returns the array</td></tr>
+<tr><td><code>arr.sort()</code></td><td>array</td><td>Sort in place, returns the array</td></tr>
+<tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join elements into a string</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="practical-examples"><a class="header" href="#practical-examples">Practical examples</a></h2>
+<h3 id="building-a-list"><a class="header" href="#building-a-list">Building a list</a></h3>
+<pre><code class="language-bop">let squares = []
+for i in range(1, 6) {
+  squares.push(i * i)
+}
+print(squares)    // [1, 4, 9, 16, 25]
+</code></pre>
+<h3 id="filtering-values"><a class="header" href="#filtering-values">Filtering values</a></h3>
+<pre><code class="language-bop">let numbers = [3, 7, 1, 9, 4, 6, 2, 8]
+let big = []
+for n in numbers {
+  if n &gt; 5 {
+    big.push(n)
+  }
+}
+print(big)    // [7, 9, 6, 8]
+</code></pre>
+<h3 id="checking-membership"><a class="header" href="#checking-membership">Checking membership</a></h3>
+<pre><code class="language-bop">let allowed = ["admin", "editor", "viewer"]
+let role = "editor"
+if allowed.has(role) {
+  print("Access granted")
+} else {
+  print("Access denied")
+}
+</code></pre>
+<h3 id="sorting-and-joining"><a class="header" href="#sorting-and-joining">Sorting and joining</a></h3>
+<pre><code class="language-bop">let scores = [42, 17, 85, 3]
+scores.sort()
+print(scores)    // [3, 17, 42, 85]
+
+let names = ["Charlie", "Alice", "Bob"]
+names.sort()
+print(names.join(", "))    // "Alice, Bob, Charlie"
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="strings-2"><a class="header" href="#strings-2">Strings</a></h1>
+<p>Strings are immutable sequences of characters. All string methods return new strings — the original is never modified.</p>
+<h2 id="creating-strings"><a class="header" href="#creating-strings">Creating strings</a></h2>
+<pre><code class="language-bop">let s = "hello world"
+let empty = ""
+let escaped = "Line 1\nLine 2"
+</code></pre>
+<p>Supported escape sequences: <code>\"</code>, <code>\\</code>, <code>\n</code>, <code>\t</code>, <code>\{</code>, <code>\}</code>.</p>
+<h2 id="indexing"><a class="header" href="#indexing">Indexing</a></h2>
+<pre><code class="language-bop">let s = "hello"
+print(s[0])      // "h"
+print(s[-1])     // "o"
+</code></pre>
+<p>Each index returns a single-character string (there’s no separate character type).</p>
+<h2 id="string-interpolation-1"><a class="header" href="#string-interpolation-1">String interpolation</a></h2>
+<p>Insert variable values with <code>{name}</code> inside a string:</p>
+<pre><code class="language-bop">let name = "Alice"
+let count = 5
+print("Hello, {name}! You have {count} items.")
+</code></pre>
+<p>Only variable names are allowed inside <code>{}</code>. For expressions, use a temporary variable:</p>
+<pre><code class="language-bop">let total = str(count * 2)
+print("Double: {total}")
+</code></pre>
+<p>Or use concatenation:</p>
+<pre><code class="language-bop">print("Double: " + str(count * 2))
+</code></pre>
+<p>To include a literal <code>{</code> or <code>}</code> in a string, escape it with <code>\{</code> and <code>\}</code>:</p>
+<pre><code class="language-bop">print("Use \{name\} for interpolation")
+// prints: Use {name} for interpolation
+</code></pre>
+<h2 id="concatenation"><a class="header" href="#concatenation">Concatenation</a></h2>
+<p>Use <code>+</code> to join strings:</p>
+<pre><code class="language-bop">let full = "Hello" + ", " + "world!"
+print(full)    // "Hello, world!"
+</code></pre>
+<p>Numbers must be converted with <code>str()</code> first:</p>
+<pre><code class="language-bop">let msg = "Score: " + str(42)
+</code></pre>
+<h2 id="methods-1"><a class="header" href="#methods-1">Methods</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>s.len()</code></td><td>number</td><td>Number of characters</td></tr>
+<tr><td><code>s.contains(sub)</code></td><td>bool</td><td>Whether the string contains <code>sub</code></td></tr>
+<tr><td><code>s.starts_with(prefix)</code></td><td>bool</td><td>Whether it starts with <code>prefix</code></td></tr>
+<tr><td><code>s.ends_with(suffix)</code></td><td>bool</td><td>Whether it ends with <code>suffix</code></td></tr>
+<tr><td><code>s.index_of(sub)</code></td><td>number or none</td><td>Index of first occurrence, or <code>none</code></td></tr>
+<tr><td><code>s.split(sep)</code></td><td>array</td><td>Split into array of strings on <code>sep</code></td></tr>
+<tr><td><code>s.replace(old, new)</code></td><td>string</td><td>Replace all occurrences</td></tr>
+<tr><td><code>s.upper()</code></td><td>string</td><td>Uppercase copy</td></tr>
+<tr><td><code>s.lower()</code></td><td>string</td><td>Lowercase copy</td></tr>
+<tr><td><code>s.trim()</code></td><td>string</td><td>Copy with leading/trailing whitespace removed</td></tr>
+<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring (both args optional)</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="practical-examples-1"><a class="header" href="#practical-examples-1">Practical examples</a></h2>
+<h3 id="parsing-csv-data"><a class="header" href="#parsing-csv-data">Parsing CSV data</a></h3>
+<pre><code class="language-bop">let input = "Alice,95,A"
+let parts = input.split(",")
+print(parts[0])    // "Alice"
+print(parts[1])    // "95"
+</code></pre>
+<h3 id="checking-prefixes"><a class="header" href="#checking-prefixes">Checking prefixes</a></h3>
+<pre><code class="language-bop">let filename = "report.csv"
+if filename.ends_with(".csv") {
+  print("CSV file detected")
+}
+</code></pre>
+<h3 id="building-a-formatted-string"><a class="header" href="#building-a-formatted-string">Building a formatted string</a></h3>
+<pre><code class="language-bop">let items = ["apple", "banana", "cherry"]
+let count = str(items.len())
+let list = items.join(", ")
+print("Found {count} items: {list}")
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="dictionaries"><a class="header" href="#dictionaries">Dictionaries</a></h1>
+<p>Dictionaries (dicts) are key-value stores. Keys are always strings; values can be any type.</p>
+<h2 id="creating-dictionaries"><a class="header" href="#creating-dictionaries">Creating dictionaries</a></h2>
+<pre><code class="language-bop">let person = {"name": "Alice", "age": 30, "active": true}
+let empty = {}
+</code></pre>
+<h2 id="accessing-values"><a class="header" href="#accessing-values">Accessing values</a></h2>
+<p>Use bracket notation with a string key:</p>
+<pre><code class="language-bop">let name = person["name"]     // "Alice"
+let age = person["age"]       // 30
+</code></pre>
+<p>Accessing a missing key returns <code>none</code> (no error):</p>
+<pre><code class="language-bop">let email = person["email"]
+print(email)    // none
+</code></pre>
+<h2 id="modifying-values"><a class="header" href="#modifying-values">Modifying values</a></h2>
+<pre><code class="language-bop">person["age"] = 31             // update existing key
+person["email"] = "a@b.com"   // add new entry
+</code></pre>
+<h2 id="methods-2"><a class="header" href="#methods-2">Methods</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>d.len()</code></td><td>number</td><td>Number of entries</td></tr>
+<tr><td><code>d.keys()</code></td><td>array</td><td>Array of all keys</td></tr>
+<tr><td><code>d.values()</code></td><td>array</td><td>Array of all values</td></tr>
+<tr><td><code>d.has(key)</code></td><td>bool</td><td>Whether the key exists</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="practical-examples-2"><a class="header" href="#practical-examples-2">Practical examples</a></h2>
+<h3 id="counting-occurrences"><a class="header" href="#counting-occurrences">Counting occurrences</a></h3>
+<pre><code class="language-bop">let words = ["apple", "banana", "apple", "cherry", "banana", "apple"]
+let counts = {}
+for word in words {
+  if counts.has(word) {
+    counts[word] += 1
+  } else {
+    counts[word] = 1
+  }
+}
+
+for key in counts {
+  print(key + ": " + str(counts[key]))
+}
+</code></pre>
+<h3 id="storing-structured-data"><a class="header" href="#storing-structured-data">Storing structured data</a></h3>
+<pre><code class="language-bop">let point = {"x": 10, "y": 20}
+let x = str(point["x"])
+let y = str(point["y"])
+print("Position: ({x}, {y})")
+</code></pre>
+<h3 id="iterating-over-entries"><a class="header" href="#iterating-over-entries">Iterating over entries</a></h3>
+<pre><code class="language-bop">let config = {"width": 800, "height": 600, "title": "My App"}
+for key in config {
+  let val = str(config[key])
+  print(key + ": " + val)
+}
+</code></pre>
+<h3 id="checking-for-a-key-before-using-it"><a class="header" href="#checking-for-a-key-before-using-it">Checking for a key before using it</a></h3>
+<pre><code class="language-bop">let settings = {"volume": 80}
+
+if settings.has("volume") {
+  let v = str(settings["volume"])
+  print("Volume is {v}")
+} else {
+  print("Using default volume")
+}
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="defining-functions"><a class="header" href="#defining-functions">Defining Functions</a></h1>
+<p>Functions let you name a sequence of actions and reuse it. This is where Bop starts to feel like real programming.</p>
+<h2 id="declaring-a-function"><a class="header" href="#declaring-a-function">Declaring a function</a></h2>
+<pre><code class="language-bop">fn greet() {
+  print("Hello!")
+}
+
+greet()    // "Hello!"
+greet()    // "Hello!"
+</code></pre>
+<h2 id="parameters"><a class="header" href="#parameters">Parameters</a></h2>
+<p>Functions can take parameters — values you pass in when calling:</p>
+<pre><code class="language-bop">fn repeat_string(text, times) {
+  let result = ""
+  repeat times {
+    result += text
+  }
+  return result
+}
+
+print(repeat_string("ha", 3))    // "hahaha"
+</code></pre>
+<p>Parameters are positional. There are no default values or type annotations.</p>
+<h2 id="return-values"><a class="header" href="#return-values">Return values</a></h2>
+<p>Use <code>return</code> to send a value back from the function:</p>
+<pre><code class="language-bop">fn double(x) {
+  return x * 2
+}
+
+let result = double(5)    // 10
+print(str(result))
+</code></pre>
+<p><code>return</code> with no value (or reaching the end of the function) returns <code>none</code>:</p>
+<pre><code class="language-bop">fn do_something() {
+  print("Working...")
+  // no return — returns none
+}
+
+let result = do_something()
+print(result)    // none
+</code></pre>
+<h2 id="early-return"><a class="header" href="#early-return">Early return</a></h2>
+<p><code>return</code> exits the function immediately, even from inside loops or conditionals:</p>
+<pre><code class="language-bop">fn find_first_big(numbers, threshold) {
+  for n in numbers {
+    if n &gt; threshold {
+      return n
+    }
+  }
+  return none
+}
+
+let result = find_first_big([3, 7, 1, 15, 4], 10)
+print(str(result))    // 15
+</code></pre>
+<h2 id="calling-functions"><a class="header" href="#calling-functions">Calling functions</a></h2>
+<p>Parentheses are always required, even with no arguments:</p>
+<pre><code class="language-bop">greet()          // correct
+// greet         // error — 'greet' is a function, call it with greet()
+</code></pre>
+<h2 id="practical-example-sum-of-squares"><a class="header" href="#practical-example-sum-of-squares">Practical example: sum of squares</a></h2>
+<pre><code class="language-bop">fn sum_of_squares(n) {
+  let total = 0
+  for i in range(1, n + 1) {
+    total += i * i
+  }
+  return total
+}
+
+let result = sum_of_squares(5)
+print("Sum of squares: " + str(result))    // 55
+</code></pre>
+<h2 id="recursion"><a class="header" href="#recursion">Recursion</a></h2>
+<p>Functions can call themselves. Recursion is capped by the step limit to prevent infinite recursion:</p>
+<pre><code class="language-bop">fn factorial(n) {
+  if n &lt;= 1 {
+    return 1
+  }
+  return n * factorial(n - 1)
+}
+
+print(str(factorial(5)))    // 120
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> Functions are named declarations only. You can’t assign a function to a variable or pass one as an argument (yet). First-class functions may be added in a future version.</p>
+</blockquote>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="operators"><a class="header" href="#operators">Operators</a></h1>
+<p>All Bop operators, grouped by category. No operator overloading — each operator works on specific types and produces an error on type mismatch.</p>
+<h2 id="arithmetic"><a class="header" href="#arithmetic">Arithmetic</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Name</th><th>Types</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>+</code></td><td>Add</td><td>number</td><td>Also concatenates strings: <code>"a" + "b"</code> → <code>"ab"</code></td></tr>
+<tr><td><code>-</code></td><td>Subtract</td><td>number</td><td>Also unary negation: <code>-x</code></td></tr>
+<tr><td><code>*</code></td><td>Multiply</td><td>number</td><td></td></tr>
+<tr><td><code>/</code></td><td>Divide</td><td>number</td><td>Always produces float: <code>7 / 2</code> → <code>3.5</code></td></tr>
+<tr><td><code>%</code></td><td>Modulo</td><td>number</td><td></td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">print(10 + 3)      // 13
+print(10 - 3)      // 7
+print(10 * 3)      // 30
+print(10 / 3)      // 3.333...
+print(10 % 3)      // 1
+
+print("Hello" + " " + "world")    // "Hello world"
+</code></pre>
+<h2 id="comparison"><a class="header" href="#comparison">Comparison</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Name</th><th>Returns</th></tr>
+</thead>
+<tbody>
+<tr><td><code>==</code></td><td>Equal</td><td>bool</td></tr>
+<tr><td><code>!=</code></td><td>Not equal</td><td>bool</td></tr>
+<tr><td><code>&lt;</code></td><td>Less than</td><td>bool</td></tr>
+<tr><td><code>&gt;</code></td><td>Greater than</td><td>bool</td></tr>
+<tr><td><code>&lt;=</code></td><td>Less or equal</td><td>bool</td></tr>
+<tr><td><code>&gt;=</code></td><td>Greater or equal</td><td>bool</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>==</code> and <code>!=</code> work on all types. Comparing different types is always <code>false</code> (no implicit coercion). <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code> work on numbers and strings (lexicographic).</p>
+<pre><code class="language-bop">print(5 == 5)         // true
+print(5 == "5")       // false (different types)
+print("abc" &lt; "def")  // true (lexicographic)
+</code></pre>
+<h2 id="boolean"><a class="header" href="#boolean">Boolean</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Name</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>&amp;&amp;</code></td><td>And</td><td>Short-circuits</td></tr>
+<tr><td><code>||</code></td><td>Or</td><td>Short-circuits</td></tr>
+<tr><td><code>!</code></td><td>Not</td><td>Unary prefix</td></tr>
+</tbody>
+</table>
+</div>
+<p>Short-circuiting means the second operand isn’t evaluated if the first determines the result:</p>
+<pre><code class="language-bop">// &amp;&amp; stops at the first false
+if x &gt; 0 &amp;&amp; x &lt; 100 {
+  print("In range")
+}
+
+// || stops at the first true
+if name == "" || name == none {
+  print("No name provided")
+}
+
+// ! inverts a boolean
+if !found {
+  print("Still searching...")
+}
+</code></pre>
+<h2 id="assignment"><a class="header" href="#assignment">Assignment</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>Equivalent to</th></tr>
+</thead>
+<tbody>
+<tr><td><code>=</code></td><td>Assign</td></tr>
+<tr><td><code>+=</code></td><td><code>x = x + ...</code></td></tr>
+<tr><td><code>-=</code></td><td><code>x = x - ...</code></td></tr>
+<tr><td><code>*=</code></td><td><code>x = x * ...</code></td></tr>
+<tr><td><code>/=</code></td><td><code>x = x / ...</code></td></tr>
+<tr><td><code>%=</code></td><td><code>x = x % ...</code></td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">let score = 0
+score += 10    // 10
+score -= 3     // 7
+score *= 2     // 14
+</code></pre>
+<h2 id="conditional-expressions"><a class="header" href="#conditional-expressions">Conditional expressions</a></h2>
+<p>Bop has no ternary operator (<code>?:</code>). Use <code>if/else</code> as an expression instead:</p>
+<pre><code class="language-bop">let label = if count &gt; 3 { "lots" } else { "few" }
+</code></pre>
+<p>Both branches are required when <code>if/else</code> is used as an expression. The last expression in each branch is the value.</p>
+<h2 id="precedence"><a class="header" href="#precedence">Precedence</a></h2>
+<p>From highest (evaluated first) to lowest:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Priority</th><th>Operators</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>!</code>, <code>-</code> (unary)</td></tr>
+<tr><td>2</td><td><code>*</code>, <code>/</code>, <code>%</code></td></tr>
+<tr><td>3</td><td><code>+</code>, <code>-</code></td></tr>
+<tr><td>4</td><td><code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code></td></tr>
+<tr><td>5</td><td><code>==</code>, <code>!=</code></td></tr>
+<tr><td>6</td><td><code>&amp;&amp;</code></td></tr>
+<tr><td>7</td><td><code>||</code></td></tr>
+<tr><td>8</td><td><code>=</code>, <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code>, <code>%=</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Parentheses override precedence:</p>
+<pre><code class="language-bop">let result = (1 + 2) * 3    // 9, not 7
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="built-in-functions"><a class="header" href="#built-in-functions">Built-in Functions</a></h1>
+<p>Bop provides 11 built-in functions available in every program. These cannot be shadowed by user-defined functions.</p>
+<h2 id="output"><a class="header" href="#output">Output</a></h2>
+<h3 id="printargs"><a class="header" href="#printargs"><code>print(args...)</code></a></h3>
+<p>Prints values to output, separated by spaces. Returns <code>none</code>.</p>
+<pre><code class="language-bop">print("hello")           // hello
+print("x =", 42)         // x = 42
+print(1, "plus", 2)      // 1 plus 2
+</code></pre>
+<p><code>print</code> accepts any number of arguments (including zero). Each argument is converted to its string representation automatically.</p>
+<h3 id="inspectvalue"><a class="header" href="#inspectvalue"><code>inspect(value)</code></a></h3>
+<p>Returns a debug representation of a value as a string. Strings are wrapped in quotes; other types look the same as <code>str()</code>.</p>
+<pre><code class="language-bop">print(inspect("hello"))    // "hello"
+print(inspect(42))         // 42
+print(inspect([1, 2]))     // [1, 2]
+</code></pre>
+<p>Useful for debugging when you need to distinguish strings from other types.</p>
+<h2 id="type-conversion"><a class="header" href="#type-conversion">Type Conversion</a></h2>
+<h3 id="strvalue"><a class="header" href="#strvalue"><code>str(value)</code></a></h3>
+<p>Converts any value to its string representation.</p>
+<pre><code class="language-bop">str(42)        // "42"
+str(3.14)      // "3.14"
+str(true)      // "true"
+str(none)      // "none"
+str([1, 2])    // "[1, 2]"
+</code></pre>
+<h3 id="intvalue"><a class="header" href="#intvalue"><code>int(value)</code></a></h3>
+<p>Truncates a number to an integer, or parses a string as a number and truncates.</p>
+<pre><code class="language-bop">int(3.9)       // 3
+int(-2.7)      // -2
+int("42")      // 42
+int(true)      // 1
+int(false)     // 0
+</code></pre>
+<p>Produces an error if the value can’t be converted (e.g., <code>int("hello")</code>).</p>
+<h3 id="typevalue"><a class="header" href="#typevalue"><code>type(value)</code></a></h3>
+<p>Returns the type name of a value as a string.</p>
+<pre><code class="language-bop">type(42)           // "number"
+type("hello")      // "string"
+type(true)         // "bool"
+type(none)         // "none"
+type([1, 2])       // "array"
+type({"a": 1})     // "dict"
+</code></pre>
+<h2 id="math"><a class="header" href="#math">Math</a></h2>
+<h3 id="absx"><a class="header" href="#absx"><code>abs(x)</code></a></h3>
+<p>Returns the absolute value of a number.</p>
+<pre><code class="language-bop">abs(-5)     // 5
+abs(3)      // 3
+abs(-2.7)   // 2.7
+</code></pre>
+<h3 id="mina-b"><a class="header" href="#mina-b"><code>min(a, b)</code></a></h3>
+<p>Returns the smaller of two numbers.</p>
+<pre><code class="language-bop">min(3, 7)      // 3
+min(-1, -5)    // -5
+</code></pre>
+<h3 id="maxa-b"><a class="header" href="#maxa-b"><code>max(a, b)</code></a></h3>
+<p>Returns the larger of two numbers.</p>
+<pre><code class="language-bop">max(3, 7)      // 7
+max(-1, -5)    // -1
+</code></pre>
+<h3 id="randn"><a class="header" href="#randn"><code>rand(n)</code></a></h3>
+<p>Returns a random integer from 0 to n-1 (inclusive). The argument must be a positive integer.</p>
+<pre><code class="language-bop">rand(6)     // 0, 1, 2, 3, 4, or 5
+rand(2)     // 0 or 1 (coin flip)
+rand(100)   // 0 to 99
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> <code>rand</code> uses a deterministic pseudo-random number generator. The same seed produces the same sequence of values.</p>
+</blockquote>
+<h2 id="collections"><a class="header" href="#collections">Collections</a></h2>
+<h3 id="lenvalue"><a class="header" href="#lenvalue"><code>len(value)</code></a></h3>
+<p>Returns the length of a string, array, or dictionary.</p>
+<pre><code class="language-bop">len("hello")       // 5
+len([1, 2, 3])     // 3
+len({"a": 1})      // 1
+len("")            // 0
+len([])            // 0
+</code></pre>
+<p>Produces an error for numbers, bools, and <code>none</code>.</p>
+<h2 id="ranges-1"><a class="header" href="#ranges-1">Ranges</a></h2>
+<h3 id="rangen--rangestart-end--rangestart-end-step"><a class="header" href="#rangen--rangestart-end--rangestart-end-step"><code>range(n)</code> / <code>range(start, end)</code> / <code>range(start, end, step)</code></a></h3>
+<p>Generates an array of numbers.</p>
+<pre><code class="language-bop">range(5)           // [0, 1, 2, 3, 4]
+range(2, 6)        // [2, 3, 4, 5]
+range(0, 10, 2)    // [0, 2, 4, 6, 8]
+range(5, 0)        // [5, 4, 3, 2, 1]  (auto-detects direction)
+range(10, 0, -3)   // [10, 7, 4, 1]
+</code></pre>
+<ul>
+<li>With 1 argument: <code>range(n)</code> produces <code>[0, 1, ..., n-1]</code></li>
+<li>With 2 arguments: <code>range(start, end)</code> auto-detects direction</li>
+<li>With 3 arguments: <code>range(start, end, step)</code> uses the given step (error if step is 0)</li>
+<li>Maximum 10,000 elements</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="grammar"><a class="header" href="#grammar">Grammar</a></h1>
+<p>An informal grammar for the Bop language, plus the complete list of reserved words.</p>
+<h2 id="reserved-words"><a class="header" href="#reserved-words">Reserved words</a></h2>
+<pre><code>let fn return if else while for in repeat break continue
+true false none
+</code></pre>
+<p>These cannot be used as variable or function names.</p>
+<h2 id="built-in-functions-1"><a class="header" href="#built-in-functions-1">Built-in functions</a></h2>
+<p>Built-in functions available everywhere:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>range(n)</code></td><td>array</td><td><code>[0, 1, ..., n-1]</code></td></tr>
+<tr><td><code>range(start, end)</code></td><td>array</td><td><code>[start, start+1, ..., end-1]</code> (auto-detects direction)</td></tr>
+<tr><td><code>range(start, end, step)</code></td><td>array</td><td>Sequence with custom step</td></tr>
+<tr><td><code>str(x)</code></td><td>string</td><td>Convert any value to string</td></tr>
+<tr><td><code>int(x)</code></td><td>number</td><td>Truncate to integer, or parse string</td></tr>
+<tr><td><code>type(x)</code></td><td>string</td><td>Type name: <code>"number"</code>, <code>"string"</code>, <code>"bool"</code>, <code>"none"</code>, <code>"array"</code>, <code>"dict"</code></td></tr>
+<tr><td><code>abs(x)</code></td><td>number</td><td>Absolute value</td></tr>
+<tr><td><code>min(a, b)</code></td><td>number</td><td>Smaller of two numbers</td></tr>
+<tr><td><code>max(a, b)</code></td><td>number</td><td>Larger of two numbers</td></tr>
+<tr><td><code>rand(n)</code></td><td>number</td><td>Random integer 0 to n-1</td></tr>
+<tr><td><code>len(x)</code></td><td>number</td><td>Length of string, array, or dict</td></tr>
+<tr><td><code>print(args...)</code></td><td>none</td><td>Print values separated by spaces</td></tr>
+<tr><td><code>inspect(x)</code></td><td>string</td><td>Debug representation (strings quoted)</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="grammar-1"><a class="header" href="#grammar-1">Grammar</a></h2>
+<pre><code>program     = statement*
+statement   = letDecl | assignment | ifStmt | whileStmt | repeatStmt
+            | forStmt | fnDecl | returnStmt | breakStmt | continueStmt
+            | exprStmt
+
+letDecl     = "let" IDENT "=" expr
+assignment  = target ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
+target      = IDENT | expr "[" expr "]"
+
+ifStmt      = "if" expr "{" statement* "}"
+              ("else" "if" expr "{" statement* "}")*
+              ("else" "{" statement* "}")?
+whileStmt   = "while" expr "{" statement* "}"
+repeatStmt  = "repeat" expr "{" statement* "}"
+forStmt     = "for" IDENT "in" expr "{" statement* "}"
+fnDecl      = "fn" IDENT "(" params? ")" "{" statement* "}"
+returnStmt  = "return" expr?
+breakStmt   = "break"
+continueStmt = "continue"
+
+exprStmt    = expr
+
+expr        = or
+or          = and ("||" and)*
+and         = equality ("&amp;&amp;" equality)*
+equality    = comparison (("==" | "!=") comparison)*
+comparison  = addition (("&lt;" | "&gt;" | "&lt;=" | "&gt;=") addition)*
+addition    = multiply (("+" | "-") multiply)*
+multiply    = unary (("*" | "/" | "%") unary)*
+unary       = ("!" | "-") unary | postfix
+postfix     = primary (call | index | method)*
+call        = "(" args? ")"
+index       = "[" expr "]"
+method      = "." IDENT "(" args? ")"
+primary     = NUMBER | STRING | "true" | "false" | "none"
+            | IDENT | "(" expr ")" | arrayLit | dictLit
+            | ifExpr
+
+arrayLit    = "[" (expr ("," expr)*)? "]"
+dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)*)? "}"
+ifExpr      = "if" expr "{" expr "}" "else" "{" expr "}"
+
+params      = IDENT ("," IDENT)*
+args        = expr ("," expr)*
+</code></pre>
+<h2 id="automatic-semicolons"><a class="header" href="#automatic-semicolons">Automatic semicolons</a></h2>
+<p>Bop automatically inserts a semicolon at the end of a line if the last token is one of:</p>
+<ul>
+<li>An identifier or literal</li>
+<li><code>true</code>, <code>false</code>, <code>none</code></li>
+<li><code>break</code>, <code>continue</code>, <code>return</code></li>
+<li><code>)</code>, <code>]</code>, <code>}</code></li>
+</ul>
+<p>This means the opening <code>{</code> of a block must be on the same line as its keyword:</p>
+<pre><code class="language-bop">// Correct
+if x &gt; 3 {
+  print("yes")
+}
+
+// Wrong — semicolon inserted after "3"
+if x &gt; 3
+{
+  print("yes")
+}
+</code></pre>
+<h2 id="string-interpolation-2"><a class="header" href="#string-interpolation-2">String interpolation</a></h2>
+<p>Inside double-quoted strings, <code>{identifier}</code> inserts the value of a variable. Only plain variable names are allowed — no expressions, operators, or function calls:</p>
+<pre><code class="language-bop">let name = "Alice"
+print("Hello, {name}!")     // works
+// print("Hello, {1 + 2}!")  // error — expressions not allowed
+</code></pre>
+<p>Use <code>\{</code> and <code>\}</code> for literal braces in strings.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="embedding-bop"><a class="header" href="#embedding-bop">Embedding Bop</a></h1>
+<p>Bop is designed to be embedded in Rust applications. You can add custom functions, capture output, and control execution through the <code>BopHost</code> trait.</p>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick start</a></h2>
+<p>Add <code>bop-lang</code> to your <code>Cargo.toml</code>:</p>
+<pre><code class="language-toml">[dependencies]
+bop = { package = "bop-lang", version = "0.1" }
+</code></pre>
+<p>Run a program with the default host:</p>
+<pre class="playground"><code class="language-rust">use bop::{run, StdHost, BopLimits};
+
+fn main() {
+    let source = r#"
+        let name = "world"
+        print("Hello, {name}!")
+    "#;
+
+    let mut host = StdHost;
+    let limits = BopLimits::standard();
+
+    if let Err(e) = run(source, &amp;mut host, &amp;limits) {
+        eprintln!("Error: {e}");
+    }
+}</code></pre>
+<h2 id="the-bophost-trait"><a class="header" href="#the-bophost-trait">The BopHost trait</a></h2>
+<p>The <code>BopHost</code> trait is the integration point between your application and the Bop interpreter:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub trait BopHost {
+    /// Called for unknown function names. Return `None` if not handled.
+    fn call(
+        &amp;mut self,
+        name: &amp;str,
+        args: &amp;[Value],
+        line: u32,
+    ) -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt;;
+
+    /// Called by `print()`. Default: writes to stdout.
+    fn on_print(&amp;mut self, message: &amp;str) {
+        println!("{}", message);
+    }
+
+    /// Hint text appended to "function not found" errors.
+    fn function_hint(&amp;self) -&gt; &amp;str {
+        ""
+    }
+
+    /// Called each tick (statement, loop iteration). Return Err to halt.
+    fn on_tick(&amp;mut self) -&gt; Result&lt;(), BopError&gt; {
+        Ok(())
+    }
+}
+<span class="boring">}</span></code></pre>
+<h3 id="call--custom-functions"><a class="header" href="#call--custom-functions"><code>call</code> — Custom functions</a></h3>
+<p>This is the primary extension point. When Bop encounters a function call that isn’t a built-in or user-defined function, it calls <code>host.call()</code>. Return <code>None</code> if you don’t handle the function name — Bop will report a “function not found” error. Return <code>Some(Ok(value))</code> on success, or <code>Some(Err(error))</code> to raise a runtime error.</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop::{BopHost, BopError, Value};
+
+struct MyHost;
+
+impl BopHost for MyHost {
+    fn call(
+        &amp;mut self,
+        name: &amp;str,
+        args: &amp;[Value],
+        line: u32,
+    ) -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt; {
+        match name {
+            "square" =&gt; {
+                if args.len() != 1 {
+                    return Some(Err(BopError::runtime(
+                        "square() takes 1 argument", line
+                    )));
+                }
+                match &amp;args[0] {
+                    Value::Number(n) =&gt; Some(Ok(Value::Number(n * n))),
+                    _ =&gt; Some(Err(BopError::runtime(
+                        "square() requires a number", line
+                    ))),
+                }
+            }
+            _ =&gt; None, // not handled
+        }
+    }
+}
+<span class="boring">}</span></code></pre>
+<p>Bop scripts can then call <code>square()</code> as if it were built-in:</p>
+<pre><code class="language-bop">let result = square(5)
+print(str(result))    // 25
+</code></pre>
+<h3 id="on_print--capturing-output"><a class="header" href="#on_print--capturing-output"><code>on_print</code> — Capturing output</a></h3>
+<p>Override <code>on_print</code> to redirect <code>print()</code> output to a buffer, log, UI widget, or anywhere else:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>struct BufferedHost {
+    output: Vec&lt;String&gt;,
+}
+
+impl BopHost for BufferedHost {
+    fn call(&amp;mut self, _: &amp;str, _: &amp;[Value], _: u32)
+        -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt;
+    {
+        None
+    }
+
+    fn on_print(&amp;mut self, message: &amp;str) {
+        self.output.push(message.to_string());
+    }
+}
+<span class="boring">}</span></code></pre>
+<h3 id="on_tick--execution-control"><a class="header" href="#on_tick--execution-control"><code>on_tick</code> — Execution control</a></h3>
+<p><code>on_tick</code> is called on every interpreter step (each statement, loop iteration, etc.). Use it for:</p>
+<ul>
+<li><strong>Timeouts</strong> — check elapsed time and halt if exceeded</li>
+<li><strong>Cancellation</strong> — check a flag set by another thread</li>
+<li><strong>Progress tracking</strong> — count steps or update a progress bar</li>
+</ul>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use std::time::{Duration, Instant};
+
+struct TimedHost {
+    start: Instant,
+    timeout: Duration,
+}
+
+impl BopHost for TimedHost {
+    fn call(&amp;mut self, _: &amp;str, _: &amp;[Value], _: u32)
+        -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt;
+    {
+        None
+    }
+
+    fn on_tick(&amp;mut self) -&gt; Result&lt;(), BopError&gt; {
+        if self.start.elapsed() &gt; self.timeout {
+            Err(BopError::runtime("execution timed out", 0))
+        } else {
+            Ok(())
+        }
+    }
+}
+<span class="boring">}</span></code></pre>
+<h3 id="function_hint--better-error-messages"><a class="header" href="#function_hint--better-error-messages"><code>function_hint</code> — Better error messages</a></h3>
+<p>Return a hint string that gets appended to “function not found” errors. This helps guide users toward the functions your host provides:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn function_hint(&amp;self) -&gt; &amp;str {
+    "Available functions: square(), cube(), sqrt()"
+}
+<span class="boring">}</span></code></pre>
+<h2 id="resource-limits"><a class="header" href="#resource-limits">Resource limits</a></h2>
+<p><code>BopLimits</code> controls how much work a script can do:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct BopLimits {
+    pub max_steps: u64,      // loop iterations, statements, etc.
+    pub max_memory: usize,   // bytes for strings + arrays
+}
+<span class="boring">}</span></code></pre>
+<p>Two presets are provided:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Preset</th><th><code>max_steps</code></th><th><code>max_memory</code></th></tr>
+</thead>
+<tbody>
+<tr><td><code>BopLimits::standard()</code></td><td>10,000</td><td>10 MB</td></tr>
+<tr><td><code>BopLimits::demo()</code></td><td>1,000</td><td>1 MB</td></tr>
+</tbody>
+</table>
+</div>
+<p>Or create your own:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let limits = BopLimits {
+    max_steps: 50_000,
+    max_memory: 32 * 1024 * 1024, // 32 MB
+};
+<span class="boring">}</span></code></pre>
+<p>When a limit is exceeded, <code>run()</code> returns a <code>BopError</code> — the script is halted cleanly without panicking.</p>
+<h2 id="putting-it-all-together"><a class="header" href="#putting-it-all-together">Putting it all together</a></h2>
+<p>Here’s a complete example of a host that provides domain-specific functions, captures output, and enforces a timeout:</p>
+<pre class="playground"><code class="language-rust">use bop::{run, BopHost, BopError, BopLimits, Value};
+use std::time::{Duration, Instant};
+
+struct AppHost {
+    output: Vec&lt;String&gt;,
+    start: Instant,
+    data: Vec&lt;f64&gt;,
+}
+
+impl BopHost for AppHost {
+    fn call(
+        &amp;mut self,
+        name: &amp;str,
+        args: &amp;[Value],
+        line: u32,
+    ) -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt; {
+        match name {
+            "add_data" =&gt; {
+                if let Some(Value::Number(n)) = args.first() {
+                    self.data.push(*n);
+                    Some(Ok(Value::None))
+                } else {
+                    Some(Err(BopError::runtime(
+                        "add_data() requires a number", line
+                    )))
+                }
+            }
+            "average" =&gt; {
+                if self.data.is_empty() {
+                    Some(Ok(Value::Number(0.0)))
+                } else {
+                    let sum: f64 = self.data.iter().sum();
+                    Some(Ok(Value::Number(sum / self.data.len() as f64)))
+                }
+            }
+            _ =&gt; None,
+        }
+    }
+
+    fn on_print(&amp;mut self, message: &amp;str) {
+        self.output.push(message.to_string());
+    }
+
+    fn on_tick(&amp;mut self) -&gt; Result&lt;(), BopError&gt; {
+        if self.start.elapsed() &gt; Duration::from_secs(5) {
+            Err(BopError::runtime("timed out", 0))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn function_hint(&amp;self) -&gt; &amp;str {
+        "Available: add_data(n), average()"
+    }
+}
+
+fn main() {
+    let source = r#"
+        for n in [10, 20, 30, 40, 50] {
+            add_data(n)
+        }
+        print("Average: " + str(average()))
+    "#;
+
+    let mut host = AppHost {
+        output: vec![],
+        start: Instant::now(),
+        data: vec![],
+    };
+
+    match run(source, &amp;mut host, &amp;BopLimits::standard()) {
+        Ok(()) =&gt; {
+            for line in &amp;host.output {
+                println!("{line}");
+            }
+        }
+        Err(e) =&gt; eprintln!("Script error: {e}"),
+    }
+}</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+        <!-- Livereload script (if served using the cli tool) -->
+        <script>
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
+            const socket = new WebSocket(wsAddress);
+            socket.onmessage = function (event) {
+                if (event.data === "reload") {
+                    socket.close();
+                    location.reload();
+                }
+            };
+
+            window.onbeforeunload = function() {
+                socket.close();
+            }
+        </script>
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-c782337f.js"></script>
+        <script src="book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>

@@ -1,0 +1,8 @@
+[book]
+authors = ["Steve Pryde"]
+language = "en"
+src = "src"
+title = "The Bop Language"
+
+[output.html]
+git-repository-url = "https://github.com/stevepryde/bop-lang"
