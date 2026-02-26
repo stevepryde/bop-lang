@@ -40,7 +40,9 @@ print(results.join(", "))
 // Dictionaries
 let player = {"name": "Ada", "hp": 100}
 player["hp"] -= 20
-print("{player["name"]} has {player["hp"]} HP")
+let name = player["name"]
+let hp = player["hp"]
+print("{name} has {hp} HP")
 
 // Built-in methods
 let words = "the quick brown fox".split(" ")
