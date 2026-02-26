@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a7066e9a.js";
+            window.path_to_searchindex_js = "searchindex-a90c2256.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-3d459e96.js"></script>
@@ -179,8 +179,8 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="welcome-to-bop"><a class="header" href="#welcome-to-bop">Welcome to Bop</a></h1>
-<p>Bop is a small, dynamically-typed programming language designed for embedding. It looks like real code — curly braces, functions, operators — but runs in a sandbox with bounded resources and no access to the filesystem or network.</p>
-<p>Bop isn’t Python, JavaScript, or any existing language, but it borrows familiar syntax so that the skills transfer. Variables, loops, functions, arrays, dictionaries — real programming concepts, zero setup.</p>
+<p>Bop is a small, dynamically-typed programming language designed for teaching and embedding. It has a simple, modern syntax with no semicolons, no boilerplate, and no surprises — just the core concepts that matter. It runs in a sandbox with bounded resources and no access to the filesystem or network.</p>
+<p>Bop isn’t Python, JavaScript, or any existing language, but it deliberately borrows familiar syntax so that skills transfer directly to real-world languages. Variables, loops, functions, arrays, dictionaries — real programming concepts, zero setup. The library has no dependencies and also supports no-std and wasm.</p>
 <h2 id="quick-example"><a class="header" href="#quick-example">Quick example</a></h2>
 <pre><code class="language-bop">// Sum the numbers from 1 to 10
 let total = 0
@@ -191,10 +191,11 @@ print("Sum: " + str(total))
 </code></pre>
 <h2 id="what-makes-bop-different"><a class="header" href="#what-makes-bop-different">What makes Bop different?</a></h2>
 <ul>
-<li><strong>Looks like real code</strong> — curly braces, functions, operators. Skills transfer to real languages.</li>
+<li><strong>Built for learning</strong> — no semicolons, no boilerplate, simple syntax that teaches real programming concepts without getting in the way.</li>
+<li><strong>Looks like real code</strong> — curly braces, functions, operators. Very similar to modern languages so that skills are directly transferable.</li>
 <li><strong>Friendly errors</strong> — never cryptic, always helpful. (<code>"I don't know what 'pritn' is — did you mean 'print'?"</code>)</li>
 <li><strong>Sandboxed by design</strong> — no imports, no file I/O, no network access. All resource usage is bounded.</li>
-<li><strong>Embeddable</strong> — add custom functions and control execution through the <code>BopHost</code> trait.</li>
+<li><strong>Embeddable</strong> — zero dependencies, wasm support, and the <code>BopHost</code> trait for adding custom functions and controlling execution.</li>
 </ul>
 <h2 id="where-to-start"><a class="header" href="#where-to-start">Where to start</a></h2>
 <p>If you’re new to Bop, start with the <strong>Basics</strong> section and work your way through. If you’re looking for a specific function or operator, jump straight to the <strong>Reference</strong> section. If you want to embed Bop in your own Rust project, see the <strong>Embedding</strong> chapter.</p>

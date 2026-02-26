@@ -1,8 +1,8 @@
 # Welcome to Bop
 
-Bop is a small, dynamically-typed programming language designed for embedding. It looks like real code — curly braces, functions, operators — but runs in a sandbox with bounded resources and no access to the filesystem or network.
+Bop is a small, dynamically-typed programming language designed for teaching and embedding. It has a simple, modern syntax with no semicolons, no boilerplate, and no surprises — just the core concepts that matter. It runs in a sandbox with bounded resources and no access to the filesystem or network.
 
-Bop isn't Python, JavaScript, or any existing language, but it borrows familiar syntax so that the skills transfer. Variables, loops, functions, arrays, dictionaries — real programming concepts, zero setup.
+Bop isn't Python, JavaScript, or any existing language, but it deliberately borrows familiar syntax so that skills transfer directly to real-world languages. Variables, loops, functions, arrays, dictionaries — real programming concepts, zero setup. The library has no dependencies and also supports no-std and wasm.
 
 ## Quick example
 
@@ -17,10 +17,11 @@ print("Sum: " + str(total))
 
 ## What makes Bop different?
 
-- **Looks like real code** — curly braces, functions, operators. Skills transfer to real languages.
+- **Built for learning** — no semicolons, no boilerplate, simple syntax that teaches real programming concepts without getting in the way.
+- **Looks like real code** — curly braces, functions, operators. Very similar to modern languages so that skills are directly transferable.
 - **Friendly errors** — never cryptic, always helpful. (`"I don't know what 'pritn' is — did you mean 'print'?"`)
 - **Sandboxed by design** — no imports, no file I/O, no network access. All resource usage is bounded.
-- **Embeddable** — add custom functions and control execution through the `BopHost` trait.
+- **Embeddable** — zero dependencies, wasm support, and the `BopHost` trait for adding custom functions and controlling execution.
 
 ## Where to start
 
