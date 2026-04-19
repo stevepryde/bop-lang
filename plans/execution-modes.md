@@ -1,11 +1,10 @@
 # Bop Execution Modes & Compilation Strategy
 
-Status: design / roadmap. Step 1 (`bop-sys`), step 2a (bytecode
-compiler in `bop-vm`), and step 2b (VM dispatch + limits) have all
-landed. Step 2c (differential harness + fuzzing) is next.
-`bop-lang` stays self-contained — the VM and AOT crates depend on it
-directly for `Value` / builtins / operator primitives, rather than a
-separate runtime crate.
+Status: design / roadmap. Step 1 (`bop-sys`) and step 2 (bytecode
+VM with differential harness) have landed. Step 3 (AOT-Rust
+transpiler) is next. `bop-lang` stays self-contained — the VM and
+AOT crates depend on it directly for `Value` / builtins / operator
+primitives, rather than a separate runtime crate.
 
 ## Summary
 
@@ -261,6 +260,19 @@ Rough order of work (each step is independently shippable):
      grammar, compare outputs). Promoted from "nice to have" — this
      is how we keep the engines from drifting. Required before
      shipping the VM.
+     *Status: done. Lives in
+     [`bop-vm/tests/differential.rs`](../bop-vm/tests/differential.rs).
+     Every corpus program runs through both `bop::run` and
+     `bop_vm::run`; the harness asserts strict print equality and
+     error-message equality (line numbers legitimately diverge, so
+     they're excluded). A constrained-grammar fuzzer layered on top
+     (`let` / assign / `print` / `if` / `repeat` / arrays /
+     arithmetic / logic; no `while`, `fn`, or methods) runs 100
+     deterministic programs on every build and 10k under
+     `cargo test -- --ignored fuzz_extended_diff`. One loosened
+     check, `run_err_loose` / `assert_both_resource_limit`, covers
+     the handful of safety tests where the engines legitimately
+     halt on different limit classes (step vs memory).*
 
 3. **AOT-Rust transpiler** (`bop-compile`). Depends on `bop-lang` for
    the AST and runtime surface. Start with a subset (numbers, strings,
