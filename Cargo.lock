@@ -7,8 +7,16 @@ name = "bop-cli"
 version = "0.2.0"
 dependencies = [
  "bop-lang",
+ "bop-sys",
 ]
 
 [[package]]
 name = "bop-lang"
 version = "0.2.0"
+
+[[package]]
+name = "bop-sys"
+version = "0.2.0"
+dependencies = [
+ "bop-lang",
+]

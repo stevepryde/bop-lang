@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, Write};
 
-use bop::{BopLimits, BopHost, BopError, Value, StdHost};
+use bop::BopLimits;
+use bop_sys::StdHost;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -15,7 +16,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let mut host = StdHost;
+        let mut host = StdHost::new();
         if let Err(e) = bop::run(&source, &mut host, &BopLimits::standard()) {
             eprintln!("{}", e);
             std::process::exit(1);
@@ -30,7 +31,7 @@ fn repl() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    let mut host = ReplHost;
+    let mut host = StdHost::new();
 
     print!("> ");
     stdout.flush().unwrap();
@@ -54,13 +55,5 @@ fn repl() {
 
         print!("> ");
         stdout.flush().unwrap();
-    }
-}
-
-struct ReplHost;
-
-impl BopHost for ReplHost {
-    fn call(&mut self, _name: &str, _args: &[Value], _line: u32) -> Option<Result<Value, BopError>> {
-        None
     }
 }

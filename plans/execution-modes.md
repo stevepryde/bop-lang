@@ -1,6 +1,6 @@
 # Bop Execution Modes & Compilation Strategy
 
-Status: design / roadmap. Not yet implemented.
+Status: design / roadmap. Step 1 (`bop-sys`) has been started.
 
 ## Summary
 
@@ -115,6 +115,10 @@ If the need ever becomes real, reopen the discussion. For now: no.
 A new crate alongside `bop-lang` that provides standard host / OS
 integration: file I/O, env vars, time, stdin, etc. — the things the core
 language deliberately stays agnostic of.
+
+Status: crate split implemented. The initial `bop-sys` surface provides the
+standard stdout-backed host used by `bop-cli`; additional host builtins
+remain future work.
 
 Rationale:
 

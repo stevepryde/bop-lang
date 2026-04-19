@@ -8,13 +8,15 @@ Add `bop-lang` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bop = { package = "bop-lang", version = "0.1" }
+bop = { package = "bop-lang", version = "0.2" }
+bop-sys = "0.2"
 ```
 
 Run a program with the default host:
 
 ```rust
-use bop::{run, StdHost, BopLimits};
+use bop::{run, BopLimits};
+use bop_sys::StdHost;
 
 fn main() {
     let source = r#"
@@ -22,7 +24,7 @@ fn main() {
         print("Hello, {name}!")
     "#;
 
-    let mut host = StdHost;
+    let mut host = StdHost::new();
     let limits = BopLimits::standard();
 
     if let Err(e) = run(source, &mut host, &limits) {
@@ -45,9 +47,9 @@ pub trait BopHost {
         line: u32,
     ) -> Option<Result<Value, BopError>>;
 
-    /// Called by `print()`. Default: writes to stdout.
+    /// Called by `print()`. Default: ignores output.
     fn on_print(&mut self, message: &str) {
-        println!("{}", message);
+        let _ = message;
     }
 
     /// Hint text appended to "function not found" errors.

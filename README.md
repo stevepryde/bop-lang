@@ -77,13 +77,15 @@ Add `bop-lang` to your `Cargo.toml`:
 ```toml
 [dependencies]
 bop-lang = "0.2"
+bop-sys = "0.2"
 ```
 
 ```rust
-use bop::{run, BopLimits, StdHost};
+use bop::{run, BopLimits};
+use bop_sys::StdHost;
 
 fn main() {
-    let mut host = StdHost;
+    let mut host = StdHost::new();
     run("print(1 + 2)", &mut host, &BopLimits::standard()).unwrap();
 }
 ```

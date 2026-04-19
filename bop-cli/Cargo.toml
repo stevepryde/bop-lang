@@ -17,3 +17,4 @@ path = "src/main.rs"
 
 [dependencies]
 bop = { version = "0.2.0", path = "../bop", package = "bop-lang" }
+bop-sys = { version = "0.2.0", path = "../bop-sys" }

@@ -61,17 +61,9 @@ pub trait BopHost {
     /// Called for unknown function names. Return `None` = not handled.
     fn call(&mut self, name: &str, args: &[Value], line: u32) -> Option<Result<Value, BopError>>;
 
-    /// Called by `print()`. Default: writes to stdout (std only), panics (no-std).
+    /// Called by `print()`.
     fn on_print(&mut self, message: &str) {
-        #[cfg(feature = "std")]
-        {
-            println!("{}", message);
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            let _ = message;
-            panic!("BopHost::on_print must be implemented in no-std environments");
-        }
+        let _ = message;
     }
 
     /// Hint text for "function not found" errors.
@@ -82,17 +74,6 @@ pub trait BopHost {
     /// Called each tick. Return `Err` to halt execution.
     fn on_tick(&mut self) -> Result<(), BopError> {
         Ok(())
-    }
-}
-
-// ─── StdHost ───────────────────────────────────────────────────────────────
-
-/// Default host: no custom builtins, print to stdout.
-pub struct StdHost;
-
-impl BopHost for StdHost {
-    fn call(&mut self, _name: &str, _args: &[Value], _line: u32) -> Option<Result<Value, BopError>> {
-        None
     }
 }
 
