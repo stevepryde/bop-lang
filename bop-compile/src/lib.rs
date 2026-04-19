@@ -65,6 +65,13 @@ pub struct Options {
     /// and runaway programs are the caller's problem. This matches
     /// the plan's "hot path should be clean" goal.
     pub sandbox: bool,
+    /// If `Some(name)`, wrap the entire emitted output in
+    /// `pub mod <name> { ... }`. Use this when you want to embed
+    /// several transpiled programs in one Rust source file without
+    /// colliding on top-level items (`Ctx`, `run_program`,
+    /// `run`, `__bop_tick`, user-fn names, etc.). `emit_main` is
+    /// ignored in this mode — you provide your own driver.
+    pub module_name: Option<String>,
 }
 
 impl Default for Options {
@@ -73,6 +80,7 @@ impl Default for Options {
             emit_main: true,
             use_bop_sys: true,
             sandbox: false,
+            module_name: None,
         }
     }
 }

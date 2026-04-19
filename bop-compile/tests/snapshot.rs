@@ -418,11 +418,43 @@ fn sandbox_run_program_ticks_once_on_entry() {
 }
 
 #[test]
+fn module_name_wraps_output_and_skips_main() {
+    let opts = Options {
+        module_name: Some("my_prog".into()),
+        ..Options::default()
+    };
+    let out = transpile("print(1)", &opts).unwrap();
+    assert!(
+        out.starts_with("pub mod my_prog {\n"),
+        "expected module wrapper prefix:\n{}",
+        out
+    );
+    assert!(
+        out.trim_end().ends_with('}'),
+        "expected closing `}}`:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("fn main()"),
+        "module mode should skip main:\n{}",
+        out
+    );
+    // The run fn should still be there, now addressed as
+    // `my_prog::run`.
+    assert!(
+        out.contains("pub fn run<H: ::bop::BopHost>"),
+        "expected pub fn run:\n{}",
+        out
+    );
+}
+
+#[test]
 fn options_without_main_skip_entry_point() {
     let opts = Options {
         emit_main: false,
         use_bop_sys: false,
         sandbox: false,
+        module_name: None,
     };
     let out = transpile("print(1)", &opts).unwrap();
     assert!(

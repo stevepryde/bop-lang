@@ -15,6 +15,7 @@ name = "bop-compile"
 version = "0.2.0"
 dependencies = [
  "bop-lang",
+ "bop-vm",
 ]
 
 [[package]]

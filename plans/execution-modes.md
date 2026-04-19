@@ -1,13 +1,13 @@
 # Bop Execution Modes & Compilation Strategy
 
-Status: design / roadmap. Step 1 (`bop-sys`), step 2 (bytecode VM
-with differential harness), and step 3 (`bop-compile` transpiler
-— full non-sandbox surface plus opt-in sandbox mode) have landed.
-Remaining work for step 3 closure: folding the transpiled path
-into a shared walker/VM/AOT differential harness. `bop-lang`
-stays self-contained — the VM and AOT crates depend on it
-directly for `Value` / builtins / operator primitives, rather
-than a separate runtime crate.
+Status: design / roadmap. Steps 1 (`bop-sys`), 2 (bytecode VM with
+differential harness), and 3 (AOT-Rust transpiler with sandbox
+mode and three-way differential harness) have all landed. Bop now
+ships three execution modes: tree-walker, bytecode VM, and AOT
+Rust, with a shared differential harness proving they agree.
+JIT stays out of scope. `bop-lang` stays self-contained — the VM
+and AOT crates depend on it directly for `Value` / builtins /
+operator primitives, rather than a separate runtime crate.
 
 ## Summary
 
@@ -303,11 +303,24 @@ Rough order of work (each step is independently shippable):
    run the transpiled Rust through `cargo run` and assert either
    output matches the tree-walker (non-sandbox) or the program
    exits with the expected limit-violation message (sandbox).
-   Folding the AOT path into the 2c differential harness is the
-   remaining step 3 milestone — deferred because the e2e suite
-   is already doing the comparison for the programs that
-   matter, and adding 100+ AOT cargo runs to every CI build
-   would blow past reasonable test-suite timings.*
+   A three-way differential harness
+   ([`bop-compile/tests/three_way.rs`](../bop-compile/tests/three_way.rs))
+   runs every corpus program through all three engines — walker,
+   VM, AOT — and asserts strict agreement on prints and on error
+   messages. AOT programs are batched into a single Rust driver
+   file via `Options::module_name` so one `cargo run` covers the
+   entire corpus; `#[ignore]`-gated to keep default `cargo test`
+   fast (the AOT leg adds ~1–2 s per invocation). Safety tests
+   that trip resource limits are deliberately excluded from the
+   three-way corpus — the three engines measure "steps"
+   differently and halt at slightly different points, a
+   divergence already accepted by 2c's `assert_both_resource_limit`.
+   Two other intentional AOT divergences are documented inline in
+   the corpus: short-circuit with unbound idents
+   (`false && x`) and undefined-variable lookups (`print(nope)`)
+   — both halt with a useful error in all three engines, but the
+   message text only matches for the first two since the AOT
+   catches unbound names at rustc time.*
 
 JIT is not on the roadmap. If that changes, open a new design doc.
 

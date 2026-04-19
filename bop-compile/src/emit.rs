@@ -114,12 +114,19 @@ impl Emitter {
     }
 
     fn emit_program(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
+        let module_name = self.opts.module_name.clone();
+        if let Some(ref name) = module_name {
+            writeln!(self.out, "pub mod {} {{", name).unwrap();
+        }
         self.emit_header();
         self.emit_runtime_preamble();
         self.emit_run_program(stmts)?;
         self.emit_public_entry();
-        if self.opts.emit_main {
+        if self.opts.emit_main && module_name.is_none() {
             self.emit_main();
+        }
+        if module_name.is_some() {
+            self.out.push_str("}\n");
         }
         Ok(())
     }
