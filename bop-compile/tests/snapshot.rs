@@ -193,31 +193,96 @@ fn rust_keyword_idents_are_raw_escaped() {
 }
 
 #[test]
-fn method_call_returns_not_supported_error() {
-    let err = transpile("let a = [1]\na.push(2)", &Options::default()).unwrap_err();
-    assert!(
-        err.message.contains("method calls"),
-        "got: {}",
-        err.message
+fn method_call_on_ident_emits_back_assign_for_mutating() {
+    // `push` is mutating, so the emitted code must carry the
+    // mutated array back into the source binding.
+    let out = compile("let a = [1, 2]\na.push(3)");
+    contains_all(
+        &out,
+        &[
+            "__bop_call_method(&",
+            "\"push\"",
+            "if let Some(__new_obj) = __mutated",
+            "a = __new_obj",
+        ],
     );
 }
 
 #[test]
-fn string_interp_returns_not_supported_error() {
-    let err =
-        transpile("let name = \"x\"\nprint(\"hi {name}\")", &Options::default()).unwrap_err();
+fn method_call_on_ident_skips_back_assign_for_pure() {
+    // `len` is pure, so the mutated slot is discarded with `_`.
+    let out = compile("let a = [1, 2, 3]\nprint(a.len())");
     assert!(
-        err.message.contains("string interpolation"),
-        "got: {}",
-        err.message
+        out.contains("let (__ret, _) = __bop_call_method(&"),
+        "expected pure-method discard in:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("if let Some(__new_obj)"),
+        "pure method shouldn't emit the back-assign branch:\n{}",
+        out
     );
 }
 
 #[test]
-fn index_assign_returns_not_supported_error() {
-    let err = transpile("let a = [1]\na[0] = 2", &Options::default()).unwrap_err();
+fn method_call_on_literal_has_no_back_assign() {
+    // `[1,2,3].push(...)` has no target ident — the mutation is
+    // observed and then discarded, same as in the tree-walker.
+    let out = compile("print([1, 2, 3].push(4))");
     assert!(
-        err.message.contains("indexed assignment"),
+        out.contains("let (__ret, _) = __bop_call_method(&"),
+        "expected literal-receiver discard in:\n{}",
+        out
+    );
+}
+
+#[test]
+fn string_interp_builds_string_via_format() {
+    let out = compile(r#"let name = "bop"
+print("hi {name}!")"#);
+    contains_all(
+        &out,
+        &[
+            "::std::string::String::new()",
+            "__s.push_str(\"hi \")",
+            "__s.push_str(&format!(\"{}\", name.clone()))",
+            "__s.push_str(\"!\")",
+            "::bop::value::Value::new_str(__s)",
+        ],
+    );
+}
+
+#[test]
+fn index_assign_routes_through_ops_index_set() {
+    let out = compile("let a = [1, 2, 3]\na[0] = 99");
+    contains_all(
+        &out,
+        &[
+            "::bop::ops::index_set(&mut a,",
+        ],
+    );
+}
+
+#[test]
+fn compound_index_assign_reads_then_writes() {
+    let out = compile("let a = [1, 2]\na[0] += 5");
+    contains_all(
+        &out,
+        &[
+            "::bop::ops::index_get(&a,",
+            "::bop::ops::add(",
+            "::bop::ops::index_set(&mut a,",
+        ],
+    );
+}
+
+#[test]
+fn index_assign_on_non_ident_is_rejected() {
+    // The tree-walker rejects `[1,2][0] = 3` too — the error
+    // message matches, for differential-harness peace of mind.
+    let err = transpile("[1, 2][0] = 3", &Options::default()).unwrap_err();
+    assert!(
+        err.message.contains("Can only assign to indexed variables"),
         "got: {}",
         err.message
     );

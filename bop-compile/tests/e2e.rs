@@ -265,6 +265,80 @@ print(if [1] { "t" } else { "f" })"#,
 
 #[test]
 #[ignore]
+fn e2e_method_calls_array_and_string() {
+    assert_aot_matches(
+        "method_calls",
+        r#"let a = [1, 2, 3]
+a.push(4)
+print(a.len())
+print(a)
+print("hello world".upper())
+print("a,b,c".split(","))
+print(["x", "y", "z"].join("-"))
+let sorted = [3, 1, 2]
+sorted.sort()
+print(sorted)"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_string_interpolation() {
+    assert_aot_matches(
+        "interpolation",
+        r#"let name = "bop"
+let version = 2
+print("hi {name}!")
+print("bop v{version} ready")"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_indexed_writes_and_compound() {
+    assert_aot_matches(
+        "indexed_writes",
+        r#"let a = [1, 2, 3]
+a[0] = 99
+print(a)
+a[1] += 10
+print(a)
+a[-1] *= 2
+print(a)
+let d = {"hp": 100}
+d["hp"] = 50
+d["mp"] = 20
+print(d["hp"])
+print(d["mp"])"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_fizzbuzz_roundtrip() {
+    // Canonical smoke test — uses arrays, method calls, string
+    // interpolation indirectly through str(), for/range, if/else
+    // chain, and mutation back-assign on `push`.
+    assert_aot_matches(
+        "fizzbuzz",
+        r#"let result = []
+for i in range(1, 16) {
+    if i % 15 == 0 {
+        result.push("FizzBuzz")
+    } else if i % 3 == 0 {
+        result.push("Fizz")
+    } else if i % 5 == 0 {
+        result.push("Buzz")
+    } else {
+        result.push(str(i))
+    }
+}
+print(result.join(", "))"#,
+    );
+}
+
+#[test]
+#[ignore]
 fn e2e_builtins_str_int_type() {
     assert_aot_matches(
         "builtins",

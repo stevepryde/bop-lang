@@ -364,10 +364,54 @@ impl Emitter {
                 }
                 Ok(())
             }
-            AssignTarget::Index { .. } => Err(BopError::runtime(
-                "bop-compile: indexed assignment (arr[i] = ...) is not yet supported",
-                line,
-            )),
+            AssignTarget::Index { object, index } => {
+                // Tree-walker requires the object to be a bare ident;
+                // anything else is a compile-time error here too.
+                let target = match &object.kind {
+                    ExprKind::Ident(n) => rust_ident(n),
+                    _ => {
+                        return Err(BopError::runtime(
+                            "Can only assign to indexed variables (like `arr[0] = val`)",
+                            line,
+                        ));
+                    }
+                };
+                // Eval order mirrors the tree-walker: rhs value,
+                // then index, then (for compound) the current
+                // indexed value, then apply the op, then write back.
+                let val_src = self.expr_src(value)?;
+                let idx_src = self.expr_src(index)?;
+                let val_tmp = self.fresh_tmp();
+                let idx_tmp = self.fresh_tmp();
+                self.line(&format!("let {} = {};", val_tmp, val_src));
+                self.line(&format!("let {} = {};", idx_tmp, idx_src));
+                match op {
+                    AssignOp::Eq => {
+                        self.line(&format!(
+                            "::bop::ops::index_set(&mut {}, &{}, {}, {})?;",
+                            target, idx_tmp, val_tmp, line
+                        ));
+                    }
+                    compound => {
+                        let op_path = compound_op_path(*compound);
+                        let cur_tmp = self.fresh_tmp();
+                        let new_tmp = self.fresh_tmp();
+                        self.line(&format!(
+                            "let {} = ::bop::ops::index_get(&{}, &{}, {})?;",
+                            cur_tmp, target, idx_tmp, line
+                        ));
+                        self.line(&format!(
+                            "let {} = {}(&{}, &{}, {})?;",
+                            new_tmp, op_path, cur_tmp, val_tmp, line
+                        ));
+                        self.line(&format!(
+                            "::bop::ops::index_set(&mut {}, &{}, {}, {})?;",
+                            target, idx_tmp, new_tmp, line
+                        ));
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -451,12 +495,11 @@ impl Emitter {
 
             ExprKind::Call { callee, args } => self.call_src(callee, args, line)?,
 
-            ExprKind::MethodCall { .. } => {
-                return Err(BopError::runtime(
-                    "bop-compile: method calls (obj.method(...)) are not yet supported",
-                    line,
-                ));
-            }
+            ExprKind::MethodCall {
+                object,
+                method,
+                args,
+            } => self.method_call_src(object, method, args, line)?,
 
             ExprKind::Index { object, index } => {
                 let obj_src = self.expr_src(object)?;
@@ -675,11 +718,96 @@ impl Emitter {
         parts: &[StringPart],
         line: u32,
     ) -> Result<String, BopError> {
-        let _ = parts;
-        Err(BopError::runtime(
-            "bop-compile: string interpolation (\"hi {name}\") is not yet supported",
-            line,
-        ))
+        // Mirror the tree-walker: for each Variable part, format the
+        // current value of the Bop ident into the buffer. Missing
+        // idents surface as a Rust compile error ("cannot find value
+        // X"), which is strictly sooner than the tree-walker's
+        // runtime "Variable X not found" — acceptable; the program
+        // still fails with a clear message.
+        let _ = line;
+        let mut body = String::from("{ let mut __s = ::std::string::String::new(); ");
+        for part in parts {
+            match part {
+                StringPart::Literal(s) => {
+                    write!(body, "__s.push_str({}); ", rust_string_literal(s)).unwrap();
+                }
+                StringPart::Variable(name) => {
+                    // The cloned Value lives only for the duration
+                    // of the format call; its Drop tracks the
+                    // de-alloc correctly against `bop::memory`.
+                    write!(
+                        body,
+                        "__s.push_str(&format!(\"{{}}\", {}.clone())); ",
+                        rust_ident(name)
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        body.push_str("::bop::value::Value::new_str(__s) }");
+        Ok(body)
+    }
+
+    fn method_call_src(
+        &mut self,
+        object: &Expr,
+        method: &str,
+        args: &[Expr],
+        line: u32,
+    ) -> Result<String, BopError> {
+        // Tree-walker evaluates args first, then the object. We
+        // match that here so any future programs with side-effecting
+        // sub-expressions behave identically.
+        let mut arg_tmps = Vec::with_capacity(args.len());
+        let mut arg_lets = String::new();
+        for arg in args {
+            let src = self.expr_src(arg)?;
+            let tmp = self.fresh_tmp();
+            write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
+            arg_tmps.push(tmp);
+        }
+
+        let obj_src = self.expr_src(object)?;
+        let obj_tmp = self.fresh_tmp();
+        let args_arr = build_arg_array(&arg_tmps);
+
+        // Method name goes into a Rust string literal; we also look
+        // up "is this mutating?" up-front so we only emit the
+        // back-assign branch when it's actually needed.
+        let method_lit = rust_string_literal(method);
+        let mutating = is_mutating_method(method);
+        let ident_target = if mutating {
+            match &object.kind {
+                ExprKind::Ident(n) => Some(rust_ident(n)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let mut body = String::new();
+        write!(body, "{{ {}let {} = {}; ", arg_lets, obj_tmp, obj_src).unwrap();
+        match ident_target {
+            Some(target) => {
+                write!(
+                    body,
+                    "let (__ret, __mutated) = __bop_call_method(&{}, {}, &{}, {})?; \
+                     if let Some(__new_obj) = __mutated {{ {} = __new_obj; }} \
+                     __ret }}",
+                    obj_tmp, method_lit, args_arr, line, target
+                )
+                .unwrap();
+            }
+            None => {
+                write!(
+                    body,
+                    "let (__ret, _) = __bop_call_method(&{}, {}, &{}, {})?; __ret }}",
+                    obj_tmp, method_lit, args_arr, line
+                )
+                .unwrap();
+            }
+        }
+        Ok(body)
     }
 }
 
@@ -736,6 +864,16 @@ fn rust_ident(name: &str) -> String {
 /// the generated module.
 fn rust_fn_name(name: &str) -> String {
     format!("bop_fn_{}", name)
+}
+
+/// Kept in sync with `bop::methods::is_mutating_method` —
+/// duplicated here so the emitter can make the decision at compile
+/// time and skip the back-assign boilerplate for pure methods.
+fn is_mutating_method(method: &str) -> bool {
+    matches!(
+        method,
+        "push" | "pop" | "insert" | "remove" | "reverse" | "sort"
+    )
 }
 
 fn is_rust_keyword(s: &str) -> bool {
