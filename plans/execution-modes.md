@@ -116,9 +116,9 @@ A new crate alongside `bop-lang` that provides standard host / OS
 integration: file I/O, env vars, time, stdin, etc. — the things the core
 language deliberately stays agnostic of.
 
-Status: crate split implemented. The initial `bop-sys` surface provides the
-standard stdout-backed host used by `bop-cli`; additional host builtins
-remain future work.
+Status: crate split implemented. `bop-sys` now provides the standard
+stdout-backed host used by `bop-cli`, plus stdin, file, env, and time host
+functions.
 
 Rationale:
 
@@ -133,9 +133,9 @@ Shape:
 
 - Implements `BopHost` with a standard set of builtins (print, readline,
   file ops, time, env…).
-- Feature-flagged internally so embedders can trim what they don't want
-  (e.g. `fs`, `net`, `time`). Defaults to a reasonable "batteries
-  included" set.
+- Intentionally not feature-flagged internally. Embedded/minimal use cases
+  depend on `bop-lang` directly; users that choose `bop-sys` get the full
+  standard host.
 - Re-used by `bop-cli` so the `bop` binary keeps its current behaviour
   without duplicating code.
 

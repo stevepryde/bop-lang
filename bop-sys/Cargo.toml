@@ -14,12 +14,5 @@ categories = ["compilers"]
 [lib]
 name = "bop_sys"
 
-[features]
-default = ["stdio"]
-stdio = []
-fs = []
-env = []
-time = []
-
 [dependencies]
 bop = { version = "0.2.0", path = "../bop", package = "bop-lang" }

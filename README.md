@@ -90,6 +90,10 @@ fn main() {
 }
 ```
 
+`bop-sys` provides the standard OS-backed host functions: `readline`,
+`read_file`, `write_file`, `append_file`, `file_exists`, `env`,
+`unix_time`, and `unix_time_ms`.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option.

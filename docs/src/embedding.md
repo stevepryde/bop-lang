@@ -33,6 +33,20 @@ fn main() {
 }
 ```
 
+`StdHost` comes from `bop-sys`, the OS-backed standard host. It supports
+`print()` output plus these host functions:
+
+| Function | Description |
+|----------|-------------|
+| `readline()` / `readline(prompt)` | Read one line from stdin, returning `none` at EOF |
+| `read_file(path)` | Read a UTF-8 file into a string |
+| `write_file(path, contents)` | Replace a file with string contents |
+| `append_file(path, contents)` | Append string contents to a file |
+| `file_exists(path)` | Return whether a path exists |
+| `env(name)` | Return an environment variable string, or `none` if missing |
+| `unix_time()` | Return Unix time in seconds |
+| `unix_time_ms()` | Return Unix time in milliseconds |
+
 ## The BopHost trait
 
 The `BopHost` trait is the integration point between your application and the Bop interpreter:
