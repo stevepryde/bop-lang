@@ -13,10 +13,10 @@ pub mod parser;
 pub mod memory;
 pub mod ops;
 pub mod precheck;
+pub mod builtins;
+pub mod methods;
 
 mod evaluator;
-mod builtins;
-mod methods;
 
 pub use error::BopError;
 pub use parser::{Stmt, count_instructions};

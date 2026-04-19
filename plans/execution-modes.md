@@ -1,10 +1,11 @@
 # Bop Execution Modes & Compilation Strategy
 
-Status: design / roadmap. Step 1 (`bop-sys`) and step 2a (bytecode
-compiler in `bop-vm`) have landed. Step 2b (VM dispatch + limits) is
-next. `bop-lang` stays self-contained — the VM and AOT crates depend
-on it directly for `Value` / builtins / operator primitives, rather
-than a separate runtime crate.
+Status: design / roadmap. Step 1 (`bop-sys`), step 2a (bytecode
+compiler in `bop-vm`), and step 2b (VM dispatch + limits) have all
+landed. Step 2c (differential harness + fuzzing) is next.
+`bop-lang` stays self-contained — the VM and AOT crates depend on it
+directly for `Value` / builtins / operator primitives, rather than a
+separate runtime crate.
 
 ## Summary
 
@@ -241,6 +242,19 @@ Rough order of work (each step is independently shippable):
      cost table, loop-backedge / call-entry checks, `on_tick` hooks,
      memory tracking routed through `bop::memory`. At the end of 2b
      the VM passes the full `bop-lang` test suite on its own.
+     *Status: done. Implementation: [`bop-vm/src/vm.rs`](../bop-vm/src/vm.rs).
+     Stack-based dispatch with per-frame scopes, `Rc<Chunk>` for
+     function sharing, and iteration/repeat slots kept inline on the
+     value stack. `bop::memory` tracks allocations automatically via
+     `Value`'s `Clone` / `Drop`, so no VM-specific bookkeeping is
+     needed for `max_memory`. `max_steps` is scaled internally
+     (`STEP_SCALE = 8`) so source-level budgets survive the 1-op-per-
+     instruction expansion. `bop::builtins` and `bop::methods` are
+     promoted to public modules so the VM can share the tree-walker's
+     builtin / method implementations. Tested in
+     [`bop-vm/tests/semantics.rs`](../bop-vm/tests/semantics.rs)
+     (117 tests mirroring `bop-lang`'s suite, including safety /
+     resource-limit cases).*
    - **2c. Differential harness.** Every test in the suite runs
      against both engines; outputs and error messages must match.
      Fuzzing layered on top (random programs from a constrained

@@ -1,8 +1,7 @@
 //! Bytecode compiler and stack VM for Bop.
 //!
-//! This is step 2a of the execution-modes roadmap: the compiler and
-//! instruction set only. Execution (dispatch loop, resource limits,
-//! differential harness) lands in 2b / 2c.
+//! Steps 2a (compiler + instruction set) and 2b (VM + limits) have
+//! landed. The differential harness against the tree-walker is step 2c.
 //!
 //! # Instruction set (stack-based)
 //!
@@ -69,11 +68,14 @@
 //! ## Termination
 //! - `Halt` — only emitted at the end of the top-level chunk.
 //!
-//! # What this crate does not yet do
+//! # Using the VM
 //!
-//! Execution lands in step 2b. This crate compiles a parsed `bop-lang`
-//! AST into a [`Chunk`] and renders it back out via [`disassemble`].
-//! There is no dispatch loop, no stack, no runtime state.
+//! Call [`run`] with Bop source to parse, compile, and execute through
+//! the VM. For finer control, compile a [`Chunk`] with [`compile`] and
+//! hand it to [`execute`] (or construct [`Vm`] directly).
+//!
+//! The VM shares [`bop::BopHost`] / [`bop::BopLimits`] semantics with
+//! the tree-walking evaluator in `bop-lang`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -83,7 +85,9 @@ extern crate alloc;
 pub mod chunk;
 pub mod compiler;
 pub mod disasm;
+pub mod vm;
 
 pub use chunk::{Chunk, CodeOffset, ConstIdx, Constant, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx};
 pub use compiler::compile;
 pub use disasm::disassemble;
+pub use vm::{Vm, execute, run};

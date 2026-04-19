@@ -68,9 +68,10 @@ pub enum Instr {
     SetIndex,
 
     // ─── String interpolation ─────────────────────────────────────
-    /// Interpolate using a recipe from the chunk's interp pool. Pops
-    /// the variables named in the recipe (in order) and pushes the
-    /// resulting string.
+    /// Interpolate using a recipe from the chunk's interp pool. The
+    /// variables named in the recipe are looked up by name in the
+    /// current scope and formatted in order; the resulting string is
+    /// pushed.
     StringInterp(InterpIdx),
 
     // ─── Collections ──────────────────────────────────────────────
