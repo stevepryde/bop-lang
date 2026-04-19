@@ -213,34 +213,101 @@ Keep it dead simple.
 destructuring; make sure the `Value::Struct` shape works for it
 without retrofitting.
 
-### Phase 4 — Exception handling
+### Phase 4 — Error handling (Result + `try`)
 
-**Why fourth.** With modules and structs, programs get large
-enough that "error aborts the whole thing" becomes painful.
-Exceptions let libraries signal recoverable failures without the
-caller having to pre-check everything.
+**Why fourth.** Programs past a few hundred lines need a way for
+libraries to signal recoverable failures without either aborting
+the whole program or forcing every caller to pre-check every
+input. Bop rejects exception machinery in favour of a Result-based
+model — a lighter touch that maps cleanly onto all three engines.
+
+**Two-tier semantics.** The model splits runtime failure into two
+distinct categories that don't get confused at the language level:
+
+1. **Unwinding errors** — the existing `BopError` mechanism. Raised
+   by the runtime for type mismatches, division by zero, index
+   out of bounds, "function not found", and — crucially — resource-
+   limit violations (`too many steps`, `Memory limit`). These
+   unwind to the engine boundary and halt the program. **User
+   code cannot catch them at the statement level.** This is the
+   load-bearing property that makes `BopLimits` a real sandbox:
+   a script can't swallow a step-limit error and loop anyway.
+2. **Result values** — ordinary `Value::Struct` instances named
+   `Result`, with `Ok(v)` and `Err(e)` variants by convention.
+   Libraries that can fail in a recoverable way return these;
+   callers inspect, propagate, or destructure them like any other
+   value. No control-flow magic.
 
 **Scope.**
 
-- `try { ... } catch err { ... }` statement form. `err` binds the
-  thrown value (a `Value`) in the catch block's scope.
-- `throw <expr>` raises the value. The value is conventionally a
-  dict or a struct, but Bop doesn't enforce a shape.
-- Optional `finally { ... }` clause.
-- Integration with existing `BopError`: runtime errors produced by
-  ops / builtins / methods become catchable — they materialise as
-  a struct (say, `Error { message, line }`) when a `try` block is
-  active. Uncaught errors still abort, same as today.
+- `Result` ships as a stdlib struct (`std.result::Result`) with
+  `Ok` and `Err` variants and helpers (`is_ok`, `is_err`, `unwrap`,
+  `unwrap_or`, `map`, `and_then`). Written in Bop; lives in the
+  `bop-std` crate (phase 6). Core has no built-in `Result` type
+  — this keeps the core surface minimal and the stdlib definition
+  authoritative.
+- **`try <expr>` operator** — parses as a prefix expression. If
+  `<expr>` evaluates to `Result::Err(e)`, `return Result::Err(e)`
+  from the enclosing function. If it's `Result::Ok(v)`, evaluate
+  to `v`. Anything else (a non-Result value) is a runtime error
+  — `try` only works on Results, same as Rust's `?` only works on
+  `Result`/`Option`. Example:
+  ```
+  fn load_config(path) {
+      let text = try read_file(path)
+      let parsed = try json.parse(text)
+      return Ok(parsed)
+  }
+  ```
+- **`try_call(f)` builtin** — Lua's `pcall`, renamed. Calls `f`
+  (a zero-arg closure) and catches any unwinding `BopError`,
+  returning `Result::Ok(return_value)` on success or
+  `Result::Err({ message, line })` on unwind. This is the escape
+  valve: user code that genuinely needs to recover from a runtime
+  error (a parser given untrusted input, a sandbox-within-sandbox)
+  uses it sparingly. **Resource-limit errors stay uncatchable**
+  even inside `try_call` — otherwise the sandbox invariant
+  breaks. Flag: `BopError` gains an `is_fatal: bool` field (or
+  equivalent) that `try_call` honours.
 
-**Where it lives.** Core. Three engines follow.
+**Where it lives.** `try` is a parser + codegen change in
+`bop-lang`; the three engines each implement it (walker: early
+`Signal::Return`-style control flow; VM: a new `TryPropagate`
+opcode that inspects the top-of-stack Result; AOT: emits
+`match <expr> { ... }` with a `return` in the `Err` arm).
+`try_call` is a builtin in `bop-lang` that wraps a runtime call in
+its engine's error-trapping primitive.
 
-**Non-goals.** No typed exception hierarchies. No resumable
-exceptions. No stack traces on the exception value (yet —
-revisit when/if debugging gets attention in phase 9).
+The `Result` type and helpers live in `bop-std` as Bop source —
+core stays zero-dep, and nothing forces embedders to load
+`bop-std` if they have their own error conventions.
 
-**Risks.** VM integration — unwinding to the nearest `try` frame
-means tracking frame depth at the catch site. AOT emits Rust
-`Result` chains; maps onto `?` reasonably cleanly.
+**Non-goals.**
+
+- No `try { ... } catch { ... }` block form. If you need
+  multi-statement error handling, bind the result and `match` on
+  it. Keeps the control-flow surface tiny.
+- No automatic conversion between Result variants (no `From` /
+  `Into` chain). Explicit `map_err` or similar in the stdlib.
+- No stack traces in `Err` payloads for v1 — `Err` carries
+  whatever the raising code puts in it.
+- `try_call` is deliberately clunky. It exists; it isn't idiomatic.
+
+**Risks / open points.**
+
+- Shape of the `Result` struct. Since struct literals require
+  naming all fields, `Ok(v)` and `Err(e)` syntax needs either
+  a constructor function (`Ok(v)` calls `fn Ok(value) { return
+  Result { tag: "ok", value: value } }`) or a tagged-variant
+  extension to the struct system. Start with constructor
+  functions — simpler, unblocks the phase.
+- `try`'s interaction with top-level code. At program scope
+  (outside a function) there's nothing to return from. Treat
+  top-level `try` on an `Err` as a runtime error — either the
+  user converts to a value with `match` or they put it in a
+  function.
+- `try_call` in the AOT must not swallow resource-limit errors.
+  The emitted Rust inspects `BopError::is_fatal` before wrapping.
 
 ### Phase 5 — Integer type
 
@@ -330,10 +397,11 @@ second".
 
 ### — Checkpoint: "MVP general purpose" reached —
 
-After phase 6 Bop has: closures, modules, structs, exceptions, an
-integer type, and a standard library. A competent developer can
-write a non-trivial program in it. The core crate is still
-zero-dep embeddable. The remaining phases are quality-of-life.
+After phase 6 Bop has: closures, modules, structs, Result-based
+error handling, an integer type, and a standard library. A
+competent developer can write a non-trivial program in it. The
+core crate is still zero-dep embeddable. The remaining phases are
+quality-of-life.
 
 ### Phase 7 — Pattern matching
 
@@ -412,10 +480,22 @@ Keeping this list is as important as the roadmap itself.
   is `false`; consistency argues `Int(1) == Number(1.0)` is also
   `false`. Users might expect `true`. Decide before shipping
   phase 5.
-- **Exception payload shape.** Struct? Dict? Both? Probably a
-  built-in `Error` struct with `message` + `line` + optional
-  `cause` field, constructed by the runtime when internal errors
-  become catchable.
+- **Result tag representation.** `Ok(v)` and `Err(e)` could be
+  either (a) two distinct struct types (`struct Ok { value }`,
+  `struct Err { error }`) plus a `Result` wrapper, (b) one
+  `Result` struct with a `tag: "ok" | "err"` field, or (c) a
+  tagged-variant extension to the struct system — a genuine sum
+  type. (a) is simplest and unblocks phase 4 without changing the
+  struct system; (c) is cleanest long-term but couples this phase
+  to a bigger design change. Lean (a) for v1; revisit when
+  pattern matching lands in phase 7 and demands better sum-type
+  ergonomics anyway.
+- **Which `BopError`s are fatal.** Resource-limit errors must stay
+  uncatchable by `try_call` — that's the sandbox invariant. Type
+  errors, division by zero, index OOB probably should be catchable
+  since user code has a reasonable interest in recovering from
+  parse-like failures. Needs an explicit `is_fatal` bit on
+  `BopError`, populated at construction.
 - **Module resolution timing.** Parse-time (all imports resolved
   before any code runs) or run-time (imports resolved when
   executed)? Python does the latter, which enables lazy /
@@ -428,21 +508,25 @@ Keeping this list is as important as the roadmap itself.
 ## Dependency graph between phases
 
 ```
-Phase 1 (closures) ─┬─> Phase 6 (stdlib) ──> Phase 9 (polish)
-                    ├─> Phase 2 (modules) ─┤
-                    └─> Phase 4 (exceptions)
-                                           │
-Phase 3 (structs) ──────────────────────────┼─> Phase 7 (match)
-                                           │
-Phase 5 (integer type) ────────────────────┘
-
-Phase 8 (package manager) depends on phase 2 (modules) and
-the existence of a stdlib (phase 6), but is otherwise orthogonal.
+Phase 1 (closures) ──────┬──> Phase 2 (modules) ──┐
+                         │                         │
+                         └──> Phase 6 (stdlib) ────┼──> Phase 9 (polish)
+                                                   │
+Phase 3 (structs) ──> Phase 4 (Result + try) ─────┤
+                  └──────────────────────────────> Phase 7 (match)
+                                                   │
+Phase 5 (integer type) ──────────────────────────>┘
 ```
 
-Phases 1–5 can be mostly tackled in order. Phase 5 (integer type)
-can slot in parallel to any of 2, 3, or 4 since it's orthogonal.
-Phase 6 wants everything below it green before it starts.
+Structs (phase 3) are a prerequisite for phase 4 — the `Result`
+type is a struct, and `try` only makes sense once structured
+values exist. Phase 5 (integer type) is orthogonal and can land
+anytime. Phase 6 (stdlib) wants phases 1–5 green so it can be
+written against the full language surface, including the
+`Result` type that lives in `std.result`.
+
+Phase 8 (package manager) depends on phase 2 (modules) and the
+existence of a stdlib (phase 6), but is otherwise orthogonal.
 
 ## How each phase gets shipped
 
