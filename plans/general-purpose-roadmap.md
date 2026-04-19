@@ -89,9 +89,10 @@ once it lands.
 
 A useful mental split:
 
-- **Phases 1–6** constitute the "MVP general-purpose" set. After
-  phase 6 lands, Bop is a small-but-real general-purpose language.
-- **Phases 7–9** are quality-of-life and ecosystem work on top.
+- **Phases 1–7** constitute the "MVP general-purpose" set. After
+  phase 7 lands, Bop is a small-but-real general-purpose language.
+- **Phases 8–9** are ecosystem (package manager) and continuous
+  polish (docs, REPL, performance).
 
 ### Phase 1 — Closures and first-class functions
 
@@ -173,17 +174,19 @@ later).
 level `fn` captures module-level state. Design must be clear that
 module scope is its own lexical environment.
 
-### Phase 3 — User-defined types (structs)
+### Phase 3 — User-defined types (structs and enums)
 
-**Why third.** Dicts-with-convention simulate structs badly. Real
-data modeling wants named fields, a type identity, and methods
-that know their receiver's type at a glance. This also unlocks
-cleaner stdlib designs later — `Result`, `Option`, iterators,
-sets, queues.
+**Why third.** Dicts-with-convention simulate structs badly, and
+tag-field workarounds simulate tagged unions even worse. Real data
+modeling wants named fields, a type identity, and — for sum types
+— variant dispatch that's checked by the language rather than by
+convention. `Result` (phase 5) is a sum type, so enums land here;
+pattern matching (phase 4) destructures them; the stdlib (phase 7)
+leans on both heavily.
 
 **Scope.**
 
-- Syntax:
+- **Structs** — product types with named fields:
   ```
   struct Point { x, y }
 
@@ -193,33 +196,101 @@ sets, queues.
       return math.sqrt(dx * dx + dy * dy)
   }
   ```
-- Construction: `Point { x: 1, y: 2 }`. Positional `Point(1, 2)`
+  Construction: `Point { x: 1, y: 2 }`. Positional `Point(1, 2)`
   can come later.
-- Field access via `.`: distinct from dict indexing. `foo.x`
-  always resolves by name at parse time; `foo["x"]` works for
-  dicts.
-- New `Value::Struct { type_name, fields }`.
-- Method resolution: `foo.bar(args)` looks up `bar` on the
-  struct's type first, then falls back to the built-in method
-  dispatch (arrays / strings / dicts).
+- **Enums** — sum types with named variants. Each variant is one of:
+  unit (`Empty`), tuple (`Circle(radius)`), or struct
+  (`Rectangle { width, height }`):
+  ```
+  enum Shape {
+      Circle(radius),
+      Rectangle { width, height },
+      Empty,
+  }
 
-**Where it lives.** Core. Three engines follow.
+  fn Shape.area(self) {
+      match self {
+          Shape::Circle(r) => math.pi * r * r,
+          Shape::Rectangle { width, height } => width * height,
+          Shape::Empty => 0,
+      }
+  }
+  ```
+- **Construction**. Structs: `Point { x: 1, y: 2 }`. Enum
+  variants: `Shape::Circle(5)`, `Shape::Rectangle { width: 4,
+  height: 3 }`, `Shape::Empty`. Fully qualified paths avoid
+  ambiguity with free functions of the same name.
+- **Field access** via `.`: distinct from dict indexing. `foo.x`
+  resolves by name; `foo["x"]` works only for dicts.
+- **Method resolution**: `foo.bar(args)` looks up `bar` on the
+  value's type first (struct or enum), then falls back to the
+  built-in method dispatch (arrays / strings / dicts).
+- **New `Value` variants**: `Value::Struct { type_name, fields }`
+  and `Value::EnumVariant { type_name, variant, payload }`. The
+  payload is `Unit`, `Tuple(Vec<Value>)`, or `Struct(Vec<(String,
+  Value)>)` depending on the variant's shape.
 
-**Non-goals.** No inheritance. No traits or interfaces. No
-generics. Methods are just regular functions keyed by `TypeName`.
-Keep it dead simple.
+**Where it lives.** Core — all three engines.
 
-**Risks.** Pattern matching (phase 7) will want struct
-destructuring; make sure the `Value::Struct` shape works for it
-without retrofitting.
+**Non-goals.**
 
-### Phase 4 — Error handling (Result + `try`)
+- No inheritance. No traits or interfaces. No generics.
+- No exhaustiveness checking at declaration time (that becomes a
+  pattern-matching concern — see phase 4).
+- No `impl` blocks. Methods are free `fn TypeName.method(...)`
+  definitions, same pattern for structs and enums.
 
-**Why fourth.** Programs past a few hundred lines need a way for
+**Risks.** Enum variant identity is the critical correctness
+property — equality checks must compare `type_name` +
+`variant_name`, not just payload. Pattern matching (phase 4)
+depends on this working.
+
+### Phase 4 — Pattern matching
+
+**Why fourth.** Sum types without variant destructuring are
+unusable. Phase 3 introduces enums; phase 4 gives users the
+primitive for taking them apart. It also lands before `Result`
+(phase 5) because `try` is just sugar for a specific `match`
+pattern, and `try_call`'s output is pattern-matched.
+
+**Scope.**
+
+- `match expr { pattern => expr, ... }` as an expression.
+- Patterns supported in v1:
+  - Literals: `1`, `"foo"`, `true`, `none`.
+  - Wildcard: `_`.
+  - Variable binding: `x` (binds the scrutinee's value to `x`).
+  - Enum variants: `Result::Ok(v)`, `Shape::Rectangle { width,
+    height }`, `Option::None`, with nested patterns allowed —
+    `Err(FileError::NotFound(path))` works.
+  - Struct destructuring: `Point { x, y }` or
+    `Point { x, .. }`.
+  - Array destructuring: `[a, b, c]` or `[head, ..rest]`.
+  - Or-patterns: `1 | 2 | 3`.
+  - Guards: `x if x > 0 => ...`.
+- Compiled in the walker to nested `if`/`else`; in the VM to a
+  small decision-tree opcode; in the AOT to a straight Rust
+  `match`.
+
+**Where it lives.** Core — all three engines.
+
+**Non-goals.**
+
+- No exhaustiveness checking in v1. A dynamic language can get
+  away with "no matching arm → runtime error". Revisit in
+  phase 9.
+- No custom matcher protocol, no deref patterns, no range
+  patterns (`1..10`). Those are phase-9 polish.
+
+### Phase 5 — Error handling (Result + `try`)
+
+**Why fifth.** Programs past a few hundred lines need a way for
 libraries to signal recoverable failures without either aborting
 the whole program or forcing every caller to pre-check every
 input. Bop rejects exception machinery in favour of a Result-based
-model — a lighter touch that maps cleanly onto all three engines.
+model built on the enum type from phase 3 and the pattern matcher
+from phase 4 — a lighter touch that maps cleanly onto all three
+engines.
 
 **Two-tier semantics.** The model splits runtime failure into two
 distinct categories that don't get confused at the language level:
@@ -232,91 +303,103 @@ distinct categories that don't get confused at the language level:
    code cannot catch them at the statement level.** This is the
    load-bearing property that makes `BopLimits` a real sandbox:
    a script can't swallow a step-limit error and loop anyway.
-2. **Result values** — ordinary `Value::Struct` instances named
-   `Result`, with `Ok(v)` and `Err(e)` variants by convention.
-   Libraries that can fail in a recoverable way return these;
-   callers inspect, propagate, or destructure them like any other
-   value. No control-flow magic.
+2. **Result values** — ordinary `enum Result { Ok(value),
+   Err(error) }` instances. Libraries that can fail in a
+   recoverable way return these; callers inspect, propagate, or
+   destructure them with `match` (phase 4) like any other value.
+   No control-flow magic.
 
 **Scope.**
 
-- `Result` ships as a stdlib struct (`std.result::Result`) with
-  `Ok` and `Err` variants and helpers (`is_ok`, `is_err`, `unwrap`,
-  `unwrap_or`, `map`, `and_then`). Written in Bop; lives in the
-  `bop-std` crate (phase 6). Core has no built-in `Result` type
-  — this keeps the core surface minimal and the stdlib definition
-  authoritative.
-- **`try <expr>` operator** — parses as a prefix expression. If
-  `<expr>` evaluates to `Result::Err(e)`, `return Result::Err(e)`
-  from the enclosing function. If it's `Result::Ok(v)`, evaluate
-  to `v`. Anything else (a non-Result value) is a runtime error
-  — `try` only works on Results, same as Rust's `?` only works on
-  `Result`/`Option`. Example:
+- `Result` ships in the stdlib as `enum Result { Ok(value),
+  Err(error) }` with helper functions (`is_ok`, `is_err`,
+  `unwrap`, `unwrap_or`, `map`, `and_then`). Written in Bop;
+  lives in `bop-std` (phase 7). Core stays agnostic about
+  error representation.
+- **`try <expr>` operator** — parses as a prefix expression. Pure
+  sugar for a specific `match`:
   ```
-  fn load_config(path) {
-      let text = try read_file(path)
-      let parsed = try json.parse(text)
-      return Ok(parsed)
+  // This
+  let text = try read_file(path)
+
+  // Desugars to
+  let text = match read_file(path) {
+      Ok(value) => value,
+      Err(e) => return Err(e),
   }
   ```
+  If `<expr>` evaluates to a non-Result value, `try` raises a
+  runtime error. Same rule as Rust's `?`.
 - **`try_call(f)` builtin** — Lua's `pcall`, renamed. Calls `f`
-  (a zero-arg closure) and catches any unwinding `BopError`,
-  returning `Result::Ok(return_value)` on success or
-  `Result::Err({ message, line })` on unwind. This is the escape
-  valve: user code that genuinely needs to recover from a runtime
-  error (a parser given untrusted input, a sandbox-within-sandbox)
-  uses it sparingly. **Resource-limit errors stay uncatchable**
-  even inside `try_call` — otherwise the sandbox invariant
-  breaks. Flag: `BopError` gains an `is_fatal: bool` field (or
-  equivalent) that `try_call` honours.
+  (a zero-arg closure) and catches any *non-fatal* unwinding
+  `BopError`, returning
+  `Result::Ok(return_value)` on success or
+  `Result::Err(RuntimeError { message, line })` on unwind.
+  Resource-limit errors — flagged with `is_fatal = true` on
+  `BopError` — bypass `try_call` entirely so the sandbox
+  invariant can't be undone by a wrapping `fn` { ... }`.
+- **`RuntimeError` struct** lives in `bop-std` alongside `Result`
+  so pattern-matching the payload is idiomatic:
+  ```
+  match try_call(fn() { return risky(input) }) {
+      Ok(v) => v,
+      Err(RuntimeError { message, line }) => {
+          log("crashed at {line}: {message}")
+          fallback()
+      },
+  }
+  ```
 
 **Where it lives.** `try` is a parser + codegen change in
-`bop-lang`; the three engines each implement it (walker: early
-`Signal::Return`-style control flow; VM: a new `TryPropagate`
-opcode that inspects the top-of-stack Result; AOT: emits
-`match <expr> { ... }` with a `return` in the `Err` arm).
-`try_call` is a builtin in `bop-lang` that wraps a runtime call in
-its engine's error-trapping primitive.
+`bop-lang`; the three engines each lower it to their existing
+match / branching machinery (walker: `Signal::Return`-style
+propagation on `Err`; VM: a new `TryUnwrap` opcode that inspects
+the top-of-stack Result variant; AOT: emits a Rust `match` with
+`return Err(e)` in the `Err` arm). `try_call` is a builtin in
+`bop-lang` that wraps a runtime call in its engine's
+error-trapping primitive. `BopError` gains an `is_fatal: bool`
+field.
 
-The `Result` type and helpers live in `bop-std` as Bop source —
-core stays zero-dep, and nothing forces embedders to load
-`bop-std` if they have their own error conventions.
+`Result` and `RuntimeError` live in `bop-std` — core stays
+zero-dep, and nothing forces embedders to load `bop-std` if
+they have their own error conventions.
 
 **Non-goals.**
 
 - No `try { ... } catch { ... }` block form. If you need
-  multi-statement error handling, bind the result and `match` on
-  it. Keeps the control-flow surface tiny.
+  multi-statement error handling, use `match`.
 - No automatic conversion between Result variants (no `From` /
   `Into` chain). Explicit `map_err` or similar in the stdlib.
-- No stack traces in `Err` payloads for v1 — `Err` carries
-  whatever the raising code puts in it.
-- `try_call` is deliberately clunky. It exists; it isn't idiomatic.
+- No stack traces in `Err` payloads for v1.
+- `try_call` is deliberately clunky. It exists; it isn't
+  idiomatic. Most code uses `Result` + `try` and never touches
+  it.
 
 **Risks / open points.**
 
-- Shape of the `Result` struct. Since struct literals require
-  naming all fields, `Ok(v)` and `Err(e)` syntax needs either
-  a constructor function (`Ok(v)` calls `fn Ok(value) { return
-  Result { tag: "ok", value: value } }`) or a tagged-variant
-  extension to the struct system. Start with constructor
-  functions — simpler, unblocks the phase.
 - `try`'s interaction with top-level code. At program scope
   (outside a function) there's nothing to return from. Treat
   top-level `try` on an `Err` as a runtime error — either the
   user converts to a value with `match` or they put it in a
   function.
 - `try_call` in the AOT must not swallow resource-limit errors.
-  The emitted Rust inspects `BopError::is_fatal` before wrapping.
+  The emitted Rust inspects `BopError::is_fatal` before
+  wrapping.
+- Naming of Result's variants inside `bop-std`. Rust-style
+  `Result::Ok` / `Result::Err` is one option; making `Ok` and
+  `Err` top-level names (imported by default) saves typing at
+  the cost of polluting the global namespace. Lean
+  default-imported like Rust's prelude; embedders who want it
+  strict can skip loading `bop-std`.
 
-### Phase 5 — Integer type
+### Phase 6 — Integer type
 
-**Why fifth.** `f64`-only arithmetic bites real use cases: bit
+**Why sixth.** `f64`-only arithmetic bites real use cases: bit
 twiddling, array indices past 2^53, any domain where
-`3.0000000001` surprises you. Independent of the above phases, so
-it can move in parallel, but cheaper to do after the semantic
-surface stabilises so we only refit `ops` / `methods` / `builtins`
-once.
+`3.0000000001` surprises you. Orthogonal to everything above and
+below, so it can move in parallel, but cheaper to do after the
+semantic surface stabilises so we only refit `ops` / `methods` /
+`builtins` once.
 
 **Scope.**
 
@@ -346,11 +429,11 @@ No arbitrary precision. One integer type.
 `methods.rs`, `builtins.rs` needs an `Int` arm. Tedious; no
 architectural risk.
 
-### Phase 6 — Standard library (`bop-std`)
+### Phase 7 — Standard library (`bop-std`)
 
-**Why sixth.** Everything above enables it, and it's the thing
-that turns "Bop can do it" into "Bop ships with it". Phases 1–5
-produce the language; phase 6 produces the library.
+**Why seventh.** Everything above enables it, and it's the thing
+that turns "Bop can do it" into "Bop ships with it". Phases 1–6
+produce the language; phase 7 produces the library.
 
 **Scope.**
 
@@ -397,28 +480,11 @@ second".
 
 ### — Checkpoint: "MVP general purpose" reached —
 
-After phase 6 Bop has: closures, modules, structs, Result-based
-error handling, an integer type, and a standard library. A
-competent developer can write a non-trivial program in it. The
-core crate is still zero-dep embeddable. The remaining phases are
-quality-of-life.
-
-### Phase 7 — Pattern matching
-
-**Scope.**
-
-- `match expr { pattern => expr, ... }` — expression form.
-- Patterns: literals, wildcards (`_`), variable bindings, array
-  (`[a, b, ..rest]`), struct (`Point { x, y }`, `Point { x, .. }`),
-  or patterns (`1 | 2 | 3`), and guards (`x if x > 0 => ...`).
-- Compiled to nested `if`/`else` chains in the walker; a small
-  decision tree in the VM and AOT.
-
-**Where it lives.** Core.
-
-**Non-goals.** No range patterns for v1 (`1..10`). No custom
-matcher protocol. No exhaustiveness checking (nice to have; not
-mandatory for a dynamic language).
+After phase 7 Bop has: closures, modules, structs + enums,
+pattern matching, Result-based error handling, an integer type,
+and a standard library. A competent developer can write a
+non-trivial program in it. The core crate is still zero-dep
+embeddable. The remaining phases are tooling and polish.
 
 ### Phase 8 — Package manager (`bop-pkg`)
 
@@ -480,16 +546,13 @@ Keeping this list is as important as the roadmap itself.
   is `false`; consistency argues `Int(1) == Number(1.0)` is also
   `false`. Users might expect `true`. Decide before shipping
   phase 5.
-- **Result tag representation.** `Ok(v)` and `Err(e)` could be
-  either (a) two distinct struct types (`struct Ok { value }`,
-  `struct Err { error }`) plus a `Result` wrapper, (b) one
-  `Result` struct with a `tag: "ok" | "err"` field, or (c) a
-  tagged-variant extension to the struct system — a genuine sum
-  type. (a) is simplest and unblocks phase 4 without changing the
-  struct system; (c) is cleanest long-term but couples this phase
-  to a bigger design change. Lean (a) for v1; revisit when
-  pattern matching lands in phase 7 and demands better sum-type
-  ergonomics anyway.
+- **Enum variant resolution.** `Shape::Circle(5)` is the fully
+  qualified form. Should bare `Circle(5)` work when the parser
+  can tell it's an enum variant by context? Rust allows
+  `use Shape::*;` to make variants callable unqualified; Bop
+  could follow suit via `import Shape.*` or by auto-importing
+  the variants of an enum declared in the current module. Pick
+  auto-import-in-scope for ergonomics.
 - **Which `BopError`s are fatal.** Resource-limit errors must stay
   uncatchable by `try_call` — that's the sandbox invariant. Type
   errors, division by zero, index OOB probably should be catchable
@@ -508,25 +571,34 @@ Keeping this list is as important as the roadmap itself.
 ## Dependency graph between phases
 
 ```
-Phase 1 (closures) ──────┬──> Phase 2 (modules) ──┐
-                         │                         │
-                         └──> Phase 6 (stdlib) ────┼──> Phase 9 (polish)
+Phase 1 (closures)
+        │
+        ├──> Phase 2 (modules)
+        │
+        └──> Phase 3 (structs + enums) ──> Phase 4 (pattern matching)
                                                    │
-Phase 3 (structs) ──> Phase 4 (Result + try) ─────┤
-                  └──────────────────────────────> Phase 7 (match)
-                                                   │
-Phase 5 (integer type) ──────────────────────────>┘
+                                                   └──> Phase 5 (Result + try)
+
+Phase 6 (integer type)   (orthogonal, slot in anywhere)
+
+Phase 7 (stdlib) wants 1–6 green
+    │
+    └──> Phase 8 (package manager, if/when it happens)
+
+Phase 9 (polish) is continuous
 ```
 
-Structs (phase 3) are a prerequisite for phase 4 — the `Result`
-type is a struct, and `try` only makes sense once structured
-values exist. Phase 5 (integer type) is orthogonal and can land
-anytime. Phase 6 (stdlib) wants phases 1–5 green so it can be
-written against the full language surface, including the
-`Result` type that lives in `std.result`.
+Structs + enums (phase 3) are a prerequisite for phase 4 — you
+can't match on variants that don't exist. Pattern matching
+(phase 4) is a prerequisite for phase 5 — `try` is sugar for a
+specific `match` on `Result`, and `try_call`'s output is
+consumed by `match`. Phase 6 (integer type) is orthogonal and
+can land anytime. Phase 7 (stdlib) wants phases 1–6 green so it
+can be written against the full language surface, including
+`Result` in `std.result` and `RuntimeError` in `std.error`.
 
 Phase 8 (package manager) depends on phase 2 (modules) and the
-existence of a stdlib (phase 6), but is otherwise orthogonal.
+existence of a stdlib (phase 7), but is otherwise orthogonal.
 
 ## How each phase gets shipped
 
