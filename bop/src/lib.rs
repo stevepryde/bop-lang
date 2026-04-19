@@ -11,6 +11,7 @@ pub mod value;
 pub mod lexer;
 pub mod parser;
 pub mod memory;
+pub mod ops;
 pub mod precheck;
 
 mod evaluator;

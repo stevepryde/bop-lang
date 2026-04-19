@@ -12,8 +12,9 @@ use crate::builtins::{self, error, error_with_hint};
 use crate::error::BopError;
 use crate::lexer::StringPart;
 use crate::methods;
+use crate::ops;
 use crate::parser::*;
-use crate::value::{Value, values_equal};
+use crate::value::Value;
 use crate::{BopHost, BopLimits};
 
 const MAX_CALL_DEPTH: usize = 64;
@@ -326,7 +327,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     AssignOp::Eq => new_val,
                     _ => {
                         let obj = self.eval_expr(object)?;
-                        let current = self.index_into(&obj, &idx, line)?;
+                        let current = ops::index_get(&obj, &idx, line)?;
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };
@@ -337,7 +338,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             error(line, format!("Variable `{}` doesn't exist", name))
                         })?
                         .clone();
-                    self.set_index(&mut obj, &idx, val_to_set, line)?;
+                    ops::index_set(&mut obj, &idx, val_to_set, line)?;
                     self.set_var(name, obj);
                     Ok(())
                 } else {
@@ -359,11 +360,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     ) -> Result<Value, BopError> {
         match op {
             AssignOp::Eq => Ok(right.clone()),
-            AssignOp::AddEq => self.binary_op(left, &BinOp::Add, right, line),
-            AssignOp::SubEq => self.binary_op(left, &BinOp::Sub, right, line),
-            AssignOp::MulEq => self.binary_op(left, &BinOp::Mul, right, line),
-            AssignOp::DivEq => self.binary_op(left, &BinOp::Div, right, line),
-            AssignOp::ModEq => self.binary_op(left, &BinOp::Mod, right, line),
+            AssignOp::AddEq => ops::add(left, right, line),
+            AssignOp::SubEq => ops::sub(left, right, line),
+            AssignOp::MulEq => ops::mul(left, right, line),
+            AssignOp::DivEq => ops::div(left, right, line),
+            AssignOp::ModEq => ops::rem(left, right, line),
         }
     }
 
@@ -430,14 +431,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             ExprKind::UnaryOp { op, expr: inner } => {
                 let val = self.eval_expr(inner)?;
                 match op {
-                    UnaryOp::Neg => match val {
-                        Value::Number(n) => Ok(Value::Number(-n)),
-                        _ => Err(error(
-                            expr.line,
-                            format!("Can't negate a {}", val.type_name()),
-                        )),
-                    },
-                    UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
+                    UnaryOp::Neg => ops::neg(&val, expr.line),
+                    UnaryOp::Not => Ok(ops::not(&val)),
                 }
             }
 
@@ -478,7 +473,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             ExprKind::Index { object, index } => {
                 let obj = self.eval_expr(object)?;
                 let idx = self.eval_expr(index)?;
-                self.index_into(&obj, &idx, expr.line)
+                ops::index_get(&obj, &idx, expr.line)
             }
 
             ExprKind::Array(elements) => {
@@ -522,227 +517,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         line: u32,
     ) -> Result<Value, BopError> {
         match op {
-            BinOp::Add => match (left, right) {
-                (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
-                (Value::Str(a), Value::Str(b)) => {
-                    builtins::check_string_concat_memory(a.len(), b.len(), line)?;
-                    Ok(Value::new_str(format!("{}{}", a, b)))
-                }
-                (Value::Str(a), b) => {
-                    let b_display = format!("{}", b);
-                    builtins::check_string_concat_memory(a.len(), b_display.len(), line)?;
-                    Ok(Value::new_str(format!("{}{}", a, b_display)))
-                }
-                (a, Value::Str(b)) => {
-                    let a_display = format!("{}", a);
-                    builtins::check_string_concat_memory(a_display.len(), b.len(), line)?;
-                    Ok(Value::new_str(format!("{}{}", a_display, b)))
-                }
-                (Value::Array(a), Value::Array(b)) => {
-                    builtins::check_array_concat_memory(a.len(), b.len(), line)?;
-                    let mut result = a.to_vec();
-                    result.extend(b.to_vec());
-                    Ok(Value::new_array(result))
-                }
-                _ => Err(error(
-                    line,
-                    format!("Can't add {} and {}", left.type_name(), right.type_name()),
-                )),
-            },
-            BinOp::Sub => self.numeric_op(left, right, |a, b| a - b, "-", line),
-            BinOp::Mul => match (left, right) {
-                (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
-                (Value::Str(s), Value::Number(n)) | (Value::Number(n), Value::Str(s)) => {
-                    let nf = *n;
-                    if nf < 0.0 || !nf.is_finite() {
-                        return Err(error(line, format!("Can't repeat a string {} times", nf)));
-                    }
-                    let count = nf as usize;
-                    builtins::check_string_repeat_memory(s.len(), count, line)?;
-                    Ok(Value::new_str(s.repeat(count)))
-                }
-                _ => Err(error(
-                    line,
-                    format!(
-                        "Can't multiply {} and {}",
-                        left.type_name(),
-                        right.type_name()
-                    ),
-                )),
-            },
-            BinOp::Div => match (left, right) {
-                (Value::Number(_), Value::Number(b)) if *b == 0.0 => {
-                    Err(error_with_hint(line, "Division by zero", "You can't divide by 0."))
-                }
-                (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
-                _ => Err(error(
-                    line,
-                    format!("Can't divide {} by {}", left.type_name(), right.type_name()),
-                )),
-            },
-            BinOp::Mod => match (left, right) {
-                (Value::Number(_), Value::Number(b)) if *b == 0.0 => {
-                    Err(error_with_hint(line, "Modulo by zero", "You can't use % with 0."))
-                }
-                (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a % b)),
-                _ => Err(error(
-                    line,
-                    format!(
-                        "Can't use % with {} and {}",
-                        left.type_name(),
-                        right.type_name()
-                    ),
-                )),
-            },
-            BinOp::Eq => Ok(Value::Bool(values_equal(left, right))),
-            BinOp::NotEq => Ok(Value::Bool(!values_equal(left, right))),
-            BinOp::Lt => self.compare_op(left, right, |a, b| a < b, "<", line),
-            BinOp::Gt => self.compare_op(left, right, |a, b| a > b, ">", line),
-            BinOp::LtEq => self.compare_op(left, right, |a, b| a <= b, "<=", line),
-            BinOp::GtEq => self.compare_op(left, right, |a, b| a >= b, ">=", line),
+            BinOp::Add => ops::add(left, right, line),
+            BinOp::Sub => ops::sub(left, right, line),
+            BinOp::Mul => ops::mul(left, right, line),
+            BinOp::Div => ops::div(left, right, line),
+            BinOp::Mod => ops::rem(left, right, line),
+            BinOp::Eq => Ok(ops::eq(left, right)),
+            BinOp::NotEq => Ok(ops::not_eq(left, right)),
+            BinOp::Lt => ops::lt(left, right, line),
+            BinOp::Gt => ops::gt(left, right, line),
+            BinOp::LtEq => ops::lt_eq(left, right, line),
+            BinOp::GtEq => ops::gt_eq(left, right, line),
             BinOp::And | BinOp::Or => unreachable!("handled in eval_expr"),
-        }
-    }
-
-    fn numeric_op(
-        &self,
-        left: &Value,
-        right: &Value,
-        f: impl Fn(f64, f64) -> f64,
-        op_str: &str,
-        line: u32,
-    ) -> Result<Value, BopError> {
-        match (left, right) {
-            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(f(*a, *b))),
-            _ => Err(error(
-                line,
-                format!(
-                    "Can't use `{}` with {} and {}",
-                    op_str,
-                    left.type_name(),
-                    right.type_name()
-                ),
-            )),
-        }
-    }
-
-    fn compare_op(
-        &self,
-        left: &Value,
-        right: &Value,
-        f: impl Fn(f64, f64) -> bool,
-        op_str: &str,
-        line: u32,
-    ) -> Result<Value, BopError> {
-        match (left, right) {
-            (Value::Number(a), Value::Number(b)) => Ok(Value::Bool(f(*a, *b))),
-            (Value::Str(a), Value::Str(b)) => {
-                let result = match op_str {
-                    "<" => a < b,
-                    ">" => a > b,
-                    "<=" => a <= b,
-                    _ => a >= b,
-                };
-                Ok(Value::Bool(result))
-            }
-            _ => Err(error(
-                line,
-                format!(
-                    "Can't compare {} and {} with `{}`",
-                    left.type_name(),
-                    right.type_name(),
-                    op_str
-                ),
-            )),
-        }
-    }
-
-    // ─── Indexing ──────────────────────────────────────────────────
-
-    fn index_into(&self, obj: &Value, idx: &Value, line: u32) -> Result<Value, BopError> {
-        match (obj, idx) {
-            (Value::Array(arr), Value::Number(n)) => {
-                let i = *n as i64;
-                let actual = if i < 0 {
-                    (arr.len() as i64 + i) as usize
-                } else {
-                    i as usize
-                };
-                arr.get(actual).cloned().ok_or_else(|| {
-                    error(
-                        line,
-                        format!(
-                            "Index {} is out of bounds (array has {} items)",
-                            i,
-                            arr.len()
-                        ),
-                    )
-                })
-            }
-            (Value::Str(s), Value::Number(n)) => {
-                let i = *n as i64;
-                let chars: Vec<char> = s.chars().collect();
-                let actual = if i < 0 {
-                    (chars.len() as i64 + i) as usize
-                } else {
-                    i as usize
-                };
-                chars
-                    .get(actual)
-                    .map(|c| Value::new_str(c.to_string()))
-                    .ok_or_else(|| {
-                        error(
-                            line,
-                            format!(
-                                "Index {} is out of bounds (string has {} characters)",
-                                i,
-                                chars.len()
-                            ),
-                        )
-                    })
-            }
-            (Value::Dict(entries), Value::Str(key)) => entries
-                .iter()
-                .find(|(k, _)| k.as_str() == key.as_str())
-                .map(|(_, v)| v.clone())
-                .ok_or_else(|| error(line, format!("Key \"{}\" not found in dict", key))),
-            _ => Err(error(
-                line,
-                format!("Can't index {} with {}", obj.type_name(), idx.type_name()),
-            )),
-        }
-    }
-
-    fn set_index(
-        &self,
-        obj: &mut Value,
-        idx: &Value,
-        val: Value,
-        line: u32,
-    ) -> Result<(), BopError> {
-        match (obj, idx) {
-            (Value::Array(arr), Value::Number(n)) => {
-                let i = *n as i64;
-                let len = arr.len();
-                let actual = if i < 0 {
-                    (len as i64 + i) as usize
-                } else {
-                    i as usize
-                };
-                if actual >= len {
-                    return Err(error(
-                        line,
-                        format!("Index {} is out of bounds (array has {} items)", i, len),
-                    ));
-                }
-                arr.set(actual, val);
-                Ok(())
-            }
-            (Value::Dict(entries), Value::Str(key)) => {
-                entries.set_key(key, val);
-                Ok(())
-            }
-            _ => Err(error(line, "Can't set index with these types")),
         }
     }
 

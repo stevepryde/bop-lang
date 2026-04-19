@@ -1,3 +1,9 @@
+//! Language-level builtins (`range`, `str`, `int`, `type`, `len`, ...) and
+//! the shared argument-validation helpers used across the runtime.
+//!
+//! These are pure-data operations on `Value`. Host-backed builtins like
+//! file I/O live in `bop-sys` instead.
+
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
@@ -127,7 +133,7 @@ pub fn builtin_inspect(args: &[Value], line: u32) -> Result<Value, BopError> {
     Ok(Value::new_str(args[0].inspect()))
 }
 
-// ─── Helpers (also used by evaluator) ──────────────────────────────────────
+// ─── Helpers (also used by evaluator / VM / AOT) ────────────────────────────
 
 pub fn expect_args(
     name: &str,
