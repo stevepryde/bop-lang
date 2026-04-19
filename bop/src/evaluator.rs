@@ -20,7 +20,7 @@ use crate::lexer::StringPart;
 use crate::methods;
 use crate::ops;
 use crate::parser::*;
-use crate::value::{BopFn, Value};
+use crate::value::{BopFn, FnBody, Value};
 use crate::{BopHost, BopLimits};
 
 const MAX_CALL_DEPTH: usize = 64;
@@ -644,6 +644,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         args: Vec<Value>,
         line: u32,
     ) -> Result<Value, BopError> {
+        let body = match &func.body {
+            FnBody::Ast(stmts) => stmts,
+            FnBody::Compiled(_) => {
+                return Err(error(
+                    line,
+                    "This function was compiled for another engine and can't be run in the tree-walker",
+                ));
+            }
+        };
         if args.len() != func.params.len() {
             let name = func.self_name.as_deref().unwrap_or("fn");
             return Err(error(
@@ -688,7 +697,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             self.define(param.clone(), arg);
         }
 
-        let result = self.exec_block(&func.body);
+        let result = self.exec_block(body);
         self.scopes = saved_scopes;
         self.call_depth -= 1;
 
@@ -755,7 +764,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let bop_fn = Rc::new(BopFn {
             params: func.params,
             captures: Vec::new(),
-            body: func.body,
+            body: FnBody::Ast(func.body),
             self_name: Some(name.to_string()),
         });
         self.call_bop_fn(&bop_fn, args, line)

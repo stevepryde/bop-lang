@@ -32,11 +32,10 @@ pub struct BopDict(Vec<(String, Value)>);
 /// or a reified `fn foo(...) { ... }` declaration. Shared by `Rc`
 /// so first-class usage (`let g = f; pass(f)`) is cheap.
 ///
-/// The body is kept as the parsed AST. The tree-walker interprets
-/// it directly; the bytecode VM and AOT transpiler compile it on
-/// demand. Keeping one representation avoids Value carrying
-/// engine-specific state across crates.
-#[derive(Debug)]
+/// The body is engine-opaque: the tree-walker produces an
+/// [`FnBody::Ast`] for direct interpretation; the bytecode VM
+/// produces an [`FnBody::Compiled`] carrying a pre-compiled body.
+/// Each engine only ever dispatches its own variant.
 pub struct BopFn {
     pub params: Vec<String>,
     /// Values captured from the enclosing scope at construction
@@ -44,12 +43,48 @@ pub struct BopFn {
     /// aren't parameters and aren't in this list fall through to
     /// the outer module / global lookup at call time.
     pub captures: Vec<(String, Value)>,
-    pub body: Vec<Stmt>,
+    pub body: FnBody,
     /// `Some(name)` when this `BopFn` is bound to its own name
     /// for self-reference (the lowering of `fn foo(...) { ... }`).
     /// Lambdas created from an `fn(...) { ... }` expression leave
     /// this `None`.
     pub self_name: Option<String>,
+}
+
+/// Engine-specific representation of a function body.
+///
+/// - The tree-walker creates `Ast` bodies and re-walks the AST on
+///   every call.
+/// - The bytecode VM creates `Compiled` bodies carrying a
+///   pre-compiled form (typically `Rc<bop_vm::Chunk>`). `Rc<dyn
+///   Any>` keeps `bop-lang` from taking a dep on any particular
+///   engine crate.
+///
+/// An engine that only understands one variant errors cleanly
+/// when handed the other, rather than silently misbehaving.
+pub enum FnBody {
+    Ast(Vec<Stmt>),
+    Compiled(Rc<dyn core::any::Any + 'static>),
+}
+
+impl core::fmt::Debug for BopFn {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BopFn")
+            .field("params", &self.params)
+            .field("captures", &self.captures.len())
+            .field("body", &self.body)
+            .field("self_name", &self.self_name)
+            .finish()
+    }
+}
+
+impl core::fmt::Debug for FnBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            FnBody::Ast(stmts) => write!(f, "Ast({} stmts)", stmts.len()),
+            FnBody::Compiled(_) => write!(f, "Compiled(<opaque>)"),
+        }
+    }
 }
 
 // ─── Value enum ────────────────────────────────────────────────────────────
@@ -90,9 +125,9 @@ impl Value {
         Value::Dict(BopDict(entries))
     }
 
-    /// Build a closure value. Param names, captures, and the AST body
-    /// all move into a shared [`BopFn`] behind an `Rc` — subsequent
-    /// clones of the resulting `Value::Fn` just bump the refcount.
+    /// Build a tree-walker-ready closure value. The AST body moves
+    /// into a shared [`BopFn`] behind an `Rc`; subsequent clones
+    /// of the resulting `Value::Fn` just bump the refcount.
     pub fn new_fn(
         params: Vec<String>,
         captures: Vec<(String, Value)>,
@@ -102,7 +137,25 @@ impl Value {
         Value::Fn(Rc::new(BopFn {
             params,
             captures,
-            body,
+            body: FnBody::Ast(body),
+            self_name,
+        }))
+    }
+
+    /// Build a closure value with an engine-opaque compiled body.
+    /// Used by the bytecode VM (and any future engine) to carry
+    /// its pre-compiled form inside a `Value::Fn` without
+    /// `bop-lang` depending on the engine crate.
+    pub fn new_compiled_fn(
+        params: Vec<String>,
+        captures: Vec<(String, Value)>,
+        body: Rc<dyn core::any::Any + 'static>,
+        self_name: Option<String>,
+    ) -> Self {
+        Value::Fn(Rc::new(BopFn {
+            params,
+            captures,
+            body: FnBody::Compiled(body),
             self_name,
         }))
     }

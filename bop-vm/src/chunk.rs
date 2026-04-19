@@ -85,7 +85,14 @@ pub enum Instr {
 
     // ─── Calls ────────────────────────────────────────────────────
     /// Call `name` with `argc` arguments popped from the stack.
+    /// Resolution order: locally-bound closure → builtin → host →
+    /// named user fn → error.
     Call { name: NameIdx, argc: u32 },
+    /// Call whatever sits under the `argc` args on the stack. The
+    /// callee must be a `Value::Fn`; anything else is a runtime
+    /// error. Emitted when the call's callee expression isn't a
+    /// bare ident (e.g. `funcs[0](x)` or `make_adder(5)(3)`).
+    CallValue { argc: u32 },
     /// Method call: `[.., obj, args...]` → `[.., ret]`, and if the
     /// method is mutating and `obj` came from a variable, the VM
     /// writes the mutated value back. The back-write target is
@@ -101,6 +108,10 @@ pub enum Instr {
     // ─── Functions ────────────────────────────────────────────────
     /// Register the function at `FnIdx` in the current scope.
     DefineFn(FnIdx),
+    /// Build a `Value::Fn` for the lambda at `FnIdx`, capturing
+    /// every variable currently visible in the frame's scope
+    /// stack. Pushes the resulting closure onto the value stack.
+    MakeLambda(FnIdx),
     /// Pop the top value and return from the current call frame.
     Return,
     /// Return with `Value::None`.

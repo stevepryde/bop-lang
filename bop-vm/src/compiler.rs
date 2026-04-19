@@ -427,21 +427,35 @@ impl Compiler {
             }
 
             ExprKind::Call { callee, args } => {
-                let name = match &callee.kind {
-                    ExprKind::Ident(n) => n.clone(),
-                    _ => return Err(err(line, "Can only call named functions")),
-                };
-                for arg in args {
-                    self.compile_expr(arg)?;
+                // Ident callees take the name-based fast path so
+                // builtins / host / named-fn dispatch stays O(1).
+                // Anything else (indexed call, nested call result,
+                // if-expr returning a fn, …) evaluates the callee
+                // onto the stack and goes through `CallValue`.
+                if let ExprKind::Ident(name) = &callee.kind {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    let name_idx = self.add_name(name);
+                    self.emit(
+                        Instr::Call {
+                            name: name_idx,
+                            argc: args.len() as u32,
+                        },
+                        line,
+                    );
+                } else {
+                    self.compile_expr(callee)?;
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit(
+                        Instr::CallValue {
+                            argc: args.len() as u32,
+                        },
+                        line,
+                    );
                 }
-                let name_idx = self.add_name(&name);
-                self.emit(
-                    Instr::Call {
-                        name: name_idx,
-                        argc: args.len() as u32,
-                    },
-                    line,
-                );
             }
 
             ExprKind::MethodCall {
@@ -509,16 +523,16 @@ impl Compiler {
                 self.patch_jump(end_jmp, end);
             }
 
-            ExprKind::Lambda { .. } => {
-                // Tracked for phase 1b — the bytecode VM gets its
-                // own `MakeLambda` opcode and a closure-aware
-                // `Value::Fn` path in the follow-up commit. Until
-                // then, rejecting at compile time is the clearest
-                // signal to the user.
-                return Err(err(
-                    line,
-                    "bop-vm: lambda / first-class functions are not yet supported in the bytecode VM",
-                ));
+            ExprKind::Lambda { params, body } => {
+                // Compile the body into the current chunk's fn
+                // pool the same way named fn declarations do, but
+                // emit `MakeLambda` instead of `DefineFn` at the
+                // expression site so the VM materialises a
+                // `Value::Fn` on the stack (capturing the current
+                // scope at runtime) rather than binding a name.
+                let def = self.compile_function("<lambda>", params, body)?;
+                let idx = self.add_function(def);
+                self.emit(Instr::MakeLambda(idx), line);
             }
         }
         Ok(())

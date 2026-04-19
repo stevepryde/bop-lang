@@ -100,6 +100,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::Call { name, argc } => {
             format!("Call {}/{}", chunk.name(*name), argc)
         }
+        Instr::CallValue { argc } => format!("CallValue /{}", argc),
         Instr::CallMethod {
             method,
             argc,
@@ -119,6 +120,9 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
 
         Instr::DefineFn(idx) => {
             format!("DefineFn #{} ({})", idx.0, chunk.function(*idx).name)
+        }
+        Instr::MakeLambda(idx) => {
+            format!("MakeLambda #{} ({})", idx.0, chunk.function(*idx).name)
         }
         Instr::Return => "Return".to_string(),
         Instr::ReturnNone => "ReturnNone".to_string(),

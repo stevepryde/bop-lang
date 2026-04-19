@@ -60,7 +60,7 @@ use bop::error::BopError;
 use bop::lexer::StringPart;
 use bop::methods;
 use bop::ops;
-use bop::value::Value;
+use bop::value::{BopFn, FnBody, Value};
 use bop::{BopHost, BopLimits};
 
 use crate::chunk::{Chunk, CodeOffset, Constant, FnIdx, Instr, NameIdx};
@@ -303,14 +303,34 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // ─── Variables ────────────────────────────────────────
             Instr::LoadVar(n) => {
                 let name = self.current_chunk().name(n).to_string();
-                let v = self.lookup_var(&name).cloned().ok_or_else(|| {
-                    error_with_hint(
+                // Lexical scope first, then fall back to the
+                // named-fn registry so `fn fib(...) {...}; let g =
+                // fib` yields a real `Value::Fn` — same synthesis
+                // the walker does via `self.functions`.
+                if let Some(v) = self.lookup_var(&name).cloned() {
+                    self.push_value(v);
+                } else if let Some(entry) = self.functions.get(&name) {
+                    let params = entry.params.clone();
+                    let chunk_rc: Rc<Chunk> = entry.chunk.clone();
+                    // Explicit two-step to drive the `Rc<Chunk>`
+                    // → `Rc<dyn Any>` unsized coercion at assign
+                    // time — `Rc::clone` through an expected
+                    // `&Rc<dyn Any>` doesn't infer through.
+                    let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
+                    let v = Value::new_compiled_fn(
+                        params,
+                        Vec::new(),
+                        body,
+                        Some(name.clone()),
+                    );
+                    self.push_value(v);
+                } else {
+                    return Err(error_with_hint(
                         line,
                         format!("Variable `{}` not found", name),
                         "Did you forget to create it with `let`?",
-                    )
-                })?;
-                self.push_value(v);
+                    ));
+                }
             }
             Instr::DefineLocal(n) => {
                 let name = self.current_chunk().name(n).to_string();
@@ -440,6 +460,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             Instr::Call { name, argc } => {
                 return self.call(name, argc as usize, line);
             }
+            Instr::CallValue { argc } => {
+                return self.call_value(argc as usize, line);
+            }
             Instr::CallMethod {
                 method,
                 argc,
@@ -451,6 +474,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // ─── Functions ────────────────────────────────────────
             Instr::DefineFn(idx) => {
                 self.define_fn(idx);
+            }
+            Instr::MakeLambda(idx) => {
+                self.make_lambda(idx);
             }
             Instr::Return => {
                 let v = self.pop_value(line)?;
@@ -608,6 +634,28 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // Pop args (in source order).
         let args = self.pop_n_values(argc, line)?;
 
+        // 0. Lexical callable: if the name is bound in the
+        // current frame's scopes (e.g. `let f = fn() {...}`), call
+        // it as a closure. Matches the tree-walker's
+        // "let-binding shadows everything" behaviour.
+        if let Some(value) = self.lookup_var(&name).cloned() {
+            return match &value {
+                Value::Fn(f) => {
+                    let f = Rc::clone(f);
+                    drop(value);
+                    self.call_closure(&f, args, line)
+                }
+                other => Err(error(
+                    line,
+                    format!(
+                        "`{}` is a {}, not a function",
+                        name,
+                        other.type_name()
+                    ),
+                )),
+            };
+        }
+
         // 1. Standard-library builtins.
         match name.as_str() {
             "range" => {
@@ -731,6 +779,26 @@ impl<'h, H: BopHost> Vm<'h, H> {
         Ok(Next::Continue)
     }
 
+    /// Dispatch a value-based call: `argc` args sit on top, the
+    /// callee sits directly under them. Pops all `argc + 1` slots,
+    /// expects the callee to be a `Value::Fn`, and delegates to
+    /// `call_closure`.
+    fn call_value(&mut self, argc: usize, line: u32) -> Result<Next, BopError> {
+        let args = self.pop_n_values(argc, line)?;
+        let callee = self.pop_value(line)?;
+        match &callee {
+            Value::Fn(f) => {
+                let f = Rc::clone(f);
+                drop(callee);
+                self.call_closure(&f, args, line)
+            }
+            other => Err(error(
+                line,
+                format!("Can't call a {}", other.type_name()),
+            )),
+        }
+    }
+
     fn call_method(
         &mut self,
         method_idx: NameIdx,
@@ -772,6 +840,108 @@ impl<'h, H: BopHost> Vm<'h, H> {
             chunk: Rc::new(fn_def.chunk),
         };
         self.functions.insert(fn_def.name, entry);
+    }
+
+    /// Materialise a lambda expression as a `Value::Fn`. Captures
+    /// the flattened current scope at runtime (matching the
+    /// tree-walker's snapshot semantics) and wraps the
+    /// pre-compiled chunk as the closure's opaque body.
+    fn make_lambda(&mut self, idx: FnIdx) {
+        let fn_def = self.current_chunk().function(idx).clone();
+        let captures = self.snapshot_captures();
+        let body: Rc<dyn core::any::Any + 'static> = Rc::new(fn_def.chunk);
+        let value = Value::new_compiled_fn(fn_def.params, captures, body, None);
+        self.push_value(value);
+    }
+
+    /// Flatten the current frame's scope stack into a
+    /// `(name, value)` list — inner scopes shadow outer ones. Used
+    /// only by `make_lambda`.
+    fn snapshot_captures(&self) -> Vec<(String, Value)> {
+        let mut flat = BTreeMap::new();
+        for scope in self.current_scopes() {
+            for (k, v) in scope {
+                flat.insert(k.clone(), v.clone());
+            }
+        }
+        flat.into_iter().collect()
+    }
+
+    /// Call a `Value::Fn` by pushing a new frame whose scope holds
+    /// the closure's captures plus its parameters (plus the
+    /// closure itself under `self_name`, when present, so
+    /// self-reference works without a separate pathway).
+    fn call_closure(
+        &mut self,
+        func: &Rc<BopFn>,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Next, BopError> {
+        // The body must be a VM-compiled chunk. Walker-created
+        // `Value::Fn`s would carry `FnBody::Ast` and don't belong
+        // in the VM.
+        let chunk: Rc<Chunk> = match &func.body {
+            FnBody::Compiled(any) => match Rc::clone(any).downcast::<Chunk>() {
+                Ok(c) => c,
+                Err(_) => {
+                    return Err(error(
+                        line,
+                        "Closure body wasn't compiled by the bytecode VM",
+                    ));
+                }
+            },
+            FnBody::Ast(_) => {
+                return Err(error(
+                    line,
+                    "Closure body wasn't compiled for the VM — use `bop::run` to execute tree-walker closures",
+                ));
+            }
+        };
+
+        if args.len() != func.params.len() {
+            let display_name = func.self_name.as_deref().unwrap_or("fn");
+            return Err(error(
+                line,
+                format!(
+                    "`{}` expects {} argument{}, but got {}",
+                    display_name,
+                    func.params.len(),
+                    if func.params.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+            ));
+        }
+
+        if self.frames.len() >= MAX_CALL_DEPTH {
+            return Err(error_with_hint(
+                line,
+                "Too many nested function calls (possible infinite recursion)",
+                "Check that your recursive function has a base case that stops calling itself.",
+            ));
+        }
+
+        // Seed the scope: captures first so params shadow on
+        // collision, self-reference wins over everything so the
+        // closure can find itself in the body.
+        let mut scope = BTreeMap::new();
+        for (name, value) in &func.captures {
+            scope.insert(name.clone(), value.clone());
+        }
+        if let Some(self_name) = &func.self_name {
+            scope.insert(self_name.clone(), Value::Fn(Rc::clone(func)));
+        }
+        for (param, arg) in func.params.iter().zip(args) {
+            scope.insert(param.clone(), arg);
+        }
+
+        self.frames.push(Frame {
+            chunk,
+            ip: 0,
+            scopes: vec![scope],
+            stack_base: self.stack.len(),
+            is_function: true,
+        });
+        Ok(Next::Continue)
     }
 
     fn do_return(&mut self, value: Value) -> Result<Next, BopError> {
