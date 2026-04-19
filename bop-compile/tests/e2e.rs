@@ -111,8 +111,8 @@ path = "src/main.rs"
     dir
 }
 
-fn run_aot(code: &str, test_name: &str) -> String {
-    let rust_src = transpile(code, &Options::default()).expect("transpile");
+fn run_aot_with_opts(code: &str, test_name: &str, opts: &Options) -> AotRun {
+    let rust_src = transpile(code, opts).expect("transpile");
     let dir = write_scratch_project(test_name, &rust_src);
     let output = Command::new("cargo")
         .arg("run")
@@ -123,18 +123,32 @@ fn run_aot(code: &str, test_name: &str) -> String {
         .stderr(Stdio::piped())
         .output()
         .expect("run cargo");
-    if !output.status.success() {
+    AotRun {
+        status: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches('\n')
+            .to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        rust_src,
+    }
+}
+
+struct AotRun {
+    status: Option<i32>,
+    stdout: String,
+    stderr: String,
+    rust_src: String,
+}
+
+fn run_aot(code: &str, test_name: &str) -> String {
+    let run = run_aot_with_opts(code, test_name, &Options::default());
+    if run.status != Some(0) {
         panic!(
-            "cargo run failed in {}:\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- generated ---\n{}",
-            dir.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-            rust_src,
+            "cargo run failed for {}:\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- generated ---\n{}",
+            test_name, run.stdout, run.stderr, run.rust_src,
         );
     }
-    String::from_utf8_lossy(&output.stdout)
-        .trim_end_matches('\n')
-        .to_string()
+    run.stdout
 }
 
 fn assert_aot_matches(test_name: &str, code: &str) {
@@ -334,6 +348,100 @@ for i in range(1, 16) {
     }
 }
 print(result.join(", "))"#,
+    );
+}
+
+// ─── Sandbox ───────────────────────────────────────────────────
+
+#[test]
+#[ignore]
+fn e2e_sandbox_happy_path_matches_walker() {
+    // With sandbox on, output for a well-behaved program should
+    // still match the tree-walker — ticks / memory checks fire but
+    // don't change semantics.
+    let code = r#"let sum = 0
+for i in range(10) { sum = sum + i }
+print(sum)"#;
+    let expected = walker_output(code);
+    let run = run_aot_with_opts(
+        code,
+        "sandbox_happy",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(run.status, Some(0), "stderr:\n{}", run.stderr);
+    assert_eq!(run.stdout, expected);
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_halts_infinite_loop() {
+    // Default limits are `BopLimits::standard()` — 10k steps. A
+    // bare `while true { }` burns one tick per iteration and hits
+    // the cap. The process should exit non-zero with the
+    // canonical "too many steps" message on stderr.
+    let run = run_aot_with_opts(
+        "while true { }",
+        "sandbox_infinite",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_ne!(run.status, Some(0), "expected non-zero exit; stderr:\n{}", run.stderr);
+    assert!(
+        run.stderr.contains("too many steps"),
+        "expected 'too many steps' in stderr; got:\n{}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_halts_memory_bomb() {
+    // `"x" * 999999` trips the pre-flight memory check
+    // (`check_string_repeat_memory`) since standard limits set
+    // max_memory to 10 MB. AOT routes through the same `ops::mul`
+    // → builtins path, so the error message is identical.
+    let run = run_aot_with_opts(
+        r#"let s = "x" * 99999999
+print(s.len())"#,
+        "sandbox_memory_bomb",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_ne!(run.status, Some(0), "expected non-zero exit; stderr:\n{}", run.stderr);
+    assert!(
+        run.stderr.contains("Memory limit"),
+        "expected 'Memory limit' in stderr; got:\n{}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_recursion_halts() {
+    // The tree-walker caps recursion at MAX_CALL_DEPTH = 64. The
+    // AOT has no such cap (Rust's call stack limit kicks in much
+    // later), but the step counter still halts the program long
+    // before blowing the stack.
+    let run = run_aot_with_opts(
+        "fn f() { f() }\nf()",
+        "sandbox_recursion",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_ne!(run.status, Some(0), "expected non-zero exit; stderr:\n{}", run.stderr);
+    assert!(
+        run.stderr.contains("too many steps"),
+        "expected 'too many steps' in stderr; got:\n{}",
+        run.stderr
     );
 }
 

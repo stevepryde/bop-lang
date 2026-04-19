@@ -131,26 +131,48 @@ impl Emitter {
     }
 
     fn emit_runtime_preamble(&mut self) {
-        self.out.push_str(RUNTIME_PREAMBLE);
+        if self.opts.sandbox {
+            self.out.push_str(RUNTIME_PREAMBLE_SANDBOX);
+        } else {
+            self.out.push_str(RUNTIME_PREAMBLE);
+        }
     }
 
     fn emit_public_entry(&mut self) {
-        self.out.push_str(PUBLIC_ENTRY);
+        if self.opts.sandbox {
+            self.out.push_str(PUBLIC_ENTRY_SANDBOX);
+        } else {
+            self.out.push_str(PUBLIC_ENTRY);
+        }
     }
 
     fn emit_main(&mut self) {
-        self.out.push_str(MAIN_FN);
+        if self.opts.sandbox {
+            self.out.push_str(MAIN_FN_SANDBOX);
+        } else {
+            self.out.push_str(MAIN_FN);
+        }
     }
 
     fn emit_run_program(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
         writeln!(self.out, "fn run_program(ctx: &mut Ctx<'_>) -> Result<(), ::bop::error::BopError> {{").unwrap();
         self.indent = 1;
         self.tmp_counter = 0;
+        self.emit_tick(0);
         self.emit_block_body(stmts, /* wants_value = */ false)?;
         self.line("Ok(())");
         self.indent = 0;
         self.out.push_str("}\n\n");
         Ok(())
+    }
+
+    /// Emit a `__bop_tick` call at the current indent. No-op when
+    /// sandbox mode is off, so call sites don't need their own
+    /// gate.
+    fn emit_tick(&mut self, line: u32) {
+        if self.opts.sandbox {
+            self.line(&format!("__bop_tick(ctx, {})?;", line));
+        }
     }
 
     // ─── Indentation helpers ──────────────────────────────────────
@@ -220,6 +242,7 @@ impl Emitter {
             StmtKind::While { condition, body } => {
                 let cond_src = self.expr_src(condition)?;
                 self.open_block(&format!("while ({}).is_truthy()", cond_src));
+                self.emit_tick(line);
                 for s in body {
                     self.emit_stmt(s)?;
                 }
@@ -241,6 +264,7 @@ impl Emitter {
                 self.pad();
                 self.out.push_str("};\n");
                 self.open_block(&format!("for _ in 0..({}.max(0))", n_tmp));
+                self.emit_tick(line);
                 for s in body {
                     self.emit_stmt(s)?;
                 }
@@ -260,6 +284,7 @@ impl Emitter {
                 ));
                 let ident = rust_ident(var);
                 self.open_block(&format!("for {} in {}", ident, items_tmp));
+                self.emit_tick(line);
                 // Mirror the tree-walker: the loop variable is a
                 // fresh binding in each iteration. Re-bind as mut so
                 // the body can reassign it.
@@ -439,10 +464,13 @@ impl Emitter {
                 fn_name, param_list
             )
         };
-        let _ = line;
         self.open_block(&sig);
         let saved_tmp = self.tmp_counter;
         self.tmp_counter = 0;
+        // Function-entry checkpoint — matches the plan's "step-count
+        // checks at loop backedges / function entry". No-op outside
+        // sandbox mode.
+        self.emit_tick(line);
         for s in body {
             self.emit_stmt(s)?;
         }
@@ -1021,7 +1049,7 @@ const PUBLIC_ENTRY: &str = r#"// ─── Public entry points ─────�
 /// tracker is initialised to a permissive ceiling so the
 /// `bop::memory` allocation hooks on `Value` don't fire spurious
 /// limit errors. Embedders that want a real sandbox should compile
-/// with `--sandbox` (once that lands) or call `bop_memory_init`
+/// with `Options::sandbox = true` or call `bop_memory_init`
 /// themselves before invoking `run`.
 pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError> {
     ::bop::memory::bop_memory_init(usize::MAX);
@@ -1037,6 +1065,133 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
 const MAIN_FN: &str = r#"fn main() {
     let mut host = ::bop_sys::StandardHost::new();
     if let Err(err) = run(&mut host) {
+        eprintln!("{}", err);
+        ::std::process::exit(1);
+    }
+}
+"#;
+
+// ─── Sandbox variants ──────────────────────────────────────────────
+//
+// Same shape as the non-sandbox preamble but:
+// - `Ctx` carries `steps` and `max_steps`.
+// - A `__bop_tick` helper enforces the step budget, re-checks the
+//   allocation tracker's ceiling, and fans the tick out to the
+//   host's `on_tick` hook.
+// - `run` takes a `&BopLimits` so callers can dial the budget.
+
+const RUNTIME_PREAMBLE_SANDBOX: &str = r#"// ─── Runtime context and helpers ────────────────────────────────
+
+pub struct Ctx<'h> {
+    pub host: &'h mut dyn ::bop::BopHost,
+    pub rand_state: u64,
+    pub steps: u64,
+    pub max_steps: u64,
+}
+
+/// Step / memory / on_tick checkpoint. Emitted by `bop-compile` at
+/// the head of every loop iteration and at function entry when the
+/// `sandbox` option is on. Mirrors `Evaluator::tick` in `bop-lang`.
+#[inline]
+fn __bop_tick(ctx: &mut Ctx<'_>, line: u32) -> Result<(), ::bop::error::BopError> {
+    ctx.steps += 1;
+    if ctx.steps > ctx.max_steps {
+        return Err(::bop::builtins::error_with_hint(
+            line,
+            "Your code took too many steps (possible infinite loop)",
+            "Check your loops — make sure they have a condition that eventually stops them.",
+        ));
+    }
+    if ::bop::memory::bop_memory_exceeded() {
+        return Err(::bop::builtins::error_with_hint(
+            line,
+            "Memory limit exceeded",
+            "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+        ));
+    }
+    ctx.host.on_tick()?;
+    Ok(())
+}
+
+/// Mirror of Evaluator::call_method from bop-lang: dispatches a
+/// method call to the right family for the receiver's type.
+#[inline]
+fn __bop_call_method(
+    obj: &::bop::value::Value,
+    method: &str,
+    args: &[::bop::value::Value],
+    line: u32,
+) -> Result<(::bop::value::Value, Option<::bop::value::Value>), ::bop::error::BopError> {
+    match obj {
+        ::bop::value::Value::Array(arr) => ::bop::methods::array_method(arr, method, args, line),
+        ::bop::value::Value::Str(s) => ::bop::methods::string_method(s.as_str(), method, args, line),
+        ::bop::value::Value::Dict(d) => ::bop::methods::dict_method(d, method, args, line),
+        _ => Err(::bop::error::BopError::runtime(
+            format!("{} doesn't have a .{}() method", obj.type_name(), method),
+            line,
+        )),
+    }
+}
+
+/// Format the argument list the way Bop's built-in `print` does:
+/// values space-separated via their Display impls.
+#[inline]
+fn __bop_format_print(args: &[::bop::value::Value]) -> String {
+    args.iter()
+        .map(|v| format!("{}", v))
+        .collect::<::std::vec::Vec<_>>()
+        .join(" ")
+}
+
+/// Materialise an iterable into a Vec of items (mirrors the
+/// tree-walker's handling of `for x in ...`).
+#[inline]
+fn __bop_iter_items(
+    mut v: ::bop::value::Value,
+    line: u32,
+) -> Result<::std::vec::Vec<::bop::value::Value>, ::bop::error::BopError> {
+    match &mut v {
+        ::bop::value::Value::Array(arr) => Ok(arr.take()),
+        ::bop::value::Value::Str(s) => Ok(s
+            .chars()
+            .map(|c| ::bop::value::Value::new_str(c.to_string()))
+            .collect()),
+        _ => Err(::bop::error::BopError::runtime(
+            format!("Can't iterate over {}", v.type_name()),
+            line,
+        )),
+    }
+}
+
+"#;
+
+const PUBLIC_ENTRY_SANDBOX: &str = r#"// ─── Public entry points ────────────────────────────────────────
+
+/// Run the compiled program with the supplied host and resource
+/// limits. `limits.max_memory` wires into `bop::memory`'s
+/// allocation tracker; `limits.max_steps` caps the number of
+/// tick-points (loop iterations + function entries) before the
+/// program halts with `Your code took too many steps`.
+pub fn run<H: ::bop::BopHost>(
+    host: &mut H,
+    limits: &::bop::BopLimits,
+) -> Result<(), ::bop::error::BopError> {
+    ::bop::memory::bop_memory_init(limits.max_memory);
+    let mut ctx = Ctx {
+        host: host as &mut dyn ::bop::BopHost,
+        rand_state: 0,
+        steps: 0,
+        max_steps: limits.max_steps,
+    };
+    run_program(&mut ctx)
+}
+
+"#;
+
+const MAIN_FN_SANDBOX: &str = r#"fn main() {
+    let mut host = ::bop_sys::StandardHost::new();
+    let limits = ::bop::BopLimits::standard();
+    if let Err(err) = run(&mut host, &limits) {
         eprintln!("{}", err);
         ::std::process::exit(1);
     }

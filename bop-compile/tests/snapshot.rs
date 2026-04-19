@@ -288,11 +288,141 @@ fn index_assign_on_non_ident_is_rejected() {
     );
 }
 
+// ─── Sandbox mode ─────────────────────────────────────────────────
+
+fn compile_sandbox(code: &str) -> String {
+    transpile(
+        code,
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    )
+    .expect("transpile")
+}
+
+#[test]
+fn sandbox_off_by_default_emits_no_tick_helper() {
+    let out = compile("while true { }");
+    assert!(
+        !out.contains("__bop_tick"),
+        "non-sandbox build shouldn't emit __bop_tick:\n{}",
+        out
+    );
+    assert!(
+        out.contains("bop_memory_init(usize::MAX)"),
+        "non-sandbox init should disable the memory ceiling:\n{}",
+        out
+    );
+}
+
+#[test]
+fn sandbox_on_emits_tick_helper_and_limits_param() {
+    let out = compile_sandbox("while true { }");
+    let flat = norm(&out);
+    for needle in [
+        "fn __bop_tick(ctx: &mut Ctx<'_>, line: u32)",
+        "ctx.max_steps",
+        "bop_memory_init(limits.max_memory)",
+        "pub fn run<H: ::bop::BopHost>( host: &mut H, limits: &::bop::BopLimits, )",
+        "let limits = ::bop::BopLimits::standard();",
+    ] {
+        assert!(
+            flat.contains(needle),
+            "expected fragment not found: {:?}\n---\n{}\n---",
+            needle,
+            out
+        );
+    }
+}
+
+#[test]
+fn sandbox_emits_tick_at_while_iteration() {
+    let out = norm(&compile_sandbox("while true { let x = 1 }"));
+    assert!(
+        out.contains("while (::bop::value::Value::Bool(true)).is_truthy() { __bop_tick(ctx,"),
+        "expected tick at top of while body:\n{}",
+        out
+    );
+}
+
+/// Normalize whitespace runs to single spaces so we can do
+/// position-insensitive substring checks on the pretty-printed
+/// output.
+fn norm(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+            }
+            last_space = true;
+        } else {
+            out.push(c);
+            last_space = false;
+        }
+    }
+    out
+}
+
+#[test]
+fn sandbox_emits_tick_at_repeat_and_for() {
+    let repeat = norm(&compile_sandbox("repeat 3 { let x = 1 }"));
+    assert!(
+        repeat.contains(".max(0)) { __bop_tick(ctx,"),
+        "expected tick at top of repeat iteration:\n{}",
+        repeat
+    );
+
+    let forin = norm(&compile_sandbox("for x in [1, 2] { let y = x }"));
+    // The iter-items tmp number depends on how many temporaries
+    // the array literal introduced; just check that `for x in
+    // <something> { __bop_tick(...)` appears somewhere.
+    let forin_matches = forin.split("for x in ").any(|tail| {
+        tail.split_once(' ')
+            .map(|(_ident, rest)| rest.trim_start().starts_with("{ __bop_tick(ctx,"))
+            .unwrap_or(false)
+    });
+    assert!(
+        forin_matches,
+        "expected tick at top of for-in iteration:\n{}",
+        forin
+    );
+}
+
+#[test]
+fn sandbox_emits_tick_at_fn_entry() {
+    let out = norm(&compile_sandbox("fn foo() { return 1 }\nprint(foo())"));
+    assert!(
+        out.contains(
+            "fn bop_fn_foo(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_tick(ctx,"
+        ),
+        "expected tick at function entry:\n{}",
+        out
+    );
+}
+
+#[test]
+fn sandbox_run_program_ticks_once_on_entry() {
+    let out = norm(&compile_sandbox("print(1)"));
+    // Top-level `run_program` is the program-scope equivalent of a
+    // function entry, so it ticks once before doing anything else.
+    assert!(
+        out.contains(
+            "fn run_program(ctx: &mut Ctx<'_>) -> Result<(), ::bop::error::BopError> { __bop_tick(ctx,"
+        ),
+        "expected tick at run_program entry:\n{}",
+        out
+    );
+}
+
 #[test]
 fn options_without_main_skip_entry_point() {
     let opts = Options {
         emit_main: false,
         use_bop_sys: false,
+        sandbox: false,
     };
     let out = transpile("print(1)", &opts).unwrap();
     assert!(

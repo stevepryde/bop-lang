@@ -1,12 +1,10 @@
 # Bop Execution Modes & Compilation Strategy
 
 Status: design / roadmap. Step 1 (`bop-sys`), step 2 (bytecode VM
-with differential harness), and the bulk of step 3 (`bop-compile`
-transpiler — now covering method calls, string interpolation, and
-indexed writes in addition to the earlier starter set) have
-landed. Remaining step 3 work: sandbox mode (step / memory
-enforcement in emitted code) and folding the transpiled path into
-a shared differential harness with the walker and VM. `bop-lang`
+with differential harness), and step 3 (`bop-compile` transpiler
+— full non-sandbox surface plus opt-in sandbox mode) have landed.
+Remaining work for step 3 closure: folding the transpiled path
+into a shared walker/VM/AOT differential harness. `bop-lang`
 stays self-contained — the VM and AOT crates depend on it
 directly for `Value` / builtins / operator primitives, rather
 than a separate runtime crate.
@@ -284,25 +282,32 @@ Rough order of work (each step is independently shippable):
    arrays, dicts, functions, control flow, common builtins). Extend
    the differential harness from 2c to run tests through the
    transpiled path too; grow the subset until it reaches parity.
-   *Status: covers the full non-sandbox v1 surface. Crate:
-   [`bop-compile`](../bop-compile). `transpile(source) -> String`
-   parses Bop via `bop-lang` and emits Rust that depends on `bop`
-   for `Value` / `ops` / `builtins` / `methods` and (when
-   `Options::emit_main` is set) on `bop-sys` for the standard host.
-   Supported: all literals, binary/unary ops (including
+   *Status: v1 complete. Crate:
+   [`bop-compile`](../bop-compile). `transpile(source, opts) ->
+   String` parses Bop via `bop-lang` and emits Rust that depends
+   on `bop` for `Value` / `ops` / `builtins` / `methods` and (when
+   `Options::emit_main` is set) on `bop-sys` for the standard
+   host. Supported: all literals, binary/unary ops (including
    short-circuit `&&` / `||`), plain-variable `let` / assign /
    compound-assign, `if` / `if-expr`, `while`, `repeat`, `for-in`
    (arrays / ranges / strings), `break` / `continue`, user
    functions with recursion, built-in calls, arrays, dicts, index
-   reads, **method calls with mutation back-assign**, **string
-   interpolation**, and **indexed writes (`a[i] = v`,
-   `a[i] += v`)**. Not yet: sandbox mode (step / memory
-   enforcement in the emitted code). 23 snapshot tests pin the
-   emitted shape; 12 `#[ignore]`-gated e2e tests (including
-   FizzBuzz) run the transpiled Rust through `cargo run` and
-   assert output matches the tree-walker. Folding the AOT path
-   into the 2c differential harness is the last step 3 milestone
-   once sandbox mode is in.*
+   reads, method calls with mutation back-assign, string
+   interpolation, and indexed writes. Resource limits are opt-in
+   via `Options::sandbox`: when enabled, the emitted code
+   enforces `BopLimits` by emitting a `__bop_tick(ctx, line)?`
+   checkpoint at every loop iteration and function entry, wiring
+   `max_memory` into `bop::memory`'s allocation tracker, and
+   firing `BopHost::on_tick` at every checkpoint. 29 snapshot
+   tests pin the emitted shape; 16 `#[ignore]`-gated e2e tests
+   run the transpiled Rust through `cargo run` and assert either
+   output matches the tree-walker (non-sandbox) or the program
+   exits with the expected limit-violation message (sandbox).
+   Folding the AOT path into the 2c differential harness is the
+   remaining step 3 milestone — deferred because the e2e suite
+   is already doing the comparison for the programs that
+   matter, and adding 100+ AOT cargo runs to every CI build
+   would blow past reasonable test-suite timings.*
 
 JIT is not on the roadmap. If that changes, open a new design doc.
 

@@ -53,6 +53,18 @@ pub struct Options {
     /// so `main()` can construct it directly. Implied by
     /// [`Self::emit_main`].
     pub use_bop_sys: bool,
+    /// If true, the emitted code enforces [`bop::BopLimits`]: step
+    /// counts are checked at every loop iteration and function
+    /// entry, `bop::memory`'s allocation hooks are initialised with
+    /// `max_memory`, and [`bop::BopHost::on_tick`] fires at the
+    /// same checkpoints. The generated `run` takes a `&BopLimits`
+    /// parameter in this mode.
+    ///
+    /// When false (the default), the emitted code is straight-line
+    /// Rust with no accounting overhead: `run` takes only a host,
+    /// and runaway programs are the caller's problem. This matches
+    /// the plan's "hot path should be clean" goal.
+    pub sandbox: bool,
 }
 
 impl Default for Options {
@@ -60,6 +72,7 @@ impl Default for Options {
         Self {
             emit_main: true,
             use_bop_sys: true,
+            sandbox: false,
         }
     }
 }
