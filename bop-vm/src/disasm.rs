@@ -1,0 +1,151 @@
+//! Human-readable rendering of a [`Chunk`] for debugging and tests.
+//!
+//! The output is stable-ish — assertions in tests match against it
+//! directly. Each instruction renders to a single line with its
+//! operand resolved inline (constants, names, jump targets). Nested
+//! functions are recursively rendered after the main body.
+
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::{String, ToString}, vec::Vec};
+
+use bop::lexer::StringPart;
+
+use crate::chunk::{Chunk, Constant, Instr};
+
+/// Render a chunk as a string. One line per instruction; nested
+/// function bodies are indented and follow the main body.
+pub fn disassemble(chunk: &Chunk) -> String {
+    let mut out = String::new();
+    render_chunk(chunk, &mut out, 0);
+    out
+}
+
+fn render_chunk(chunk: &Chunk, out: &mut String, indent: usize) {
+    let pad = "  ".repeat(indent);
+    let width = chunk.code.len().saturating_sub(1).to_string().len().max(1);
+    for (i, instr) in chunk.code.iter().enumerate() {
+        out.push_str(&pad);
+        out.push_str(&format!("{:>width$}: {}\n", i, render_instr(chunk, instr), width = width));
+    }
+
+    for (i, f) in chunk.functions.iter().enumerate() {
+        out.push_str(&pad);
+        out.push_str(&format!(
+            "\n{}fn #{} {}({}):\n",
+            pad,
+            i,
+            f.name,
+            f.params.join(", ")
+        ));
+        render_chunk(&f.chunk, out, indent + 1);
+    }
+}
+
+fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
+    match instr {
+        Instr::LoadConst(idx) => {
+            format!("LoadConst {}", render_constant(chunk.constant(*idx)))
+        }
+        Instr::LoadNone => "LoadNone".to_string(),
+        Instr::LoadTrue => "LoadTrue".to_string(),
+        Instr::LoadFalse => "LoadFalse".to_string(),
+
+        Instr::LoadVar(n) => format!("LoadVar {}", chunk.name(*n)),
+        Instr::DefineLocal(n) => format!("DefineLocal {}", chunk.name(*n)),
+        Instr::StoreVar(n) => format!("StoreVar {}", chunk.name(*n)),
+
+        Instr::PushScope => "PushScope".to_string(),
+        Instr::PopScope => "PopScope".to_string(),
+
+        Instr::Pop => "Pop".to_string(),
+        Instr::Dup => "Dup".to_string(),
+        Instr::Dup2 => "Dup2".to_string(),
+
+        Instr::Add => "Add".to_string(),
+        Instr::Sub => "Sub".to_string(),
+        Instr::Mul => "Mul".to_string(),
+        Instr::Div => "Div".to_string(),
+        Instr::Rem => "Rem".to_string(),
+        Instr::Eq => "Eq".to_string(),
+        Instr::NotEq => "NotEq".to_string(),
+        Instr::Lt => "Lt".to_string(),
+        Instr::Gt => "Gt".to_string(),
+        Instr::LtEq => "LtEq".to_string(),
+        Instr::GtEq => "GtEq".to_string(),
+
+        Instr::Neg => "Neg".to_string(),
+        Instr::Not => "Not".to_string(),
+
+        Instr::TruthyToBool => "TruthyToBool".to_string(),
+
+        Instr::GetIndex => "GetIndex".to_string(),
+        Instr::SetIndex => "SetIndex".to_string(),
+
+        Instr::StringInterp(idx) => {
+            let recipe = chunk.interp(*idx);
+            let parts: Vec<String> = recipe
+                .parts
+                .iter()
+                .map(|p| match p {
+                    StringPart::Literal(s) => format!("{:?}", s),
+                    StringPart::Variable(name) => format!("${}", name),
+                })
+                .collect();
+            format!("StringInterp [{}]", parts.join(", "))
+        }
+
+        Instr::MakeArray(n) => format!("MakeArray {}", n),
+        Instr::MakeDict(n) => format!("MakeDict {}", n),
+
+        Instr::Call { name, argc } => {
+            format!("Call {}/{}", chunk.name(*name), argc)
+        }
+        Instr::CallMethod {
+            method,
+            argc,
+            assign_back_to,
+        } => {
+            let name = chunk.name(*method);
+            match assign_back_to {
+                Some(var) => format!(
+                    "CallMethod .{}/{} (back to {})",
+                    name,
+                    argc,
+                    chunk.name(*var)
+                ),
+                None => format!("CallMethod .{}/{}", name, argc),
+            }
+        }
+
+        Instr::DefineFn(idx) => {
+            format!("DefineFn #{} ({})", idx.0, chunk.function(*idx).name)
+        }
+        Instr::Return => "Return".to_string(),
+        Instr::ReturnNone => "ReturnNone".to_string(),
+
+        Instr::MakeIter => "MakeIter".to_string(),
+        Instr::IterNext { target } => format!("IterNext -> {}", target.0),
+        Instr::MakeRepeatCount => "MakeRepeatCount".to_string(),
+        Instr::RepeatNext { target } => format!("RepeatNext -> {}", target.0),
+
+        Instr::Jump(t) => format!("Jump -> {}", t.0),
+        Instr::JumpIfFalse(t) => format!("JumpIfFalse -> {}", t.0),
+        Instr::JumpIfFalsePeek(t) => format!("JumpIfFalsePeek -> {}", t.0),
+        Instr::JumpIfTruePeek(t) => format!("JumpIfTruePeek -> {}", t.0),
+
+        Instr::Halt => "Halt".to_string(),
+    }
+}
+
+fn render_constant(c: &Constant) -> String {
+    match c {
+        Constant::Number(n) => {
+            if *n == (*n as i64 as f64) && n.is_finite() {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Constant::Str(s) => format!("{:?}", s),
+    }
+}
