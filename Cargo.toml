@@ -1,5 +1,5 @@
 [workspace]
-members = ["bop", "bop-cli", "bop-sys", "bop-vm"]
+members = ["bop", "bop-cli", "bop-compile", "bop-sys", "bop-vm"]
 resolver = "2"
 
 [workspace.package]

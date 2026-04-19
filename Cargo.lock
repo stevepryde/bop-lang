@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bop-compile"
+version = "0.2.0"
+dependencies = [
+ "bop-lang",
+]
+
+[[package]]
 name = "bop-lang"
 version = "0.2.0"
 
