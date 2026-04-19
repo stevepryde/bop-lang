@@ -508,6 +508,18 @@ impl Compiler {
                 let end = self.current_offset();
                 self.patch_jump(end_jmp, end);
             }
+
+            ExprKind::Lambda { .. } => {
+                // Tracked for phase 1b — the bytecode VM gets its
+                // own `MakeLambda` opcode and a closure-aware
+                // `Value::Fn` path in the follow-up commit. Until
+                // then, rejecting at compile time is the clearest
+                // signal to the user.
+                return Err(err(
+                    line,
+                    "bop-vm: lambda / first-class functions are not yet supported in the bytecode VM",
+                ));
+            }
         }
         Ok(())
     }

@@ -8,13 +8,19 @@ use std as alloc_import;
 #[cfg(not(feature = "std"))]
 use alloc as alloc_import;
 
+#[cfg(not(feature = "std"))]
+use alloc::rc::Rc;
+
+#[cfg(feature = "std")]
+use std::rc::Rc;
+
 use crate::builtins::{self, error, error_with_hint};
 use crate::error::BopError;
 use crate::lexer::StringPart;
 use crate::methods;
 use crate::ops;
 use crate::parser::*;
-use crate::value::Value;
+use crate::value::{BopFn, Value};
 use crate::{BopHost, BopLimits};
 
 const MAX_CALL_DEPTH: usize = 64;
@@ -396,13 +402,31 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 Ok(Value::new_str(result))
             }
 
-            ExprKind::Ident(name) => self.get_var(name).cloned().ok_or_else(|| {
-                error_with_hint(
+            ExprKind::Ident(name) => {
+                // Lexical lookup first — matches the intuition that
+                // `let x = ...` locally shadows everything else.
+                if let Some(v) = self.get_var(name) {
+                    return Ok(v.clone());
+                }
+                // Fall back to named `fn` declarations so they can
+                // be passed around as first-class values. The
+                // synthesised `Value::Fn` carries `self_name` so
+                // recursive lookups inside the body still resolve
+                // through `self.functions` (see `call_bop_fn`).
+                if let Some(f) = self.functions.get(name) {
+                    return Ok(Value::new_fn(
+                        f.params.clone(),
+                        Vec::new(),
+                        f.body.clone(),
+                        Some(name.to_string()),
+                    ));
+                }
+                Err(error_with_hint(
                     expr.line,
                     format!("Variable `{}` not found", name),
                     "Did you forget to create it with `let`?",
-                )
-            }),
+                ))
+            }
 
             ExprKind::BinaryOp { left, op, right } => {
                 // Short-circuit for && and ||
@@ -437,15 +461,40 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
 
             ExprKind::Call { callee, args } => {
-                let func_name = match &callee.kind {
-                    ExprKind::Ident(name) => name.clone(),
-                    _ => return Err(error(expr.line, "Can only call named functions")),
-                };
                 let mut eval_args = Vec::new();
                 for arg in args {
                     eval_args.push(self.eval_expr(arg)?);
                 }
-                self.call_function(&func_name, eval_args, expr.line)
+                if let ExprKind::Ident(name) = &callee.kind {
+                    // Lexical callable first: if the name is bound
+                    // to a `Value::Fn` in the current scope, call
+                    // it. A bound non-callable is an explicit
+                    // error — "shadowing a builtin with a number
+                    // then calling it" should fail loudly, not
+                    // silently dispatch to the builtin.
+                    if let Some(v) = self.get_var(name).cloned() {
+                        return self.call_value(v, eval_args, expr.line, Some(name));
+                    }
+                    // Otherwise fall through to the original
+                    // name-based dispatch (builtins → host → named
+                    // fns). This is what keeps `print(x)` /
+                    // `range(n)` / `my_user_fn(x)` working.
+                    return self.call_function(name, eval_args, expr.line);
+                }
+                // Non-Ident callee: evaluate the expression; it
+                // must produce a `Value::Fn`.
+                let callee_val = self.eval_expr(callee)?;
+                self.call_value(callee_val, eval_args, expr.line, None)
+            }
+
+            ExprKind::Lambda { params, body } => {
+                let captures = self.snapshot_captures();
+                Ok(Value::new_fn(
+                    params.clone(),
+                    captures,
+                    body.clone(),
+                    None,
+                ))
             }
 
             ExprKind::MethodCall {
@@ -534,6 +583,123 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
     // ─── Function calls ────────────────────────────────────────────
 
+    /// Collapse the current scope stack into a flat list of
+    /// `(name, value)` pairs — the snapshot used as a lambda's
+    /// captures. Inner scopes shadow outer ones, so the resulting
+    /// list is deduplicated by name with the innermost binding
+    /// winning.
+    fn snapshot_captures(&self) -> Vec<(String, Value)> {
+        let mut flat = BTreeMap::new();
+        for scope in &self.scopes {
+            for (k, v) in scope {
+                flat.insert(k.clone(), v.clone());
+            }
+        }
+        flat.into_iter().collect()
+    }
+
+    /// Call a value directly. Non-`Value::Fn` payloads are an
+    /// explicit "not callable" error — this is the safety net for
+    /// `let x = 5; x(1)` and friends.
+    ///
+    /// `name_hint` is the Ident text when the callee was a bare
+    /// name, used only for error messages. Non-Ident callees pass
+    /// `None`.
+    fn call_value(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        line: u32,
+        name_hint: Option<&str>,
+    ) -> Result<Value, BopError> {
+        match &callee {
+            Value::Fn(f) => {
+                let f = Rc::clone(f);
+                drop(callee);
+                self.call_bop_fn(&f, args, line)
+            }
+            other => match name_hint {
+                Some(n) => Err(error(
+                    line,
+                    format!(
+                        "`{}` is a {}, not a function",
+                        n,
+                        other.type_name()
+                    ),
+                )),
+                None => Err(error(
+                    line,
+                    format!("Can't call a {}", other.type_name()),
+                )),
+            },
+        }
+    }
+
+    /// Shared call path for every `Value::Fn` — the body of both
+    /// `let f = fn(...) {...}; f(x)` and the reified version of
+    /// `fn name(...) {...}; name(x)` come through here.
+    fn call_bop_fn(
+        &mut self,
+        func: &Rc<BopFn>,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Value, BopError> {
+        if args.len() != func.params.len() {
+            let name = func.self_name.as_deref().unwrap_or("fn");
+            return Err(error(
+                line,
+                format!(
+                    "`{}` expects {} argument{}, but got {}",
+                    name,
+                    func.params.len(),
+                    if func.params.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+            ));
+        }
+
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(error_with_hint(
+                line,
+                "Too many nested function calls (possible infinite recursion)",
+                "Check that your recursive function has a base case that stops calling itself.",
+            ));
+        }
+
+        // A function call gets a fresh scope stack: no outer
+        // locals leak in. Captures and parameters seed the new
+        // scope; self-reference via `self_name` lets recursive
+        // lambdas see themselves.
+        self.call_depth += 1;
+        let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
+
+        // Captures go in first so parameters shadow them on
+        // collision (matches the lexical snapshot semantics).
+        for (name, value) in &func.captures {
+            self.define(name.clone(), value.clone());
+        }
+        if let Some(self_name) = &func.self_name {
+            // Make the reified `fn name` value visible inside its
+            // own body so `fn fib(n) { return fib(n-1) ... }`
+            // works without a special "named fn" path.
+            self.define(self_name.clone(), Value::Fn(Rc::clone(func)));
+        }
+        for (param, arg) in func.params.iter().zip(args) {
+            self.define(param.clone(), arg);
+        }
+
+        let result = self.exec_block(&func.body);
+        self.scopes = saved_scopes;
+        self.call_depth -= 1;
+
+        match result? {
+            Signal::Return(val) => Ok(val),
+            Signal::Break => Err(error(line, "break used outside of a loop")),
+            Signal::Continue => Err(error(line, "continue used outside of a loop")),
+            Signal::None => Ok(Value::None),
+        }
+    }
+
     fn call_function(
         &mut self,
         name: &str,
@@ -569,7 +735,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             return result;
         }
 
-        // 3. User-defined functions
+        // 3. User-defined functions — synthesise a transient
+        // `BopFn` and delegate to the shared call path. This keeps
+        // the behaviour of `fn name` declarations and `Value::Fn`
+        // values identical, including self-reference semantics.
         let func = self.functions.get(name).cloned().ok_or_else(|| {
             let hint = self.host.function_hint();
             if hint.is_empty() {
@@ -583,45 +752,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
         })?;
 
-        if args.len() != func.params.len() {
-            return Err(error(
-                line,
-                format!(
-                    "`{}` expects {} argument{}, but got {}",
-                    name,
-                    func.params.len(),
-                    if func.params.len() == 1 { "" } else { "s" },
-                    args.len()
-                ),
-            ));
-        }
-
-        // Check recursion depth
-        if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(error_with_hint(
-                line,
-                "Too many nested function calls (possible infinite recursion)",
-                "Check that your recursive function has a base case that stops calling itself.",
-            ));
-        }
-
-        // Clean scope for function (no outer variables)
-        self.call_depth += 1;
-        let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
-        for (param, arg) in func.params.iter().zip(args) {
-            self.define(param.clone(), arg);
-        }
-
-        let result = self.exec_block(&func.body);
-        self.scopes = saved_scopes;
-        self.call_depth -= 1;
-
-        match result? {
-            Signal::Return(val) => Ok(val),
-            Signal::Break => Err(error(line, "break used outside of a loop")),
-            Signal::Continue => Err(error(line, "continue used outside of a loop")),
-            Signal::None => Ok(Value::None),
-        }
+        let bop_fn = Rc::new(BopFn {
+            params: func.params,
+            captures: Vec::new(),
+            body: func.body,
+            self_name: Some(name.to_string()),
+        });
+        self.call_bop_fn(&bop_fn, args, line)
     }
 
     // ─── Methods ───────────────────────────────────────────────────

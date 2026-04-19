@@ -49,6 +49,13 @@ pub enum ExprKind {
         then_expr: Box<Expr>,
         else_expr: Box<Expr>,
     },
+    /// Anonymous function expression: `fn(params) { body }`.
+    /// Captures the referenced free variables from the enclosing
+    /// scope when evaluated; see the evaluator for capture rules.
+    Lambda {
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +194,13 @@ impl Parser {
         self.tokens.get(self.pos).map(|t| t.line).unwrap_or(0)
     }
 
+    fn peek_at(&self, offset: usize) -> &Token {
+        self.tokens
+            .get(self.pos + offset)
+            .map(|t| &t.token)
+            .unwrap_or(&Token::Eof)
+    }
+
     fn advance(&mut self) -> &Token {
         let tok = self
             .tokens
@@ -284,7 +298,10 @@ impl Parser {
             Token::While => self.parse_while(),
             Token::For => self.parse_for(),
             Token::Repeat => self.parse_repeat(),
-            Token::Fn => self.parse_fn_decl(),
+            // `fn name(...)` is a declaration; `fn(...)` is a
+            // lambda expression at statement position — delegate
+            // to the expression parser so it becomes an `ExprStmt`.
+            Token::Fn if matches!(self.peek_at(1), Token::Ident(_)) => self.parse_fn_decl(),
             Token::Return => self.parse_return(),
             Token::Break => {
                 self.advance();
@@ -756,6 +773,7 @@ impl Parser {
             Token::LBracket => self.parse_array_literal(),
             Token::LBrace => self.parse_dict_literal(),
             Token::If => self.parse_if_expr(),
+            Token::Fn => self.parse_lambda(),
             _ => Err(self.error(
                 line,
                 format!("I didn't expect `{}` here", fmt_token(self.peek())),
@@ -820,6 +838,29 @@ impl Parser {
             }
             _ => Err(self.error(line, "Dict keys must be strings (in quotes)")),
         }
+    }
+
+    fn parse_lambda(&mut self) -> Result<Expr, BopError> {
+        let line = self.peek_line();
+        self.advance(); // consume 'fn'
+        self.expect(&Token::LParen)?;
+
+        let mut params = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            let (p, _) = self.expect_ident()?;
+            params.push(p);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                let (p, _) = self.expect_ident()?;
+                params.push(p);
+            }
+        }
+        self.expect(&Token::RParen)?;
+        let body = self.parse_block()?;
+        Ok(Expr {
+            kind: ExprKind::Lambda { params, body },
+            line,
+        })
     }
 
     fn parse_if_expr(&mut self) -> Result<Expr, BopError> {

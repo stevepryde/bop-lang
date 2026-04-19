@@ -513,6 +513,18 @@ impl Emitter {
 
             ExprKind::StringInterp(parts) => self.string_interp_src(parts, line)?,
 
+            ExprKind::Lambda { .. } => {
+                // Tracked for phase 1c — the AOT emits Rust
+                // closures (Box<dyn Fn(...)>) and teaches its Call
+                // dispatch to accept a Value::Fn callee. Rejecting
+                // at transpile time for now keeps the error
+                // surface honest.
+                return Err(BopError::runtime(
+                    "bop-compile: lambda / first-class functions are not yet supported by the AOT transpiler",
+                    line,
+                ));
+            }
+
             ExprKind::BinaryOp { left, op, right } => self.binary_src(left, *op, right, line)?,
 
             ExprKind::UnaryOp { op, expr: inner } => {

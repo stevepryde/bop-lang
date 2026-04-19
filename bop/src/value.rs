@@ -7,9 +7,13 @@
 //! this module cannot access the private inner fields.
 
 #[cfg(not(feature = "std"))]
-use alloc::{format, string::{String, ToString}, vec::Vec};
+use alloc::{format, rc::Rc, string::{String, ToString}, vec::Vec};
+
+#[cfg(feature = "std")]
+use std::rc::Rc;
 
 use crate::memory::{bop_alloc, bop_dealloc};
+use crate::parser::Stmt;
 
 // ─── Tracked newtypes ──────────────────────────────────────────────────────
 //
@@ -24,6 +28,30 @@ pub struct BopArray(Vec<Value>);
 #[derive(Debug)]
 pub struct BopDict(Vec<(String, Value)>);
 
+/// A Bop function value — the runtime representation of a closure
+/// or a reified `fn foo(...) { ... }` declaration. Shared by `Rc`
+/// so first-class usage (`let g = f; pass(f)`) is cheap.
+///
+/// The body is kept as the parsed AST. The tree-walker interprets
+/// it directly; the bytecode VM and AOT transpiler compile it on
+/// demand. Keeping one representation avoids Value carrying
+/// engine-specific state across crates.
+#[derive(Debug)]
+pub struct BopFn {
+    pub params: Vec<String>,
+    /// Values captured from the enclosing scope at construction
+    /// time, cloned by value. Free variables in the body that
+    /// aren't parameters and aren't in this list fall through to
+    /// the outer module / global lookup at call time.
+    pub captures: Vec<(String, Value)>,
+    pub body: Vec<Stmt>,
+    /// `Some(name)` when this `BopFn` is bound to its own name
+    /// for self-reference (the lowering of `fn foo(...) { ... }`).
+    /// Lambdas created from an `fn(...) { ... }` expression leave
+    /// this `None`.
+    pub self_name: Option<String>,
+}
+
 // ─── Value enum ────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -34,6 +62,7 @@ pub enum Value {
     None,
     Array(BopArray),
     Dict(BopDict),
+    Fn(Rc<BopFn>),
 }
 
 // ─── Tracked constructors ──────────────────────────────────────────────────
@@ -59,6 +88,23 @@ impl Value {
         let key_bytes: usize = entries.iter().map(|(k, _)| k.capacity()).sum();
         bop_alloc(entries.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
         Value::Dict(BopDict(entries))
+    }
+
+    /// Build a closure value. Param names, captures, and the AST body
+    /// all move into a shared [`BopFn`] behind an `Rc` — subsequent
+    /// clones of the resulting `Value::Fn` just bump the refcount.
+    pub fn new_fn(
+        params: Vec<String>,
+        captures: Vec<(String, Value)>,
+        body: Vec<Stmt>,
+        self_name: Option<String>,
+    ) -> Self {
+        Value::Fn(Rc::new(BopFn {
+            params,
+            captures,
+            body,
+            self_name,
+        }))
     }
 }
 
@@ -91,6 +137,12 @@ impl Clone for Value {
                 bop_alloc(cloned.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
                 Value::Dict(BopDict(cloned))
             }
+            // Closures are reference-counted: cloning a Value::Fn
+            // is O(1) and doesn't duplicate the body or captures.
+            // Tracking the captures' memory happens once, at the
+            // moment the BopFn is constructed (by `new_fn`), via
+            // their own Value Clone/Drop hooks.
+            Value::Fn(f) => Value::Fn(Rc::clone(f)),
         }
     }
 }
@@ -108,6 +160,9 @@ impl Drop for Value {
                 let key_bytes: usize = d.0.iter().map(|(k, _)| k.capacity()).sum();
                 bop_dealloc(d.0.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
             }
+            // Value::Fn drops by releasing its Rc. The inner
+            // captures' Drop impls fire only when the refcount
+            // reaches zero; no per-Value accounting here.
             _ => {}
         }
     }
@@ -148,6 +203,10 @@ impl core::fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
+            Value::Fn(func) => match &func.self_name {
+                Some(name) => write!(f, "<fn {}>", name),
+                None => write!(f, "<fn>"),
+            },
         }
     }
 }
@@ -176,6 +235,7 @@ impl Value {
             Value::None => "none",
             Value::Array(_) => "array",
             Value::Dict(_) => "dict",
+            Value::Fn(_) => "fn",
         }
     }
 
@@ -187,6 +247,9 @@ impl Value {
             Value::Str(s) => !s.0.is_empty(),
             Value::Array(a) => !a.0.is_empty(),
             Value::Dict(d) => !d.0.is_empty(),
+            // A callable is always a "thing" — match other
+            // non-empty runtime objects.
+            Value::Fn(_) => true,
         }
     }
 }
@@ -277,6 +340,10 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                         .is_some_and(|(_, v2)| values_equal(v, v2))
                 })
         }
+        // Functions have identity-based equality: two references
+        // to the same `BopFn` compare equal; structurally identical
+        // closures constructed independently do not.
+        (Value::Fn(a), Value::Fn(b)) => Rc::ptr_eq(a, b),
         _ => false,
     }
 }

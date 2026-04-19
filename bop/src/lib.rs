@@ -466,6 +466,141 @@ print(fib(10))"#),
         );
     }
 
+    // ─── Closures / first-class functions ──────────────────────────
+
+    #[test]
+    fn lambda_basic() {
+        assert_eq!(
+            say(r#"let double = fn(x) { return x * 2 }
+print(double(5))"#),
+            "10"
+        );
+    }
+
+    #[test]
+    fn lambda_captures_value() {
+        assert_eq!(
+            say(r#"let n = 5
+let add_n = fn(x) { return x + n }
+print(add_n(3))"#),
+            "8"
+        );
+    }
+
+    #[test]
+    fn lambda_captures_are_snapshot() {
+        // Mutating `n` after the lambda is built should not
+        // affect the captured value — the snapshot semantics are
+        // deliberate.
+        assert_eq!(
+            say(r#"let n = 5
+let add_n = fn(x) { return x + n }
+n = 100
+print(add_n(3))"#),
+            "8"
+        );
+    }
+
+    #[test]
+    fn lambda_returned_from_fn() {
+        // Classic closure pattern: factory function returns a
+        // specialised closure. The captured `n` outlives the
+        // enclosing frame because it was cloned into the closure.
+        assert_eq!(
+            say(r#"fn make_adder(n) { return fn(x) { return x + n } }
+let add5 = make_adder(5)
+let add10 = make_adder(10)
+print(add5(3))
+print(add10(3))"#),
+            "13"
+        );
+    }
+
+    #[test]
+    fn named_fn_is_first_class_value() {
+        assert_eq!(
+            say(r#"fn double(x) { return x * 2 }
+let f = double
+print(f(7))"#),
+            "14"
+        );
+    }
+
+    #[test]
+    fn fn_stored_in_array_and_called_via_index() {
+        assert_eq!(
+            say(r#"fn add(x, y) { return x + y }
+fn mul(x, y) { return x * y }
+let ops = [add, mul]
+print(ops[0](2, 3))
+print(ops[1](2, 3))"#),
+            "6"
+        );
+    }
+
+    #[test]
+    fn higher_order_apply() {
+        // `apply` takes any callable, proving we call through a
+        // parameter, not a statically known name.
+        assert_eq!(
+            say(r#"fn apply(f, x) { return f(x) }
+fn square(n) { return n * n }
+print(apply(square, 4))
+print(apply(fn(n) { return n + 1 }, 4))"#),
+            "5"
+        );
+    }
+
+    #[test]
+    fn lambda_self_reference_via_named_fn() {
+        // Named-fn decls see themselves through `self.functions`,
+        // so recursion works. Let-bound lambdas are documented as
+        // not supporting self-reference — this test pins the
+        // working case.
+        assert_eq!(
+            say(r#"fn countdown(n) {
+    if n <= 0 { return "done" }
+    return countdown(n - 1)
+}
+print(countdown(3))"#),
+            "done"
+        );
+    }
+
+    #[test]
+    fn type_of_fn_is_fn() {
+        assert_eq!(say("fn f() { }\nprint(type(f))"), "fn");
+        assert_eq!(say("let g = fn() { }\nprint(type(g))"), "fn");
+    }
+
+    #[test]
+    fn calling_non_callable_value_errors() {
+        assert!(run_err("let x = 5\nx(1)").contains("not a function"));
+    }
+
+    #[test]
+    fn lambda_captures_nested_scope() {
+        // Closures snapshot the full lexical scope stack, so
+        // bindings from outer blocks are visible inside nested
+        // lambdas.
+        assert_eq!(
+            say(r#"let a = 1
+if true {
+    let b = 2
+    let f = fn() { return a + b }
+    print(f())
+}"#),
+            "3"
+        );
+    }
+
+    #[test]
+    fn iife() {
+        // Immediately-invoked lambda: `(fn() { ... })()`. Falls
+        // out of the parser for free once lambdas are expressions.
+        assert_eq!(say("print((fn(x) { return x * 3 })(4))"), "12");
+    }
+
     // ─── Arrays ────────────────────────────────────────────────────
 
     #[test]
