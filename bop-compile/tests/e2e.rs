@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use bop::{BopError, BopHost, BopLimits, Value};
-use bop_compile::{Options, transpile};
+use bop_compile::{Options, modules_from_map, transpile};
 
 // ─── Tree-walker reference ────────────────────────────────────────
 
@@ -446,6 +446,150 @@ fn e2e_sandbox_recursion_halts() {
 }
 
 // ─── Closures / first-class fns ───────────────────────────────
+
+// ─── Imports (phase 2c) ──────────────────────────────────────────
+
+/// Compare AOT output against a walker run that resolves modules
+/// from the same in-memory table. Used by the import tests —
+/// lets the same map drive both engines so we can assert they
+/// produce identical output.
+fn assert_aot_matches_with_modules(
+    test_name: &str,
+    code: &str,
+    modules: &[(&str, &str)],
+) {
+    // Walker reference — run against a host backed by the map.
+    struct MapHost<'a> {
+        prints: std::cell::RefCell<Vec<String>>,
+        modules: std::collections::HashMap<String, String>,
+        _marker: std::marker::PhantomData<&'a ()>,
+    }
+    impl<'a> BopHost for MapHost<'a> {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            None
+        }
+        fn on_print(&mut self, message: &str) {
+            self.prints.borrow_mut().push(message.to_string());
+        }
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+    let mut walker_host = MapHost {
+        prints: std::cell::RefCell::new(Vec::new()),
+        modules: modules
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        _marker: std::marker::PhantomData,
+    };
+    bop::run(code, &mut walker_host, &BopLimits::standard())
+        .expect("walker failed");
+    let expected = walker_host.prints.borrow().join("\n");
+
+    let resolver = modules_from_map(modules.iter().map(|(k, v)| (*k, *v)));
+    let rust_src = transpile(
+        code,
+        &Options {
+            module_resolver: Some(resolver),
+            ..Options::default()
+        },
+    )
+    .expect("transpile");
+    let dir = write_scratch_project(test_name, &rust_src);
+    let output = Command::new("cargo")
+        .arg("run")
+        .arg("--quiet")
+        .arg("--release")
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run cargo");
+    if !output.status.success() {
+        panic!(
+            "cargo run failed for {}:\n--- stderr ---\n{}\n--- generated ---\n{}",
+            test_name,
+            String::from_utf8_lossy(&output.stderr),
+            rust_src,
+        );
+    }
+    let actual = String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_string();
+    assert_eq!(
+        actual, expected,
+        "AOT output diverged from walker for {}:\n--- walker ---\n{}\n--- aot ---\n{}",
+        test_name, expected, actual,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_import_basic_let() {
+    assert_aot_matches_with_modules(
+        "import_basic_let",
+        r#"import math
+print(pi)"#,
+        &[("math", "let pi = 3")],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_import_named_fn() {
+    assert_aot_matches_with_modules(
+        "import_named_fn",
+        r#"import math
+print(square(7))"#,
+        &[("math", "fn square(n) { return n * n }")],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_import_dotted_path() {
+    assert_aot_matches_with_modules(
+        "import_dotted_path",
+        r#"import std.math
+print(e)"#,
+        &[("std.math", "let e = 2")],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_import_transitive() {
+    assert_aot_matches_with_modules(
+        "import_transitive",
+        r#"import a
+print(doubled)"#,
+        &[
+            ("a", "import b\nlet doubled = pi + pi"),
+            ("b", "let pi = 3"),
+        ],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_import_idempotent_reload_cache() {
+    // Second import shouldn't re-run the module body. The walker
+    // caches; the AOT caches via the __mod_*__load fn's
+    // module_cache check.
+    assert_aot_matches_with_modules(
+        "import_idempotent",
+        r#"import m
+import m
+print(x)"#,
+        &[("m", "let x = 42")],
+    );
+}
 
 #[test]
 #[ignore]

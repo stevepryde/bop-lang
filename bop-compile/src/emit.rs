@@ -29,7 +29,7 @@
 //! so the caller sees a clear "not yet supported" message instead of
 //! broken Rust.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use bop::error::BopError;
@@ -39,10 +39,206 @@ use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind,
 use crate::Options;
 
 pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
+    // Pre-resolve every import in the program's transitive graph.
+    // Failures here (missing resolver, module not found, cycle)
+    // surface before any Rust is written.
+    let modules = build_module_graph(stmts, opts)?;
     let info = collect_fn_info(stmts);
-    let mut emitter = Emitter::new(opts.clone(), info);
+    let mut emitter = Emitter::new(opts.clone(), info, modules);
     emitter.emit_program(stmts)?;
     Ok(emitter.finish())
+}
+
+// ─── Module graph ──────────────────────────────────────────────────
+
+/// Transitively-resolved modules, keyed by dot-joined path and
+/// ordered so each module comes after the ones it imports
+/// (topological / leaves-first). Produced once per transpile and
+/// handed to the emitter.
+pub(crate) struct ModuleGraph {
+    pub order: Vec<String>,
+    pub modules: HashMap<String, ModuleEntry>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModuleEntry {
+    pub ast: Vec<Stmt>,
+    pub own_fns: HashMap<String, Vec<String>>,
+    /// Every name reachable from this module's final scope —
+    /// its own `let`s and `fn`s plus, transitively, its imports'
+    /// effective exports. Matches the walker's injection
+    /// semantics (`import` re-exports by default).
+    pub effective_exports: Vec<String>,
+    // Kept during analysis for potential future use (e.g. more
+    // precise `let` vs `fn` handling in exports packing), but not
+    // currently read by the emitter.
+    #[allow(dead_code)]
+    pub own_lets: Vec<String>,
+    #[allow(dead_code)]
+    pub direct_imports: Vec<String>,
+}
+
+fn build_module_graph(
+    root: &[Stmt],
+    opts: &Options,
+) -> Result<ModuleGraph, BopError> {
+    let root_imports = collect_imports_in_stmts(root);
+    if root_imports.is_empty() {
+        return Ok(ModuleGraph {
+            order: Vec::new(),
+            modules: HashMap::new(),
+        });
+    }
+    let resolver = match &opts.module_resolver {
+        Some(r) => r.clone(),
+        None => {
+            return Err(BopError::runtime(
+                "bop-compile: `import` requires `Options::module_resolver` to be set so the transpiler can inline the imported modules",
+                root_imports.first().map(|(_, line)| *line).unwrap_or(0),
+            ));
+        }
+    };
+
+    let mut graph = ModuleGraph {
+        order: Vec::new(),
+        modules: HashMap::new(),
+    };
+    let mut visiting: BTreeSet<String> = BTreeSet::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    for (name, line) in &root_imports {
+        visit_module(
+            name,
+            *line,
+            &resolver,
+            &mut graph,
+            &mut visiting,
+            &mut visited,
+        )?;
+    }
+    Ok(graph)
+}
+
+fn visit_module(
+    name: &str,
+    line: u32,
+    resolver: &crate::ModuleResolver,
+    graph: &mut ModuleGraph,
+    visiting: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+) -> Result<(), BopError> {
+    if visiting.contains(name) {
+        return Err(BopError::runtime(
+            format!("Circular import: module `{}`", name),
+            line,
+        ));
+    }
+    if visited.contains(name) {
+        return Ok(());
+    }
+    visiting.insert(name.to_string());
+
+    // Resolve + parse.
+    let source = {
+        let mut r = resolver.borrow_mut();
+        match r(name) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(BopError::runtime(
+                    format!("Module `{}` not found", name),
+                    line,
+                ));
+            }
+        }
+    };
+    let ast = bop::parse(&source)?;
+
+    // Collect this module's direct imports and visit them first so
+    // `effective_exports` is ready when we pack ours.
+    let direct_imports: Vec<(String, u32)> = collect_imports_in_stmts(&ast);
+    for (child_name, child_line) in &direct_imports {
+        visit_module(
+            child_name,
+            *child_line,
+            resolver,
+            graph,
+            visiting,
+            visited,
+        )?;
+    }
+
+    let own_lets = collect_top_level_lets(&ast);
+    let own_fns = collect_top_level_fn_params(&ast);
+
+    // effective_exports = own_lets + own_fn_names + (transitively,
+    // every import's effective_exports). De-dup while preserving
+    // declaration order.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut exports: Vec<String> = Vec::new();
+    for (imp_name, _) in &direct_imports {
+        if let Some(m) = graph.modules.get(imp_name) {
+            for name in &m.effective_exports {
+                if seen.insert(name.clone()) {
+                    exports.push(name.clone());
+                }
+            }
+        }
+    }
+    for name in &own_lets {
+        if seen.insert(name.clone()) {
+            exports.push(name.clone());
+        }
+    }
+    for name in own_fns.keys() {
+        if seen.insert(name.clone()) {
+            exports.push(name.clone());
+        }
+    }
+
+    graph.modules.insert(
+        name.to_string(),
+        ModuleEntry {
+            ast,
+            own_fns,
+            own_lets,
+            direct_imports: direct_imports.into_iter().map(|(n, _)| n).collect(),
+            effective_exports: exports,
+        },
+    );
+    graph.order.push(name.to_string());
+    visiting.remove(name);
+    visited.insert(name.to_string());
+    Ok(())
+}
+
+fn collect_imports_in_stmts(stmts: &[Stmt]) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    for stmt in stmts {
+        if let StmtKind::Import { path } = &stmt.kind {
+            out.push((path.clone(), stmt.line));
+        }
+    }
+    out
+}
+
+fn collect_top_level_lets(stmts: &[Stmt]) -> Vec<String> {
+    stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::Let { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_top_level_fn_params(stmts: &[Stmt]) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for stmt in stmts {
+        if let StmtKind::FnDecl { name, params, .. } = &stmt.kind {
+            out.insert(name.clone(), params.clone());
+        }
+    }
+    out
 }
 
 /// Result of the pre-pass over the AST. `all_fns` maps every
@@ -115,10 +311,19 @@ struct Emitter {
     indent: usize,
     opts: Options,
     fn_info: FnInfo,
+    modules: ModuleGraph,
     /// Counter for temporary locals (`__t0`, `__t1`, …). Reset at
     /// the start of each fn / top-level program so the names stay
     /// short.
     tmp_counter: usize,
+    /// Non-empty while emitting an imported module's body — the
+    /// prefix (e.g. `"foo__bar__"`) is applied to every user fn
+    /// name so modules can't collide on function identifiers.
+    module_prefix: String,
+    /// Paths already imported at the current scope. Re-importing
+    /// the same path in the same scope is a no-op — matches the
+    /// walker's `imported_here` guard.
+    imported_in_scope: HashSet<String>,
     /// Stack of `let`-bound Bop names visible at the current
     /// emission position. Used for:
     ///
@@ -132,13 +337,16 @@ struct Emitter {
 }
 
 impl Emitter {
-    fn new(opts: Options, fn_info: FnInfo) -> Self {
+    fn new(opts: Options, fn_info: FnInfo, modules: ModuleGraph) -> Self {
         Self {
             out: String::new(),
             indent: 0,
             opts,
             fn_info,
+            modules,
             tmp_counter: 0,
+            module_prefix: String::new(),
+            imported_in_scope: HashSet::new(),
             scope_stack: Vec::new(),
         }
     }
@@ -161,6 +369,14 @@ impl Emitter {
         self.scope_stack.iter().rev().any(|s| s.contains(name))
     }
 
+    fn rust_fn_name(&self, name: &str) -> String {
+        rust_fn_name_with(&self.module_prefix, name)
+    }
+
+    fn wrapper_fn_name(&self, name: &str) -> String {
+        wrapper_fn_name_with(&self.module_prefix, name)
+    }
+
     fn finish(self) -> String {
         self.out
     }
@@ -172,6 +388,10 @@ impl Emitter {
         }
         self.emit_header();
         self.emit_runtime_preamble();
+        // Imported modules emit first (topo-ordered — leaves
+        // first) so their fns, exports, and load fns exist by
+        // the time the root program's code references them.
+        self.emit_imported_modules()?;
         // Top-level fn declarations move out of `run_program`'s
         // body to module scope. That way the `__bop_fn_value_*`
         // wrappers (also at module scope) can reference them, and
@@ -186,6 +406,232 @@ impl Emitter {
         if module_name.is_some() {
             self.out.push_str("}\n");
         }
+        Ok(())
+    }
+
+    /// Emit every module in the pre-resolved graph, in topo
+    /// order. Each module gets: its user fn decls (prefixed by
+    /// the module slug), its fn-value wrappers, its exports
+    /// struct, and its load fn.
+    fn emit_imported_modules(&mut self) -> Result<(), BopError> {
+        let order = self.modules.order.clone();
+        for name in &order {
+            let entry = self
+                .modules
+                .modules
+                .get(name)
+                .cloned()
+                .expect("module present in graph");
+            self.emit_one_module(name, &entry)?;
+        }
+        Ok(())
+    }
+
+    fn emit_one_module(
+        &mut self,
+        name: &str,
+        entry: &ModuleEntry,
+    ) -> Result<(), BopError> {
+        // Swap in this module's scope: prefix every user fn we
+        // emit with the module slug, and replace `fn_info` with
+        // the module's own fns so `is_local` / Ident / Call
+        // resolution inside the module body behave correctly.
+        let saved_prefix = std::mem::replace(
+            &mut self.module_prefix,
+            format!("{}__", module_slug(name)),
+        );
+        let saved_fn_info =
+            std::mem::replace(&mut self.fn_info, collect_fn_info(&entry.ast));
+
+        self.emit_top_level_fn_decls(&entry.ast)?;
+        self.emit_fn_value_wrappers();
+        self.emit_module_exports_struct(name, entry);
+        self.emit_module_load_fn(name, entry)?;
+
+        self.fn_info = saved_fn_info;
+        self.module_prefix = saved_prefix;
+        Ok(())
+    }
+
+    fn emit_module_exports_struct(&mut self, name: &str, entry: &ModuleEntry) {
+        writeln!(self.out, "#[derive(Clone)]").unwrap();
+        writeln!(
+            self.out,
+            "struct {type_name} {{",
+            type_name = module_exports_type_name(name)
+        )
+        .unwrap();
+        for export in &entry.effective_exports {
+            writeln!(
+                self.out,
+                "    {ident}: ::bop::value::Value,",
+                ident = rust_ident(export)
+            )
+            .unwrap();
+        }
+        self.out.push_str("}\n\n");
+    }
+
+    /// Emit an `import foo.bar` statement as Rust code that loads
+    /// the module once (via its `__mod_*__load` fn, which handles
+    /// caching + cycle detection) and then unpacks each of its
+    /// effective exports as a local Bop binding. Matches the
+    /// walker's flat-injection semantics.
+    fn emit_import_stmt(&mut self, path: &str, line: u32) -> Result<(), BopError> {
+        // Idempotent at the injection site: re-importing a module
+        // we already injected into this scope is a no-op. Matches
+        // the walker's `imported_here` short-circuit.
+        if self.imported_in_scope.contains(path) {
+            return Ok(());
+        }
+        let entry = self
+            .modules
+            .modules
+            .get(path)
+            .cloned()
+            .ok_or_else(|| {
+                BopError::runtime(
+                    format!("Module `{}` not found (bop-compile)", path),
+                    line,
+                )
+            })?;
+        let tmp = self.fresh_tmp();
+        self.line(&format!(
+            "let {tmp} = {load}(ctx)?;",
+            tmp = tmp,
+            load = module_load_fn_name(path)
+        ));
+        for export in &entry.effective_exports {
+            // Shadow-check: the importer can't already have this
+            // name in its scope. Emitted as a transpile-time
+            // guard so it mirrors the walker / VM behaviour.
+            if self.is_local(export) {
+                return Err(BopError::runtime(
+                    format!(
+                        "Import of `{}` from `{}` would shadow an existing binding",
+                        export, path
+                    ),
+                    line,
+                ));
+            }
+            self.line(&format!(
+                "let mut {ident}: ::bop::value::Value = {tmp}.{ident}.clone();",
+                ident = rust_ident(export),
+                tmp = tmp
+            ));
+            self.bind_local(export);
+        }
+        self.imported_in_scope.insert(path.to_string());
+        Ok(())
+    }
+
+    /// Emit the load fn for one module: checks the cache, inserts
+    /// the `Loading` sentinel, emits the module body (imports +
+    /// user statements), then packs every effective export into
+    /// the module's exports struct and caches the result.
+    fn emit_module_load_fn(
+        &mut self,
+        name: &str,
+        entry: &ModuleEntry,
+    ) -> Result<(), BopError> {
+        let load = module_load_fn_name(name);
+        let exports = module_exports_type_name(name);
+        writeln!(
+            self.out,
+            "fn {load}(ctx: &mut Ctx<'_>) -> Result<{exports}, ::bop::error::BopError> {{",
+            load = load,
+            exports = exports,
+        )
+        .unwrap();
+        self.indent = 1;
+        self.tmp_counter = 0;
+
+        // Cache lookup: hit a live exports? clone + return.
+        // In progress? error with cycle message. Miss? mark
+        // loading and fall through to evaluate the body.
+        self.line(&format!(
+            r#"if let Some(entry) = ctx.module_cache.get("{key}") {{"#,
+            key = name
+        ));
+        self.line("    if entry.is::<__ModuleLoading>() {");
+        self.line(&format!(
+            "        return Err(::bop::error::BopError::runtime(\"Circular import: module `{key}`\", 0));",
+            key = name
+        ));
+        self.line("    }");
+        self.line(&format!(
+            "    if let Some(loaded) = entry.downcast_ref::<{exports}>() {{",
+            exports = exports
+        ));
+        self.line("        return Ok(loaded.clone());");
+        self.line("    }");
+        self.line("}");
+        self.line(&format!(
+            r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__ModuleLoading));"#,
+            key = name
+        ));
+
+        // Sandbox gets a tick at module entry too — same checkpoint
+        // as any fn entry.
+        self.emit_tick(0);
+
+        // Body: emit the module's statements, skipping top-level
+        // fn decls (already emitted) but handling imports /
+        // lets / everything else. Track a fresh scope so the
+        // emitter's Ident lookup resolves within the module.
+        self.push_scope();
+        for stmt in &entry.ast {
+            if matches!(&stmt.kind, StmtKind::FnDecl { .. }) {
+                continue;
+            }
+            self.emit_stmt(stmt)?;
+        }
+
+        // Pack every effective export. Top-level lets are Rust
+        // locals at this point. Imports injected their names as
+        // Rust locals too. Top-level fns need the wrapper to get
+        // a `Value::Fn`.
+        writeln!(self.out).unwrap();
+        self.pad();
+        writeln!(
+            self.out,
+            "let __exports = {exports} {{",
+            exports = exports
+        )
+        .unwrap();
+        for export in &entry.effective_exports {
+            self.pad();
+            if entry.own_fns.contains_key(export) {
+                writeln!(
+                    self.out,
+                    "    {ident}: {wrapper}(),",
+                    ident = rust_ident(export),
+                    wrapper = self.wrapper_fn_name(export)
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    self.out,
+                    "    {ident}: {ident}.clone(),",
+                    ident = rust_ident(export)
+                )
+                .unwrap();
+            }
+        }
+        self.pad();
+        self.out.push_str("};\n");
+        self.pad();
+        writeln!(
+            self.out,
+            r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__exports.clone()));"#,
+            key = name
+        )
+        .unwrap();
+        self.pad();
+        self.out.push_str("Ok(__exports)\n");
+        self.pop_scope();
+        self.indent = 0;
+        self.out.push_str("}\n\n");
         Ok(())
     }
 
@@ -217,7 +663,7 @@ impl Emitter {
                 Some(p) => p.clone(),
                 None => continue,
             };
-            let rust_fn = rust_fn_name(&name);
+            let rust_fn = self.rust_fn_name(&name);
             let arity = params.len();
             let params_list = params
                 .iter()
@@ -227,8 +673,8 @@ impl Emitter {
 
             writeln!(
                 self.out,
-                "fn __bop_fn_value_{name}() -> ::bop::value::Value {{",
-                name = name
+                "fn {wrapper}() -> ::bop::value::Value {{",
+                wrapper = self.wrapper_fn_name(&name)
             )
             .unwrap();
             writeln!(
@@ -484,20 +930,8 @@ impl Emitter {
             StmtKind::Break => self.line("break;"),
             StmtKind::Continue => self.line("continue;"),
 
-            StmtKind::Import { .. } => {
-                // Tracked as a follow-up: the AOT would have to
-                // either (a) resolve modules at transpile time by
-                // asking a resolver supplied via `Options` and
-                // inline the compiled bodies, or (b) ship a
-                // runtime loader that parses+interprets the
-                // imported source via the tree-walker. Both work;
-                // both are follow-up effort. Phase 2 lands the
-                // walker + VM support and leaves a clear error at
-                // the AOT boundary.
-                return Err(BopError::runtime(
-                    "bop-compile: `import` is not yet supported by the AOT transpiler — use `bop::run` or `bop_vm::run` for programs that import modules",
-                    line,
-                ));
+            StmtKind::Import { path } => {
+                self.emit_import_stmt(path, line)?;
             }
 
             StmtKind::ExprStmt(expr) => {
@@ -636,7 +1070,7 @@ impl Emitter {
         body: &[Stmt],
         line: u32,
     ) -> Result<(), BopError> {
-        let fn_name = rust_fn_name(name);
+        let fn_name = self.rust_fn_name(name);
         let param_list = params
             .iter()
             .map(|p| format!("mut {}: ::bop::value::Value", rust_ident(p)))
@@ -706,7 +1140,7 @@ impl Emitter {
                     // Top-level fn used as a value — hand back the
                     // wrapper that reifies the Rust fn as a
                     // `Value::Fn`.
-                    format!("__bop_fn_value_{}()", name)
+                    format!("{}()", self.wrapper_fn_name(name))
                 } else if self.fn_info.all_fns.contains_key(name) {
                     // A nested fn isn't reachable as a value from
                     // outside its outer fn's Rust scope — document
@@ -947,7 +1381,7 @@ impl Emitter {
                     )
                 };
                 if self.fn_info.all_fns.contains_key(&name) {
-                    let fn_name = rust_fn_name(&name);
+                    let fn_name = self.rust_fn_name(&name);
                     let fn_args = if arg_names.is_empty() {
                         "ctx".to_string()
                     } else {
@@ -1499,11 +1933,33 @@ fn rust_ident(name: &str) -> String {
     }
 }
 
-/// Render a Bop user-fn name as a Rust function name. Prefixed so
-/// there's no chance of clashing with built-in / stdlib fn names in
-/// the generated module.
-fn rust_fn_name(name: &str) -> String {
-    format!("bop_fn_{}", name)
+/// Render a Bop user-fn name as a Rust function name under a
+/// specific module prefix (`""` for the root program). Kept
+/// prefixed to avoid clashes with built-ins, and extended with
+/// the module slug so `foo.bar::square` and root::square can
+/// coexist in the same emitted Rust file.
+fn rust_fn_name_with(module_prefix: &str, name: &str) -> String {
+    format!("bop_fn_{}{}", module_prefix, name)
+}
+
+fn wrapper_fn_name_with(module_prefix: &str, name: &str) -> String {
+    format!("__bop_fn_value_{}{}", module_prefix, name)
+}
+
+/// Turn a Bop module path (`std.math.extra`) into a Rust-safe
+/// identifier slug (`std_math_extra`). Used as the prefix for
+/// everything a module emits — fns, wrappers, the load fn, the
+/// exports struct.
+fn module_slug(path: &str) -> String {
+    path.replace('.', "_")
+}
+
+fn module_load_fn_name(path: &str) -> String {
+    format!("__mod_{}__load", module_slug(path))
+}
+
+fn module_exports_type_name(path: &str) -> String {
+    format!("__mod_{}__Exports", module_slug(path))
 }
 
 /// Kept in sync with `bop::methods::is_mutating_method` —
@@ -1601,7 +2057,19 @@ const RUNTIME_PREAMBLE: &str = r#"// ─── Runtime context and helpers ─�
 pub struct Ctx<'h> {
     pub host: &'h mut dyn ::bop::BopHost,
     pub rand_state: u64,
+    /// Per-program module cache keyed by the Bop module path (the
+    /// dot-joined string). `load` fns use this to memoise imports
+    /// and to spot circular dependencies via the `__ModuleLoading`
+    /// sentinel.
+    pub module_cache:
+        ::std::collections::HashMap<::std::string::String, ::std::boxed::Box<dyn ::core::any::Any + 'static>>,
 }
+
+/// Sentinel type inserted into `module_cache` while a module's
+/// body is evaluating. If a load fn hits its own entry in this
+/// state it means a circular import — the runtime returns a clear
+/// error and halts.
+pub struct __ModuleLoading;
 
 /// Opaque body that a `Value::Fn` carries around in AOT-emitted
 /// code. The callable is a higher-ranked `Fn` so the same Rc can
@@ -1736,6 +2204,7 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
     let mut ctx = Ctx {
         host: host as &mut dyn ::bop::BopHost,
         rand_state: 0,
+        module_cache: ::std::collections::HashMap::new(),
     };
     run_program(&mut ctx)
 }
@@ -1767,7 +2236,13 @@ pub struct Ctx<'h> {
     pub rand_state: u64,
     pub steps: u64,
     pub max_steps: u64,
+    pub module_cache:
+        ::std::collections::HashMap<::std::string::String, ::std::boxed::Box<dyn ::core::any::Any + 'static>>,
 }
+
+/// Sentinel inserted into `module_cache` while a module's body is
+/// evaluating. See the non-sandbox preamble for details.
+pub struct __ModuleLoading;
 
 /// Opaque body that a `Value::Fn` carries around in AOT-emitted
 /// code. See the non-sandbox preamble for the rationale.
@@ -1921,6 +2396,7 @@ pub fn run<H: ::bop::BopHost>(
         rand_state: 0,
         steps: 0,
         max_steps: limits.max_steps,
+        module_cache: ::std::collections::HashMap::new(),
     };
     run_program(&mut ctx)
 }

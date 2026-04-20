@@ -157,8 +157,8 @@ must be cheap (envs use `Rc` internally).
 
 ### Phase 2 — Modules and imports
 
-*Status: done for walker + VM + bop-sys; AOT deferred to a
-follow-up. `BopHost::resolve_module(name) -> Option<Result<String,
+*Status: done across all three engines + bop-sys.
+`BopHost::resolve_module(name) -> Option<Result<String,
 BopError>>` added to the core trait with a `None`-returning
 default. `import foo.bar.baz` is now a statement; the walker and
 VM each run the module in a sub-engine that inherits the parent's
@@ -171,10 +171,17 @@ from a module come back as engine-compatible `Value::Fn`s —
 walker gets `FnBody::Ast`, VM gets `FnBody::Compiled(Rc<Chunk>)`.
 bop-sys's `StandardHost::with_module_root(path)` maps
 `foo.bar.baz` to `<root>/foo/bar/baz.bop` with path-traversal
-guards. 9 walker tests + 8 differential tests + 3 bop-sys tests.
-AOT rejects `import` with a clear "use walker/VM" error — will
-either compile-time-resolve via an `Options` callback or ship a
-runtime loader in phase 2c.*
+guards. The AOT transpiler takes a compile-time
+`Options::module_resolver` callback, pre-resolves the entire
+module graph with DFS cycle detection, and emits each module as a
+`__mod_<slug>__load` fn + `__mod_<slug>__Exports` struct + a
+shared `Ctx::module_cache` that memoises loaded modules and
+detects cycles at runtime via a `__ModuleLoading` sentinel. Cross-
+module refs unpack the exports struct into local Bop bindings at
+each import site, matching the walker's flat-injection semantics
+(with transitive re-exports). 9 walker tests + 8 differential
+tests + 3 bop-sys tests + 5 AOT e2e tests + 5 three-way corpus
+entries. All green.*
 
 **Why second.** Multi-file programs are table stakes. Closures
 without modules would still leave users writing 2000-line single

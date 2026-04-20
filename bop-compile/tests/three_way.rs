@@ -36,18 +36,23 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use bop::{BopError, BopHost, BopLimits, Value};
-use bop_compile::{Options, transpile};
+use bop_compile::{Options, modules_from_map, transpile};
 
 // ─── Shared test host ─────────────────────────────────────────────
 
 struct BufHost {
     prints: RefCell<Vec<String>>,
+    modules: std::collections::HashMap<String, String>,
 }
 
 impl BufHost {
-    fn new() -> Self {
+    fn new(modules: &[(&str, &str)]) -> Self {
         Self {
             prints: RefCell::new(Vec::new()),
+            modules: modules
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
         }
     }
 }
@@ -65,6 +70,10 @@ impl BopHost for BufHost {
     fn on_print(&mut self, message: &str) {
         self.prints.borrow_mut().push(message.to_string());
     }
+
+    fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+        self.modules.get(name).cloned().map(Ok)
+    }
 }
 
 /// Normalised per-engine outcome the harness compares across
@@ -75,8 +84,8 @@ struct Outcome {
     error: Option<String>,
 }
 
-fn walker_outcome(code: &str) -> Outcome {
-    let mut host = BufHost::new();
+fn walker_outcome(code: &str, modules: &[(&str, &str)]) -> Outcome {
+    let mut host = BufHost::new(modules);
     let result = bop::run(code, &mut host, &BopLimits::standard());
     Outcome {
         prints: host.prints.borrow().clone(),
@@ -84,8 +93,8 @@ fn walker_outcome(code: &str) -> Outcome {
     }
 }
 
-fn vm_outcome(code: &str) -> Outcome {
-    let mut host = BufHost::new();
+fn vm_outcome(code: &str, modules: &[(&str, &str)]) -> Outcome {
+    let mut host = BufHost::new(modules);
     let result = bop_vm::run(code, &mut host, &BopLimits::standard());
     Outcome {
         prints: host.prints.borrow().clone(),
@@ -113,26 +122,42 @@ fn scratch_dir(name: &str) -> PathBuf {
     p
 }
 
+/// One test in the three-way corpus. `modules` is optional — empty
+/// slice means the program has no imports.
+struct CorpusEntry {
+    name: &'static str,
+    source: &'static str,
+    modules: &'static [(&'static str, &'static str)],
+}
+
 /// Build the single-file AOT driver that runs every program in the
 /// corpus and emits per-program envelopes on stdout.
-fn build_driver(programs: &[(&str, &str)]) -> String {
+fn build_driver(programs: &[CorpusEntry]) -> String {
     let mut out = String::new();
     out.push_str(DRIVER_HEADER);
 
     // One pub mod per program. Sandbox is on so runaway programs
     // can't hang the CI machine — the walker and VM run with the
     // same `BopLimits::standard()` so the comparison stays fair.
-    for (name, src) in programs {
+    for entry in programs {
+        let resolver = if entry.modules.is_empty() {
+            None
+        } else {
+            Some(modules_from_map(
+                entry.modules.iter().map(|(k, v)| (*k, *v)),
+            ))
+        };
         let mod_src = transpile(
-            src,
+            entry.source,
             &Options {
                 emit_main: false,
                 use_bop_sys: false,
                 sandbox: true,
-                module_name: Some(format!("p_{}", name)),
+                module_name: Some(format!("p_{}", entry.name)),
+                module_resolver: resolver,
             },
         )
-        .unwrap_or_else(|e| panic!("transpile failed for {}: {}", name, e.message));
+        .unwrap_or_else(|e| panic!("transpile failed for {}: {}", entry.name, e.message));
         out.push_str(&mod_src);
         out.push('\n');
     }
@@ -143,11 +168,15 @@ fn build_driver(programs: &[(&str, &str)]) -> String {
     // be trivially type-erased.
     out.push_str("fn main() {\n");
     out.push_str("    let mut out = ::std::string::String::new();\n");
-    for (name, _) in programs {
+    for entry in programs {
+        let name = entry.name;
         writeln!(
             out,
             concat!(
                 "    {{\n",
+                // Driver-side BufHost, defined in DRIVER_HEADER —
+                // distinct from the harness-side one, no modules
+                // map (AOT resolves at compile time).
                 "        let mut host = BufHost::new();\n",
                 "        let limits = ::bop::BopLimits::standard();\n",
                 "        let result = p_{name}::run(&mut host, &limits);\n",
@@ -237,7 +266,7 @@ path = "src/main.rs"
     dir
 }
 
-fn run_aot_batch(programs: &[(&str, &str)]) -> Vec<(String, Outcome)> {
+fn run_aot_batch(programs: &[CorpusEntry]) -> Vec<(String, Outcome)> {
     let driver_src = build_driver(programs);
     let dir = write_driver_project(&driver_src);
     let output = Command::new("cargo")
@@ -561,35 +590,96 @@ print(ops[1](2, 3))"#,
     ("type_of_fn_is_fn", "fn f() { }\nprint(type(f))"),
 ];
 
+/// Programs that exercise the `import` surface. Each entry
+/// pairs source with a module map the walker, VM, and AOT all
+/// resolve against. AOT's compile-time resolver is seeded from
+/// this same map via `modules_from_map`.
+const IMPORTS_CORPUS: &[(&str, &str, &[(&str, &str)])] = &[
+    (
+        "import_basic_let",
+        r#"import math
+print(pi)"#,
+        &[("math", "let pi = 3")],
+    ),
+    (
+        "import_named_fn",
+        r#"import math
+print(square(7))"#,
+        &[("math", "fn square(n) { return n * n }")],
+    ),
+    (
+        "import_dotted_path",
+        r#"import std.math
+print(e)"#,
+        &[("std.math", "let e = 2")],
+    ),
+    (
+        "import_transitive",
+        r#"import a
+print(doubled)"#,
+        &[
+            ("a", "import b\nlet doubled = pi + pi"),
+            ("b", "let pi = 3"),
+        ],
+    ),
+    (
+        "import_idempotent_cache",
+        r#"import m
+import m
+print(x)"#,
+        &[("m", "let x = 42")],
+    ),
+];
+
 // ─── The actual three-way test ────────────────────────────────────
 
 #[test]
 #[ignore]
 fn three_way_diff() {
+    // Unify the flat CORPUS (no imports) and IMPORTS_CORPUS into
+    // a single list of `CorpusEntry`. The empty-slice for
+    // `modules` on flat entries is load-bearing — it's what lets
+    // us skip threading a resolver through to simple programs.
+    let mut entries: Vec<CorpusEntry> = CORPUS
+        .iter()
+        .map(|(name, source)| CorpusEntry {
+            name,
+            source,
+            modules: &[],
+        })
+        .collect();
+    for (name, source, modules) in IMPORTS_CORPUS {
+        entries.push(CorpusEntry {
+            name,
+            source,
+            modules,
+        });
+    }
+
     // Step 1: compute walker + VM outcomes up-front so we can
     // compare against AOT after the slow compile.
     let mut walker = std::collections::HashMap::new();
     let mut vm = std::collections::HashMap::new();
-    for (name, src) in CORPUS {
-        walker.insert(*name, walker_outcome(src));
-        vm.insert(*name, vm_outcome(src));
+    for e in &entries {
+        walker.insert(e.name, walker_outcome(e.source, e.modules));
+        vm.insert(e.name, vm_outcome(e.source, e.modules));
     }
 
     // Step 2: run the batched AOT once.
-    let aot_results = run_aot_batch(CORPUS);
+    let aot_results = run_aot_batch(&entries);
     let aot: std::collections::HashMap<String, Outcome> = aot_results.into_iter().collect();
 
     // Step 3: every program's outcome must agree across all three.
     let mut failures: Vec<String> = Vec::new();
-    for (name, _src) in CORPUS {
-        let w = &walker[*name];
-        let v = &vm[*name];
-        let a = aot.get(*name).unwrap_or_else(|| {
-            panic!("AOT did not produce an envelope for {}", name);
+    for e in &entries {
+        let w = &walker[e.name];
+        let v = &vm[e.name];
+        let a = aot.get(e.name).unwrap_or_else(|| {
+            panic!("AOT did not produce an envelope for {}", e.name);
         });
 
         if w != v || v != a {
-            let mut msg = format!("\n--- {} ---\n", name);
+            let mut msg = format!("\n--- {} ---\n", e.name);
             writeln!(msg, "walker: {:?}", w).unwrap();
             writeln!(msg, "vm:     {:?}", v).unwrap();
             writeln!(msg, "aot:    {:?}", a).unwrap();

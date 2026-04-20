@@ -455,6 +455,7 @@ fn options_without_main_skip_entry_point() {
         use_bop_sys: false,
         sandbox: false,
         module_name: None,
+        module_resolver: None,
     };
     let out = transpile("print(1)", &opts).unwrap();
     assert!(

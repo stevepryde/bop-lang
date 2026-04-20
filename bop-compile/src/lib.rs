@@ -36,13 +36,46 @@
 //! - `BopLimits` sandbox mode (step / memory enforcement in the
 //!   emitted code)
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use bop::error::BopError;
 use bop::parser::Stmt;
 
 mod emit;
 
+/// A compile-time module resolver. The AOT runs this eagerly for
+/// every `import` it encounters, threading the entire module graph
+/// into the generated Rust. Same contract as
+/// [`bop::BopHost::resolve_module`]: `None` = not handled,
+/// `Some(Ok(source))` = module source text,
+/// `Some(Err(_))` = resolver failure.
+///
+/// Wrapped as `Rc<RefCell<..>>` so `Options` stays `Clone` while
+/// the callback keeps `FnMut` freedom.
+pub type ModuleResolver =
+    Rc<RefCell<dyn FnMut(&str) -> Option<Result<String, BopError>> + 'static>>;
+
+/// Build a [`ModuleResolver`] from an in-memory name→source map.
+/// Convenience for tests and simple embedders.
+pub fn modules_from_map<S: Into<String>>(
+    modules: impl IntoIterator<Item = (S, S)>,
+) -> ModuleResolver {
+    let map: std::collections::HashMap<String, String> = modules
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+    Rc::new(RefCell::new(move |name: &str| {
+        map.get(name).cloned().map(Ok)
+    }))
+}
+
 /// Options that control the shape of the emitted Rust.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is skipped — `module_resolver` is a trait object that
+/// has no useful debug representation. If you need to diff options
+/// in tests, compare specific fields directly.
+#[derive(Clone)]
 pub struct Options {
     /// If true, emit a `fn main()` that drives the program with
     /// [`bop_sys::StandardHost`]. If false, emit only the library
@@ -72,6 +105,15 @@ pub struct Options {
     /// `run`, `__bop_tick`, user-fn names, etc.). `emit_main` is
     /// ignored in this mode — you provide your own driver.
     pub module_name: Option<String>,
+    /// Resolver used to inline imported modules into the emitted
+    /// Rust at transpile time. Required when the program contains
+    /// any `import` statement; missing (`None`) + an import in
+    /// source raises a clear "set `module_resolver`" error.
+    ///
+    /// The resolver is called eagerly for each transitive import
+    /// before any Rust is emitted, so cycle detection and missing
+    /// modules both surface at build time rather than at run time.
+    pub module_resolver: Option<ModuleResolver>,
 }
 
 impl Default for Options {
@@ -81,6 +123,7 @@ impl Default for Options {
             use_bop_sys: true,
             sandbox: false,
             module_name: None,
+            module_resolver: None,
         }
     }
 }
