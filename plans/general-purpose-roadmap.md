@@ -96,6 +96,26 @@ A useful mental split:
 
 ### Phase 1 — Closures and first-class functions
 
+*Status: done. Value gains an `Rc<BopFn>` variant with an
+engine-opaque `FnBody` (`Ast` for the walker; `Compiled(Rc<dyn
+Any>)` for the VM and AOT). Lambdas parse as `fn(params) {
+body }` at expression position; the walker snapshots visible
+scope into the closure's captures, the VM's `MakeLambda` opcode
+does the same at runtime while carrying a pre-compiled chunk,
+and the AOT emits Rust `move` closures with compile-time
+free-variable analysis. First-class named fns work in all three
+via synthesised wrappers / `LoadVar` fallback / module-scope
+`__bop_fn_value_<name>` helpers. Non-Ident callees (`funcs[0](x)`,
+`make_adder(5)(3)`) go through a `CallValue` opcode in the VM
+and a `__bop_call_value` helper in AOT. 12 walker tests + 10
+differential tests + 6 AOT e2e tests + 8 three-way corpus
+entries all green.*
+
+Known limitation: let-bound lambdas can't self-reference
+(`let f = fn() { f() }` fails because captures snapshot `f`
+before it's bound). Named-fn declarations (`fn name(...)`) work
+for recursion via `self_name` seeding.
+
 **Why first.** Everything downstream assumes functions are values.
 Iterators, callbacks, the stdlib's `map` / `filter` / `reduce`,
 event handlers in embedders, higher-order patterns in user code —

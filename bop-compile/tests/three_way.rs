@@ -513,6 +513,52 @@ print(if [] { "t" } else { "f" })"#,
     // with a useful error; the three-way harness just can't
     // phrase the assertion as "same message text".
     ("error_array_oob", "let a = [1]\nprint(a[5])"),
+    // ─── Closures / first-class fns (phase 1) ─────────────────
+    (
+        "closure_basic_lambda",
+        r#"let double = fn(x) { return x * 2 }
+print(double(5))
+print(double(21))"#,
+    ),
+    (
+        "closure_captures_value",
+        r#"let n = 5
+let add_n = fn(x) { return x + n }
+print(add_n(3))
+n = 100
+print(add_n(3))"#,
+    ),
+    (
+        "closure_factory",
+        r#"fn make_adder(n) { return fn(x) { return x + n } }
+let add5 = make_adder(5)
+let add10 = make_adder(10)
+print(add5(3))
+print(add10(3))"#,
+    ),
+    (
+        "named_fn_as_first_class_value",
+        r#"fn double(x) { return x * 2 }
+let f = double
+print(f(7))"#,
+    ),
+    (
+        "higher_order_apply",
+        r#"fn apply(f, x) { return f(x) }
+fn square(n) { return n * n }
+print(apply(square, 4))
+print(apply(fn(n) { return n + 1 }, 4))"#,
+    ),
+    (
+        "fn_in_array_indexed_call",
+        r#"fn add(x, y) { return x + y }
+fn mul(x, y) { return x * y }
+let ops = [add, mul]
+print(ops[0](2, 3))
+print(ops[1](2, 3))"#,
+    ),
+    ("iife_value_call", "print((fn(x) { return x * 3 })(4))"),
+    ("type_of_fn_is_fn", "fn f() { }\nprint(type(f))"),
 ];
 
 // ─── The actual three-way test ────────────────────────────────────

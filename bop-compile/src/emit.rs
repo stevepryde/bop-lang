@@ -29,7 +29,7 @@
 //! so the caller sees a clear "not yet supported" message instead of
 //! broken Rust.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use bop::error::BopError;
@@ -39,49 +39,72 @@ use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind,
 use crate::Options;
 
 pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
-    let user_fns = collect_fn_names(stmts);
-    let mut emitter = Emitter::new(opts.clone(), user_fns);
+    let info = collect_fn_info(stmts);
+    let mut emitter = Emitter::new(opts.clone(), info);
     emitter.emit_program(stmts)?;
     Ok(emitter.finish())
 }
 
-/// Walk the AST collecting every `fn <name>` declaration, including
-/// those nested in function bodies or inside control-flow blocks.
-/// The set is used to decide whether a call to a non-builtin name
-/// should emit a user-fn fallback path or drop straight to the
-/// "Function X not found" error.
-fn collect_fn_names(stmts: &[Stmt]) -> HashSet<String> {
-    let mut out = HashSet::new();
-    collect_from_block(stmts, &mut out);
-    out
+/// Result of the pre-pass over the AST. `all_fns` maps every
+/// user-defined function name (top-level or nested) to its
+/// parameter list so the emitter can decide dispatch + arity
+/// for each call site. `top_level_fns` is the subset that's
+/// reachable from outside its defining block and therefore
+/// eligible to be turned into a first-class `Value::Fn` via an
+/// emitted wrapper.
+struct FnInfo {
+    all_fns: HashMap<String, Vec<String>>,
+    top_level_fns: HashSet<String>,
 }
 
-fn collect_from_block(stmts: &[Stmt], out: &mut HashSet<String>) {
+fn collect_fn_info(stmts: &[Stmt]) -> FnInfo {
+    let mut all_fns = HashMap::new();
+    let mut top_level_fns = HashSet::new();
     for stmt in stmts {
-        match &stmt.kind {
-            StmtKind::FnDecl { name, body, .. } => {
-                out.insert(name.clone());
-                collect_from_block(body, out);
-            }
-            StmtKind::If {
-                body,
-                else_ifs,
-                else_body,
-                ..
-            } => {
-                collect_from_block(body, out);
-                for (_, b) in else_ifs {
-                    collect_from_block(b, out);
-                }
-                if let Some(b) = else_body {
-                    collect_from_block(b, out);
-                }
-            }
-            StmtKind::While { body, .. } => collect_from_block(body, out),
-            StmtKind::Repeat { body, .. } => collect_from_block(body, out),
-            StmtKind::ForIn { body, .. } => collect_from_block(body, out),
-            _ => {}
+        if let StmtKind::FnDecl { name, params, body } = &stmt.kind {
+            all_fns.insert(name.clone(), params.clone());
+            top_level_fns.insert(name.clone());
+            collect_nested_fns(body, &mut all_fns);
+        } else {
+            collect_nested_fns_in_stmt(stmt, &mut all_fns);
         }
+    }
+    FnInfo {
+        all_fns,
+        top_level_fns,
+    }
+}
+
+fn collect_nested_fns(stmts: &[Stmt], all: &mut HashMap<String, Vec<String>>) {
+    for stmt in stmts {
+        collect_nested_fns_in_stmt(stmt, all);
+    }
+}
+
+fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<String>>) {
+    match &stmt.kind {
+        StmtKind::FnDecl { name, params, body } => {
+            all.insert(name.clone(), params.clone());
+            collect_nested_fns(body, all);
+        }
+        StmtKind::If {
+            body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            collect_nested_fns(body, all);
+            for (_, b) in else_ifs {
+                collect_nested_fns(b, all);
+            }
+            if let Some(b) = else_body {
+                collect_nested_fns(b, all);
+            }
+        }
+        StmtKind::While { body, .. } => collect_nested_fns(body, all),
+        StmtKind::Repeat { body, .. } => collect_nested_fns(body, all),
+        StmtKind::ForIn { body, .. } => collect_nested_fns(body, all),
+        _ => {}
     }
 }
 
@@ -91,22 +114,51 @@ struct Emitter {
     out: String,
     indent: usize,
     opts: Options,
-    user_fns: HashSet<String>,
+    fn_info: FnInfo,
     /// Counter for temporary locals (`__t0`, `__t1`, …). Reset at
     /// the start of each fn / top-level program so the names stay
     /// short.
     tmp_counter: usize,
+    /// Stack of `let`-bound Bop names visible at the current
+    /// emission position. Used for:
+    ///
+    /// - Ident resolution (local vs top-level fn vs error).
+    /// - Free-variable analysis for lambda capture.
+    ///
+    /// Each block (if / while / repeat / for / fn / lambda) pushes
+    /// a fresh set on entry and pops on exit. User-fn and
+    /// lambda parameters are inserted into the freshly-pushed set.
+    scope_stack: Vec<HashSet<String>>,
 }
 
 impl Emitter {
-    fn new(opts: Options, user_fns: HashSet<String>) -> Self {
+    fn new(opts: Options, fn_info: FnInfo) -> Self {
         Self {
             out: String::new(),
             indent: 0,
             opts,
-            user_fns,
+            fn_info,
             tmp_counter: 0,
+            scope_stack: Vec::new(),
         }
+    }
+
+    fn push_scope(&mut self) {
+        self.scope_stack.push(HashSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scope_stack.pop();
+    }
+
+    fn bind_local(&mut self, name: &str) {
+        if let Some(top) = self.scope_stack.last_mut() {
+            top.insert(name.to_string());
+        }
+    }
+
+    fn is_local(&self, name: &str) -> bool {
+        self.scope_stack.iter().rev().any(|s| s.contains(name))
     }
 
     fn finish(self) -> String {
@@ -120,7 +172,13 @@ impl Emitter {
         }
         self.emit_header();
         self.emit_runtime_preamble();
+        // Top-level fn declarations move out of `run_program`'s
+        // body to module scope. That way the `__bop_fn_value_*`
+        // wrappers (also at module scope) can reference them, and
+        // `let g = fib` works even before `fib` is called.
+        self.emit_top_level_fn_decls(stmts)?;
         self.emit_run_program(stmts)?;
+        self.emit_fn_value_wrappers();
         self.emit_public_entry();
         if self.opts.emit_main && module_name.is_none() {
             self.emit_main();
@@ -129,6 +187,96 @@ impl Emitter {
             self.out.push_str("}\n");
         }
         Ok(())
+    }
+
+    /// Emit every top-level `fn name(...) { ... }` as a module-scope
+    /// Rust fn. Called before `run_program`; the top-level decls are
+    /// subsequently skipped inside `emit_run_program` so they don't
+    /// emit twice.
+    fn emit_top_level_fn_decls(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
+        for stmt in stmts {
+            if let StmtKind::FnDecl { name, params, body } = &stmt.kind {
+                self.emit_fn_decl(name, params, body, stmt.line)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// For each top-level user fn, emit a helper that constructs
+    /// a `Value::Fn` wrapping a Rust closure that forwards into
+    /// the real Rust fn. Lets `let g = foo; g(5)` work end-to-end
+    /// by giving us a runtime handle on a named fn. Nested fns
+    /// aren't wrapped — they're only visible inside their outer
+    /// fn's Rust scope.
+    fn emit_fn_value_wrappers(&mut self) {
+        // Sort for deterministic output.
+        let mut names: Vec<_> = self.fn_info.top_level_fns.iter().cloned().collect();
+        names.sort();
+        for name in names {
+            let params = match self.fn_info.all_fns.get(&name) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let rust_fn = rust_fn_name(&name);
+            let arity = params.len();
+            let params_list = params
+                .iter()
+                .map(|p| format!("\"{}\".to_string()", p))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            writeln!(
+                self.out,
+                "fn __bop_fn_value_{name}() -> ::bop::value::Value {{",
+                name = name
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "    let callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{"
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "        if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"`{name}` expects {arity} argument{s}, but got {{}}\", args.len()), 0)); }}",
+                arity = arity,
+                name = name,
+                s = if arity == 1 { "" } else { "s" }
+            )
+            .unwrap();
+            // Move args into positional locals in declaration order.
+            for i in 0..arity {
+                writeln!(
+                    self.out,
+                    "        let __a{i} = args.remove(0);",
+                    i = i
+                )
+                .unwrap();
+            }
+            let call_args = (0..arity)
+                .map(|i| format!("__a{}", i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if arity == 0 {
+                writeln!(self.out, "        {}(ctx)", rust_fn).unwrap();
+            } else {
+                writeln!(
+                    self.out,
+                    "        {}(ctx, {})",
+                    rust_fn, call_args
+                )
+                .unwrap();
+            }
+            writeln!(self.out, "    }});").unwrap();
+            writeln!(
+                self.out,
+                "    __bop_wrap_callable(vec![{params}], ::std::vec::Vec::new(), Some(\"{name}\".to_string()), callable)",
+                params = params_list,
+                name = name
+            )
+            .unwrap();
+            writeln!(self.out, "}}\n").unwrap();
+        }
     }
 
     // ─── Preamble / footer ────────────────────────────────────────
@@ -166,7 +314,18 @@ impl Emitter {
         self.indent = 1;
         self.tmp_counter = 0;
         self.emit_tick(0);
-        self.emit_block_body(stmts, /* wants_value = */ false)?;
+        self.push_scope();
+        // Top-level fn decls were already emitted at module scope;
+        // skip them here. The scope_stack deliberately stays empty
+        // for fn names — they're resolved through `fn_info`
+        // (top_level_fns / all_fns), not via `is_local`.
+        for stmt in stmts {
+            if matches!(&stmt.kind, StmtKind::FnDecl { .. }) {
+                continue;
+            }
+            self.emit_stmt(stmt)?;
+        }
+        self.pop_scope();
         self.line("Ok(())");
         self.indent = 0;
         self.out.push_str("}\n\n");
@@ -231,6 +390,7 @@ impl Emitter {
                 let rhs = self.expr_src(value)?;
                 let ident = rust_ident(name);
                 self.line(&format!("let mut {}: ::bop::value::Value = {};", ident, rhs));
+                self.bind_local(name);
             }
 
             StmtKind::Assign { target, op, value } => {
@@ -250,9 +410,11 @@ impl Emitter {
                 let cond_src = self.expr_src(condition)?;
                 self.open_block(&format!("while ({}).is_truthy()", cond_src));
                 self.emit_tick(line);
+                self.push_scope();
                 for s in body {
                     self.emit_stmt(s)?;
                 }
+                self.pop_scope();
                 self.close_block();
             }
 
@@ -272,9 +434,11 @@ impl Emitter {
                 self.out.push_str("};\n");
                 self.open_block(&format!("for _ in 0..({}.max(0))", n_tmp));
                 self.emit_tick(line);
+                self.push_scope();
                 for s in body {
                     self.emit_stmt(s)?;
                 }
+                self.pop_scope();
                 self.close_block();
             }
 
@@ -299,9 +463,12 @@ impl Emitter {
                     "let mut {}: ::bop::value::Value = {};",
                     ident, ident
                 ));
+                self.push_scope();
+                self.bind_local(var);
                 for s in body {
                     self.emit_stmt(s)?;
                 }
+                self.pop_scope();
                 self.close_block();
             }
 
@@ -341,27 +508,33 @@ impl Emitter {
     ) -> Result<(), BopError> {
         let cond_src = self.expr_src(cond)?;
         self.open_block(&format!("if ({}).is_truthy()", cond_src));
+        self.push_scope();
         for s in body {
             self.emit_stmt(s)?;
         }
+        self.pop_scope();
         self.indent -= 1;
         for (elif_cond, elif_body) in else_ifs {
             let c = self.expr_src(elif_cond)?;
             self.pad();
             self.out.push_str(&format!("}} else if ({}).is_truthy() {{\n", c));
             self.indent += 1;
+            self.push_scope();
             for s in elif_body {
                 self.emit_stmt(s)?;
             }
+            self.pop_scope();
             self.indent -= 1;
         }
         if let Some(else_body) = else_body {
             self.pad();
             self.out.push_str("} else {\n");
             self.indent += 1;
+            self.push_scope();
             for s in else_body {
                 self.emit_stmt(s)?;
             }
+            self.pop_scope();
             self.indent -= 1;
         }
         self.pad();
@@ -478,9 +651,17 @@ impl Emitter {
         // checks at loop backedges / function entry". No-op outside
         // sandbox mode.
         self.emit_tick(line);
+        // Fresh scope with the params bound; Rust-level fn scope
+        // isolates outer locals anyway, but scope tracking is the
+        // source of truth for lambda-capture analysis.
+        self.push_scope();
+        for p in params {
+            self.bind_local(p);
+        }
         for s in body {
             self.emit_stmt(s)?;
         }
+        self.pop_scope();
         // Implicit `return none` if control falls off the end. The
         // `allow(unreachable_code)` at the top of the file silences
         // the warning for bodies that always return explicitly.
@@ -509,21 +690,39 @@ impl Emitter {
             }
             ExprKind::None => "::bop::value::Value::None".to_string(),
 
-            ExprKind::Ident(name) => format!("{}.clone()", rust_ident(name)),
+            ExprKind::Ident(name) => {
+                if self.is_local(name) {
+                    format!("{}.clone()", rust_ident(name))
+                } else if self.fn_info.top_level_fns.contains(name) {
+                    // Top-level fn used as a value — hand back the
+                    // wrapper that reifies the Rust fn as a
+                    // `Value::Fn`.
+                    format!("__bop_fn_value_{}()", name)
+                } else if self.fn_info.all_fns.contains_key(name) {
+                    // A nested fn isn't reachable as a value from
+                    // outside its outer fn's Rust scope — document
+                    // and bail explicitly rather than emit broken
+                    // Rust.
+                    return Err(BopError::runtime(
+                        format!(
+                            "bop-compile: nested function `{}` can't be used as a first-class value (only top-level fns are currently wrappable)",
+                            name
+                        ),
+                        line,
+                    ));
+                } else {
+                    // Fall through: treat as a local binding and
+                    // let rustc flag it if the name doesn't
+                    // actually resolve. Matches the existing
+                    // "undefined at compile time" behaviour for
+                    // plain `print(nope)` and the like.
+                    format!("{}.clone()", rust_ident(name))
+                }
+            }
 
             ExprKind::StringInterp(parts) => self.string_interp_src(parts, line)?,
 
-            ExprKind::Lambda { .. } => {
-                // Tracked for phase 1c — the AOT emits Rust
-                // closures (Box<dyn Fn(...)>) and teaches its Call
-                // dispatch to accept a Value::Fn callee. Rejecting
-                // at transpile time for now keeps the error
-                // surface honest.
-                return Err(BopError::runtime(
-                    "bop-compile: lambda / first-class functions are not yet supported by the AOT transpiler",
-                    line,
-                ));
-            }
+            ExprKind::Lambda { params, body } => self.lambda_src(params, body, line)?,
 
             ExprKind::BinaryOp { left, op, right } => self.binary_src(left, *op, right, line)?,
 
@@ -626,12 +825,60 @@ impl Emitter {
     }
 
     fn call_src(&mut self, callee: &Expr, args: &[Expr], line: u32) -> Result<String, BopError> {
+        // Non-Ident callees go through the value-call path:
+        // evaluate the callee onto the stack, then dispatch via
+        // `__bop_call_value`. Captures `funcs[0](x)`,
+        // `make_adder(5)(3)`, `(if cond { f } else { g })(x)`, etc.
         let name = match &callee.kind {
             ExprKind::Ident(n) => n.clone(),
             _ => {
-                return Err(BopError::runtime("Can only call named functions", line));
+                let callee_src = self.expr_src(callee)?;
+                let callee_tmp = self.fresh_tmp();
+                let mut arg_lets = format!("let {} = {}; ", callee_tmp, callee_src);
+                let mut arg_names = Vec::with_capacity(args.len());
+                for arg in args {
+                    let src = self.expr_src(arg)?;
+                    let tmp = self.fresh_tmp();
+                    write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
+                    arg_names.push(tmp);
+                }
+                let args_vec = if arg_names.is_empty() {
+                    "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
+                } else {
+                    format!("vec![{}]", arg_names.join(", "))
+                };
+                return Ok(format!(
+                    "{{ {}__bop_call_value(ctx, {}, {}, {})? }}",
+                    arg_lets, callee_tmp, args_vec, line
+                ));
             }
         };
+
+        // A locally-bound Ident (e.g. `let f = fn() {...}; f(x)`)
+        // becomes a value call. Matches the walker / VM rule that
+        // local shadowing wins over builtin / host / named-fn.
+        if self.is_local(&name) {
+            let mut arg_lets = String::new();
+            let mut arg_names = Vec::with_capacity(args.len());
+            for arg in args {
+                let src = self.expr_src(arg)?;
+                let tmp = self.fresh_tmp();
+                write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
+                arg_names.push(tmp);
+            }
+            let args_vec = if arg_names.is_empty() {
+                "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
+            } else {
+                format!("vec![{}]", arg_names.join(", "))
+            };
+            return Ok(format!(
+                "{{ {}__bop_call_value(ctx, {}.clone(), {}, {})? }}",
+                arg_lets,
+                rust_ident(&name),
+                args_vec,
+                line
+            ));
+        }
 
         // Evaluate args into locals up-front so the resulting block
         // has a predictable evaluation order and doesn't reborrow
@@ -690,7 +937,7 @@ impl Emitter {
                             .join(", ")
                     )
                 };
-                if self.user_fns.contains(&name) {
+                if self.fn_info.all_fns.contains_key(&name) {
                     let fn_name = rust_fn_name(&name);
                     let fn_args = if arg_names.is_empty() {
                         "ctx".to_string()
@@ -856,6 +1103,338 @@ impl Emitter {
         }
         Ok(body)
     }
+
+    /// Emit a lambda expression as an `AotClosure`-wrapped
+    /// `Value::Fn`. Free variables that resolve to outer locals
+    /// are cloned into the closure via `move`; anything else
+    /// (top-level fns, builtins) stays reachable through the
+    /// usual Call / Ident dispatch inside the body.
+    fn lambda_src(
+        &mut self,
+        params: &[String],
+        body: &[Stmt],
+        line: u32,
+    ) -> Result<String, BopError> {
+        // Free-variable analysis against the outer scope stack.
+        let mut captures = std::collections::BTreeSet::<String>::new();
+        let mut body_known = HashSet::new();
+        for p in params {
+            body_known.insert(p.clone());
+        }
+        scan_free_vars_stmts(
+            body,
+            &mut body_known,
+            &mut captures,
+            &self.scope_stack,
+            &self.fn_info,
+        );
+        let captures_ordered: Vec<String> = captures.into_iter().collect();
+
+        // Switch into the lambda's lexical context before emitting
+        // its body: outer scope is hidden (so Ident lookups inside
+        // resolve against the closure's scope, not the outer fn's
+        // Rust locals), and the new scope holds both the params
+        // and the names we'll re-introduce as moved captures.
+        let saved_scope_stack = core::mem::take(&mut self.scope_stack);
+        self.push_scope();
+        for p in params {
+            self.bind_local(p);
+        }
+        for cap in &captures_ordered {
+            self.bind_local(cap);
+        }
+
+        // Emit body into a side buffer so we can splice it into
+        // the closure literal without disturbing indentation or
+        // the tmp counter.
+        let saved_out = core::mem::take(&mut self.out);
+        let saved_indent = self.indent;
+        let saved_tmp = self.tmp_counter;
+        self.indent = 0;
+        self.tmp_counter = 0;
+        for s in body {
+            self.emit_stmt(s)?;
+        }
+        let body_src = core::mem::replace(&mut self.out, saved_out);
+        self.indent = saved_indent;
+        self.tmp_counter = saved_tmp;
+
+        self.pop_scope();
+        self.scope_stack = saved_scope_stack;
+
+        // Build the capture prelude (outer-side clones) and the
+        // in-closure rebinding (moved values shadowed under the
+        // original Bop names so the body references them
+        // naturally).
+        let mut capture_prelude = String::new();
+        let mut capture_moves = String::new();
+        for (i, cap) in captures_ordered.iter().enumerate() {
+            writeln!(
+                capture_prelude,
+                "let __cap_{i} = {ident}.clone();",
+                i = i,
+                ident = rust_ident(cap)
+            )
+            .unwrap();
+            // `Fn` closures can be invoked repeatedly, so captures
+            // must stay owned by the closure body. Clone per
+            // invocation; the outer capture is the stable source.
+            writeln!(
+                capture_moves,
+                "let mut {ident}: ::bop::value::Value = __cap_{i}.clone();",
+                ident = rust_ident(cap),
+                i = i
+            )
+            .unwrap();
+        }
+
+        let arity = params.len();
+        let arity_suffix = if arity == 1 { "" } else { "s" };
+        let mut param_binds = String::new();
+        for p in params {
+            writeln!(
+                param_binds,
+                "let mut {ident}: ::bop::value::Value = args.remove(0);",
+                ident = rust_ident(p)
+            )
+            .unwrap();
+        }
+        let params_array = if params.is_empty() {
+            "::std::vec::Vec::<String>::new()".to_string()
+        } else {
+            format!(
+                "vec![{}]",
+                params
+                    .iter()
+                    .map(|p| format!("\"{}\".to_string()", p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+
+        Ok(format!(
+            "{{ {prelude}let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {moves}{param_binds}{body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }}); __bop_wrap_callable({params_array}, ::std::vec::Vec::new(), None, __callable) }}",
+            prelude = capture_prelude,
+            arity = arity,
+            suffix = arity_suffix,
+            line = line,
+            moves = capture_moves,
+            param_binds = param_binds,
+            body = body_src,
+            params_array = params_array,
+        ))
+    }
+}
+
+// ─── Free-variable analysis for lambdas ────────────────────────────
+//
+// Walks a lambda's body collecting every Ident that resolves to an
+// *outer* local — i.e. something present in `outer_scopes` and not
+// shadowed by a param / local inside the lambda. Top-level fns
+// stay callable without capture (they're globally reachable Rust
+// fns) and unknown identifiers are left for rustc to flag.
+
+fn scan_free_vars_stmts(
+    stmts: &[Stmt],
+    known: &mut HashSet<String>,
+    free: &mut std::collections::BTreeSet<String>,
+    outer_scopes: &[HashSet<String>],
+    fn_info: &FnInfo,
+) {
+    for stmt in stmts {
+        scan_free_vars_stmt(stmt, known, free, outer_scopes, fn_info);
+    }
+}
+
+fn scan_free_vars_stmt(
+    stmt: &Stmt,
+    known: &mut HashSet<String>,
+    free: &mut std::collections::BTreeSet<String>,
+    outer_scopes: &[HashSet<String>],
+    fn_info: &FnInfo,
+) {
+    match &stmt.kind {
+        StmtKind::Let { name, value } => {
+            scan_free_vars_expr(value, known, free, outer_scopes, fn_info);
+            known.insert(name.clone());
+        }
+        StmtKind::Assign { target, op: _, value } => {
+            match target {
+                AssignTarget::Variable(n) => {
+                    if !known.contains(n) && is_outer_local(n, outer_scopes) {
+                        free.insert(n.clone());
+                    }
+                }
+                AssignTarget::Index { object, index } => {
+                    scan_free_vars_expr(object, known, free, outer_scopes, fn_info);
+                    scan_free_vars_expr(index, known, free, outer_scopes, fn_info);
+                }
+            }
+            scan_free_vars_expr(value, known, free, outer_scopes, fn_info);
+        }
+        StmtKind::If {
+            condition,
+            body,
+            else_ifs,
+            else_body,
+        } => {
+            scan_free_vars_expr(condition, known, free, outer_scopes, fn_info);
+            let saved = known.clone();
+            scan_free_vars_stmts(body, known, free, outer_scopes, fn_info);
+            *known = saved.clone();
+            for (c, b) in else_ifs {
+                scan_free_vars_expr(c, known, free, outer_scopes, fn_info);
+                scan_free_vars_stmts(b, known, free, outer_scopes, fn_info);
+                *known = saved.clone();
+            }
+            if let Some(b) = else_body {
+                scan_free_vars_stmts(b, known, free, outer_scopes, fn_info);
+                *known = saved;
+            }
+        }
+        StmtKind::While { condition, body } => {
+            scan_free_vars_expr(condition, known, free, outer_scopes, fn_info);
+            let saved = known.clone();
+            scan_free_vars_stmts(body, known, free, outer_scopes, fn_info);
+            *known = saved;
+        }
+        StmtKind::Repeat { count, body } => {
+            scan_free_vars_expr(count, known, free, outer_scopes, fn_info);
+            let saved = known.clone();
+            scan_free_vars_stmts(body, known, free, outer_scopes, fn_info);
+            *known = saved;
+        }
+        StmtKind::ForIn {
+            var,
+            iterable,
+            body,
+        } => {
+            scan_free_vars_expr(iterable, known, free, outer_scopes, fn_info);
+            let saved = known.clone();
+            known.insert(var.clone());
+            scan_free_vars_stmts(body, known, free, outer_scopes, fn_info);
+            *known = saved;
+        }
+        StmtKind::FnDecl { name, params, body } => {
+            // A nested fn decl introduces `name` into the body's
+            // scope (so recursive refs work) but its own body is
+            // analysed with only its params in scope — matches
+            // how the walker / VM treat nested fns.
+            known.insert(name.clone());
+            let mut inner_known = HashSet::new();
+            for p in params {
+                inner_known.insert(p.clone());
+            }
+            inner_known.insert(name.clone());
+            scan_free_vars_stmts(body, &mut inner_known, free, outer_scopes, fn_info);
+        }
+        StmtKind::Return { value } => {
+            if let Some(v) = value {
+                scan_free_vars_expr(v, known, free, outer_scopes, fn_info);
+            }
+        }
+        StmtKind::Break | StmtKind::Continue => {}
+        StmtKind::ExprStmt(e) => {
+            scan_free_vars_expr(e, known, free, outer_scopes, fn_info);
+        }
+    }
+}
+
+fn scan_free_vars_expr(
+    expr: &Expr,
+    known: &mut HashSet<String>,
+    free: &mut std::collections::BTreeSet<String>,
+    outer_scopes: &[HashSet<String>],
+    fn_info: &FnInfo,
+) {
+    match &expr.kind {
+        ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::None => {}
+        ExprKind::Ident(name) => {
+            // If the ident resolves against the enclosing Bop
+            // scope (and isn't shadowed by a binding inside the
+            // lambda), record it as a capture. Top-level fns and
+            // the `self_name` of the enclosing decl don't need to
+            // be captured — they stay callable directly.
+            if !known.contains(name)
+                && !fn_info.top_level_fns.contains(name)
+                && is_outer_local(name, outer_scopes)
+            {
+                free.insert(name.clone());
+            }
+        }
+        ExprKind::StringInterp(parts) => {
+            for part in parts {
+                if let StringPart::Variable(name) = part {
+                    if !known.contains(name) && is_outer_local(name, outer_scopes) {
+                        free.insert(name.clone());
+                    }
+                }
+            }
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            scan_free_vars_expr(left, known, free, outer_scopes, fn_info);
+            scan_free_vars_expr(right, known, free, outer_scopes, fn_info);
+        }
+        ExprKind::UnaryOp { expr: inner, .. } => {
+            scan_free_vars_expr(inner, known, free, outer_scopes, fn_info);
+        }
+        ExprKind::Call { callee, args } => {
+            // For Ident callees, the call site either resolves to
+            // a local (capture-worthy) or to a builtin/host/user
+            // fn (not captured). Same logic as the Ident arm.
+            scan_free_vars_expr(callee, known, free, outer_scopes, fn_info);
+            for arg in args {
+                scan_free_vars_expr(arg, known, free, outer_scopes, fn_info);
+            }
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            scan_free_vars_expr(object, known, free, outer_scopes, fn_info);
+            for arg in args {
+                scan_free_vars_expr(arg, known, free, outer_scopes, fn_info);
+            }
+        }
+        ExprKind::Index { object, index } => {
+            scan_free_vars_expr(object, known, free, outer_scopes, fn_info);
+            scan_free_vars_expr(index, known, free, outer_scopes, fn_info);
+        }
+        ExprKind::Array(items) => {
+            for item in items {
+                scan_free_vars_expr(item, known, free, outer_scopes, fn_info);
+            }
+        }
+        ExprKind::Dict(entries) => {
+            for (_, v) in entries {
+                scan_free_vars_expr(v, known, free, outer_scopes, fn_info);
+            }
+        }
+        ExprKind::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            scan_free_vars_expr(condition, known, free, outer_scopes, fn_info);
+            scan_free_vars_expr(then_expr, known, free, outer_scopes, fn_info);
+            scan_free_vars_expr(else_expr, known, free, outer_scopes, fn_info);
+        }
+        ExprKind::Lambda { params, body } => {
+            // A nested lambda's captures are *its* concern — but
+            // anything it references from *our* outer scope still
+            // needs to bubble up to be captured here so the inner
+            // closure gets the value when it's constructed.
+            let mut inner_known = HashSet::new();
+            for p in params {
+                inner_known.insert(p.clone());
+            }
+            scan_free_vars_stmts(body, &mut inner_known, free, outer_scopes, fn_info);
+        }
+    }
+}
+
+fn is_outer_local(name: &str, outer_scopes: &[HashSet<String>]) -> bool {
+    outer_scopes.iter().any(|s| s.contains(name))
 }
 
 // ─── Free helpers ──────────────────────────────────────────────────
@@ -1010,6 +1589,74 @@ pub struct Ctx<'h> {
     pub rand_state: u64,
 }
 
+/// Opaque body that a `Value::Fn` carries around in AOT-emitted
+/// code. The callable is a higher-ranked `Fn` so the same Rc can
+/// satisfy any lifetime of `Ctx`, which lets us store closures in
+/// `Value::Fn` (whose body is `Rc<dyn Any + 'static>`) regardless
+/// of where they're eventually called from.
+pub struct AotClosure {
+    pub callable: ::std::rc::Rc<
+        dyn for<'__a> Fn(
+            &mut Ctx<'__a>,
+            ::std::vec::Vec<::bop::value::Value>,
+        ) -> Result<::bop::value::Value, ::bop::error::BopError>,
+    >,
+}
+
+/// Build a `Value::Fn` around an `AotClosure`. Used by the emitted
+/// `__bop_fn_value_<name>` wrappers and by `MakeLambda` emission.
+fn __bop_wrap_callable(
+    params: ::std::vec::Vec<String>,
+    captures: ::std::vec::Vec<(String, ::bop::value::Value)>,
+    self_name: ::std::option::Option<String>,
+    callable: ::std::rc::Rc<
+        dyn for<'__a> Fn(
+            &mut Ctx<'__a>,
+            ::std::vec::Vec<::bop::value::Value>,
+        ) -> Result<::bop::value::Value, ::bop::error::BopError>,
+    >,
+) -> ::bop::value::Value {
+    let closure = ::std::rc::Rc::new(AotClosure { callable });
+    let body: ::std::rc::Rc<dyn ::core::any::Any + 'static> = closure;
+    ::bop::value::Value::new_compiled_fn(params, captures, body, self_name)
+}
+
+/// Runtime dispatch for a value-based call: the callee is a
+/// `Value::Fn` whose body must be an `AotClosure` we recognise.
+/// Walker-created closures carrying an AST body come back as a
+/// clear error rather than silently misbehaving.
+fn __bop_call_value(
+    ctx: &mut Ctx<'_>,
+    callee: ::bop::value::Value,
+    args: ::std::vec::Vec<::bop::value::Value>,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    match &callee {
+        ::bop::value::Value::Fn(f) => match &f.body {
+            ::bop::value::FnBody::Compiled(body) => {
+                if let Some(aot) = body.downcast_ref::<AotClosure>() {
+                    let callable = ::std::rc::Rc::clone(&aot.callable);
+                    drop(callee);
+                    callable(ctx, args)
+                } else {
+                    Err(::bop::error::BopError::runtime(
+                        "Closure body wasn't compiled by the AOT transpiler",
+                        line,
+                    ))
+                }
+            }
+            ::bop::value::FnBody::Ast(_) => Err(::bop::error::BopError::runtime(
+                "Closure wasn't compiled for the AOT — use `bop::run` for tree-walker closures",
+                line,
+            )),
+        },
+        other => Err(::bop::error::BopError::runtime(
+            format!("Can't call a {}", other.type_name()),
+            line,
+        )),
+    }
+}
+
 /// Mirror of Evaluator::call_method from bop-lang: dispatches a
 /// method call to the right family for the receiver's type.
 #[inline]
@@ -1106,6 +1753,65 @@ pub struct Ctx<'h> {
     pub rand_state: u64,
     pub steps: u64,
     pub max_steps: u64,
+}
+
+/// Opaque body that a `Value::Fn` carries around in AOT-emitted
+/// code. See the non-sandbox preamble for the rationale.
+pub struct AotClosure {
+    pub callable: ::std::rc::Rc<
+        dyn for<'__a> Fn(
+            &mut Ctx<'__a>,
+            ::std::vec::Vec<::bop::value::Value>,
+        ) -> Result<::bop::value::Value, ::bop::error::BopError>,
+    >,
+}
+
+fn __bop_wrap_callable(
+    params: ::std::vec::Vec<String>,
+    captures: ::std::vec::Vec<(String, ::bop::value::Value)>,
+    self_name: ::std::option::Option<String>,
+    callable: ::std::rc::Rc<
+        dyn for<'__a> Fn(
+            &mut Ctx<'__a>,
+            ::std::vec::Vec<::bop::value::Value>,
+        ) -> Result<::bop::value::Value, ::bop::error::BopError>,
+    >,
+) -> ::bop::value::Value {
+    let closure = ::std::rc::Rc::new(AotClosure { callable });
+    let body: ::std::rc::Rc<dyn ::core::any::Any + 'static> = closure;
+    ::bop::value::Value::new_compiled_fn(params, captures, body, self_name)
+}
+
+fn __bop_call_value(
+    ctx: &mut Ctx<'_>,
+    callee: ::bop::value::Value,
+    args: ::std::vec::Vec<::bop::value::Value>,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    match &callee {
+        ::bop::value::Value::Fn(f) => match &f.body {
+            ::bop::value::FnBody::Compiled(body) => {
+                if let Some(aot) = body.downcast_ref::<AotClosure>() {
+                    let callable = ::std::rc::Rc::clone(&aot.callable);
+                    drop(callee);
+                    callable(ctx, args)
+                } else {
+                    Err(::bop::error::BopError::runtime(
+                        "Closure body wasn't compiled by the AOT transpiler",
+                        line,
+                    ))
+                }
+            }
+            ::bop::value::FnBody::Ast(_) => Err(::bop::error::BopError::runtime(
+                "Closure wasn't compiled for the AOT — use `bop::run` for tree-walker closures",
+                line,
+            )),
+        },
+        other => Err(::bop::error::BopError::runtime(
+            format!("Can't call a {}", other.type_name()),
+            line,
+        )),
+    }
 }
 
 /// Step / memory / on_tick checkpoint. Emitted by `bop-compile` at

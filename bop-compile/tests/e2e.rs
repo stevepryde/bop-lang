@@ -445,6 +445,77 @@ fn e2e_sandbox_recursion_halts() {
     );
 }
 
+// ─── Closures / first-class fns ───────────────────────────────
+
+#[test]
+#[ignore]
+fn e2e_closure_basic_lambda() {
+    assert_aot_matches(
+        "closure_basic",
+        r#"let double = fn(x) { return x * 2 }
+print(double(5))
+print(double(21))"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_closure_captures_value() {
+    assert_aot_matches(
+        "closure_captures",
+        r#"let n = 5
+let add_n = fn(x) { return x + n }
+print(add_n(3))
+n = 100
+print(add_n(3))"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_closure_factory() {
+    assert_aot_matches(
+        "closure_factory",
+        r#"fn make_adder(n) { return fn(x) { return x + n } }
+let add5 = make_adder(5)
+let add10 = make_adder(10)
+print(add5(3))
+print(add10(3))"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_named_fn_as_value() {
+    assert_aot_matches(
+        "named_fn_as_value",
+        r#"fn double(x) { return x * 2 }
+let f = double
+print(f(7))"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_higher_order_apply() {
+    assert_aot_matches(
+        "higher_order",
+        r#"fn apply(f, x) { return f(x) }
+fn square(n) { return n * n }
+print(apply(square, 4))
+print(apply(fn(n) { return n + 1 }, 4))"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_iife() {
+    assert_aot_matches(
+        "iife",
+        "print((fn(x) { return x * 3 })(4))",
+    );
+}
+
 #[test]
 #[ignore]
 fn e2e_builtins_str_int_type() {
