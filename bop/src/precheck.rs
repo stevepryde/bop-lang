@@ -36,6 +36,7 @@ pub fn check(code: &str) -> Option<BopError> {
                     "You can't use `{}` as a variable name — try something like `my_{}` instead!",
                     keyword, keyword
                 )),
+                is_fatal: false,
             });
         }
 
@@ -58,6 +59,7 @@ pub fn check(code: &str) -> Option<BopError> {
                     "You can't name a function `{}` — try something like `do_{}` instead!",
                     keyword, keyword
                 )),
+                is_fatal: false,
             });
         }
     }

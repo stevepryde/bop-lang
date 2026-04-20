@@ -57,7 +57,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::collections::{BTreeMap, BTreeSet};
 
-use bop::builtins::{self, error, error_with_hint};
+use bop::builtins::{self, error, error_fatal_with_hint, error_with_hint};
 use bop::error::BopError;
 use bop::lexer::StringPart;
 use bop::methods;
@@ -98,6 +98,14 @@ struct Frame {
     scopes: Vec<BTreeMap<String, Value>>,
     stack_base: usize,
     is_function: bool,
+    /// Marks this frame as the landing pad for a `try_call(f)`
+    /// invocation. When set, a clean return wraps the value in
+    /// `Result::Ok(v)` before pushing it for the caller; a
+    /// non-fatal error unwinds to this frame and pushes
+    /// `Result::Err(RuntimeError { message, line })` instead.
+    /// Fatal errors still bypass the trap — see
+    /// `BopError::is_fatal`.
+    try_call_wrapper: bool,
 }
 
 #[derive(Clone)]
@@ -178,6 +186,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scopes: vec![BTreeMap::new()],
             stack_base: 0,
             is_function: false,
+            try_call_wrapper: false,
         };
         let step_budget = limits.max_steps.saturating_mul(STEP_SCALE);
         Self {
@@ -203,10 +212,20 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 Some(x) => x,
                 None => break,
             };
-            self.tick(line)?;
-            match self.dispatch(instr, line)? {
-                Next::Continue => {}
-                Next::Halt => break,
+            // Tick errors (resource-limit violations) are always
+            // fatal, so `unwind_to_try_call` will short-circuit
+            // them. The path still goes through the helper so
+            // the two error paths behave identically.
+            if let Err(err) = self.tick(line) {
+                self.unwind_to_try_call(err)?;
+                continue;
+            }
+            match self.dispatch(instr, line) {
+                Ok(Next::Continue) => {}
+                Ok(Next::Halt) => break,
+                Err(err) => {
+                    self.unwind_to_try_call(err)?;
+                }
             }
         }
         Ok(())
@@ -236,14 +255,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
     fn tick(&mut self, line: u32) -> Result<(), BopError> {
         self.steps += 1;
         if self.steps > self.step_budget {
-            return Err(error_with_hint(
+            // Fatal — `try_call` can't catch this or the
+            // step-limit sandbox invariant would break.
+            return Err(error_fatal_with_hint(
                 line,
                 "Your code took too many steps (possible infinite loop)",
                 "Check your loops — make sure they have a condition that eventually stops them.",
             ));
         }
         if bop::memory::bop_memory_exceeded() {
-            return Err(error_with_hint(
+            return Err(error_fatal_with_hint(
                 line,
                 "Memory limit exceeded",
                 "Your code is using too much memory. Check for large strings or arrays growing in loops.",
@@ -819,6 +840,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 self.push_value(Value::None);
                 return Ok(Next::Continue);
             }
+            "try_call" => return self.builtin_try_call(args, line),
             _ => {}
         }
 
@@ -875,6 +897,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scopes: vec![scope],
             stack_base: self.stack.len(),
             is_function: true,
+            try_call_wrapper: false,
         };
         self.frames.push(frame);
         Ok(Next::Continue)
@@ -961,6 +984,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     scopes: vec![scope],
                     stack_base: self.stack.len(),
                     is_function: true,
+                    try_call_wrapper: false,
                 });
                 // User methods don't do mutation back-assign
                 // — the receiver is passed by value, and the
@@ -1491,6 +1515,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scopes: vec![scope],
             stack_base: self.stack.len(),
             is_function: true,
+            try_call_wrapper: false,
         });
         Ok(Next::Continue)
     }
@@ -1630,10 +1655,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 Some(x) => x,
                 None => break,
             };
-            self.tick(line)?;
-            match self.dispatch(instr, line)? {
-                Next::Continue => {}
-                Next::Halt => break,
+            if let Err(err) = self.tick(line) {
+                self.unwind_to_try_call(err)?;
+                continue;
+            }
+            match self.dispatch(instr, line) {
+                Ok(Next::Continue) => {}
+                Ok(Next::Halt) => break,
+                Err(err) => {
+                    self.unwind_to_try_call(err)?;
+                }
             }
         }
         Ok(())
@@ -1644,15 +1675,91 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // residue, and push the return value for the caller.
         let frame = self.frames.pop().expect("frame present");
         self.stack.truncate(frame.stack_base);
+        // A `try_call` wrapper frame wraps the return value in
+        // `Result::Ok(v)` before handing it back to its caller.
+        let final_value = if frame.try_call_wrapper {
+            builtins::make_try_call_ok(value)
+        } else {
+            value
+        };
         if frame.is_function {
-            self.push_value(value);
+            self.push_value(final_value);
             Ok(Next::Continue)
         } else {
             // Return at top level: behave like Halt (matches tree-walker,
             // which silently accepts Signal::Return at program scope).
-            drop(value);
+            drop(final_value);
             Ok(Next::Halt)
         }
+    }
+
+    /// Implement the `try_call(f)` builtin. Validates the arg
+    /// shape, dispatches to `call_closure` to push a frame for
+    /// `f`, and flips that frame's `try_call_wrapper` flag so
+    /// the outcome (whether a normal return or a non-fatal
+    /// error) gets wrapped in a `Result::Ok`/`Result::Err`
+    /// before returning to the original `try_call` caller.
+    fn builtin_try_call(
+        &mut self,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Next, BopError> {
+        if args.len() != 1 {
+            return Err(error(
+                line,
+                format!(
+                    "`try_call` expects 1 argument, but got {}",
+                    args.len()
+                ),
+            ));
+        }
+        let mut iter = args.into_iter();
+        let callable = iter.next().unwrap();
+        let func = match &callable {
+            Value::Fn(f) => Rc::clone(f),
+            other => {
+                return Err(error(
+                    line,
+                    format!(
+                        "`try_call` expects a function, got {}",
+                        other.type_name()
+                    ),
+                ));
+            }
+        };
+        drop(callable);
+        self.call_closure(&func, Vec::new(), line)?;
+        // The frame we just pushed is the one that should
+        // participate in the try_call wrap/catch dance.
+        if let Some(frame) = self.frames.last_mut() {
+            frame.try_call_wrapper = true;
+        }
+        Ok(Next::Continue)
+    }
+
+    /// Propagate a non-fatal error up through any number of fn
+    /// frames until we find a `try_call_wrapper`. On success,
+    /// truncates the frame stack and value stack back to the
+    /// wrapper's base, pushes a `Result::Err(RuntimeError { … })`
+    /// for the outer caller, and returns `Ok(())` so the dispatch
+    /// loop keeps going.
+    ///
+    /// Returns `Err(err)` (untouched) when:
+    /// - the error is fatal (resource-limit violation), or
+    /// - no enclosing `try_call` frame exists.
+    fn unwind_to_try_call(&mut self, err: BopError) -> Result<(), BopError> {
+        if err.is_fatal {
+            return Err(err);
+        }
+        let wrap_idx = match self.frames.iter().rposition(|f| f.try_call_wrapper) {
+            Some(i) => i,
+            None => return Err(err),
+        };
+        let wrapper_stack_base = self.frames[wrap_idx].stack_base;
+        self.frames.truncate(wrap_idx);
+        self.stack.truncate(wrapper_stack_base);
+        self.push_value(builtins::make_try_call_err(&err));
+        Ok(())
     }
 }
 

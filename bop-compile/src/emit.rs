@@ -1884,6 +1884,26 @@ impl Emitter {
                     line
                 )
             }
+            "try_call" => {
+                // `try_call(f)` takes a single callable and
+                // dispatches through the preamble's
+                // `__bop_try_call`. We validate the arity at
+                // runtime for parity with walker / VM (which
+                // both raise there too).
+                if arg_names.len() != 1 {
+                    format!(
+                        "return Err(::bop::error::BopError::runtime(format!(\"`try_call` expects 1 argument, but got {{}}\", {}usize), {}))",
+                        arg_names.len(),
+                        line,
+                    )
+                } else {
+                    format!(
+                        "__bop_try_call(ctx, {}, {})?",
+                        arg_names[0],
+                        line,
+                    )
+                }
+            }
             _ => {
                 // Build a separate cloned-args slice for host.call
                 // so we can still pass the originals to the user-fn
@@ -3160,6 +3180,62 @@ fn __bop_call_value(
     }
 }
 
+/// `try_call(f)` implementation. Invokes `f` with no args via
+/// the existing `AotClosure` pathway, then wraps the outcome
+/// for the caller: `Ok(value)` on normal return, `Err(RuntimeError
+/// { message, line })` on a non-fatal error, and re-raised on
+/// fatal errors (resource-limit violations). `Result` and
+/// `RuntimeError` values are built directly by
+/// `bop::builtins::make_try_call_ok` / `_err`, so the
+/// program doesn't need to have declared those types itself.
+fn __bop_try_call(
+    ctx: &mut Ctx<'_>,
+    callable: ::bop::value::Value,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    let func = match &callable {
+        ::bop::value::Value::Fn(f) => ::std::rc::Rc::clone(f),
+        other => {
+            return Err(::bop::error::BopError::runtime(
+                format!(
+                    "`try_call` expects a function, got {}",
+                    other.type_name()
+                ),
+                line,
+            ));
+        }
+    };
+    drop(callable);
+    let callable_fn = match &func.body {
+        ::bop::value::FnBody::Compiled(body) => match body.downcast_ref::<AotClosure>() {
+            Some(aot) => ::std::rc::Rc::clone(&aot.callable),
+            None => {
+                return Err(::bop::error::BopError::runtime(
+                    "try_call: callee wasn't compiled by the AOT transpiler",
+                    line,
+                ));
+            }
+        },
+        ::bop::value::FnBody::Ast(_) => {
+            return Err(::bop::error::BopError::runtime(
+                "try_call: callee was compiled for the walker, not AOT",
+                line,
+            ));
+        }
+    };
+    drop(func);
+    match callable_fn(ctx, ::std::vec::Vec::new()) {
+        Ok(value) => Ok(::bop::builtins::make_try_call_ok(value)),
+        Err(err) => {
+            if err.is_fatal {
+                Err(err)
+            } else {
+                Ok(::bop::builtins::make_try_call_err(&err))
+            }
+        }
+    }
+}
+
 /// Field read for `Value::Struct` and struct-payload enum
 /// variants. Returns a cloned value; missing fields surface as
 /// a runtime error with the type name in the message.
@@ -3397,14 +3473,14 @@ fn __bop_call_value(
 fn __bop_tick(ctx: &mut Ctx<'_>, line: u32) -> Result<(), ::bop::error::BopError> {
     ctx.steps += 1;
     if ctx.steps > ctx.max_steps {
-        return Err(::bop::builtins::error_with_hint(
+        return Err(::bop::builtins::error_fatal_with_hint(
             line,
             "Your code took too many steps (possible infinite loop)",
             "Check your loops — make sure they have a condition that eventually stops them.",
         ));
     }
     if ::bop::memory::bop_memory_exceeded() {
-        return Err(::bop::builtins::error_with_hint(
+        return Err(::bop::builtins::error_fatal_with_hint(
             line,
             "Memory limit exceeded",
             "Your code is using too much memory. Check for large strings or arrays growing in loops.",
@@ -3412,6 +3488,58 @@ fn __bop_tick(ctx: &mut Ctx<'_>, line: u32) -> Result<(), ::bop::error::BopError
     }
     ctx.host.on_tick()?;
     Ok(())
+}
+
+/// `try_call(f)` implementation. See the non-sandbox preamble
+/// for the full contract — identical semantics here; we just
+/// duplicate so sandbox-mode programs don't pull the non-
+/// sandbox preamble for a single helper.
+fn __bop_try_call(
+    ctx: &mut Ctx<'_>,
+    callable: ::bop::value::Value,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    let func = match &callable {
+        ::bop::value::Value::Fn(f) => ::std::rc::Rc::clone(f),
+        other => {
+            return Err(::bop::error::BopError::runtime(
+                format!(
+                    "`try_call` expects a function, got {}",
+                    other.type_name()
+                ),
+                line,
+            ));
+        }
+    };
+    drop(callable);
+    let callable_fn = match &func.body {
+        ::bop::value::FnBody::Compiled(body) => match body.downcast_ref::<AotClosure>() {
+            Some(aot) => ::std::rc::Rc::clone(&aot.callable),
+            None => {
+                return Err(::bop::error::BopError::runtime(
+                    "try_call: callee wasn't compiled by the AOT transpiler",
+                    line,
+                ));
+            }
+        },
+        ::bop::value::FnBody::Ast(_) => {
+            return Err(::bop::error::BopError::runtime(
+                "try_call: callee was compiled for the walker, not AOT",
+                line,
+            ));
+        }
+    };
+    drop(func);
+    match callable_fn(ctx, ::std::vec::Vec::new()) {
+        Ok(value) => Ok(::bop::builtins::make_try_call_ok(value)),
+        Err(err) => {
+            if err.is_fatal {
+                Err(err)
+            } else {
+                Ok(::bop::builtins::make_try_call_err(&err))
+            }
+        }
+    }
 }
 
 /// Field read for `Value::Struct` and struct-payload enum

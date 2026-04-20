@@ -403,7 +403,7 @@ pattern, and `try_call`'s output is pattern-matched.
   "no-arm-matched" runtime error. All three engines agree on
   every program.
 
-### Phase 5 — Error handling (Result + `try`) — partial ✅
+### Phase 5 — Error handling (Result + `try`) ✅
 
 **Why fifth.** Programs past a few hundred lines need a way for
 libraries to signal recoverable failures without either aborting
@@ -513,17 +513,17 @@ they have their own error conventions.
   default-imported like Rust's prelude; embedders who want it
   strict can skip loading `bop-std`.
 
-**Delivered so far (`try` operator only).**
+**Delivered.**
 
 - Lexer gains the `try` keyword; parser grows
   `ExprKind::Try(Box<Expr>)` as a prefix expression that binds
   tighter than binary ops and looser than postfix operators
   (mirrors Rust's `?`).
 - **Shape-based recognition**: `try` accepts any enum value
-  whose variant is named `Ok` or `Err`. `Result` itself lives
-  in `bop-std` (phase 7); user code declares its own
-  `enum Result { Ok(v), Err(e) }` (or any two-variant enum
-  following the same naming) until the stdlib lands.
+  whose variant is named `Ok` or `Err`. `Result` itself will
+  live in `bop-std` (phase 7); until then user code declares
+  its own `enum Result { Ok(v), Err(e) }` (or any two-variant
+  enum with the same naming) and `try` works on it.
 - Walker: `eval_try` unwraps `Ok(v)` to `v`, raises for
   malformed `Ok`/`Err`-on-non-Result values, and uses a
   sentinel `BopError` + `pending_try_return` field on the
@@ -531,8 +531,7 @@ they have their own error conventions.
   enclosing `call_bop_fn`, which converts it to a regular
   `Signal::Return`. Top-level `try` on `Err`
   (`call_depth == 0`) surfaces as a real runtime error with a
-  friendly hint — the roadmap's "top-level `try` on `Err` is
-  an error" rule is honoured.
+  friendly hint.
 - VM: new `TryUnwrap` instruction. Pops the candidate,
   unwraps `Ok` to the stack, fast-returns on `Err` via the
   existing `do_return` path, raises at the top-level frame,
@@ -542,26 +541,53 @@ they have their own error conventions.
   (`in_top_level`) picks between `return Ok(err_value)`
   (inside user fns / lambdas, which return
   `Result<Value, BopError>`) and `return Err(BopError::…)`
-  (inside `run_program`, which returns `Result<(), BopError>`
-  — no way to thread a value through). Closures explicitly
-  reset the flag so a lambda inside `run_program` still
-  routes through the fn-level path.
-- **Tests**: 10 walker tests, 8 VM differential tests, and 8
-  three-way corpus programs covering unwrap, Err propagation,
-  nested-fn chaining, unit-variant Ok, lambda short-circuit,
-  for-loop short-circuit, top-level-Err error, and
-  non-Result-shape error. All three engines agree on every
-  program.
+  (inside `run_program`, which returns `Result<(), BopError>`).
+- **`BopError::is_fatal: bool`** added. Resource-limit paths
+  (`too many steps`, `Memory limit exceeded`) now go through
+  `error_fatal_with_hint`; every other error stays non-fatal.
+  Fatal errors bypass `try_call`'s catch — the sandbox
+  invariant holds.
+- **`try_call(f)` builtin** in all three engines. Invokes a
+  zero-arg callable and wraps the outcome:
+  - normal return → `Result::Ok(value)`
+  - non-fatal `BopError` → `Result::Err(RuntimeError
+    { message, line })`
+  - fatal `BopError` → re-raise unchanged
+  Both `Result::Ok/Err` and `RuntimeError` are constructed by
+  shared helpers (`bop::builtins::make_try_call_ok` / `_err`)
+  so they produce the same shape regardless of whether the
+  program declared the types itself — pattern matching still
+  works because the matcher compares type-name strings.
+  - Walker: synchronous call through `call_bop_fn`, wraps the
+    result directly.
+  - VM: a new `try_call_wrapper` field on `Frame` plus an
+    `unwind_to_try_call` helper in the main dispatch loop.
+    Normal `Return` through a wrapper frame wraps the value
+    in `Ok`; a non-fatal error propagates through frames until
+    it hits the wrapper, which wraps in `Err` and pushes for
+    the caller. Fatal errors bypass the wrapper entirely.
+  - AOT: a `__bop_try_call` runtime helper in both (sandbox
+    and non-sandbox) preambles. The call site at `try_call(f)`
+    emits a direct call into the helper. Compiled closures
+    downcast through the `AotClosure` body and the helper
+    inspects `BopError::is_fatal` before wrapping.
+- **Tests**: 19 walker tests (10 on `try`, 9 on `try_call`),
+  16 VM differential tests (8 + 8), and 15 three-way corpus
+  programs. All three engines agree on every case, including
+  the fatal-step-limit-is-uncatchable invariant that protects
+  `BopLimits`.
 
-**Still pending.**
+**Still pending (deferred to phase 7 — `bop-std`).**
 
-- `Result` + helper fns in `bop-std` (deferred to phase 7 per
-  the plan — the std library crate lands as a single batch).
-- `try_call(f)` builtin (Lua-style `pcall` with `is_fatal`
-  honoured). Not blocking for most use cases; can follow.
-- `RuntimeError` struct for `try_call`'s `Err` payload.
-- `BopError::is_fatal` flag wired into the resource-limit
-  paths so `try_call` can't swallow them.
+- `Result` enum + helper fns (`is_ok`, `is_err`, `unwrap`,
+  `unwrap_or`, `map`, `map_err`, `and_then`) — written in Bop,
+  shipped with the standard library. The structural
+  recognition means `try_call` already produces values that
+  match this shape; declaring the type in `bop-std` just makes
+  it available without the user writing it themselves.
+- `RuntimeError` struct — likewise. The fields
+  (`message: Str`, `line: Number`) are already set by
+  `make_try_call_err`.
 
 ### Phase 6 — Integer type
 

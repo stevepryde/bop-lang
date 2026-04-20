@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use core::cell::RefCell;
 
-use crate::builtins::{self, error, error_with_hint};
+use crate::builtins::{self, error, error_fatal_with_hint, error_with_hint};
 use crate::error::BopError;
 use crate::lexer::StringPart;
 use crate::methods;
@@ -175,14 +175,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     fn tick(&mut self, line: u32) -> Result<(), BopError> {
         self.steps += 1;
         if self.steps > self.limits.max_steps {
-            return Err(error_with_hint(
+            // Fatal — `try_call` must not swallow this, or the
+            // sandbox invariant breaks.
+            return Err(error_fatal_with_hint(
                 line,
                 "Your code took too many steps (possible infinite loop)",
                 "Check your loops — make sure they have a condition that eventually stops them.",
             ));
         }
         if crate::memory::bop_memory_exceeded() {
-            return Err(error_with_hint(
+            return Err(error_fatal_with_hint(
                 line,
                 "Memory limit exceeded",
                 "Your code is using too much memory. Check for large strings or arrays growing in loops.",
@@ -1469,6 +1471,59 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         }
     }
 
+    /// Implement the `try_call(f)` builtin.
+    ///
+    /// Takes a zero-arg callable `f` and invokes it. On a clean
+    /// return, yields `Result::Ok(value)`. On a **non-fatal**
+    /// `BopError`, yields `Result::Err(RuntimeError { message,
+    /// line })` — both values are constructed directly by
+    /// `bop::builtins::make_try_call_ok` / `_err`, so they
+    /// work even in programs that never declared `Result` or
+    /// `RuntimeError` themselves.
+    ///
+    /// Fatal errors (resource-limit violations — see
+    /// `BopError::is_fatal`) bypass the wrap and propagate
+    /// unchanged, preserving the sandbox invariant.
+    fn builtin_try_call(
+        &mut self,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Value, BopError> {
+        if args.len() != 1 {
+            return Err(error(
+                line,
+                format!(
+                    "`try_call` expects 1 argument, but got {}",
+                    args.len()
+                ),
+            ));
+        }
+        let callable = args.into_iter().next().unwrap();
+        let func = match &callable {
+            Value::Fn(f) => Rc::clone(f),
+            other => {
+                return Err(error(
+                    line,
+                    format!(
+                        "`try_call` expects a function, got {}",
+                        other.type_name()
+                    ),
+                ));
+            }
+        };
+        drop(callable);
+        match self.call_bop_fn(&func, Vec::new(), line) {
+            Ok(value) => Ok(builtins::make_try_call_ok(value)),
+            Err(err) => {
+                if err.is_fatal {
+                    Err(err)
+                } else {
+                    Ok(builtins::make_try_call_err(&err))
+                }
+            }
+        }
+    }
+
     fn call_function(
         &mut self,
         name: &str,
@@ -1496,6 +1551,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 self.host.on_print(&message);
                 return Ok(Value::None);
             }
+            "try_call" => return self.builtin_try_call(args, line),
             _ => {}
         }
 

@@ -17,5 +17,6 @@ pub(crate) fn io_error(message: &str, line: Option<u32>) -> BopError {
         column: None,
         message: message.to_string(),
         friendly_hint: None,
+        is_fatal: false,
     }
 }

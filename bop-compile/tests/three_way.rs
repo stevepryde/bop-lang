@@ -858,6 +858,66 @@ doit()"#,
         r#"enum Result { Ok(v), Err(e) }
 let r = try Result::Err("boom")"#,
     ),
+    // ─── `try_call` builtin ─────────────────────────────────────
+    (
+        "try_call_wraps_ok",
+        r#"let r = try_call(fn() { return 42 })
+print(match r {
+    Result::Ok(v) => v,
+    Result::Err(_) => -1,
+})"#,
+    ),
+    (
+        "try_call_wraps_non_fatal_err",
+        r#"let r = try_call(fn() { return 1 / 0 })
+print(match r {
+    Result::Ok(_) => "ok",
+    Result::Err(e) => e.message,
+})"#,
+    ),
+    (
+        "try_call_err_carries_line",
+        r#"let r = try_call(fn() {
+    let x = 1
+    return x / 0
+})
+print(match r {
+    Result::Ok(_) => -1,
+    Result::Err(e) => e.line,
+})"#,
+    ),
+    (
+        "try_call_composes_with_try_operator",
+        r#"fn risky(x) {
+    let arr = [1, 2]
+    return arr[x]
+}
+let r = try_call(fn() { return risky(5) })
+print(match r {
+    Result::Ok(_) => "ok",
+    Result::Err(e) => e.message,
+})"#,
+    ),
+    (
+        "try_call_wrong_arg_count_errors",
+        "try_call()",
+    ),
+    (
+        "try_call_non_function_errors",
+        "try_call(42)",
+    ),
+    (
+        "try_call_nested_outer_catches_inner_err_as_ok",
+        r#"let r = try_call(fn() {
+    let inner = try_call(fn() { return 1 / 0 })
+    return inner
+})
+print(match r {
+    Result::Ok(Result::Err(e)) => e.message,
+    Result::Ok(Result::Ok(_)) => "inner ok?",
+    Result::Err(_) => "outer caught",
+})"#,
+    ),
 ];
 
 /// Programs that exercise the `import` surface. Each entry

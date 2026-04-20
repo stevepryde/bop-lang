@@ -181,6 +181,7 @@ pub fn error(line: u32, message: impl Into<String>) -> BopError {
         column: None,
         message: message.into(),
         friendly_hint: None,
+        is_fatal: false,
     }
 }
 
@@ -194,14 +195,92 @@ pub fn error_with_hint(
         column: None,
         message: message.into(),
         friendly_hint: Some(hint.into()),
+        is_fatal: false,
     }
+}
+
+/// Fatal variant of [`error_with_hint`] — `is_fatal = true`
+/// blocks `try_call` from swallowing it. Used by resource-
+/// limit violations (`too many steps`, `Memory limit
+/// exceeded`) so a script can't wrap a step-bomb in
+/// `try_call` and keep running.
+pub fn error_fatal_with_hint(
+    line: u32,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> BopError {
+    BopError {
+        line: Some(line),
+        column: None,
+        message: message.into(),
+        friendly_hint: Some(hint.into()),
+        is_fatal: true,
+    }
+}
+
+/// Fatal variant of [`error`] (no hint). Same uncatchable
+/// contract as [`error_fatal_with_hint`].
+pub fn error_fatal(line: u32, message: impl Into<String>) -> BopError {
+    BopError {
+        line: Some(line),
+        column: None,
+        message: message.into(),
+        friendly_hint: None,
+        is_fatal: true,
+    }
+}
+
+// ─── `try_call` result construction ────────────────────────────
+//
+// The `try_call(f)` builtin is Lua's `pcall` renamed — it calls
+// `f` (a zero-arg callable), catches any non-fatal `BopError`,
+// and reports the outcome as a `Result::Ok(value)` or
+// `Result::Err(RuntimeError { message, line })` structurally-
+// shaped value. These helpers construct those values directly
+// via `Value::new_enum_tuple` / `Value::new_struct` and
+// therefore don't require the program to have declared
+// `Result` or `RuntimeError` — they produce the same shape
+// either way, so user code can pattern-match them regardless.
+//
+// Fatal errors (`is_fatal == true`) are deliberately *not*
+// wrapped — `try_call`'s callers never see them. See
+// [`BopError::is_fatal`] for why.
+
+/// Build the `Result::Ok(value)` variant `try_call` returns on a
+/// successful call.
+pub fn make_try_call_ok(value: Value) -> Value {
+    let mut items: Vec<Value> = Vec::with_capacity(1);
+    items.push(value);
+    Value::new_enum_tuple(
+        String::from("Result"),
+        String::from("Ok"),
+        items,
+    )
+}
+
+/// Build the `Result::Err(RuntimeError { message, line })`
+/// variant `try_call` returns on a caught non-fatal error.
+pub fn make_try_call_err(err: &BopError) -> Value {
+    let message = Value::new_str(err.message.clone());
+    let line = Value::Number(err.line.unwrap_or(0) as f64);
+    let mut fields: Vec<(String, Value)> = Vec::with_capacity(2);
+    fields.push((String::from("message"), message));
+    fields.push((String::from("line"), line));
+    let rt_err = Value::new_struct(String::from("RuntimeError"), fields);
+    let mut items: Vec<Value> = Vec::with_capacity(1);
+    items.push(rt_err);
+    Value::new_enum_tuple(
+        String::from("Result"),
+        String::from("Err"),
+        items,
+    )
 }
 
 /// Pre-flight check for string repeat
 pub fn check_string_repeat_memory(len: usize, count: usize, line: u32) -> Result<(), BopError> {
     let result_len = len.saturating_mul(count);
     if bop_would_exceed(result_len) {
-        Err(error_with_hint(
+        Err(error_fatal_with_hint(
             line,
             "Memory limit exceeded",
             "This string repeat would use too much memory.",
@@ -215,7 +294,7 @@ pub fn check_string_repeat_memory(len: usize, count: usize, line: u32) -> Result
 pub fn check_string_concat_memory(a_len: usize, b_len: usize, line: u32) -> Result<(), BopError> {
     let result_len = a_len + b_len;
     if bop_would_exceed(result_len) {
-        Err(error_with_hint(
+        Err(error_fatal_with_hint(
             line,
             "Memory limit exceeded",
             "This string concatenation would use too much memory.",
@@ -229,7 +308,7 @@ pub fn check_string_concat_memory(a_len: usize, b_len: usize, line: u32) -> Resu
 pub fn check_array_concat_memory(a_len: usize, b_len: usize, line: u32) -> Result<(), BopError> {
     let result_bytes = (a_len + b_len) * core::mem::size_of::<Value>();
     if bop_would_exceed(result_bytes) {
-        Err(error_with_hint(
+        Err(error_fatal_with_hint(
             line,
             "Memory limit exceeded",
             "This array concatenation would use too much memory.",

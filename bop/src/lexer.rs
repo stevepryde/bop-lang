@@ -167,6 +167,7 @@ impl Lexer {
             column: None,
             message: message.into(),
             friendly_hint: None,
+            is_fatal: false,
         }
     }
 
@@ -180,6 +181,7 @@ impl Lexer {
             column: None,
             message: message.into(),
             friendly_hint: Some(hint.into()),
+            is_fatal: false,
         }
     }
 

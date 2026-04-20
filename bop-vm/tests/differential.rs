@@ -1039,6 +1039,139 @@ print(match sum_until_err() {
     );
 }
 
+// ─── `try_call` builtin ───────────────────────────────────────────
+
+#[test]
+fn try_call_wraps_ok_diff() {
+    assert_eq!(
+        say(r#"let r = try_call(fn() { return 42 })
+print(match r {
+    Result::Ok(v) => v,
+    Result::Err(_) => -1,
+})"#),
+        "42"
+    );
+}
+
+#[test]
+fn try_call_wraps_non_fatal_err_diff() {
+    assert_eq!(
+        say(r#"let r = try_call(fn() { return 1 / 0 })
+print(match r {
+    Result::Ok(_) => "ok",
+    Result::Err(e) => e.message,
+})"#),
+        "Division by zero"
+    );
+}
+
+#[test]
+fn try_call_err_carries_line_diff() {
+    assert_eq!(
+        say(r#"let r = try_call(fn() {
+    let x = 1
+    return x / 0
+})
+print(match r {
+    Result::Ok(_) => -1,
+    Result::Err(e) => e.line,
+})"#),
+        "3"
+    );
+}
+
+#[test]
+fn try_call_composes_with_try_operator_diff() {
+    assert_eq!(
+        say(r#"fn risky(x) {
+    let arr = [1, 2]
+    return arr[x]
+}
+let r = try_call(fn() { return risky(5) })
+print(match r {
+    Result::Ok(_) => "ok",
+    Result::Err(e) => e.message,
+})"#),
+        "Index 5 is out of bounds (array has 2 items)"
+    );
+}
+
+#[test]
+fn try_call_wrong_arg_count_errors_diff() {
+    let msg = run_err("try_call()");
+    assert!(msg.contains("try_call` expects 1"), "got: {}", msg);
+}
+
+#[test]
+fn try_call_non_function_errors_diff() {
+    let msg = run_err("try_call(42)");
+    assert!(
+        msg.contains("try_call` expects a function"),
+        "got: {}",
+        msg
+    );
+}
+
+#[test]
+fn try_call_nested_outer_catches_inner_err_as_ok_diff() {
+    assert_eq!(
+        say(r#"let r = try_call(fn() {
+    let inner = try_call(fn() { return 1 / 0 })
+    return inner
+})
+print(match r {
+    Result::Ok(Result::Err(e)) => e.message,
+    Result::Ok(Result::Ok(_)) => "inner ok?",
+    Result::Err(_) => "outer caught",
+})"#),
+        "Division by zero"
+    );
+}
+
+#[test]
+fn try_call_step_limit_is_fatal_diff() {
+    // Run through both engines with a tight step budget;
+    // both must report the fatal step-limit error rather
+    // than swallowing it via `try_call`.
+    let tight = BopLimits {
+        max_steps: 200,
+        max_memory: 1 << 20,
+    };
+    let code = r#"let r = try_call(fn() {
+    while true { }
+})
+print("should never run")"#;
+
+    let tw = {
+        let mut host = RecordHost::new();
+        let result = bop::run(code, &mut host, &tight);
+        (
+            host.prints.borrow().clone(),
+            result.err().map(|e| (e.message, e.is_fatal)),
+        )
+    };
+    let vm = {
+        let mut host = RecordHost::new();
+        let result = bop_vm::run(code, &mut host, &tight);
+        (
+            host.prints.borrow().clone(),
+            result.err().map(|e| (e.message, e.is_fatal)),
+        )
+    };
+    assert!(tw.0.is_empty(), "walker printed: {:?}", tw.0);
+    assert!(vm.0.is_empty(), "vm printed: {:?}", vm.0);
+    let (tw_msg, tw_fatal) = tw.1.expect("walker should error");
+    let (vm_msg, vm_fatal) = vm.1.expect("vm should error");
+    assert!(tw_fatal, "walker non-fatal: {}", tw_msg);
+    assert!(vm_fatal, "vm non-fatal: {}", vm_msg);
+    assert!(
+        tw_msg.contains("too many steps"),
+        "walker msg: {}",
+        tw_msg
+    );
+    assert!(vm_msg.contains("too many steps"), "vm msg: {}", vm_msg);
+}
+
 // ─── Modules / import ─────────────────────────────────────────────
 
 #[test]
@@ -1814,6 +1947,7 @@ impl BopHost for CustomHost {
                         column: None,
                         message: "greet() needs 1 argument".into(),
                         friendly_hint: None,
+                        is_fatal: false,
                     }));
                 }
                 Some(Ok(Value::new_str(format!("Hello, {}!", args[0]))))

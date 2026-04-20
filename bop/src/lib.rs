@@ -1373,6 +1373,7 @@ let x = 1"#,
                             column: None,
                             message: "greet() needs 1 argument".into(),
                             friendly_hint: None,
+                            is_fatal: false,
                         }));
                     }
                     Some(Ok(Value::new_str(format!("Hello, {}!", args[0]))))
@@ -1834,6 +1835,162 @@ fn with_try(x) {
 print(match with_try(5) { Result::Ok(v) => v, Result::Err(_) => -1 })
 print(match with_try(-1) { Result::Ok(_) => "ok", Result::Err(e) => e })"#),
             "negative"
+        );
+    }
+
+    // ─── `try_call` builtin ────────────────────────────────────────
+
+    #[test]
+    fn try_call_wraps_successful_return_in_ok() {
+        // Plain successful call: `try_call(f)` yields
+        // `Result::Ok(return_value)`. The program doesn't need
+        // to declare `Result` — the value comes out pre-shaped
+        // because `try_call` constructs it directly.
+        assert_eq!(
+            say(r#"let r = try_call(fn() { return 42 })
+print(match r {
+    Result::Ok(v) => v,
+    Result::Err(_) => -1,
+})"#),
+            "42"
+        );
+    }
+
+    #[test]
+    fn try_call_wraps_non_fatal_error_in_err() {
+        // Division by zero is a non-fatal runtime error, so
+        // `try_call` catches it and yields
+        // `Result::Err(RuntimeError { message, line })`.
+        assert_eq!(
+            say(r#"let r = try_call(fn() { return 1 / 0 })
+print(match r {
+    Result::Ok(_) => "ok",
+    Result::Err(e) => e.message,
+})"#),
+            "Division by zero"
+        );
+    }
+
+    #[test]
+    fn try_call_runtime_error_carries_line_number() {
+        // The RuntimeError struct exposes `line` so callers can
+        // report where the failure happened.
+        assert_eq!(
+            say(r#"let r = try_call(fn() {
+    let x = 1
+    return x / 0
+})
+print(match r {
+    Result::Ok(_) => -1,
+    Result::Err(e) => e.line,
+})"#),
+            "3"
+        );
+    }
+
+    #[test]
+    fn try_call_step_limit_error_is_fatal_and_bypasses_wrap() {
+        // The step-limit error is fatal — `try_call` must NOT
+        // swallow it or the sandbox invariant breaks. The
+        // outer `run()` sees the fatal error unchanged.
+        let tight = BopLimits {
+            max_steps: 200,
+            max_memory: 1 << 20,
+        };
+        let mut host = TestHost::new();
+        let err = run(
+            r#"let r = try_call(fn() {
+    while true { }
+})
+print("should never run")"#,
+            &mut host,
+            &tight,
+        )
+        .unwrap_err();
+        assert!(err.is_fatal, "expected fatal: {}", err.message);
+        assert!(
+            err.message.contains("too many steps"),
+            "got: {}",
+            err.message
+        );
+        // The post-try_call `print` never ran because the
+        // error short-circuited the program.
+        assert!(host.prints.borrow().is_empty());
+    }
+
+    #[test]
+    fn try_call_plays_with_try_operator_to_chain_errors() {
+        // Classic "convert caught runtime error into a Result".
+        // The fn uses `try` to short-circuit on Err; the outer
+        // wraps the whole thing in try_call to catch anything
+        // it didn't anticipate.
+        assert_eq!(
+            say(r#"fn risky(x) {
+    let arr = [1, 2]
+    return arr[x]  // out-of-bounds when x > 1
+}
+let r = try_call(fn() { return risky(5) })
+print(match r {
+    Result::Ok(_) => "ok",
+    Result::Err(e) => e.message,
+})"#),
+            "Index 5 is out of bounds (array has 2 items)"
+        );
+    }
+
+    #[test]
+    fn try_call_errors_on_wrong_arg_count() {
+        let msg = run_err("try_call()");
+        assert!(
+            msg.contains("try_call` expects 1"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn try_call_errors_on_non_function_arg() {
+        let msg = run_err("try_call(42)");
+        assert!(
+            msg.contains("try_call` expects a function"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn try_call_result_ok_is_matchable_even_without_declared_type() {
+        // The returned `Result::Ok(...)` carries a type_name
+        // of `"Result"` and variant_name of `"Ok"` — the
+        // pattern matcher uses string comparison, so the user's
+        // pattern matches regardless of whether they declared
+        // their own `Result` enum. Same for `RuntimeError`.
+        assert_eq!(
+            say(r#"let r = try_call(fn() { return "yay" })
+print(match r {
+    Result::Ok(v) => v + "!",
+    Result::Err(_) => "bad",
+})"#),
+            "yay!"
+        );
+    }
+
+    #[test]
+    fn try_call_nested_outer_sees_ok_of_inner_err() {
+        // Inner try_call catches its own error and returns
+        // `Result::Err(...)`. Outer try_call sees a clean
+        // return and wraps THAT in `Result::Ok(...)`.
+        assert_eq!(
+            say(r#"let r = try_call(fn() {
+    let inner = try_call(fn() { return 1 / 0 })
+    return inner
+})
+print(match r {
+    Result::Ok(Result::Err(e)) => e.message,
+    Result::Ok(Result::Ok(_)) => "inner ok?",
+    Result::Err(_) => "outer caught",
+})"#),
+            "Division by zero"
         );
     }
 
