@@ -1461,7 +1461,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 // — `eval_match` does this by only consuming them after the match
 // + guard both succeed.
 
-pub(crate) fn pattern_matches(
+/// Attempt to match `pattern` against `value`. On success, appends
+/// any captured `(name, Value)` bindings to `bindings` and returns
+/// `true`; on failure, returns `false` and leaves `bindings` in an
+/// undefined state — it's the caller's responsibility to discard it.
+///
+/// Exported so other engines (the bytecode VM, AOT transpiler) can
+/// run the exact same structural matcher as the tree-walker without
+/// re-implementing the rules.
+pub fn pattern_matches(
     pattern: &Pattern,
     value: &Value,
     bindings: &mut Vec<(String, Value)>,

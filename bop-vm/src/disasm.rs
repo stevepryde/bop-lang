@@ -187,6 +187,11 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::FieldGet(n) => format!("FieldGet .{}", chunk.name(*n)),
         Instr::FieldSet(n) => format!("FieldSet .{}", chunk.name(*n)),
 
+        Instr::MatchFail { pattern, on_fail } => {
+            format!("MatchFail pat#{} -> {}", pattern.0, on_fail.0)
+        }
+        Instr::MatchExhausted => "MatchExhausted".to_string(),
+
         Instr::Halt => "Halt".to_string(),
     }
 }

@@ -9,9 +9,10 @@ use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind,
 
 use crate::chunk::{
     Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx, EnumVariantDef,
-    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx, StructDef, StructIdx,
+    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx, PatternIdx, StructDef,
+    StructIdx,
 };
-use bop::parser::VariantKind;
+use bop::parser::{MatchArm, Pattern, VariantKind};
 
 /// Compile a parsed program into a top-level chunk.
 pub fn compile(program: &[Stmt]) -> Result<Chunk, BopError> {
@@ -124,6 +125,12 @@ impl Compiler {
     fn add_enum(&mut self, def: EnumDef) -> EnumIdx {
         let idx = EnumIdx(self.chunk.enum_defs.len() as u32);
         self.chunk.enum_defs.push(def);
+        idx
+    }
+
+    fn add_pattern(&mut self, pat: Pattern) -> PatternIdx {
+        let idx = PatternIdx(self.chunk.patterns.len() as u32);
+        self.chunk.patterns.push(pat);
         idx
     }
 
@@ -698,18 +705,123 @@ impl Compiler {
                 self.emit(Instr::MakeLambda(idx), line);
             }
 
-            ExprKind::Match { .. } => {
-                // Pattern matching is not yet supported in the VM
-                // backend. The walker has a complete implementation;
-                // this arm exists only so the VM crate builds while
-                // phase 4 is rolled out across engines.
-                return Err(err(
-                    line,
-                    "match expressions are not yet supported by the VM backend",
-                ));
+            ExprKind::Match { scrutinee, arms } => {
+                self.compile_match(scrutinee, arms, line)?;
             }
         }
         Ok(())
+    }
+
+    /// Emit bytecode for a `match` expression. The scrutinee is
+    /// compiled once and kept on the value stack; each arm tests
+    /// it with `MatchFail`, and falls through to the next arm on
+    /// failure. A successful arm's body produces the match's
+    /// result; `MatchExhausted` at the end raises a runtime error
+    /// if every arm rejects.
+    ///
+    /// Stack shape across an arm (scope-deltas shown for clarity):
+    ///
+    /// ```text
+    /// pre-arm:  [..., sc]
+    /// PushScope                 [..., sc]           +scope
+    /// Dup                       [..., sc, sc]
+    /// MatchFail(pat, fail)      [..., sc]  on match: bindings applied
+    ///                           [..., sc]  on fail : jumps, scope still open
+    /// <guard>                   [..., sc, bool]
+    /// JumpIfFalse(guard_fail)   [..., sc]           (pops the bool)
+    /// Pop                       [...]
+    /// <body>                    [..., result]
+    /// PopScope                                       -scope
+    /// Jump(end)
+    /// guard_fail:
+    /// PopScope                                       -scope
+    /// (fall through to next arm)
+    /// fail:
+    /// PopScope                                       -scope
+    /// (fall through to next arm)
+    /// ```
+    fn compile_match(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        line: u32,
+    ) -> Result<(), BopError> {
+        self.compile_expr(scrutinee)?;
+
+        // Jump sites that each arm emits once it has produced the
+        // match result; they all converge on the instruction after
+        // `MatchExhausted`.
+        let mut end_patches: Vec<CodeOffset> = Vec::with_capacity(arms.len());
+
+        for arm in arms {
+            let arm_line = arm.line;
+            self.emit(Instr::PushScope, arm_line);
+            self.emit(Instr::Dup, arm_line);
+            let pat_idx = self.add_pattern(arm.pattern.clone());
+            let match_fail_site = self.emit(
+                Instr::MatchFail {
+                    pattern: pat_idx,
+                    on_fail: CodeOffset(0),
+                },
+                arm_line,
+            );
+
+            // Guard (if present) runs with bindings already in
+            // scope; its failure unwinds the scope just like a
+            // pattern mismatch.
+            let guard_fail_site = if let Some(guard) = &arm.guard {
+                self.compile_expr(guard)?;
+                Some(self.emit(Instr::JumpIfFalse(CodeOffset(0)), arm_line))
+            } else {
+                None
+            };
+
+            // Committed to this arm: drop the scrutinee, emit the
+            // body, unwind the arm scope, jump past the rest.
+            self.emit(Instr::Pop, arm_line);
+            self.compile_expr(&arm.body)?;
+            self.emit(Instr::PopScope, arm_line);
+            let end_jump = self.emit(Instr::Jump(CodeOffset(0)), arm_line);
+            end_patches.push(end_jump);
+
+            // Guard-failure landing pad: scope is still open with
+            // the pattern bindings, so we unwind it before falling
+            // through to the next arm. The scrutinee is still on
+            // the stack because `MatchFail` consumed the `Dup`'d
+            // copy, not the original.
+            if let Some(gf) = guard_fail_site {
+                let here = self.current_offset();
+                self.patch_jump(gf, here);
+                self.emit(Instr::PopScope, arm_line);
+            }
+
+            // Pattern-mismatch landing pad: same unwind, then
+            // fall through to the next arm.
+            let fail_target = self.current_offset();
+            self.patch_match_fail(match_fail_site, fail_target);
+            self.emit(Instr::PopScope, arm_line);
+        }
+
+        // Every arm rejected: drop the scrutinee and raise.
+        self.emit(Instr::Pop, line);
+        self.emit(Instr::MatchExhausted, line);
+
+        let end = self.current_offset();
+        for site in end_patches {
+            self.patch_jump(site, end);
+        }
+        Ok(())
+    }
+
+    fn patch_match_fail(&mut self, site: CodeOffset, target: CodeOffset) {
+        let idx = site.0 as usize;
+        self.chunk.code[idx] = match self.chunk.code[idx].clone() {
+            Instr::MatchFail { pattern, .. } => Instr::MatchFail {
+                pattern,
+                on_fail: target,
+            },
+            other => panic!("patch_match_fail on non-MatchFail instruction: {:?}", other),
+        };
     }
 
     fn compile_binary(

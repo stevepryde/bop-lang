@@ -22,6 +22,11 @@ pub use error::BopError;
 pub use parser::{Stmt, count_instructions};
 pub use value::Value;
 
+/// The core pattern matcher. Re-exported so engines beyond the
+/// tree-walker (the bytecode VM, the AOT runtime) can apply the
+/// same structural rules without re-implementing them.
+pub use evaluator::pattern_matches;
+
 // ─── BopLimits ─────────────────────────────────────────────────────────────
 
 /// Resource limits enforced during execution.

@@ -190,6 +190,26 @@ pub enum Instr {
     /// struct back.
     FieldSet(NameIdx),
 
+    // ─── Pattern matching ───────────────────────────────────────
+    /// Pattern-match the top-of-stack value against `pattern`.
+    /// The value is popped unconditionally. On success, every
+    /// binding introduced by the pattern is installed in the
+    /// current scope and execution falls through. On failure,
+    /// nothing is bound and execution jumps to `on_fail`.
+    ///
+    /// The compiler pairs each `match` arm with its own
+    /// `PushScope` / `PopScope` bracket so bindings from a
+    /// failed arm (e.g. when a guard rejects the candidate) are
+    /// discarded before the next arm runs.
+    MatchFail {
+        pattern: PatternIdx,
+        on_fail: CodeOffset,
+    },
+    /// Raise "No match arm matched the scrutinee". Emitted after
+    /// the last arm's failure path so exhausting a `match` with
+    /// no arm that applies is observable as a runtime error.
+    MatchExhausted,
+
     // ─── Termination ──────────────────────────────────────────────
     /// End the current chunk (top-level program only).
     Halt,
@@ -224,6 +244,12 @@ pub struct StructIdx(pub u32);
 /// Index into a chunk's enum-definition pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EnumIdx(pub u32);
+
+/// Index into a chunk's pattern pool. Each `match` arm points at
+/// one `Pattern` here; `MatchFail` consults it at runtime via the
+/// shared `bop::pattern_matches` helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PatternIdx(pub u32);
 
 /// Shape of an enum variant's payload at the construction site —
 /// tells the VM how many stack entries to pop.
@@ -264,6 +290,8 @@ pub struct Chunk {
     pub functions: Vec<FnDef>,
     pub struct_defs: Vec<StructDef>,
     pub enum_defs: Vec<EnumDef>,
+    /// Match patterns referenced by `MatchFail` instructions.
+    pub patterns: Vec<bop::parser::Pattern>,
 }
 
 /// Compiled struct type record.
@@ -329,6 +357,10 @@ impl Chunk {
 
     pub fn enum_def(&self, idx: EnumIdx) -> &EnumDef {
         &self.enum_defs[idx.0 as usize]
+    }
+
+    pub fn pattern(&self, idx: PatternIdx) -> &bop::parser::Pattern {
+        &self.patterns[idx.0 as usize]
     }
 }
 

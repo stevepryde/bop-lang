@@ -690,6 +690,227 @@ print(c.n)"#),
     );
 }
 
+// ─── Pattern matching ─────────────────────────────────────────────
+
+#[test]
+fn match_literal_number_diff() {
+    assert_eq!(
+        say(r#"let x = 2
+let r = match x {
+  1 => "one",
+  2 => "two",
+  _ => "other",
+}
+print(r)"#),
+        "two"
+    );
+}
+
+#[test]
+fn match_wildcard_catches_all_diff() {
+    assert_eq!(
+        say(r#"let x = 42
+let r = match x {
+  0 => "zero",
+  _ => "big",
+}
+print(r)"#),
+        "big"
+    );
+}
+
+#[test]
+fn match_binding_captures_scrutinee_diff() {
+    assert_eq!(
+        say(r#"let x = 7
+let r = match x {
+  n => n * 2,
+}
+print(r)"#),
+        "14"
+    );
+}
+
+#[test]
+fn match_guard_selects_arm_diff() {
+    assert_eq!(
+        say(r#"let x = 10
+let r = match x {
+  n if n < 5 => "small",
+  n if n < 20 => "medium",
+  _ => "big",
+}
+print(r)"#),
+        "medium"
+    );
+}
+
+#[test]
+fn match_or_pattern_diff() {
+    assert_eq!(
+        say(r#"let x = 3
+let r = match x {
+  1 | 2 | 3 => "low",
+  _ => "other",
+}
+print(r)"#),
+        "low"
+    );
+}
+
+#[test]
+fn match_enum_unit_variant_diff() {
+    assert_eq!(
+        say(r#"enum Light { Red, Green }
+let l = Light::Green
+let r = match l {
+  Light::Red => "stop",
+  Light::Green => "go",
+}
+print(r)"#),
+        "go"
+    );
+}
+
+#[test]
+fn match_enum_tuple_binds_diff() {
+    assert_eq!(
+        say(r#"enum Result { Ok(v), Err(m) }
+let r = Result::Ok(42)
+let out = match r {
+  Result::Ok(v) => v,
+  Result::Err(_) => -1,
+}
+print(out)"#),
+        "42"
+    );
+}
+
+#[test]
+fn match_enum_struct_variant_binds_diff() {
+    assert_eq!(
+        say(r#"enum Shape { Rect { w, h } }
+let s = Shape::Rect { w: 4, h: 3 }
+let a = match s {
+  Shape::Rect { w, h } => w * h,
+}
+print(a)"#),
+        "12"
+    );
+}
+
+#[test]
+fn match_struct_destructure_diff() {
+    assert_eq!(
+        say(r#"struct Point { x, y }
+let p = Point { x: 3, y: 4 }
+let r = match p {
+  Point { x, y } => x + y,
+}
+print(r)"#),
+        "7"
+    );
+}
+
+#[test]
+fn match_struct_partial_rest_diff() {
+    assert_eq!(
+        say(r#"struct Point { x, y, z }
+let p = Point { x: 1, y: 2, z: 3 }
+let r = match p {
+  Point { y, .. } => y * 10,
+}
+print(r)"#),
+        "20"
+    );
+}
+
+#[test]
+fn match_nested_enum_struct_diff() {
+    assert_eq!(
+        say(r#"enum FileError { NotFound(path) }
+enum Result { Ok(v), Err(e) }
+let r = Result::Err(FileError::NotFound("missing.txt"))
+let msg = match r {
+  Result::Ok(_) => "ok",
+  Result::Err(FileError::NotFound(p)) => p,
+}
+print(msg)"#),
+        "missing.txt"
+    );
+}
+
+#[test]
+fn match_array_exact_diff() {
+    assert_eq!(
+        say(r#"let xs = [1, 2, 3]
+let r = match xs {
+  [a, b, c] => a + b + c,
+  _ => -1,
+}
+print(r)"#),
+        "6"
+    );
+}
+
+#[test]
+fn match_array_with_rest_diff() {
+    assert_eq!(
+        say(r#"let xs = [10, 20, 30, 40]
+let r = match xs {
+  [first, ..rest] => first,
+  _ => -1,
+}
+print(r)"#),
+        "10"
+    );
+}
+
+#[test]
+fn match_no_arm_errors_diff() {
+    let msg = run_err(
+        r#"let x = 99
+match x {
+  1 => print("one"),
+  2 => print("two"),
+}"#,
+    );
+    assert!(
+        msg.contains("No match arm matched the scrutinee"),
+        "got: {}",
+        msg
+    );
+}
+
+#[test]
+fn match_guard_rejects_then_next_arm_diff() {
+    // Guard rejects the first arm even though the pattern matched,
+    // so the scrutinee falls through to the wildcard.
+    assert_eq!(
+        say(r#"let x = 3
+let r = match x {
+  n if n > 100 => "huge",
+  _ => "small",
+}
+print(r)"#),
+        "small"
+    );
+}
+
+#[test]
+fn match_binding_scope_isolated_diff() {
+    // `n` bound inside the arm doesn't leak to outer scope —
+    // both engines must agree this errors cleanly.
+    let msg = run_err(
+        r#"let x = 5
+match x {
+  n => print(n),
+}
+print(n)"#,
+    );
+    assert!(msg.contains("not found") || msg.contains("Variable"), "got: {}", msg);
+}
+
 // ─── Modules / import ─────────────────────────────────────────────
 
 #[test]

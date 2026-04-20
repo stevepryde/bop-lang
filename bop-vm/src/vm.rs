@@ -67,7 +67,7 @@ use bop::{BopHost, BopLimits};
 
 use crate::chunk::{
     Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx, EnumVariantShape, FnIdx, Instr,
-    NameIdx, StructIdx,
+    NameIdx, PatternIdx, StructIdx,
 };
 
 /// Hard cap on call depth; matches the tree-walker.
@@ -657,6 +657,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 let val = self.pop_value(line)?;
                 let obj = self.pop_value(line)?;
                 self.push_value(self.field_set(obj, &field, val, line)?);
+            }
+
+            // ─── Pattern matching ───────────────────────────────
+            Instr::MatchFail { pattern, on_fail } => {
+                self.match_fail(pattern, on_fail, line)?;
+            }
+            Instr::MatchExhausted => {
+                return Err(error(line, "No match arm matched the scrutinee"));
             }
 
             // ─── Termination ──────────────────────────────────────
@@ -1272,6 +1280,36 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 ),
             )),
         }
+    }
+
+    /// Handle a `MatchFail` instruction: pop the scrutinee and
+    /// attempt to match it against the pattern at `pattern`. On
+    /// success, install the captured bindings into the current
+    /// scope and fall through. On failure, jump to `on_fail`.
+    ///
+    /// Delegates to `bop::pattern_matches` so the VM behaves
+    /// exactly like the tree-walker on every pattern shape.
+    fn match_fail(
+        &mut self,
+        pattern: PatternIdx,
+        on_fail: CodeOffset,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let value = self.pop_value(line)?;
+        // `pattern` refers to a slot in the *currently executing*
+        // chunk's pattern pool; we clone it out rather than hold a
+        // borrow so we can mutate `self` afterwards to install
+        // bindings.
+        let pat = self.current_chunk().pattern(pattern).clone();
+        let mut bindings: Vec<(String, Value)> = Vec::new();
+        if bop::pattern_matches(&pat, &value, &mut bindings) {
+            for (name, v) in bindings {
+                self.define_local(name, v);
+            }
+        } else {
+            self.jump(on_fail);
+        }
+        Ok(())
     }
 
     fn define_fn(&mut self, idx: FnIdx) {
