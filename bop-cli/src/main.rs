@@ -16,6 +16,23 @@ fn main() {
                 std::process::exit(1);
             }
         };
+        // Run the static-check pass first so warnings surface
+        // before any program output. Parse errors fail fast;
+        // warnings are informational and don't block
+        // execution. On a successful check we continue into
+        // `bop::run` which does its own parse again —
+        // acceptable overhead for now.
+        match bop::parse_with_warnings(&source) {
+            Ok((_stmts, warnings)) => {
+                for w in &warnings {
+                    eprint!("{}", w.render(&source));
+                }
+            }
+            Err(e) => {
+                eprint!("{}", e.render(&source));
+                std::process::exit(1);
+            }
+        }
         let mut host = StdHost::new();
         if let Err(e) = bop::run(&source, &mut host, &BopLimits::standard()) {
             // Render with the source so parse errors show the

@@ -1338,6 +1338,75 @@ print(match s {
     );
 }
 
+// ─── "did you mean?" suggestions (phase 9 polish) ─────────────────
+//
+// The walker has dedicated integration tests for these; the
+// point here is that the VM produces the *same hint field* so
+// embedders that upgrade from walker to VM don't see worse
+// diagnostics. We only check the VM directly — comparing hints
+// across engines via `run_both` would conflate with the existing
+// prints / error.message agreement contract.
+
+fn vm_hint(code: &str) -> Option<String> {
+    let mut host = RecordHost::new();
+    bop_vm::run(code, &mut host, &standard())
+        .err()
+        .and_then(|e| e.friendly_hint)
+}
+
+#[test]
+fn vm_variable_typo_suggests_closest_local_diff() {
+    let hint = vm_hint(
+        r#"let length = 5
+print(lenght)"#,
+    );
+    assert_eq!(hint.as_deref(), Some("Did you mean `length`?"));
+}
+
+#[test]
+fn vm_function_typo_suggests_user_fn_diff() {
+    let hint = vm_hint(
+        r#"fn greet(name) { print("hi " + name) }
+gret("world")"#,
+    );
+    assert_eq!(hint.as_deref(), Some("Did you mean `greet`?"));
+}
+
+#[test]
+fn vm_function_typo_suggests_core_builtin_diff() {
+    let hint = vm_hint("rang(5)");
+    assert_eq!(hint.as_deref(), Some("Did you mean `range`?"));
+}
+
+#[test]
+fn vm_struct_field_at_construction_suggests_declared_diff() {
+    let hint = vm_hint(
+        r#"struct Point { x, y }
+let p = Point { x: 1, ya: 2 }"#,
+    );
+    assert_eq!(hint.as_deref(), Some("Did you mean `y`?"));
+}
+
+#[test]
+fn vm_struct_field_at_access_suggests_declared_diff() {
+    let hint = vm_hint(
+        r#"struct Point { x, y }
+let p = Point { x: 1, y: 2 }
+print(p.z)"#,
+    );
+    // `x` and `y` both fit; declaration order wins the tie.
+    assert_eq!(hint.as_deref(), Some("Did you mean `x`?"));
+}
+
+#[test]
+fn vm_enum_variant_typo_suggests_declared_diff() {
+    let hint = vm_hint(
+        r#"enum Shape { Circle(r), Rectangle { w, h } }
+let s = Shape::Circel(5)"#,
+    );
+    assert_eq!(hint.as_deref(), Some("Did you mean `Circle`?"));
+}
+
 // ─── `try_call` builtin ───────────────────────────────────────────
 
 #[test]

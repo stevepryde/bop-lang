@@ -2037,10 +2037,17 @@ impl Emitter {
                 ));
             }
             if !decl.iter().any(|d| d == fname) {
-                return Err(BopError::runtime(
+                let mut err = BopError::runtime(
                     format!("Struct `{}` has no field `{}`", type_name, fname),
                     line,
-                ));
+                );
+                if let Some(hint) = bop::suggest::did_you_mean(
+                    fname,
+                    decl.iter().map(|s| s.as_str()),
+                ) {
+                    err.friendly_hint = Some(hint);
+                }
+                return Err(err);
             }
         }
         for declared in &decl {
@@ -2099,10 +2106,17 @@ impl Emitter {
                 )
             })?;
         let declared = variants.get(variant).cloned().ok_or_else(|| {
-            BopError::runtime(
+            let mut err = BopError::runtime(
                 format!("Enum `{}` has no variant `{}`", type_name, variant),
                 line,
-            )
+            );
+            if let Some(hint) = bop::suggest::did_you_mean(
+                variant,
+                variants.keys().map(|s| s.as_str()),
+            ) {
+                err.friendly_hint = Some(hint);
+            }
+            err
         })?;
         let tn_lit = rust_string_literal(type_name);
         let vn_lit = rust_string_literal(variant);
@@ -3273,10 +3287,15 @@ fn __bop_field_get(
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
     match obj {
         ::bop::value::Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
-            ::bop::error::BopError::runtime(
+            let mut err = ::bop::error::BopError::runtime(
                 format!("Struct `{}` has no field `{}`", s.type_name(), field),
                 line,
-            )
+            );
+            let names = s.fields().iter().map(|(k, _)| k.as_str());
+            if let Some(hint) = ::bop::suggest::did_you_mean(field, names) {
+                err.friendly_hint = Some(hint);
+            }
+            err
         }),
         ::bop::value::Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
             ::bop::error::BopError::runtime(
@@ -3579,10 +3598,15 @@ fn __bop_field_get(
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
     match obj {
         ::bop::value::Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
-            ::bop::error::BopError::runtime(
+            let mut err = ::bop::error::BopError::runtime(
                 format!("Struct `{}` has no field `{}`", s.type_name(), field),
                 line,
-            )
+            );
+            let names = s.fields().iter().map(|(k, _)| k.as_str());
+            if let Some(hint) = ::bop::suggest::did_you_mean(field, names) {
+                err.friendly_hint = Some(hint);
+            }
+            err
         }),
         ::bop::value::Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
             ::bop::error::BopError::runtime(

@@ -142,6 +142,74 @@ fn digits_of(mut n: u32) -> usize {
     d
 }
 
+/// Non-fatal diagnostic surfaced by static checks that run
+/// after parsing (currently: match-exhaustiveness analysis in
+/// [`crate::check`]). Shape mirrors `BopError` so the same
+/// source-snippet rendering works; the only divergence is the
+/// leading header, which says `warning:` instead of `error:`.
+///
+/// Warnings never halt execution — they're informational. The
+/// CLI prints them and then runs the program anyway. Embedders
+/// that want to treat them as errors can call
+/// [`BopWarning::into_error`].
+#[derive(Debug, Clone)]
+pub struct BopWarning {
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub message: String,
+    pub friendly_hint: Option<String>,
+}
+
+impl BopWarning {
+    /// Convenience constructor that matches `BopError::runtime`'s
+    /// shape so check passes can build warnings at a single
+    /// source line.
+    pub fn at(message: impl Into<String>, line: u32) -> Self {
+        Self {
+            line: Some(line),
+            column: None,
+            message: message.into(),
+            friendly_hint: None,
+            }
+    }
+
+    /// Attach a "hint:" line to the rendered output. Chained
+    /// from the constructor so call sites stay tidy.
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.friendly_hint = Some(hint.into());
+        self
+    }
+
+    /// Promote the warning to a fatal [`BopError`] with the same
+    /// fields. Useful for `-Werror`-style embedders.
+    pub fn into_error(self) -> BopError {
+        BopError {
+            line: self.line,
+            column: self.column,
+            message: self.message,
+            friendly_hint: self.friendly_hint,
+            is_fatal: false,
+        }
+    }
+
+    /// Render the warning with a source snippet. Mirrors
+    /// [`BopError::render`] but leads with `warning:` rather
+    /// than `error:`.
+    pub fn render(&self, source: &str) -> String {
+        let err = BopError {
+            line: self.line,
+            column: self.column,
+            message: self.message.clone(),
+            friendly_hint: self.friendly_hint.clone(),
+            is_fatal: false,
+        };
+        // Swap the leading `error:` for `warning:` so the
+        // output is visually distinct. The rest of the carat /
+        // snippet logic is identical to `BopError::render`.
+        err.render(source).replacen("error:", "warning:", 1)
+    }
+}
+
 #[cfg(feature = "std")]
 impl std::error::Error for BopError {}
 

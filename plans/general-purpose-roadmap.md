@@ -870,6 +870,50 @@ Ongoing, not a discrete phase:
   at construction and access, enum variants, and the
   "fall back when nothing's close" path.
 
+**Also landed: VM + AOT suggestion parity.**
+
+- The walker's "did you mean?" hints now fire from the VM and
+  AOT paths too. `bop::suggest::CORE_CALLABLE_BUILTINS` is
+  the single shared source of builtin names — each engine
+  feeds it into `did_you_mean` alongside its own fn /
+  scope / decl tables.
+- VM error sites updated: `Variable X not found`,
+  `Function X not found`, `Struct X has no field Y` (at
+  construction and at field access), `Enum X has no variant
+  Y`.
+- AOT error sites updated: the compile-time
+  struct-field-unknown and enum-variant-unknown raises in
+  `emit.rs`, plus the emitted-at-runtime `__bop_field_get`
+  helper in both sandbox and non-sandbox preambles (so
+  `p.z` in compiled code yields the same hint).
+- 6 new VM differential tests (`vm_*_suggests_*`) lock in
+  parity with the walker's hint output.
+
+**Also landed: match exhaustiveness warnings.**
+
+- New `bop::check` module runs after parse. Currently does
+  one thing: flag `match` expressions on an enum type where
+  some declared variants aren't covered by any arm.
+- Conservative by design — only fires when every arm is an
+  `EnumType::Variant` pattern on the same enum, no
+  wildcard/binding catch-all exists, and the enum is
+  declared locally (imported enums stay opaque). Guarded
+  arms don't count toward coverage (the guard can veto).
+  Or-patterns with variants contribute each variant.
+- New `BopWarning` type shares the render pipeline with
+  `BopError` — `warning:` header, snippet, carat,
+  `hint:` line — so CLI output is visually consistent.
+- New public entry point `bop::parse_with_warnings(source)`
+  returns the AST alongside the warning list. `bop-cli`
+  runs this first and prints any warnings before executing;
+  the program still runs regardless (warnings are
+  informational). Embedders who want `-Werror` behaviour
+  call `BopWarning::into_error` to promote.
+- 11 new tests in `check::tests` covering catch-all
+  detection, guarded arms, or-patterns, heterogeneous
+  matches, unknown enums (no false positives), and match
+  expressions nested inside fns / if-branches.
+
 **Still open.**
 
 - Runtime errors don't yet carry column (would require adding
@@ -877,10 +921,11 @@ Ongoing, not a discrete phase:
   renderer falls back cleanly, and runtime errors usually
   point at a whole expression anyway; parse errors, where the
   carat matters most, already have column.
-- Same suggestion logic could apply to VM/AOT error paths —
-  right now only the walker's errors pick up the hints.
 - REPL multi-line input, history, tab completion.
-- Match exhaustiveness warnings.
+- Exhaustiveness check doesn't yet follow `import`s —
+  imported enums are opaque to the analysis. A second pass
+  that loads the import graph's type decls would close that
+  gap.
 - Performance pass.
 
 ## Deliberately out of scope

@@ -392,6 +392,42 @@ impl<'h, H: BopHost> Vm<'h, H> {
         false
     }
 
+    // ─── "Did you mean?" candidate collectors ─────────────────
+    //
+    // Same pattern as the walker: gather every name the user
+    // could plausibly have meant so `bop::suggest::did_you_mean`
+    // picks the closest one. VM-specific quirk: the scope stack
+    // is per-frame, so we only scan the current frame's scopes
+    // rather than the whole interpreter's.
+
+    /// Names reachable when an identifier is used as a value —
+    /// locals in the enclosing scopes plus user fn declarations.
+    fn value_candidates_hint(&self, target: &str) -> Option<String> {
+        let mut candidates: Vec<String> = Vec::new();
+        for scope in self.current_scopes() {
+            for k in scope.keys() {
+                candidates.push(k.clone());
+            }
+        }
+        for name in self.functions.keys() {
+            candidates.push(name.clone());
+        }
+        bop::suggest::did_you_mean(target, candidates)
+    }
+
+    /// Names reachable in a call position: user fns plus core
+    /// builtins. Host builtins stay with the host's own
+    /// `function_hint()` (the call site falls back to that path
+    /// when no user-level suggestion fits).
+    fn callable_candidates_hint(&self, target: &str) -> Option<String> {
+        let mut candidates: Vec<String> =
+            self.functions.keys().cloned().collect();
+        for b in bop::suggest::CORE_CALLABLE_BUILTINS {
+            candidates.push((*b).to_string());
+        }
+        bop::suggest::did_you_mean(target, candidates)
+    }
+
     // ─── Dispatch ────────────────────────────────────────────────
 
     fn dispatch(&mut self, instr: Instr, line: u32) -> Result<Next, BopError> {
@@ -434,10 +470,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     );
                     self.push_value(v);
                 } else {
+                    // "did you mean?" first, else the generic
+                    // "use `let`" nudge. Mirrors the walker's
+                    // behaviour for consistency across engines.
+                    let hint = self
+                        .value_candidates_hint(&name)
+                        .unwrap_or_else(|| "Did you forget to create it with `let`?".to_string());
                     return Err(error_with_hint(
                         line,
                         format!("Variable `{}` not found", name),
-                        "Did you forget to create it with `let`?",
+                        hint,
                     ));
                 }
             }
@@ -948,11 +990,26 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let entry = match self.functions.get(&name) {
             Some(e) => e.clone(),
             None => {
-                let hint = self.host.function_hint().to_string();
-                return Err(if hint.is_empty() {
+                // Prefer a specific "did you mean?" hint over
+                // the host's generic suggestion — a typo hint is
+                // more actionable for the user. Only fall through
+                // to the host's hint when nothing's close.
+                if let Some(hint) = self.callable_candidates_hint(&name) {
+                    return Err(error_with_hint(
+                        line,
+                        format!("Function `{}` not found", name),
+                        hint,
+                    ));
+                }
+                let host_hint = self.host.function_hint().to_string();
+                return Err(if host_hint.is_empty() {
                     error(line, format!("Function `{}` not found", name))
                 } else {
-                    error_with_hint(line, format!("Function `{}` not found", name), hint)
+                    error_with_hint(
+                        line,
+                        format!("Function `{}` not found", name),
+                        host_hint,
+                    )
                 });
             }
         };
@@ -1188,13 +1245,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 ));
             }
             if !decl.iter().any(|d| d == &key_str) {
-                return Err(error(
-                    line,
-                    format!(
-                        "Struct `{}` has no field `{}`",
-                        type_name_s, key_str
-                    ),
-                ));
+                let msg = format!(
+                    "Struct `{}` has no field `{}`",
+                    type_name_s, key_str
+                );
+                let err = match bop::suggest::did_you_mean(
+                    &key_str,
+                    decl.iter().map(|s| s.as_str()),
+                ) {
+                    Some(hint) => error_with_hint(line, msg, hint),
+                    None => error(line, msg),
+                };
+                return Err(err);
             }
             provided.insert(key_str, val);
         }
@@ -1238,10 +1300,17 @@ impl<'h, H: BopHost> Vm<'h, H> {
             .find(|(n, _)| n == &variant_s)
             .cloned()
             .ok_or_else(|| {
-                error(
-                    line,
-                    format!("Enum `{}` has no variant `{}`", type_name_s, variant_s),
-                )
+                let msg = format!(
+                    "Enum `{}` has no variant `{}`",
+                    type_name_s, variant_s
+                );
+                match bop::suggest::did_you_mean(
+                    &variant_s,
+                    decl.iter().map(|(n, _)| n.as_str()),
+                ) {
+                    Some(hint) => error_with_hint(line, msg, hint),
+                    None => error(line, msg),
+                }
             })?;
         match (&variant_decl.1, shape) {
             (EnumVariantShape::Unit, EnumConstructShape::Unit) => {
@@ -1348,10 +1417,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
     fn field_get(&self, obj: &Value, field: &str, line: u32) -> Result<Value, BopError> {
         match obj {
             Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
-                error(
-                    line,
-                    format!("Struct `{}` has no field `{}`", s.type_name(), field),
-                )
+                let msg =
+                    format!("Struct `{}` has no field `{}`", s.type_name(), field);
+                let names = s.fields().iter().map(|(k, _)| k.as_str());
+                match bop::suggest::did_you_mean(field, names) {
+                    Some(hint) => error_with_hint(line, msg, hint),
+                    None => error(line, msg),
+                }
             }),
             Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
                 error(

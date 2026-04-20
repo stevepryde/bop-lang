@@ -16,10 +16,12 @@ pub mod precheck;
 pub mod builtins;
 pub mod methods;
 pub mod suggest;
+pub mod check;
 
 mod evaluator;
 
 pub use error::BopError;
+pub use error::BopWarning;
 pub use parser::{Stmt, count_instructions};
 pub use value::Value;
 
@@ -119,6 +121,19 @@ pub fn run<H: BopHost>(source: &str, host: &mut H, limits: &BopLimits) -> Result
 pub fn parse(source: &str) -> Result<Vec<Stmt>, BopError> {
     let tokens = lexer::lex(source)?;
     parser::parse(tokens)
+}
+
+/// Parse Bop source and run the static check pass, returning
+/// both the AST and any non-fatal warnings (currently:
+/// match-exhaustiveness). Prefer this over [`parse`] in tools
+/// that surface diagnostics to users — the CLI uses it to
+/// print warnings before running the program.
+pub fn parse_with_warnings(
+    source: &str,
+) -> Result<(Vec<Stmt>, Vec<error::BopWarning>), BopError> {
+    let stmts = parse(source)?;
+    let warnings = check::check_program(&stmts);
+    Ok((stmts, warnings))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────

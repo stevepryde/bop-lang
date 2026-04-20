@@ -65,20 +65,6 @@ type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, Import
 
 const MAX_CALL_DEPTH: usize = 64;
 
-/// Every core builtin callable by name — used by the "did you
-/// mean?" path when a `Function `foo` not found` error fires.
-/// Kept in one place so new builtins show up in suggestions
-/// without each error site needing its own copy. Host-provided
-/// builtins aren't here — they're listed via the host's own
-/// `function_hint()` for embedder-specific tips.
-const CORE_CALLABLE_BUILTINS: &[&str] = &[
-    "range", "str", "int", "float", "type", "abs", "min", "max", "rand",
-    "len", "inspect", "print", "try_call",
-    // Math (phase 6 / 7) — wrap f64::* operations.
-    "sqrt", "sin", "cos", "tan", "floor", "ceil", "round", "pow", "log",
-    "exp",
-];
-
 /// Sentinel message carried by the `BopError` that `try` raises
 /// when it wants the enclosing fn to early-return with a stored
 /// value. The fn-call wrapper (`call_bop_fn`) swaps the error
@@ -292,7 +278,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     fn callable_candidates_hint(&self, target: &str) -> Option<String> {
         let mut candidates: Vec<String> =
             self.functions.keys().cloned().collect();
-        for builtin in CORE_CALLABLE_BUILTINS {
+        for builtin in crate::suggest::CORE_CALLABLE_BUILTINS {
             candidates.push((*builtin).to_string());
         }
         crate::suggest::did_you_mean(target, candidates)

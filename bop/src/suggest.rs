@@ -11,6 +11,41 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+/// Every core builtin callable by name, in a single canonical
+/// list. Each engine (walker / VM / AOT) feeds this into
+/// [`did_you_mean`] when a `Function \`foo\` not found` error
+/// fires so a typo of `rang(5)` surfaces `range` regardless of
+/// which engine produced the error. Host-provided builtins
+/// stay out — they surface via each host's own
+/// `function_hint()` so embedder-specific tips stay embedder-
+/// owned.
+pub const CORE_CALLABLE_BUILTINS: &[&str] = &[
+    "range",
+    "str",
+    "int",
+    "float",
+    "type",
+    "abs",
+    "min",
+    "max",
+    "rand",
+    "len",
+    "inspect",
+    "print",
+    "try_call",
+    // Math (phase 6 / 7) — wrap f64::* operations.
+    "sqrt",
+    "sin",
+    "cos",
+    "tan",
+    "floor",
+    "ceil",
+    "round",
+    "pow",
+    "log",
+    "exp",
+];
+
 /// Find the closest match to `target` in `candidates`. Returns
 /// `Some(candidate)` when one is within an acceptable edit
 /// distance, or `None` when every candidate is too dissimilar
