@@ -731,6 +731,14 @@ impl Lexer {
                             current.push('\t');
                             self.advance();
                         }
+                        Some('r') => {
+                            // Windows / HTTP line endings; also
+                            // needed so `std.json` can stringify
+                            // and parse carriage returns inside
+                            // strings.
+                            current.push('\r');
+                            self.advance();
+                        }
                         Some('{') => {
                             current.push('{');
                             self.advance();
@@ -842,6 +850,17 @@ mod tests {
         assert_eq!(
             toks(r#""a\nb\t\\\"c""#),
             vec![Token::Str("a\nb\t\\\"c".into())]
+        );
+    }
+
+    #[test]
+    fn escape_sequence_cr() {
+        // `\r` was added alongside `std.json` so carriage
+        // returns can live in string literals (Windows line
+        // endings, HTTP headers, etc.).
+        assert_eq!(
+            toks(r#""a\rb""#),
+            vec![Token::Str("a\rb".into())]
         );
     }
 

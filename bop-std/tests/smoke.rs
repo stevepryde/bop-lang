@@ -515,6 +515,232 @@ print(s.values())"#,
     assert_eq!(host.prints.borrow()[0], "[1, 2, 4, 5]");
 }
 
+// ─── std.json ──────────────────────────────────────────────────
+
+#[test]
+fn json_stringify_scalars_and_null() {
+    let host = run(
+        r#"import std.json
+print(stringify(none))
+print(stringify(true))
+print(stringify(false))
+print(stringify(42))
+print(stringify(3.14))
+print(stringify("hello"))"#,
+    );
+    let prints = host.prints.borrow();
+    assert_eq!(prints[0], "null");
+    assert_eq!(prints[1], "true");
+    assert_eq!(prints[2], "false");
+    assert_eq!(prints[3], "42");
+    assert_eq!(prints[4], "3.14");
+    assert_eq!(prints[5], "\"hello\"");
+}
+
+#[test]
+fn json_stringify_escapes_special_chars() {
+    // Source has a literal newline inside a quoted string in
+    // Bop — the `\n` escape is recognised at lex time.
+    let host = run(
+        r#"import std.json
+print(stringify("a\"b"))
+print(stringify("a\\b"))
+print(stringify("a\nb"))
+print(stringify("a\tb"))"#,
+    );
+    let prints = host.prints.borrow();
+    // Each assertion compares against the literal JSON bytes
+    // the stringify helper emits.
+    assert_eq!(prints[0], "\"a\\\"b\"");
+    assert_eq!(prints[1], "\"a\\\\b\"");
+    assert_eq!(prints[2], "\"a\\nb\"");
+    assert_eq!(prints[3], "\"a\\tb\"");
+}
+
+#[test]
+fn json_stringify_array() {
+    let host = run(
+        r#"import std.json
+print(stringify([1, 2, 3]))
+print(stringify([]))
+print(stringify(["a", 1, true, none]))"#,
+    );
+    let prints = host.prints.borrow();
+    assert_eq!(prints[0], "[1,2,3]");
+    assert_eq!(prints[1], "[]");
+    assert_eq!(prints[2], "[\"a\",1,true,null]");
+}
+
+#[test]
+fn json_stringify_dict() {
+    let host = run(
+        r#"import std.json
+let d = {"name": "bop", "version": 1}
+print(stringify(d))"#,
+    );
+    // Dict iteration order is insertion order in Bop.
+    assert_eq!(
+        host.prints.borrow()[0],
+        "{\"name\":\"bop\",\"version\":1}"
+    );
+}
+
+#[test]
+fn json_parse_scalars() {
+    let host = run(
+        r#"import std.json
+print(parse("null"))
+print(parse("true"))
+print(parse("false"))
+print(parse("42"))
+print(parse("3.14"))
+print(parse("-7"))
+print(parse("\"hello\""))"#,
+    );
+    let prints = host.prints.borrow();
+    assert_eq!(prints[0], "none");
+    assert_eq!(prints[1], "true");
+    assert_eq!(prints[2], "false");
+    assert_eq!(prints[3], "42");
+    assert_eq!(prints[4], "3.14");
+    assert_eq!(prints[5], "-7");
+    assert_eq!(prints[6], "hello");
+}
+
+#[test]
+fn json_parse_number_types() {
+    // `42` is int; `42.0` / `1e2` are numbers.
+    let host = run(
+        r#"import std.json
+print(type(parse("42")))
+print(type(parse("42.0")))
+print(type(parse("1e2")))
+print(type(parse("-3")))"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["int", "number", "number", "int"]
+    );
+}
+
+#[test]
+fn json_parse_array() {
+    let host = run(
+        r#"import std.json
+let arr = parse("[1, 2, 3]")
+print(arr)
+print(arr.len())
+let empty = parse("[]")
+print(empty.len())"#,
+    );
+    let prints = host.prints.borrow();
+    assert_eq!(prints[0], "[1, 2, 3]");
+    assert_eq!(prints[1], "3");
+    assert_eq!(prints[2], "0");
+}
+
+#[test]
+fn json_parse_object_indexes_by_key() {
+    let host = run(
+        r#"import std.json
+let o = parse("{\"name\": \"bop\", \"n\": 42}")
+print(o["name"])
+print(o["n"])"#,
+    );
+    let prints = host.prints.borrow();
+    assert_eq!(prints[0], "bop");
+    assert_eq!(prints[1], "42");
+}
+
+#[test]
+fn json_parse_nested_structures() {
+    let host = run(
+        r#"import std.json
+let txt = "{\"users\": [{\"name\": \"a\"}, {\"name\": \"b\"}]}"
+let data = parse(txt)
+print(data["users"].len())
+print(data["users"][0]["name"])
+print(data["users"][1]["name"])"#,
+    );
+    let prints = host.prints.borrow();
+    assert_eq!(prints[0], "2");
+    assert_eq!(prints[1], "a");
+    assert_eq!(prints[2], "b");
+}
+
+#[test]
+fn json_parse_handles_whitespace() {
+    let host = run(
+        r#"import std.json
+let txt = "  [  1 ,  2 , 3  ]  "
+let arr = parse(txt)
+print(arr)"#,
+    );
+    assert_eq!(host.prints.borrow()[0], "[1, 2, 3]");
+}
+
+#[test]
+fn json_parse_string_escapes() {
+    let host = run(
+        r#"import std.json
+let s = parse("\"a\\\"b\\nc\"")
+print(s)
+print(s.len())"#,
+    );
+    let prints = host.prints.borrow();
+    // a, ", b, \n, c — 5 chars.
+    assert_eq!(prints[1], "5");
+    assert!(prints[0].contains("\"b"));
+}
+
+#[test]
+fn json_parse_roundtrip_via_stringify() {
+    // stringify(parse(x)) should produce semantically the
+    // same data; whitespace may differ.
+    let host = run(
+        r#"import std.json
+let original = {"name": "bop", "ok": true, "vals": [1, 2, 3]}
+let dumped = stringify(original)
+print(dumped)
+let roundtrip = parse(dumped)
+print(roundtrip["name"])
+print(roundtrip["ok"])
+print(roundtrip["vals"])"#,
+    );
+    let prints = host.prints.borrow();
+    assert_eq!(prints[0], "{\"name\":\"bop\",\"ok\":true,\"vals\":[1,2,3]}");
+    assert_eq!(prints[1], "bop");
+    assert_eq!(prints[2], "true");
+    assert_eq!(prints[3], "[1, 2, 3]");
+}
+
+#[test]
+fn json_parse_error_raises_and_try_call_catches() {
+    let host = run(
+        r#"import std.json
+import std.result
+let r = try_call(fn() { return parse("[1, 2,") })
+print(match r {
+    Result::Ok(_) => "ok?",
+    Result::Err(e) => "caught",
+})"#,
+    );
+    assert_eq!(host.prints.borrow()[0], "caught");
+}
+
+#[test]
+fn json_parse_empty_input_errors() {
+    let host = run(
+        r#"import std.json
+let r = try_call(fn() { return parse("   ") })
+print(match r {
+    Result::Ok(_) => "ok?",
+    Result::Err(_) => "err",
+})"#,
+    );
+    assert_eq!(host.prints.borrow()[0], "err");
+}
+
 #[test]
 fn collections_composes_with_std_iter() {
     // Collections + iter helpers interoperate because a Set's

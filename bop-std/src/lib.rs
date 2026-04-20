@@ -27,6 +27,8 @@
 //!   tiny test-runner.
 //! - `std.collections` — `Set`, `Queue`, `Stack` as struct
 //!   types with value-semantic methods (`s = s.push(v)` etc.).
+//! - `std.json` — `parse(text)` / `stringify(value)`. Pure
+//!   Bop implementation; adequate for scripting workloads.
 
 #![deny(missing_docs)]
 
@@ -36,6 +38,7 @@ const ITER: &str = include_str!("modules/iter.bop");
 const STRING_MOD: &str = include_str!("modules/string.bop");
 const TEST_MOD: &str = include_str!("modules/test.bop");
 const COLLECTIONS: &str = include_str!("modules/collections.bop");
+const JSON_MOD: &str = include_str!("modules/json.bop");
 
 /// Map a `std.*` module name to its bundled Bop source.
 ///
@@ -63,6 +66,7 @@ pub fn resolve(name: &str) -> Option<&'static str> {
         "std.string" => Some(STRING_MOD),
         "std.test" => Some(TEST_MOD),
         "std.collections" => Some(COLLECTIONS),
+        "std.json" => Some(JSON_MOD),
         _ => None,
     }
 }
@@ -76,6 +80,7 @@ pub const MODULES: &[&str] = &[
     "std.string",
     "std.test",
     "std.collections",
+    "std.json",
 ];
 
 #[cfg(test)]
