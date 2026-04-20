@@ -65,7 +65,10 @@ use bop::ops;
 use bop::value::{BopFn, FnBody, Value};
 use bop::{BopHost, BopLimits};
 
-use crate::chunk::{Chunk, CodeOffset, Constant, FnIdx, Instr, NameIdx};
+use crate::chunk::{
+    Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx, EnumVariantShape, FnIdx, Instr,
+    NameIdx, StructIdx,
+};
 
 /// Hard cap on call depth; matches the tree-walker.
 const MAX_CALL_DEPTH: usize = 64;
@@ -139,6 +142,17 @@ pub struct Vm<'h, H: BopHost> {
     imports: ImportCache,
     imported_here: BTreeSet<String>,
     limits: BopLimits,
+    /// Declared struct types (name → field list). Populated at
+    /// runtime by `DefineStruct`; read by `ConstructStruct` to
+    /// validate / order fields.
+    struct_defs: BTreeMap<String, Vec<String>>,
+    /// Declared enum types (name → variants with their shapes).
+    /// Populated by `DefineEnum`; read by `ConstructEnum`.
+    enum_defs: BTreeMap<String, Vec<(String, EnumVariantShape)>>,
+    /// User-defined methods. Outer key is the receiver type
+    /// name; inner is the method name. Registered by
+    /// `DefineMethod`; looked up by `CallMethod`.
+    user_methods: BTreeMap<String, BTreeMap<String, FnEntry>>,
 }
 
 impl<'h, H: BopHost> Vm<'h, H> {
@@ -177,6 +191,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             imports,
             imported_here: BTreeSet::new(),
             limits,
+            struct_defs: BTreeMap::new(),
+            enum_defs: BTreeMap::new(),
+            user_methods: BTreeMap::new(),
         }
     }
 
@@ -503,7 +520,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 argc,
                 assign_back_to,
             } => {
-                self.call_method(method, argc as usize, assign_back_to, line)?;
+                return self.call_method(method, argc as usize, assign_back_to, line);
             }
 
             // ─── Functions ────────────────────────────────────────
@@ -610,6 +627,36 @@ impl<'h, H: BopHost> Vm<'h, H> {
             Instr::Import(name_idx) => {
                 let path = self.current_chunk().name(name_idx).to_string();
                 self.exec_import(&path, line)?;
+            }
+
+            // ─── User-defined types ──────────────────────────────
+            Instr::DefineStruct(idx) => self.define_struct(idx),
+            Instr::DefineEnum(idx) => self.define_enum(idx),
+            Instr::DefineMethod {
+                type_name,
+                method_name,
+                fn_idx,
+            } => self.define_method(type_name, method_name, fn_idx),
+            Instr::ConstructStruct { type_name, count } => {
+                self.construct_struct(type_name, count as usize, line)?;
+            }
+            Instr::ConstructEnum {
+                type_name,
+                variant,
+                shape,
+            } => {
+                self.construct_enum(type_name, variant, shape, line)?;
+            }
+            Instr::FieldGet(n) => {
+                let field = self.current_chunk().name(n).to_string();
+                let obj = self.pop_value(line)?;
+                self.push_value(self.field_get(&obj, &field, line)?);
+            }
+            Instr::FieldSet(n) => {
+                let field = self.current_chunk().name(n).to_string();
+                let val = self.pop_value(line)?;
+                let obj = self.pop_value(line)?;
+                self.push_value(self.field_set(obj, &field, val, line)?);
             }
 
             // ─── Termination ──────────────────────────────────────
@@ -846,11 +893,70 @@ impl<'h, H: BopHost> Vm<'h, H> {
         argc: usize,
         assign_back_to: Option<NameIdx>,
         line: u32,
-    ) -> Result<(), BopError> {
+    ) -> Result<Next, BopError> {
         let method = self.current_chunk().name(method_idx).to_string();
 
         let args = self.pop_n_values(argc, line)?;
         let obj = self.pop_value(line)?;
+
+        // User-method dispatch comes first — any method declared
+        // on the receiver's type wins over the built-in method of
+        // the same name, matching the walker.
+        let user_type = match &obj {
+            Value::Struct(s) => Some(s.type_name().to_string()),
+            Value::EnumVariant(e) => Some(e.type_name().to_string()),
+            _ => None,
+        };
+        if let Some(type_name) = user_type {
+            let entry = self
+                .user_methods
+                .get(&type_name)
+                .and_then(|m| m.get(&method))
+                .cloned();
+            if let Some(entry) = entry {
+                if entry.params.len() != args.len() + 1 {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{}.{}` expects {} argument{} (including `self`), but got {}",
+                            type_name,
+                            method,
+                            entry.params.len(),
+                            if entry.params.len() == 1 { "" } else { "s" },
+                            args.len() + 1
+                        ),
+                    ));
+                }
+                if self.frames.len() >= MAX_CALL_DEPTH {
+                    return Err(error_with_hint(
+                        line,
+                        "Too many nested function calls (possible infinite recursion)",
+                        "Check that your recursive function has a base case that stops calling itself.",
+                    ));
+                }
+                let mut scope = BTreeMap::new();
+                // Prepend `self` as the first parameter.
+                let mut full_args = Vec::with_capacity(args.len() + 1);
+                full_args.push(obj);
+                full_args.extend(args);
+                for (param, arg) in entry.params.iter().zip(full_args) {
+                    scope.insert(param.clone(), arg);
+                }
+                self.frames.push(Frame {
+                    chunk: entry.chunk.clone(),
+                    ip: 0,
+                    scopes: vec![scope],
+                    stack_base: self.stack.len(),
+                    is_function: true,
+                });
+                // User methods don't do mutation back-assign
+                // — the receiver is passed by value, and the
+                // method returns a fresh instance if it wants to
+                // "mutate". Matches the walker's convention.
+                let _ = assign_back_to;
+                return Ok(Next::Continue);
+            }
+        }
 
         let (ret, mutated) = match &obj {
             Value::Array(arr) => methods::array_method(arr, &method, &args, line)?,
@@ -871,7 +977,301 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
         }
         self.push_value(ret);
+        Ok(Next::Continue)
+    }
+
+    fn define_struct(&mut self, idx: StructIdx) {
+        let def = self.current_chunk().struct_def(idx).clone();
+        self.struct_defs.insert(def.name, def.fields);
+    }
+
+    fn define_enum(&mut self, idx: EnumIdx) {
+        let def = self.current_chunk().enum_def(idx).clone();
+        let variants = def
+            .variants
+            .into_iter()
+            .map(|v| (v.name, v.shape))
+            .collect();
+        self.enum_defs.insert(def.name, variants);
+    }
+
+    fn define_method(
+        &mut self,
+        type_name: NameIdx,
+        method_name: NameIdx,
+        fn_idx: FnIdx,
+    ) {
+        let type_name_s = self.current_chunk().name(type_name).to_string();
+        let method_name_s = self.current_chunk().name(method_name).to_string();
+        let fn_def = self.current_chunk().function(fn_idx).clone();
+        let entry = FnEntry {
+            params: fn_def.params,
+            chunk: Rc::new(fn_def.chunk),
+        };
+        self.user_methods
+            .entry(type_name_s)
+            .or_default()
+            .insert(method_name_s, entry);
+    }
+
+    fn construct_struct(
+        &mut self,
+        type_name: NameIdx,
+        count: usize,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let type_name_s = self.current_chunk().name(type_name).to_string();
+        let decl = self
+            .struct_defs
+            .get(&type_name_s)
+            .ok_or_else(|| {
+                error(
+                    line,
+                    format!("Struct `{}` is not declared", type_name_s),
+                )
+            })?
+            .clone();
+        let flat = self.pop_n_values(count * 2, line)?;
+        let mut provided: BTreeMap<String, Value> = BTreeMap::new();
+        let mut iter = flat.into_iter();
+        while let (Some(key), Some(val)) = (iter.next(), iter.next()) {
+            let key_str = match &key {
+                Value::Str(s) => s.as_str().to_string(),
+                other => {
+                    return Err(error(
+                        line,
+                        format!(
+                            "Struct field names must be strings, got {}",
+                            other.type_name()
+                        ),
+                    ));
+                }
+            };
+            drop(key);
+            if provided.contains_key(&key_str) {
+                return Err(error(
+                    line,
+                    format!(
+                        "Field `{}` specified twice in `{}` construction",
+                        key_str, type_name_s
+                    ),
+                ));
+            }
+            if !decl.iter().any(|d| d == &key_str) {
+                return Err(error(
+                    line,
+                    format!(
+                        "Struct `{}` has no field `{}`",
+                        type_name_s, key_str
+                    ),
+                ));
+            }
+            provided.insert(key_str, val);
+        }
+        let mut fields: Vec<(String, Value)> = Vec::with_capacity(decl.len());
+        for d in &decl {
+            match provided.remove(d) {
+                Some(v) => fields.push((d.clone(), v)),
+                None => {
+                    return Err(error(
+                        line,
+                        format!(
+                            "Missing field `{}` in `{}` construction",
+                            d, type_name_s
+                        ),
+                    ));
+                }
+            }
+        }
+        self.push_value(Value::new_struct(type_name_s, fields));
         Ok(())
+    }
+
+    fn construct_enum(
+        &mut self,
+        type_name: NameIdx,
+        variant: NameIdx,
+        shape: EnumConstructShape,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let type_name_s = self.current_chunk().name(type_name).to_string();
+        let variant_s = self.current_chunk().name(variant).to_string();
+        let decl = self
+            .enum_defs
+            .get(&type_name_s)
+            .ok_or_else(|| {
+                error(line, format!("Enum `{}` is not declared", type_name_s))
+            })?
+            .clone();
+        let variant_decl = decl
+            .iter()
+            .find(|(n, _)| n == &variant_s)
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    line,
+                    format!("Enum `{}` has no variant `{}`", type_name_s, variant_s),
+                )
+            })?;
+        match (&variant_decl.1, shape) {
+            (EnumVariantShape::Unit, EnumConstructShape::Unit) => {
+                self.push_value(Value::new_enum_unit(type_name_s, variant_s));
+            }
+            (EnumVariantShape::Tuple(fields), EnumConstructShape::Tuple(argc)) => {
+                if fields.len() as u32 != argc {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{}::{}` expects {} argument{}, but got {}",
+                            type_name_s,
+                            variant_s,
+                            fields.len(),
+                            if fields.len() == 1 { "" } else { "s" },
+                            argc
+                        ),
+                    ));
+                }
+                let items = self.pop_n_values(argc as usize, line)?;
+                self.push_value(Value::new_enum_tuple(type_name_s, variant_s, items));
+            }
+            (EnumVariantShape::Struct(decl_fields), EnumConstructShape::Struct(count)) => {
+                let flat = self.pop_n_values(count as usize * 2, line)?;
+                let mut provided: BTreeMap<String, Value> = BTreeMap::new();
+                let mut iter = flat.into_iter();
+                while let (Some(key), Some(val)) = (iter.next(), iter.next()) {
+                    let key_str = match &key {
+                        Value::Str(s) => s.as_str().to_string(),
+                        _ => {
+                            return Err(error(
+                                line,
+                                "Enum struct-variant field names must be strings",
+                            ));
+                        }
+                    };
+                    drop(key);
+                    if provided.contains_key(&key_str) {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Field `{}` specified twice in `{}::{}`",
+                                key_str, type_name_s, variant_s
+                            ),
+                        ));
+                    }
+                    if !decl_fields.iter().any(|d| d == &key_str) {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Variant `{}::{}` has no field `{}`",
+                                type_name_s, variant_s, key_str
+                            ),
+                        ));
+                    }
+                    provided.insert(key_str, val);
+                }
+                let mut fields: Vec<(String, Value)> =
+                    Vec::with_capacity(decl_fields.len());
+                for d in decl_fields {
+                    match provided.remove(d) {
+                        Some(v) => fields.push((d.clone(), v)),
+                        None => {
+                            return Err(error(
+                                line,
+                                format!(
+                                    "Missing field `{}` in `{}::{}` construction",
+                                    d, type_name_s, variant_s
+                                ),
+                            ));
+                        }
+                    }
+                }
+                self.push_value(Value::new_enum_struct(type_name_s, variant_s, fields));
+            }
+            (EnumVariantShape::Unit, _) => {
+                return Err(error(
+                    line,
+                    format!("Variant `{}::{}` takes no payload", type_name_s, variant_s),
+                ));
+            }
+            (EnumVariantShape::Tuple(_), _) => {
+                return Err(error(
+                    line,
+                    format!(
+                        "Variant `{}::{}` expects positional arguments `(…)`",
+                        type_name_s, variant_s
+                    ),
+                ));
+            }
+            (EnumVariantShape::Struct(_), _) => {
+                return Err(error(
+                    line,
+                    format!(
+                        "Variant `{}::{}` expects named fields `{{ … }}`",
+                        type_name_s, variant_s
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn field_get(&self, obj: &Value, field: &str, line: u32) -> Result<Value, BopError> {
+        match obj {
+            Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
+                error(
+                    line,
+                    format!("Struct `{}` has no field `{}`", s.type_name(), field),
+                )
+            }),
+            Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
+                error(
+                    line,
+                    format!(
+                        "Variant `{}::{}` has no field `{}`",
+                        e.type_name(),
+                        e.variant(),
+                        field
+                    ),
+                )
+            }),
+            other => Err(error(
+                line,
+                format!("Can't read field `{}` on {}", field, other.type_name()),
+            )),
+        }
+    }
+
+    fn field_set(
+        &self,
+        mut obj: Value,
+        field: &str,
+        value: Value,
+        line: u32,
+    ) -> Result<Value, BopError> {
+        // Mutate in place — `Value::Struct` wraps a `Box` but
+        // we already own `obj`, so `set_field` on the inner
+        // `BopStruct` does the update and we hand the same
+        // `Value` back.
+        match &mut obj {
+            Value::Struct(boxed) => {
+                let type_name = boxed.type_name().to_string();
+                if !boxed.set_field(field, value) {
+                    return Err(error(
+                        line,
+                        format!("Struct `{}` has no field `{}`", type_name, field),
+                    ));
+                }
+                Ok(obj)
+            }
+            other => Err(error(
+                line,
+                format!(
+                    "Can't assign to field `{}` on {}",
+                    field,
+                    other.type_name()
+                ),
+            )),
+        }
     }
 
     fn define_fn(&mut self, idx: FnIdx) {

@@ -8,8 +8,10 @@ use bop::error::BopError;
 use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 
 use crate::chunk::{
-    Chunk, CodeOffset, ConstIdx, Constant, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx,
+    Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx, EnumVariantDef,
+    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx, StructDef, StructIdx,
 };
+use bop::parser::VariantKind;
 
 /// Compile a parsed program into a top-level chunk.
 pub fn compile(program: &[Stmt]) -> Result<Chunk, BopError> {
@@ -110,6 +112,18 @@ impl Compiler {
     fn add_function(&mut self, def: FnDef) -> FnIdx {
         let idx = FnIdx(self.chunk.functions.len() as u32);
         self.chunk.functions.push(def);
+        idx
+    }
+
+    fn add_struct(&mut self, def: StructDef) -> StructIdx {
+        let idx = StructIdx(self.chunk.struct_defs.len() as u32);
+        self.chunk.struct_defs.push(def);
+        idx
+    }
+
+    fn add_enum(&mut self, def: EnumDef) -> EnumIdx {
+        let idx = EnumIdx(self.chunk.enum_defs.len() as u32);
+        self.chunk.enum_defs.push(def);
         idx
     }
 
@@ -270,25 +284,54 @@ impl Compiler {
                 self.emit(Instr::Import(n), line);
             }
 
-            StmtKind::StructDecl { .. } => {
-                return Err(err(
-                    line,
-                    "bop-vm: struct declarations are not yet supported in the bytecode VM",
-                ));
+            StmtKind::StructDecl { name, fields } => {
+                let def = StructDef {
+                    name: name.clone(),
+                    fields: fields.clone(),
+                };
+                let idx = self.add_struct(def);
+                self.emit(Instr::DefineStruct(idx), line);
             }
 
-            StmtKind::EnumDecl { .. } => {
-                return Err(err(
-                    line,
-                    "bop-vm: enum declarations are not yet supported in the bytecode VM",
-                ));
+            StmtKind::EnumDecl { name, variants } => {
+                let def = EnumDef {
+                    name: name.clone(),
+                    variants: variants
+                        .iter()
+                        .map(|v| EnumVariantDef {
+                            name: v.name.clone(),
+                            shape: match &v.kind {
+                                VariantKind::Unit => EnumVariantShape::Unit,
+                                VariantKind::Tuple(fs) => EnumVariantShape::Tuple(fs.clone()),
+                                VariantKind::Struct(fs) => {
+                                    EnumVariantShape::Struct(fs.clone())
+                                }
+                            },
+                        })
+                        .collect(),
+                };
+                let idx = self.add_enum(def);
+                self.emit(Instr::DefineEnum(idx), line);
             }
 
-            StmtKind::MethodDecl { .. } => {
-                return Err(err(
+            StmtKind::MethodDecl {
+                type_name,
+                method_name,
+                params,
+                body,
+            } => {
+                let def = self.compile_function(method_name, params, body)?;
+                let fn_idx = self.add_function(def);
+                let type_name_idx = self.add_name(type_name);
+                let method_name_idx = self.add_name(method_name);
+                self.emit(
+                    Instr::DefineMethod {
+                        type_name: type_name_idx,
+                        method_name: method_name_idx,
+                        fn_idx,
+                    },
                     line,
-                    "bop-vm: user-defined methods are not yet supported in the bytecode VM",
-                ));
+                );
             }
 
             StmtKind::ExprStmt(expr) => {
@@ -402,11 +445,37 @@ impl Compiler {
                 }
                 self.emit(Instr::StoreVar(name_idx), line);
             }
-            AssignTarget::Field { .. } => {
-                return Err(err(
-                    line,
-                    "bop-vm: struct field assignment is not yet supported in the bytecode VM",
-                ));
+            AssignTarget::Field { object, field } => {
+                // Only bare-`Ident` objects are assignable — the
+                // write-back goes through `StoreVar`, matching
+                // the walker / index-assign convention.
+                let name = match &object.kind {
+                    ExprKind::Ident(n) => n.clone(),
+                    _ => {
+                        return Err(err(
+                            line,
+                            "Can only assign to fields of named variables (like `p.x = val`)",
+                        ));
+                    }
+                };
+                let name_idx = self.add_name(&name);
+                let field_idx = self.add_name(field);
+                match op {
+                    AssignOp::Eq => {
+                        self.emit(Instr::LoadVar(name_idx), line);
+                        self.compile_expr(value)?;
+                        self.emit(Instr::FieldSet(field_idx), line);
+                    }
+                    compound => {
+                        self.emit(Instr::LoadVar(name_idx), line);
+                        self.emit(Instr::Dup, line);
+                        self.emit(Instr::FieldGet(field_idx), line);
+                        self.compile_expr(value)?;
+                        self.emit(binop_for_compound(*compound), line);
+                        self.emit(Instr::FieldSet(field_idx), line);
+                    }
+                }
+                self.emit(Instr::StoreVar(name_idx), line);
             }
         }
         Ok(())
@@ -555,25 +624,66 @@ impl Compiler {
                 self.patch_jump(end_jmp, end);
             }
 
-            ExprKind::FieldAccess { .. } => {
-                return Err(err(
-                    line,
-                    "bop-vm: struct field access (obj.field) is not yet supported in the bytecode VM",
-                ));
+            ExprKind::FieldAccess { object, field } => {
+                self.compile_expr(object)?;
+                let n = self.add_name(field);
+                self.emit(Instr::FieldGet(n), line);
             }
 
-            ExprKind::StructConstruct { .. } => {
-                return Err(err(
+            ExprKind::StructConstruct { type_name, fields } => {
+                // Push each (name, value) pair in the order
+                // provided — the VM's `ConstructStruct` handler
+                // does the matching against the declared fields,
+                // so the compiler doesn't have to know the struct
+                // shape at emit time.
+                for (fname, fexpr) in fields {
+                    let c = self.add_const(Constant::Str(fname.clone()));
+                    self.emit(Instr::LoadConst(c), line);
+                    self.compile_expr(fexpr)?;
+                }
+                let type_idx = self.add_name(type_name);
+                self.emit(
+                    Instr::ConstructStruct {
+                        type_name: type_idx,
+                        count: fields.len() as u32,
+                    },
                     line,
-                    "bop-vm: struct literals are not yet supported in the bytecode VM",
-                ));
+                );
             }
 
-            ExprKind::EnumConstruct { .. } => {
-                return Err(err(
+            ExprKind::EnumConstruct {
+                type_name,
+                variant,
+                payload,
+            } => {
+                use bop::parser::VariantPayload;
+                let shape = match payload {
+                    VariantPayload::Unit => EnumConstructShape::Unit,
+                    VariantPayload::Tuple(args) => {
+                        for a in args {
+                            self.compile_expr(a)?;
+                        }
+                        EnumConstructShape::Tuple(args.len() as u32)
+                    }
+                    VariantPayload::Struct(fields) => {
+                        for (fname, fexpr) in fields {
+                            let c = self.add_const(Constant::Str(fname.clone()));
+                            self.emit(Instr::LoadConst(c), line);
+                            self.compile_expr(fexpr)?;
+                        }
+                        EnumConstructShape::Struct(fields.len() as u32)
+                    }
+                };
+                let type_idx = self.add_name(type_name);
+                let var_idx = self.add_name(variant);
+                self.emit(
+                    Instr::ConstructEnum {
+                        type_name: type_idx,
+                        variant: var_idx,
+                        shape,
+                    },
                     line,
-                    "bop-vm: enum variant construction is not yet supported in the bytecode VM",
-                ));
+                );
             }
 
             ExprKind::Lambda { params, body } => {

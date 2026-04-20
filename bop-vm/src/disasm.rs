@@ -139,6 +139,54 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
 
         Instr::Import(n) => format!("Import {}", chunk.name(*n)),
 
+        Instr::DefineStruct(idx) => {
+            let def = chunk.struct_def(*idx);
+            format!("DefineStruct {} {{ {} }}", def.name, def.fields.join(", "))
+        }
+        Instr::DefineEnum(idx) => {
+            let def = chunk.enum_def(*idx);
+            format!(
+                "DefineEnum {} [{} variants]",
+                def.name,
+                def.variants.len()
+            )
+        }
+        Instr::DefineMethod {
+            type_name,
+            method_name,
+            fn_idx,
+        } => {
+            format!(
+                "DefineMethod {}::{} (#{})",
+                chunk.name(*type_name),
+                chunk.name(*method_name),
+                fn_idx.0,
+            )
+        }
+        Instr::ConstructStruct { type_name, count } => {
+            format!("ConstructStruct {}/{}", chunk.name(*type_name), count)
+        }
+        Instr::ConstructEnum {
+            type_name,
+            variant,
+            shape,
+        } => {
+            use crate::chunk::EnumConstructShape as S;
+            let shape_str = match shape {
+                S::Unit => "Unit".to_string(),
+                S::Tuple(n) => format!("Tuple({})", n),
+                S::Struct(n) => format!("Struct({})", n),
+            };
+            format!(
+                "ConstructEnum {}::{} {}",
+                chunk.name(*type_name),
+                chunk.name(*variant),
+                shape_str,
+            )
+        }
+        Instr::FieldGet(n) => format!("FieldGet .{}", chunk.name(*n)),
+        Instr::FieldSet(n) => format!("FieldSet .{}", chunk.name(*n)),
+
         Instr::Halt => "Halt".to_string(),
     }
 }

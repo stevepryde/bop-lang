@@ -87,7 +87,10 @@ pub mod compiler;
 pub mod disasm;
 pub mod vm;
 
-pub use chunk::{Chunk, CodeOffset, ConstIdx, Constant, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx};
+pub use chunk::{
+    Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx, EnumVariantDef,
+    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx, StructDef, StructIdx,
+};
 pub use compiler::compile;
 pub use disasm::disassemble;
 pub use vm::{Vm, execute, run};

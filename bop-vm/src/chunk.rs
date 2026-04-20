@@ -145,6 +145,51 @@ pub enum Instr {
     /// VM caches by module path so re-imports are cheap.
     Import(NameIdx),
 
+    // ─── User-defined types ─────────────────────────────────────
+    /// Register the struct type at `StructIdx` (declared fields
+    /// live in the chunk's `struct_defs` pool). Subsequent
+    /// `ConstructStruct` / `FieldGet` / `FieldSet` opcodes
+    /// reference it by type name.
+    DefineStruct(StructIdx),
+    /// Register the enum type at `EnumIdx` (variants + their
+    /// payload shapes live in the chunk's `enum_defs` pool).
+    DefineEnum(EnumIdx),
+    /// Register a user method. Receiver type is looked up by
+    /// `type_name`; the body lives in `chunk.functions[fn_idx]`
+    /// (same pool as user fns / lambdas).
+    DefineMethod {
+        type_name: NameIdx,
+        method_name: NameIdx,
+        fn_idx: FnIdx,
+    },
+    /// Struct literal: pop `2 * count` stack entries (field-name
+    /// string + value, alternating — same layout as `MakeDict`),
+    /// validate against the struct declaration, push a
+    /// `Value::Struct`.
+    ConstructStruct {
+        type_name: NameIdx,
+        count: u32,
+    },
+    /// Enum variant construction. The `shape` tells the VM how
+    /// many stack entries the payload consumes:
+    /// - `Unit` — no pops
+    /// - `Tuple(argc)` — pop `argc` values
+    /// - `Struct(count)` — pop `2 * count` (name, value) pairs
+    ConstructEnum {
+        type_name: NameIdx,
+        variant: NameIdx,
+        shape: EnumConstructShape,
+    },
+    /// Pop the object, push the value of the named field. Works
+    /// on `Value::Struct` and on `Value::EnumVariant` with
+    /// struct-shaped payloads.
+    FieldGet(NameIdx),
+    /// `[.., obj, val]` → `[.., obj']` with `obj'.field = val`.
+    /// Used as the building block for `foo.field = v` — the
+    /// compiler emits a `StoreVar` after to write the modified
+    /// struct back.
+    FieldSet(NameIdx),
+
     // ─── Termination ──────────────────────────────────────────────
     /// End the current chunk (top-level program only).
     Halt,
@@ -171,6 +216,23 @@ pub struct InterpIdx(pub u32);
 /// Absolute instruction index within the same chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CodeOffset(pub u32);
+
+/// Index into a chunk's struct-definition pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StructIdx(pub u32);
+
+/// Index into a chunk's enum-definition pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnumIdx(pub u32);
+
+/// Shape of an enum variant's payload at the construction site —
+/// tells the VM how many stack entries to pop.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnumConstructShape {
+    Unit,
+    Tuple(u32),
+    Struct(u32),
+}
 
 // ─── Constants and recipes ─────────────────────────────────────────
 
@@ -200,6 +262,36 @@ pub struct Chunk {
     pub names: Vec<String>,
     pub interps: Vec<InterpRecipe>,
     pub functions: Vec<FnDef>,
+    pub struct_defs: Vec<StructDef>,
+    pub enum_defs: Vec<EnumDef>,
+}
+
+/// Compiled struct type record.
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
+/// Compiled enum type record.
+#[derive(Debug, Clone)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<EnumVariantDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumVariantDef {
+    pub name: String,
+    pub shape: EnumVariantShape,
+}
+
+/// Payload shape of a declared enum variant.
+#[derive(Debug, Clone)]
+pub enum EnumVariantShape {
+    Unit,
+    Tuple(Vec<String>),
+    Struct(Vec<String>),
 }
 
 impl Chunk {
@@ -229,6 +321,14 @@ impl Chunk {
 
     pub fn function(&self, idx: FnIdx) -> &FnDef {
         &self.functions[idx.0 as usize]
+    }
+
+    pub fn struct_def(&self, idx: StructIdx) -> &StructDef {
+        &self.struct_defs[idx.0 as usize]
+    }
+
+    pub fn enum_def(&self, idx: EnumIdx) -> &EnumDef {
+        &self.enum_defs[idx.0 as usize]
     }
 }
 

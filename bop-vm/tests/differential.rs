@@ -526,6 +526,170 @@ print(fib(10))"#),
     );
 }
 
+// ─── Structs ───────────────────────────────────────────────────────
+
+#[test]
+fn struct_basic_diff() {
+    assert_eq!(
+        say(r#"struct Point { x, y }
+let p = Point { x: 3, y: 4 }
+print(p.x + p.y)"#),
+        "7"
+    );
+}
+
+#[test]
+fn struct_display_and_equality_diff() {
+    assert_eq!(
+        say(r#"struct Point { x, y }
+let a = Point { x: 1, y: 2 }
+let b = Point { x: 1, y: 2 }
+print(a)
+print(a == b)"#),
+        "true"
+    );
+}
+
+#[test]
+fn struct_field_assign_diff() {
+    assert_eq!(
+        say(r#"struct Counter { n }
+let c = Counter { n: 10 }
+c.n += 5
+c.n *= 2
+print(c.n)"#),
+        "30"
+    );
+}
+
+#[test]
+fn struct_nested_diff() {
+    assert_eq!(
+        say(r#"struct Inner { v }
+struct Outer { name, inner }
+let o = Outer { name: "a", inner: Inner { v: 42 } }
+print(o.inner.v)"#),
+        "42"
+    );
+}
+
+#[test]
+fn struct_missing_field_error_diff() {
+    let msg = run_err(r#"struct P { x, y }
+let p = P { x: 1 }"#);
+    assert!(msg.contains("Missing field"), "got: {}", msg);
+}
+
+// ─── Enums ─────────────────────────────────────────────────────────
+
+#[test]
+fn enum_unit_variant_diff() {
+    assert_eq!(
+        say(r#"enum E { A, B }
+print(E::A == E::A)
+print(E::A == E::B)"#),
+        "false"
+    );
+}
+
+#[test]
+fn enum_tuple_variant_diff() {
+    assert_eq!(
+        say(r#"enum Pair { Pt(x, y) }
+let p = Pair::Pt(3, 4)
+print(p)"#),
+        "Pair::Pt(3, 4)"
+    );
+}
+
+#[test]
+fn enum_struct_variant_with_field_access_diff() {
+    assert_eq!(
+        say(r#"enum Shape { Rect { w, h } }
+let r = Shape::Rect { w: 4, h: 3 }
+print(r.w * r.h)"#),
+        "12"
+    );
+}
+
+#[test]
+fn enum_structural_equality_diff() {
+    assert_eq!(
+        say(r#"enum E { A, B(n) }
+print(E::B(1) == E::B(1))
+print(E::B(1) == E::B(2))
+print(E::A == E::B(1))"#),
+        "false"
+    );
+}
+
+#[test]
+fn enum_variant_arity_mismatch_diff() {
+    let msg = run_err(r#"enum E { P(a, b) }
+let x = E::P(1)"#);
+    assert!(msg.contains("expects 2"), "got: {}", msg);
+}
+
+// ─── User-defined methods ─────────────────────────────────────────
+
+#[test]
+fn method_on_struct_diff() {
+    assert_eq!(
+        say(r#"struct Point { x, y }
+fn Point.sum(self) { return self.x + self.y }
+let p = Point { x: 3, y: 4 }
+print(p.sum())"#),
+        "7"
+    );
+}
+
+#[test]
+fn method_chain_diff() {
+    assert_eq!(
+        say(r#"struct Adder { n }
+fn Adder.then(self, m) { return Adder { n: self.n + m } }
+let r = Adder { n: 1 }.then(2).then(3).then(4)
+print(r.n)"#),
+        "10"
+    );
+}
+
+#[test]
+fn method_on_enum_diff() {
+    assert_eq!(
+        say(r#"enum Shape { Circle(r), Rect { w, h } }
+fn Shape.label(self) { return "shape" }
+print(Shape::Circle(5).label())
+print(Shape::Rect { w: 4, h: 3 }.label())"#),
+        "shape"
+    );
+}
+
+#[test]
+fn method_overrides_builtin_diff() {
+    assert_eq!(
+        say(r#"struct Wrapper { data }
+fn Wrapper.len(self) { return 99 }
+let w = Wrapper { data: [1, 2, 3] }
+print(w.len())"#),
+        "99"
+    );
+}
+
+#[test]
+fn method_self_value_semantics_diff() {
+    // Mutations to `self` inside a method don't propagate;
+    // matching behaviour across walker and VM is the contract.
+    assert_eq!(
+        say(r#"struct Counter { n }
+fn Counter.bump(self) { self.n = self.n + 1 }
+let c = Counter { n: 5 }
+c.bump()
+print(c.n)"#),
+        "5"
+    );
+}
+
 // ─── Modules / import ─────────────────────────────────────────────
 
 #[test]
