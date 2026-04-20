@@ -1177,7 +1177,45 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     self.eval_expr(else_expr)
                 }
             }
+
+            ExprKind::Match { scrutinee, arms } => self.eval_match(scrutinee, arms, expr.line),
         }
+    }
+
+    fn eval_match(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        line: u32,
+    ) -> Result<Value, BopError> {
+        let value = self.eval_expr(scrutinee)?;
+        for arm in arms {
+            let mut bindings: Vec<(String, Value)> = Vec::new();
+            if !pattern_matches(&arm.pattern, &value, &mut bindings) {
+                continue;
+            }
+            // Pattern matched — open a fresh scope, bind every
+            // captured name, evaluate the guard (in that scope).
+            self.push_scope();
+            for (name, v) in bindings {
+                self.define(name, v);
+            }
+            let guard_ok = match &arm.guard {
+                Some(g) => self.eval_expr(g)?.is_truthy(),
+                None => true,
+            };
+            if !guard_ok {
+                self.pop_scope();
+                continue;
+            }
+            let result = self.eval_expr(&arm.body);
+            self.pop_scope();
+            return result;
+        }
+        Err(error(
+            line,
+            "No match arm matched the scrutinee",
+        ))
     }
 
     // ─── Binary operations ─────────────────────────────────────────
@@ -1413,4 +1451,154 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             )),
         }
     }
+}
+
+// ─── Pattern matching ──────────────────────────────────────────────
+//
+// `pattern_matches` returns true if `value` fits `pattern`, filling
+// `bindings` with every `Binding` name along the way. On a partial
+// match it's the caller's responsibility to discard the bindings
+// — `eval_match` does this by only consuming them after the match
+// + guard both succeed.
+
+pub(crate) fn pattern_matches(
+    pattern: &Pattern,
+    value: &Value,
+    bindings: &mut Vec<(String, Value)>,
+) -> bool {
+    match pattern {
+        Pattern::Wildcard => true,
+        Pattern::Binding(name) => {
+            bindings.push((name.clone(), value.clone()));
+            true
+        }
+        Pattern::Literal(lit) => match (lit, value) {
+            (LiteralPattern::Number(a), Value::Number(b)) => a == b,
+            (LiteralPattern::Str(a), Value::Str(b)) => a.as_str() == b.as_str(),
+            (LiteralPattern::Bool(a), Value::Bool(b)) => a == b,
+            (LiteralPattern::None, Value::None) => true,
+            _ => false,
+        },
+        Pattern::EnumVariant {
+            type_name,
+            variant,
+            payload,
+        } => {
+            let ev = match value {
+                Value::EnumVariant(e) => e,
+                _ => return false,
+            };
+            if ev.type_name() != type_name.as_str() || ev.variant() != variant.as_str() {
+                return false;
+            }
+            match (payload, ev.payload()) {
+                (VariantPatternPayload::Unit, crate::value::EnumPayload::Unit) => true,
+                (
+                    VariantPatternPayload::Tuple(pats),
+                    crate::value::EnumPayload::Tuple(items),
+                ) => {
+                    if pats.len() != items.len() {
+                        return false;
+                    }
+                    for (p, v) in pats.iter().zip(items.iter()) {
+                        if !pattern_matches(p, v, bindings) {
+                            return false;
+                        }
+                    }
+                    true
+                }
+                (
+                    VariantPatternPayload::Struct { fields, rest },
+                    crate::value::EnumPayload::Struct(entries),
+                ) => {
+                    match_struct_fields(fields, *rest, entries, bindings)
+                }
+                _ => false,
+            }
+        }
+        Pattern::Struct {
+            type_name,
+            fields,
+            rest,
+        } => {
+            let st = match value {
+                Value::Struct(s) => s,
+                _ => return false,
+            };
+            if st.type_name() != type_name.as_str() {
+                return false;
+            }
+            match_struct_fields(fields, *rest, st.fields(), bindings)
+        }
+        Pattern::Array { elements, rest } => {
+            let items = match value {
+                Value::Array(arr) => arr,
+                _ => return false,
+            };
+            match rest {
+                None => {
+                    if elements.len() != items.len() {
+                        return false;
+                    }
+                    for (p, v) in elements.iter().zip(items.iter()) {
+                        if !pattern_matches(p, v, bindings) {
+                            return false;
+                        }
+                    }
+                    true
+                }
+                Some(rest_kind) => {
+                    if items.len() < elements.len() {
+                        return false;
+                    }
+                    for (i, p) in elements.iter().enumerate() {
+                        if !pattern_matches(p, &items[i], bindings) {
+                            return false;
+                        }
+                    }
+                    if let ArrayRest::Named(name) = rest_kind {
+                        let tail: Vec<Value> =
+                            items[elements.len()..].iter().cloned().collect();
+                        bindings.push((name.clone(), Value::new_array(tail)));
+                    }
+                    true
+                }
+            }
+        }
+        Pattern::Or(alts) => {
+            for alt in alts {
+                let mut attempt: Vec<(String, Value)> = Vec::new();
+                if pattern_matches(alt, value, &mut attempt) {
+                    bindings.extend(attempt);
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+fn match_struct_fields(
+    fields: &[(String, Pattern)],
+    rest: bool,
+    entries: &[(String, Value)],
+    bindings: &mut Vec<(String, Value)>,
+) -> bool {
+    // Every declared field-pattern must find its value in the
+    // struct. `rest` just relaxes the requirement that *every*
+    // value's key must appear in the pattern — non-rest patterns
+    // may still leave fields unmatched, which is fine: the walker
+    // matches named-field lookup semantics, not whole-shape
+    // destructuring.
+    let _ = rest;
+    for (fname, pat) in fields {
+        let value = match entries.iter().find(|(k, _)| k == fname) {
+            Some((_, v)) => v,
+            None => return false,
+        };
+        if !pattern_matches(pat, value, bindings) {
+            return false;
+        }
+    }
+    true
 }

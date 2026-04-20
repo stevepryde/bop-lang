@@ -1504,6 +1504,16 @@ impl Emitter {
                     cond, then_s, else_s
                 )
             }
+
+            ExprKind::Match { .. } => {
+                // Pattern matching lands in AOT in a follow-up
+                // commit; for now we reject it at compile time so
+                // the crate still builds.
+                return Err(BopError::runtime(
+                    "match expressions are not yet supported by the AOT backend",
+                    line,
+                ));
+            }
         };
         Ok(s)
     }
@@ -2332,6 +2342,54 @@ fn scan_free_vars_stmt(
     }
 }
 
+/// Walks a `Pattern` and records every name it binds into `known`
+/// so the arm's free-var scan treats those bindings as locals
+/// rather than captures. Kept free-standing so the AOT emitter
+/// can call it from the exhaustive `ExprKind` match without
+/// pulling the entire pattern-matching path through `impl` state.
+fn collect_pattern_bindings(pattern: &bop::parser::Pattern, known: &mut HashSet<String>) {
+    use bop::parser::{ArrayRest, Pattern, VariantPatternPayload};
+    match pattern {
+        Pattern::Literal(_) | Pattern::Wildcard => {}
+        Pattern::Binding(name) => {
+            known.insert(name.clone());
+        }
+        Pattern::EnumVariant { payload, .. } => match payload {
+            VariantPatternPayload::Unit => {}
+            VariantPatternPayload::Tuple(items) => {
+                for item in items {
+                    collect_pattern_bindings(item, known);
+                }
+            }
+            VariantPatternPayload::Struct { fields, .. } => {
+                for (_, p) in fields {
+                    collect_pattern_bindings(p, known);
+                }
+            }
+        },
+        Pattern::Struct { fields, .. } => {
+            for (_, p) in fields {
+                collect_pattern_bindings(p, known);
+            }
+        }
+        Pattern::Array { elements, rest } => {
+            for e in elements {
+                collect_pattern_bindings(e, known);
+            }
+            if let Some(ArrayRest::Named(name)) = rest {
+                known.insert(name.clone());
+            }
+        }
+        Pattern::Or(alts) => {
+            // Every alternative is required to bind the same set
+            // of names, so scanning the first one is sufficient.
+            if let Some(first) = alts.first() {
+                collect_pattern_bindings(first, known);
+            }
+        }
+    }
+}
+
 fn scan_free_vars_expr(
     expr: &Expr,
     known: &mut HashSet<String>,
@@ -2444,6 +2502,23 @@ fn scan_free_vars_expr(
                         scan_free_vars_expr(v, known, free, outer_scopes, fn_info);
                     }
                 }
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            // AOT rejects match at emit time (see `expr_src`), but
+            // the free-var scan still has to walk it so exhaustive
+            // matching on `ExprKind` holds. For each arm we treat
+            // pattern-bound names as locally `known` so references
+            // inside the arm body don't bubble up as unrelated
+            // captures.
+            scan_free_vars_expr(scrutinee, known, free, outer_scopes, fn_info);
+            for arm in arms {
+                let mut arm_known = known.clone();
+                collect_pattern_bindings(&arm.pattern, &mut arm_known);
+                if let Some(guard) = &arm.guard {
+                    scan_free_vars_expr(guard, &mut arm_known, free, outer_scopes, fn_info);
+                }
+                scan_free_vars_expr(&arm.body, &mut arm_known, free, outer_scopes, fn_info);
             }
         }
     }

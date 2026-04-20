@@ -697,6 +697,17 @@ impl Compiler {
                 let idx = self.add_function(def);
                 self.emit(Instr::MakeLambda(idx), line);
             }
+
+            ExprKind::Match { .. } => {
+                // Pattern matching is not yet supported in the VM
+                // backend. The walker has a complete implementation;
+                // this arm exists only so the VM crate builds while
+                // phase 4 is rolled out across engines.
+                return Err(err(
+                    line,
+                    "match expressions are not yet supported by the VM backend",
+                ));
+            }
         }
         Ok(())
     }

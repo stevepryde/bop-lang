@@ -79,6 +79,87 @@ pub enum ExprKind {
         params: Vec<String>,
         body: Vec<Stmt>,
     },
+    /// `match scrutinee { pat => body, ... }` — checks each arm
+    /// top-to-bottom, evaluates the first matching arm's body,
+    /// and returns its value. Raises a runtime error if no arm
+    /// matches (exhaustiveness isn't checked statically in v1).
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    /// Optional guard expression — evaluated after the pattern
+    /// matches. A `false` guard skips to the next arm.
+    pub guard: Option<Expr>,
+    pub body: Expr,
+    pub line: u32,
+}
+
+/// A pattern appears in `match` arms (phase 4 introduces this;
+/// future phases may reuse it in `let` destructuring and fn
+/// params). Structurally mirrors the runtime `Value` enum so each
+/// variant's matcher reads as "does this value fit here?".
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// Matches a specific value verbatim: `1`, `"foo"`, `true`,
+    /// `false`, `none`.
+    Literal(LiteralPattern),
+    /// `_` — matches anything, binds nothing.
+    Wildcard,
+    /// Bare identifier — matches anything, binds the value to
+    /// this name for the arm's body.
+    Binding(String),
+    /// `Type::Variant` / `Type::Variant(...)` / `Type::Variant { ... }`.
+    EnumVariant {
+        type_name: String,
+        variant: String,
+        payload: VariantPatternPayload,
+    },
+    /// `Type { field: pat, field, .. }` destructures a struct.
+    Struct {
+        type_name: String,
+        fields: Vec<(String, Pattern)>,
+        rest: bool,
+    },
+    /// `[a, b, ..rest]` destructures an array.
+    Array {
+        elements: Vec<Pattern>,
+        rest: Option<ArrayRest>,
+    },
+    /// `p1 | p2 | p3` — match if any alternative matches. Every
+    /// alternative must introduce the same set of bindings.
+    Or(Vec<Pattern>),
+}
+
+#[derive(Debug, Clone)]
+pub enum LiteralPattern {
+    Number(f64),
+    Str(String),
+    Bool(bool),
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub enum VariantPatternPayload {
+    Unit,
+    Tuple(Vec<Pattern>),
+    Struct {
+        fields: Vec<(String, Pattern)>,
+        rest: bool,
+    },
+}
+
+/// What `..rest` does at the tail of an array pattern.
+#[derive(Debug, Clone)]
+pub enum ArrayRest {
+    /// `..` — matches any remaining elements, binds nothing.
+    Ignored,
+    /// `..name` — captures remaining elements as an array.
+    Named(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1052,6 +1133,7 @@ impl Parser {
             Token::LBrace => self.parse_dict_literal(),
             Token::If => self.parse_if_expr(),
             Token::Fn => self.parse_lambda(),
+            Token::Match => self.parse_match_expr(),
             _ => Err(self.error(
                 line,
                 format!("I didn't expect `{}` here", fmt_token(self.peek())),
@@ -1208,6 +1290,263 @@ impl Parser {
         }
     }
 
+    fn parse_match_expr(&mut self) -> Result<Expr, BopError> {
+        let line = self.peek_line();
+        self.advance(); // consume 'match'
+        // Scrutinee reads without struct-literal parsing — same
+        // rule as `if` / `while` / `for`, so `match foo { ... }`
+        // stays parseable.
+        let scrutinee = self.without_struct_literal(|p| p.parse_expr())?;
+        self.expect(&Token::LBrace)?;
+        let mut arms: Vec<MatchArm> = Vec::new();
+        self.skip_semicolons();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            arms.push(self.parse_match_arm()?);
+            // Arms separate by `,` (common) or `;` (auto-semi from
+            // newline). Accept and continue; also accept trailing
+            // separators before the closing brace.
+            while matches!(self.peek(), Token::Comma | Token::Semicolon) {
+                self.advance();
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Expr {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms,
+            },
+            line,
+        })
+    }
+
+    fn parse_match_arm(&mut self) -> Result<MatchArm, BopError> {
+        let line = self.peek_line();
+        let pattern = self.parse_pattern()?;
+        let guard = if matches!(self.peek(), Token::If) {
+            self.advance();
+            Some(self.without_struct_literal(|p| p.parse_expr())?)
+        } else {
+            None
+        };
+        self.expect(&Token::FatArrow)?;
+        let body = self.parse_expr()?;
+        Ok(MatchArm {
+            pattern,
+            guard,
+            body,
+            line,
+        })
+    }
+
+    fn parse_pattern(&mut self) -> Result<Pattern, BopError> {
+        let first = self.parse_pattern_single()?;
+        // Or-pattern: `p1 | p2 | p3`. Keep the left-associative
+        // tree flat in a single `Or` variant for ergonomic
+        // matching later.
+        if matches!(self.peek(), Token::Pipe) {
+            let mut alts = vec![first];
+            while matches!(self.peek(), Token::Pipe) {
+                self.advance();
+                alts.push(self.parse_pattern_single()?);
+            }
+            Ok(Pattern::Or(alts))
+        } else {
+            Ok(first)
+        }
+    }
+
+    fn parse_pattern_single(&mut self) -> Result<Pattern, BopError> {
+        self.enter()?;
+        let line = self.peek_line();
+        let result = match self.peek().clone() {
+            Token::Number(n) => {
+                self.advance();
+                Ok(Pattern::Literal(LiteralPattern::Number(n)))
+            }
+            Token::Str(s) => {
+                self.advance();
+                Ok(Pattern::Literal(LiteralPattern::Str(s)))
+            }
+            Token::True => {
+                self.advance();
+                Ok(Pattern::Literal(LiteralPattern::Bool(true)))
+            }
+            Token::False => {
+                self.advance();
+                Ok(Pattern::Literal(LiteralPattern::Bool(false)))
+            }
+            Token::None => {
+                self.advance();
+                Ok(Pattern::Literal(LiteralPattern::None))
+            }
+            Token::Minus => {
+                // Negative number literal: `-1`, `-3.14`.
+                self.advance();
+                match self.peek().clone() {
+                    Token::Number(n) => {
+                        self.advance();
+                        Ok(Pattern::Literal(LiteralPattern::Number(-n)))
+                    }
+                    other => Err(self.error(
+                        line,
+                        format!(
+                            "Expected a number after `-` in pattern, got `{}`",
+                            fmt_token(&other)
+                        ),
+                    )),
+                }
+            }
+            Token::LBracket => self.parse_pattern_array(),
+            Token::Ident(name) if name == "_" => {
+                self.advance();
+                Ok(Pattern::Wildcard)
+            }
+            Token::Ident(name) => {
+                self.advance();
+                // `Type::Variant[...]` path pattern.
+                if matches!(self.peek(), Token::ColonColon) {
+                    self.parse_pattern_variant_tail(name)
+                } else if matches!(self.peek(), Token::LBrace) {
+                    // `Type { ... }` struct pattern — only when
+                    // the `LBrace` is syntactically plausible as
+                    // a struct pattern. Inside a match arm pattern
+                    // it always is.
+                    self.parse_pattern_struct(name)
+                } else {
+                    // Bare identifier = binding. `_` is handled
+                    // above as wildcard.
+                    Ok(Pattern::Binding(name))
+                }
+            }
+            other => Err(self.error(
+                line,
+                format!("Expected a pattern, got `{}`", fmt_token(&other)),
+            )),
+        };
+        self.leave();
+        result
+    }
+
+    fn parse_pattern_array(&mut self) -> Result<Pattern, BopError> {
+        self.advance(); // consume `[`
+        let mut elements: Vec<Pattern> = Vec::new();
+        let mut rest: Option<ArrayRest> = None;
+        if !matches!(self.peek(), Token::RBracket) {
+            loop {
+                if matches!(self.peek(), Token::DotDot) {
+                    self.advance();
+                    // Optional name binding after `..`.
+                    let captured = match self.peek().clone() {
+                        Token::Ident(n) if n != "_" => {
+                            self.advance();
+                            ArrayRest::Named(n)
+                        }
+                        _ => ArrayRest::Ignored,
+                    };
+                    rest = Some(captured);
+                    // `..` must be the last element in the array
+                    // pattern; the parser enforces this by
+                    // stopping here.
+                    break;
+                }
+                elements.push(self.parse_pattern()?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    if matches!(self.peek(), Token::RBracket) {
+                        break; // trailing comma
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RBracket)?;
+        Ok(Pattern::Array { elements, rest })
+    }
+
+    fn parse_pattern_variant_tail(
+        &mut self,
+        type_name: String,
+    ) -> Result<Pattern, BopError> {
+        self.advance(); // consume `::`
+        let (variant, _) = self.expect_ident()?;
+        let payload = match self.peek() {
+            Token::LParen => {
+                self.advance();
+                let mut items: Vec<Pattern> = Vec::new();
+                if !matches!(self.peek(), Token::RParen) {
+                    items.push(self.parse_pattern()?);
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Token::RParen) {
+                            break;
+                        }
+                        items.push(self.parse_pattern()?);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                VariantPatternPayload::Tuple(items)
+            }
+            Token::LBrace => {
+                let (fields, rest) = self.parse_pattern_field_list()?;
+                VariantPatternPayload::Struct { fields, rest }
+            }
+            _ => VariantPatternPayload::Unit,
+        };
+        Ok(Pattern::EnumVariant {
+            type_name,
+            variant,
+            payload,
+        })
+    }
+
+    fn parse_pattern_struct(&mut self, type_name: String) -> Result<Pattern, BopError> {
+        let (fields, rest) = self.parse_pattern_field_list()?;
+        Ok(Pattern::Struct {
+            type_name,
+            fields,
+            rest,
+        })
+    }
+
+    fn parse_pattern_field_list(
+        &mut self,
+    ) -> Result<(Vec<(String, Pattern)>, bool), BopError> {
+        self.expect(&Token::LBrace)?;
+        let mut fields: Vec<(String, Pattern)> = Vec::new();
+        let mut rest = false;
+        if !matches!(self.peek(), Token::RBrace) {
+            loop {
+                if matches!(self.peek(), Token::DotDot) {
+                    self.advance();
+                    rest = true;
+                    break;
+                }
+                let (fname, _) = self.expect_ident()?;
+                // Shorthand `{ field }` binds the field value to
+                // a local named `field`. Full form `{ field: pat }`
+                // lets the user nest or wildcard.
+                let sub = if matches!(self.peek(), Token::Colon) {
+                    self.advance();
+                    self.parse_pattern()?
+                } else {
+                    Pattern::Binding(fname.clone())
+                };
+                fields.push((fname, sub));
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    if matches!(self.peek(), Token::RBrace) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok((fields, rest))
+    }
+
     fn parse_lambda(&mut self) -> Result<Expr, BopError> {
         let line = self.peek_line();
         self.advance(); // consume 'fn'
@@ -1339,7 +1678,11 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Import => "import",
         Token::Struct => "struct",
         Token::Enum => "enum",
+        Token::Match => "match",
         Token::ColonColon => "::",
+        Token::DotDot => "..",
+        Token::FatArrow => "=>",
+        Token::Pipe => "|",
         Token::Plus => "+",
         Token::Minus => "-",
         Token::Star => "*",

@@ -35,6 +35,7 @@ pub enum Token {
     Import,
     Struct,
     Enum,
+    Match,
 
     // Operators
     Plus,
@@ -69,7 +70,10 @@ pub enum Token {
     Colon,
     ColonColon,
     Dot,
+    DotDot,
     Semicolon,
+    FatArrow,
+    Pipe,
 
     // Internal (removed after auto-semicolons)
     Newline,
@@ -326,6 +330,12 @@ impl Lexer {
                             token: Token::EqEq,
                             line,
                         });
+                    } else if self.peek() == Some('>') {
+                        self.advance();
+                        tokens.push(SpannedToken {
+                            token: Token::FatArrow,
+                            line,
+                        });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Eq,
@@ -402,9 +412,14 @@ impl Lexer {
                             line,
                         });
                     } else {
-                        return Err(
-                            self.error_with_hint("Unexpected `|`", "Did you mean `||` (or)?")
-                        );
+                        // Single `|` is now the or-pattern
+                        // separator inside `match` arms. Parser
+                        // decides whether it's accepted in the
+                        // current context.
+                        tokens.push(SpannedToken {
+                            token: Token::Pipe,
+                            line,
+                        });
                     }
                 }
 
@@ -474,10 +489,18 @@ impl Lexer {
                 }
                 '.' => {
                     self.advance();
-                    tokens.push(SpannedToken {
-                        token: Token::Dot,
-                        line,
-                    });
+                    if self.peek() == Some('.') {
+                        self.advance();
+                        tokens.push(SpannedToken {
+                            token: Token::DotDot,
+                            line,
+                        });
+                    } else {
+                        tokens.push(SpannedToken {
+                            token: Token::Dot,
+                            line,
+                        });
+                    }
                 }
                 ';' => {
                     self.advance();
@@ -549,6 +572,7 @@ impl Lexer {
             "import" => Token::Import,
             "struct" => Token::Struct,
             "enum" => Token::Enum,
+            "match" => Token::Match,
             "true" => Token::True,
             "false" => Token::False,
             "none" => Token::None,
@@ -833,8 +857,14 @@ mod tests {
     }
 
     #[test]
-    fn lone_pipe_error() {
-        assert!(lex_err("|x").contains("Unexpected `|`"));
+    fn lone_pipe_lexes_as_or_pattern_separator() {
+        // `|` is now the or-pattern separator inside `match`
+        // arms. It parses at the lexer level regardless of
+        // context; the parser decides whether it's accepted.
+        assert_eq!(
+            toks("|"),
+            vec![Token::Pipe]
+        );
     }
 
     // ─── Comments ──────────────────────────────────────────────────

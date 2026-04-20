@@ -1399,6 +1399,263 @@ let x = 1"#,
         assert!(err.message.contains("not found"));
     }
 
+    // ─── Pattern matching ─────────────────────────────────────────
+
+    #[test]
+    fn match_literal_arms() {
+        assert_eq!(
+            say(r#"let x = 2
+let out = match x {
+    1 => "one",
+    2 => "two",
+    3 => "three",
+    _ => "other",
+}
+print(out)"#),
+            "two"
+        );
+    }
+
+    #[test]
+    fn match_falls_through_to_wildcard() {
+        assert_eq!(
+            say(r#"let x = 42
+print(match x {
+    1 => "one",
+    _ => "other",
+})"#),
+            "other"
+        );
+    }
+
+    #[test]
+    fn match_no_arm_errors() {
+        let err = run_err(r#"let x = 5
+match x { 1 => "a", 2 => "b" }"#);
+        assert!(err.contains("No match arm matched"), "got: {}", err);
+    }
+
+    #[test]
+    fn match_binding_captures_scrutinee() {
+        assert_eq!(
+            say(r#"print(match 42 {
+    x => x + 1,
+})"#),
+            "43"
+        );
+    }
+
+    #[test]
+    fn match_guard_accepts() {
+        assert_eq!(
+            say(r#"print(match 7 {
+    n if n > 10 => "big",
+    n if n > 0 => "small",
+    _ => "zero or less",
+})"#),
+            "small"
+        );
+    }
+
+    #[test]
+    fn match_guard_rejects_continues() {
+        assert_eq!(
+            say(r#"print(match 5 {
+    n if n < 0 => "neg",
+    n if n > 100 => "huge",
+    _ => "mid",
+})"#),
+            "mid"
+        );
+    }
+
+    #[test]
+    fn match_or_pattern() {
+        assert_eq!(
+            say(r#"let x = 3
+print(match x {
+    1 | 2 | 3 => "small",
+    _ => "other",
+})"#),
+            "small"
+        );
+    }
+
+    #[test]
+    fn match_enum_unit_variant() {
+        assert_eq!(
+            say(r#"enum E { A, B, C }
+print(match E::B {
+    E::A => "a",
+    E::B => "b",
+    E::C => "c",
+})"#),
+            "b"
+        );
+    }
+
+    #[test]
+    fn match_enum_tuple_binds() {
+        assert_eq!(
+            say(r#"enum Shape { Circle(r), Square(s), Empty }
+let s = Shape::Circle(5)
+print(match s {
+    Shape::Circle(r) => r * 2,
+    Shape::Square(s) => s * s,
+    Shape::Empty => 0,
+})"#),
+            "10"
+        );
+    }
+
+    #[test]
+    fn match_enum_struct_variant_binds() {
+        assert_eq!(
+            say(r#"enum Shape { Rect { w, h }, Empty }
+let r = Shape::Rect { w: 4, h: 3 }
+print(match r {
+    Shape::Rect { w, h } => w * h,
+    Shape::Empty => 0,
+})"#),
+            "12"
+        );
+    }
+
+    #[test]
+    fn match_struct_destructure() {
+        assert_eq!(
+            say(r#"struct Point { x, y }
+let p = Point { x: 7, y: 3 }
+print(match p {
+    Point { x, y } => x + y,
+})"#),
+            "10"
+        );
+    }
+
+    #[test]
+    fn match_struct_partial_with_rest() {
+        // `Point { x, .. }` matches regardless of the other
+        // fields. The walker's match_struct_fields looks up by
+        // name; `rest` relaxes the "mention every field" rule.
+        assert_eq!(
+            say(r#"struct Triple { a, b, c }
+let t = Triple { a: 1, b: 2, c: 3 }
+print(match t {
+    Triple { b, .. } => b,
+})"#),
+            "2"
+        );
+    }
+
+    #[test]
+    fn match_nested_pattern() {
+        // Classic Rust-style: Err(FileError::NotFound(path)).
+        assert_eq!(
+            say(r#"enum FileError { NotFound(path), Permission(path), Other }
+enum Result { Ok(value), Err(error) }
+let r = Result::Err(FileError::NotFound("/etc/passwd"))
+print(match r {
+    Result::Ok(v) => v,
+    Result::Err(FileError::NotFound(p)) => p,
+    Result::Err(FileError::Permission(p)) => p,
+    Result::Err(FileError::Other) => "other",
+})"#),
+            "/etc/passwd"
+        );
+    }
+
+    #[test]
+    fn match_array_exact() {
+        assert_eq!(
+            say(r#"let a = [1, 2, 3]
+print(match a {
+    [] => "empty",
+    [x] => "one",
+    [x, y] => "two",
+    [x, y, z] => x + y + z,
+    _ => "long",
+})"#),
+            "6"
+        );
+    }
+
+    #[test]
+    fn match_array_with_rest() {
+        assert_eq!(
+            say(r#"let a = [10, 20, 30, 40, 50]
+print(match a {
+    [head, ..rest] => rest,
+    _ => [],
+})"#),
+            "[20, 30, 40, 50]"
+        );
+    }
+
+    #[test]
+    fn match_array_with_ignored_rest() {
+        assert_eq!(
+            say(r#"let a = [10, 20, 30]
+print(match a {
+    [first, ..] => first,
+    _ => 0,
+})"#),
+            "10"
+        );
+    }
+
+    #[test]
+    fn match_binding_scope_limited_to_arm() {
+        assert!(
+            run_err(r#"let v = 5
+match v { x => print(x) }
+print(x)"#)
+                .contains("not found")
+        );
+    }
+
+    #[test]
+    fn match_negative_literal() {
+        assert_eq!(
+            say(r#"print(match -3 {
+    -3 => "neg three",
+    _ => "other",
+})"#),
+            "neg three"
+        );
+    }
+
+    #[test]
+    fn match_string_literal() {
+        assert_eq!(
+            say(r#"let s = "hello"
+print(match s {
+    "hi" => 1,
+    "hello" => 2,
+    _ => 0,
+})"#),
+            "2"
+        );
+    }
+
+    #[test]
+    fn match_bool_none() {
+        assert_eq!(
+            say(r#"print(match true {
+    true => "t",
+    false => "f",
+})"#),
+            "t"
+        );
+        assert_eq!(
+            say(r#"print(match none {
+    none => "n",
+    _ => "other",
+})"#),
+            "n"
+        );
+    }
+
     // ─── Modules / import ──────────────────────────────────────────
 
     /// Host that resolves modules from an in-memory map keyed by
