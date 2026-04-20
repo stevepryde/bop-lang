@@ -15,6 +15,7 @@ pub mod ops;
 pub mod precheck;
 pub mod builtins;
 pub mod methods;
+pub mod suggest;
 
 mod evaluator;
 
@@ -1049,6 +1050,111 @@ print(d.len())"#),
     fn run_err_full(code: &str) -> BopError {
         let mut host = TestHost::new();
         run(code, &mut host, &test_limits()).unwrap_err()
+    }
+
+    // ─── "Did you mean?" suggestions ─────────────────────────────
+
+    #[test]
+    fn typo_variable_suggests_closest_local() {
+        let err = run_err_full(
+            r#"let length = 5
+print(lenght)"#,
+        );
+        assert!(err.message.contains("not found"), "err: {:?}", err);
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("Did you mean `length`?")
+        );
+    }
+
+    #[test]
+    fn typo_variable_falls_back_when_nothing_close() {
+        // No similar name in scope → keeps the generic hint
+        // rather than suggesting something wild.
+        let err = run_err_full("print(xylophone_constant)");
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("Did you forget to create it with `let`?")
+        );
+    }
+
+    #[test]
+    fn typo_function_suggests_user_fn() {
+        let err = run_err_full(
+            r#"fn greet(name) { print("hi " + name) }
+gret("world")"#,
+        );
+        assert!(err.message.contains("not found"));
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("Did you mean `greet`?")
+        );
+    }
+
+    #[test]
+    fn typo_builtin_suggests_core_name() {
+        // `rang(5)` → core builtin `range`.
+        let err = run_err_full("rang(5)");
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("Did you mean `range`?")
+        );
+    }
+
+    #[test]
+    fn typo_struct_field_at_access_suggests_declared() {
+        let err = run_err_full(
+            r#"struct Point { x, y }
+let p = Point { x: 1, y: 2 }
+print(p.z)"#,
+        );
+        assert!(err.message.contains("has no field `z`"));
+        // Both `x` and `y` are within 1 edit of `z`; the
+        // candidate order in `s.fields()` is declaration order,
+        // so `x` wins the tie.
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("Did you mean `x`?")
+        );
+    }
+
+    #[test]
+    fn typo_struct_field_at_construction_suggests_declared() {
+        let err = run_err_full(
+            r#"struct Point { x, y }
+let p = Point { x: 1, ya: 2 }"#,
+        );
+        assert!(err.message.contains("has no field `ya`"));
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("Did you mean `y`?")
+        );
+    }
+
+    #[test]
+    fn typo_enum_variant_suggests_declared() {
+        let err = run_err_full(
+            r#"enum Shape { Circle(r), Rectangle { w, h } }
+let s = Shape::Circel(5)"#,
+        );
+        assert!(err.message.contains("has no variant `Circel`"));
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("Did you mean `Circle`?")
+        );
+    }
+
+    #[test]
+    fn typo_hint_renders_in_source_snippet() {
+        let src = r#"let length = 5
+print(lenght)"#;
+        let err = run_err_full(src);
+        let rendered = err.render(src);
+        assert!(
+            rendered.contains("hint: Did you mean `length`?"),
+            "rendered:\n{}",
+            rendered
+        );
     }
 
     #[test]

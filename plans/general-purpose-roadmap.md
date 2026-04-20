@@ -840,6 +840,36 @@ Ongoing, not a discrete phase:
   multi-line programs, and tab alignment. No regressions
   across the 597-test workspace suite.
 
+**Also landed: "did you mean?" suggestions.**
+
+- New `bop::suggest` module with Wagner–Fischer Levenshtein,
+  a length-difference prune, and a per-target edit budget
+  (~1 edit per 3 chars, clamped 1–3).
+- Walker's error paths now enrich their hints:
+  - `Variable X not found` → closest match from the current
+    scope stack + top-level fns.
+  - `Function X not found` → closest match from user fns +
+    core builtins (`range`, `print`, `sqrt`, …). Host hint
+    still wins when no user-level suggestion applies.
+  - `Struct X has no field Y` at construction and at field
+    access → closest match from the declared field list.
+  - `Enum X has no variant Y` → closest match from the
+    enum's variant list.
+- When the hint slots in it renders as a trailing `hint:`
+  line in the source-snippet output, e.g.
+  ```
+  error: Struct `Point` has no field `z`
+    --> line 3
+    |
+  3 | print(p.z)
+    |
+  hint: Did you mean `x`?
+  ```
+- 9 new unit tests in `suggest::tests` + 8 walker integration
+  tests (`typo_*`) covering user fns, builtins, struct fields
+  at construction and access, enum variants, and the
+  "fall back when nothing's close" path.
+
 **Still open.**
 
 - Runtime errors don't yet carry column (would require adding
@@ -847,7 +877,8 @@ Ongoing, not a discrete phase:
   renderer falls back cleanly, and runtime errors usually
   point at a whole expression anyway; parse errors, where the
   carat matters most, already have column.
-- "Did you mean?" suggestions for typo'd identifiers.
+- Same suggestion logic could apply to VM/AOT error paths —
+  right now only the walker's errors pick up the hints.
 - REPL multi-line input, history, tab completion.
 - Match exhaustiveness warnings.
 - Performance pass.

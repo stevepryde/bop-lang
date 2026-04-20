@@ -65,6 +65,20 @@ type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, Import
 
 const MAX_CALL_DEPTH: usize = 64;
 
+/// Every core builtin callable by name — used by the "did you
+/// mean?" path when a `Function `foo` not found` error fires.
+/// Kept in one place so new builtins show up in suggestions
+/// without each error site needing its own copy. Host-provided
+/// builtins aren't here — they're listed via the host's own
+/// `function_hint()` for embedder-specific tips.
+const CORE_CALLABLE_BUILTINS: &[&str] = &[
+    "range", "str", "int", "float", "type", "abs", "min", "max", "rand",
+    "len", "inspect", "print", "try_call",
+    // Math (phase 6 / 7) — wrap f64::* operations.
+    "sqrt", "sin", "cos", "tan", "floor", "ceil", "round", "pow", "log",
+    "exp",
+];
+
 /// Sentinel message carried by the `BopError` that `try` raises
 /// when it wants the enclosing fn to early-return with a stored
 /// value. The fn-call wrapper (`call_bop_fn`) swaps the error
@@ -243,6 +257,45 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
         }
         false
+    }
+
+    // ─── "Did you mean?" candidate collectors ─────────────────
+    //
+    // Every name the user could reasonably have meant, gathered
+    // into a single list so `bop::suggest::did_you_mean` picks
+    // the closest match. Separate methods for the "ident used
+    // as a value" and "ident called as a function" paths since
+    // the reachable sets differ (builtins are callable but
+    // aren't scope values).
+
+    /// Names reachable when an identifier is used as a value:
+    /// any local from the enclosing scopes plus any top-level
+    /// fn declaration (fns are first-class — `let g = some_fn`
+    /// works, so they count as value-like).
+    fn value_candidates_hint(&self, target: &str) -> Option<String> {
+        let mut candidates: Vec<String> = Vec::new();
+        for scope in &self.scopes {
+            for k in scope.keys() {
+                candidates.push(k.clone());
+            }
+        }
+        for name in self.functions.keys() {
+            candidates.push(name.clone());
+        }
+        crate::suggest::did_you_mean(target, candidates)
+    }
+
+    /// Names reachable in a call position: user fns, core
+    /// builtins, plus `try_call`. Host builtins stay with the
+    /// host's own `function_hint()` path — embedders often want
+    /// to list theirs differently.
+    fn callable_candidates_hint(&self, target: &str) -> Option<String> {
+        let mut candidates: Vec<String> =
+            self.functions.keys().cloned().collect();
+        for builtin in CORE_CALLABLE_BUILTINS {
+            candidates.push((*builtin).to_string());
+        }
+        crate::suggest::did_you_mean(target, candidates)
     }
 
     // ─── Statements ────────────────────────────────────────────────
@@ -710,10 +763,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         })?
         .clone();
         let decl = variants.iter().find(|v| v.name == variant).ok_or_else(|| {
-            error(
-                line,
-                format!("Enum `{}` has no variant `{}`", type_name, variant),
-            )
+            let msg = format!("Enum `{}` has no variant `{}`", type_name, variant);
+            let names = variants.iter().map(|v| v.name.as_str());
+            match crate::suggest::did_you_mean(variant, names) {
+                Some(hint) => error_with_hint(line, msg, hint),
+                None => error(line, msg),
+            }
         })?
         .clone();
 
@@ -1017,10 +1072,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         Some(name.to_string()),
                     ));
                 }
+                // Typo? Offer a "did you mean" hint if something
+                // close is visible in the current scope / fn
+                // registry. Falls back to the original "did you
+                // forget `let`" when no candidate is similar
+                // enough.
+                let hint = self
+                    .value_candidates_hint(name)
+                    .unwrap_or_else(|| "Did you forget to create it with `let`?".to_string());
                 Err(error_with_hint(
                     expr.line,
                     format!("Variable `{}` not found", name),
-                    "Did you forget to create it with `let`?",
+                    hint,
                 ))
             }
 
@@ -1172,14 +1235,20 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let obj = self.eval_expr(object)?;
                 match &obj {
                     Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
-                        error(
-                            expr.line,
-                            format!(
-                                "Struct `{}` has no field `{}`",
-                                s.type_name(),
-                                field
-                            ),
-                        )
+                        let msg = format!(
+                            "Struct `{}` has no field `{}`",
+                            s.type_name(),
+                            field,
+                        );
+                        // Suggest from the struct's own declared
+                        // field list — `p.z` when `Point` has `x`
+                        // and `y` should point to `x`/`y`.
+                        let field_names: Vec<&str> =
+                            s.fields().iter().map(|(k, _)| k.as_str()).collect();
+                        match crate::suggest::did_you_mean(field, field_names) {
+                            Some(hint) => error_with_hint(expr.line, msg, hint),
+                            None => error(expr.line, msg),
+                        }
                     }),
                     Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
                         error(
@@ -1239,13 +1308,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                     if !decl_fields.iter().any(|d| d == fname) {
-                        return Err(error(
-                            expr.line,
-                            format!(
-                                "Struct `{}` has no field `{}`",
-                                type_name, fname
-                            ),
-                        ));
+                        let msg = format!(
+                            "Struct `{}` has no field `{}`",
+                            type_name, fname
+                        );
+                        let err = match crate::suggest::did_you_mean(
+                            fname,
+                            decl_fields.iter().map(|s| s.as_str()),
+                        ) {
+                            Some(hint) => error_with_hint(expr.line, msg, hint),
+                            None => error(expr.line, msg),
+                        };
+                        return Err(err);
                     }
                     provided.insert(fname.clone(), self.eval_expr(fexpr)?);
                 }
@@ -1675,15 +1749,28 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // the behaviour of `fn name` declarations and `Value::Fn`
         // values identical, including self-reference semantics.
         let func = self.functions.get(name).cloned().ok_or_else(|| {
-            let hint = self.host.function_hint();
-            if hint.is_empty() {
-                error(line, format!("Function `{}` not found", name))
-            } else {
+            // Preference order: "did you mean" suggestion first
+            // (most specific to the user's typo), then the
+            // host's generic function hint (embedder-specific
+            // tips like "available host functions: …"), then a
+            // bare error.
+            if let Some(hint) = self.callable_candidates_hint(name) {
                 error_with_hint(
                     line,
                     format!("Function `{}` not found", name),
                     hint,
                 )
+            } else {
+                let host_hint = self.host.function_hint();
+                if host_hint.is_empty() {
+                    error(line, format!("Function `{}` not found", name))
+                } else {
+                    error_with_hint(
+                        line,
+                        format!("Function `{}` not found", name),
+                        host_hint,
+                    )
+                }
             }
         })?;
 
