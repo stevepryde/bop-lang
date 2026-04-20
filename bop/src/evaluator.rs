@@ -69,6 +69,10 @@ struct FnDef {
 pub struct Evaluator<'h, H: BopHost> {
     scopes: Vec<BTreeMap<String, Value>>,
     functions: BTreeMap<String, FnDef>,
+    /// User-defined struct types in this run. Keyed by the
+    /// declared type name; value is the declared field list in
+    /// declaration order.
+    struct_defs: BTreeMap<String, Vec<String>>,
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
@@ -91,6 +95,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
+            struct_defs: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -113,6 +118,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
+            struct_defs: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -349,6 +355,29 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
             StmtKind::Import { path } => {
                 self.exec_import(path, stmt.line)?;
+                Ok(Signal::None)
+            }
+
+            StmtKind::StructDecl { name, fields } => {
+                if self.struct_defs.contains_key(name) {
+                    return Err(error(
+                        stmt.line,
+                        format!("Struct `{}` is already declared", name),
+                    ));
+                }
+                // Reject duplicate field names at decl time so
+                // downstream code doesn't have to re-check. Walker,
+                // VM, and AOT all assume unique fields per struct.
+                let mut seen = alloc_import::collections::BTreeSet::new();
+                for f in fields {
+                    if !seen.insert(f.clone()) {
+                        return Err(error(
+                            stmt.line,
+                            format!("Struct `{}` has duplicate field `{}`", name, f),
+                        ));
+                    }
+                }
+                self.struct_defs.insert(name.clone(), fields.clone());
                 Ok(Signal::None)
             }
 
@@ -708,6 +737,87 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let obj = self.eval_expr(object)?;
                 let idx = self.eval_expr(index)?;
                 ops::index_get(&obj, &idx, expr.line)
+            }
+
+            ExprKind::FieldAccess { object, field } => {
+                let obj = self.eval_expr(object)?;
+                match &obj {
+                    Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
+                        error(
+                            expr.line,
+                            format!(
+                                "Struct `{}` has no field `{}`",
+                                s.type_name(),
+                                field
+                            ),
+                        )
+                    }),
+                    other => Err(error(
+                        expr.line,
+                        format!(
+                            "Can't read field `{}` on {}",
+                            field,
+                            other.type_name()
+                        ),
+                    )),
+                }
+            }
+
+            ExprKind::StructConstruct { type_name, fields } => {
+                let decl_fields = self.struct_defs.get(type_name).ok_or_else(|| {
+                    error(
+                        expr.line,
+                        format!("Struct `{}` is not declared", type_name),
+                    )
+                })?
+                .clone();
+                // Enforce exactly-this-field-set at construction:
+                // no duplicates, no unknown fields, no missing
+                // fields. The per-field loops below produce the
+                // specific messages the tests assert on.
+                let mut seen = alloc_import::collections::BTreeSet::new();
+                let mut values: Vec<(String, Value)> =
+                    Vec::with_capacity(decl_fields.len());
+                // Evaluate provided fields by name, then emit them
+                // in *declaration* order so the `Value::Struct`'s
+                // field list is stable across construction sites.
+                let mut provided: BTreeMap<String, Value> = BTreeMap::new();
+                for (fname, fexpr) in fields {
+                    if !seen.insert(fname.clone()) {
+                        return Err(error(
+                            expr.line,
+                            format!(
+                                "Field `{}` specified twice in `{}` construction",
+                                fname, type_name
+                            ),
+                        ));
+                    }
+                    if !decl_fields.iter().any(|d| d == fname) {
+                        return Err(error(
+                            expr.line,
+                            format!(
+                                "Struct `{}` has no field `{}`",
+                                type_name, fname
+                            ),
+                        ));
+                    }
+                    provided.insert(fname.clone(), self.eval_expr(fexpr)?);
+                }
+                for decl in &decl_fields {
+                    match provided.remove(decl) {
+                        Some(v) => values.push((decl.clone(), v)),
+                        None => {
+                            return Err(error(
+                                expr.line,
+                                format!(
+                                    "Missing field `{}` in `{}` construction",
+                                    decl, type_name
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Ok(Value::new_struct(type_name.clone(), values))
             }
 
             ExprKind::Array(elements) => {

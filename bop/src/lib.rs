@@ -1584,6 +1584,202 @@ import m"#,
         );
     }
 
+    // ─── Structs ──────────────────────────────────────────────────
+
+    #[test]
+    fn struct_decl_and_construct() {
+        assert_eq!(
+            say(r#"struct Point { x, y }
+let p = Point { x: 3, y: 4 }
+print(p.x)
+print(p.y)"#),
+            "4"
+        );
+    }
+
+    #[test]
+    fn struct_display_shows_type_name_and_fields() {
+        assert_eq!(
+            say(r#"struct Point { x, y }
+let p = Point { x: 3, y: 4 }
+print(p)"#),
+            "Point { x: 3, y: 4 }"
+        );
+    }
+
+    #[test]
+    fn struct_fields_respect_declaration_order() {
+        // Fields specified out of declaration order should still
+        // appear in declaration order in the value — stable
+        // ordering matters for `print` / `inspect` / equality.
+        assert_eq!(
+            say(r#"struct Point { x, y }
+let p = Point { y: 4, x: 3 }
+print(p)"#),
+            "Point { x: 3, y: 4 }"
+        );
+    }
+
+    #[test]
+    fn struct_equality_is_structural() {
+        assert_eq!(
+            say(r#"struct Point { x, y }
+let a = Point { x: 1, y: 2 }
+let b = Point { x: 1, y: 2 }
+print(a == b)"#),
+            "true"
+        );
+        assert_eq!(
+            say(r#"struct Point { x, y }
+let a = Point { x: 1, y: 2 }
+let b = Point { x: 1, y: 3 }
+print(a == b)"#),
+            "false"
+        );
+    }
+
+    #[test]
+    fn struct_different_types_never_equal() {
+        assert_eq!(
+            say(r#"struct A { x }
+struct B { x }
+let a = A { x: 1 }
+let b = B { x: 1 }
+print(a == b)"#),
+            "false"
+        );
+    }
+
+    #[test]
+    fn struct_type_name_is_struct() {
+        // `type()` returns a generic bucket; a per-type name
+        // would require `display_type_name()` which isn't wired
+        // to the builtin yet.
+        assert_eq!(
+            say(r#"struct Foo { a }
+print(type(Foo { a: 1 }))"#),
+            "struct"
+        );
+    }
+
+    #[test]
+    fn struct_missing_field_errors() {
+        let err = run_err(r#"struct Point { x, y }
+let p = Point { x: 1 }"#);
+        assert!(err.contains("Missing field"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_extra_field_errors() {
+        let err = run_err(r#"struct Point { x, y }
+let p = Point { x: 1, y: 2, z: 3 }"#);
+        assert!(err.contains("has no field"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_duplicate_field_errors() {
+        let err = run_err(r#"struct Point { x, y }
+let p = Point { x: 1, x: 2, y: 3 }"#);
+        assert!(err.contains("specified twice"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_undeclared_type_errors() {
+        let err = run_err(r#"let p = Nope { x: 1 }"#);
+        assert!(err.contains("not declared"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_field_access_missing_errors() {
+        let err = run_err(r#"struct Point { x, y }
+let p = Point { x: 1, y: 2 }
+print(p.z)"#);
+        assert!(err.contains("no field"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_field_access_on_non_struct_errors() {
+        let err = run_err("let x = 42\nprint(x.value)");
+        assert!(err.contains("Can't read field"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_duplicate_decl_errors() {
+        let err = run_err(r#"struct Foo { x }
+struct Foo { y }"#);
+        assert!(err.contains("already declared"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_nested() {
+        assert_eq!(
+            say(r#"struct Inner { v }
+struct Outer { name, inner }
+let o = Outer { name: "nest", inner: Inner { v: 42 } }
+print(o.inner.v)"#),
+            "42"
+        );
+    }
+
+    #[test]
+    fn struct_in_array_and_iteration() {
+        assert_eq!(
+            say(r#"struct Item { name, qty }
+let cart = [Item { name: "apple", qty: 3 }, Item { name: "banana", qty: 2 }]
+let total = 0
+for i in cart { total += i.qty }
+print(total)"#),
+            "5"
+        );
+    }
+
+    #[test]
+    fn struct_literal_disallowed_in_if_condition_parses() {
+        // `if Foo { body }` should parse as `if Foo` with body
+        // `{ body }`, not as `if (Foo { body })`. Reading a
+        // bare `Foo` ident that isn't bound fails at runtime
+        // with "not found" — confirming the struct-literal
+        // restriction held at parse.
+        let err = run_err("if Foo { print(\"hi\") }");
+        assert!(err.contains("not found"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_literal_disallowed_in_for_iterable() {
+        // `for x in arr { body }` — without the struct-literal
+        // restriction, `arr { body }` would try to parse as a
+        // struct literal where `arr` is the type name and `body`
+        // is a field. The restriction ensures the `{` belongs to
+        // the for body.
+        assert_eq!(
+            say("let arr = [1, 2, 3]\nlet sum = 0\nfor x in arr { sum += x }\nprint(sum)"),
+            "6"
+        );
+    }
+
+    #[test]
+    fn struct_literal_ok_in_let_rhs() {
+        // In a let rhs, struct literals are allowed. This
+        // confirms the context flag is re-enabled outside
+        // control-flow conditions.
+        assert_eq!(
+            say(r#"struct P { x }
+let p = P { x: 7 }
+print(p.x)"#),
+            "7"
+        );
+    }
+
+    #[test]
+    fn struct_empty() {
+        assert_eq!(
+            say(r#"struct Unit { }
+let u = Unit { }
+print(u)"#),
+            "Unit {}"
+        );
+    }
+
     #[test]
     fn import_module_does_not_see_importer_scope() {
         // `outer` is defined in the importer's scope; the module

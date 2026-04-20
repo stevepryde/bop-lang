@@ -38,6 +38,20 @@ pub enum ExprKind {
         method: String,
         args: Vec<Expr>,
     },
+    /// Bare field read: `obj.field` (no parens after the field
+    /// name). Distinct from `MethodCall`, which always has `(…)`.
+    FieldAccess {
+        object: Box<Expr>,
+        field: String,
+    },
+    /// Struct literal: `Point { x: 1, y: 2 }`. Only parsed in
+    /// contexts where struct literals are allowed — control-flow
+    /// conditions and `for-in` iterables disallow them so that
+    /// `if foo { body }` stays unambiguous.
+    StructConstruct {
+        type_name: String,
+        fields: Vec<(String, Expr)>,
+    },
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
@@ -134,6 +148,13 @@ pub enum StmtKind {
     Import {
         path: String,
     },
+    /// `struct Point { x, y }` — registers a user-defined struct
+    /// type with the listed field names. Field values get their
+    /// types from the construction site (`Point { x: 1, y: 2 }`).
+    StructDecl {
+        name: String,
+        fields: Vec<String>,
+    },
     ExprStmt(Expr),
 }
 
@@ -166,6 +187,12 @@ struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
     depth: usize,
+    /// When false, `Ident { ... }` at expression position is
+    /// *not* parsed as a struct literal — the `{` is left for the
+    /// enclosing control-flow construct (e.g. `if foo { body }`,
+    /// `for x in arr { body }`). Flipped off while parsing `if`
+    /// / `while` conditions and `for-in` iterables.
+    allow_struct_literal: bool,
 }
 
 impl Parser {
@@ -174,6 +201,7 @@ impl Parser {
             tokens,
             pos: 0,
             depth: 0,
+            allow_struct_literal: true,
         }
     }
 
@@ -206,6 +234,21 @@ impl Parser {
             .get(self.pos + offset)
             .map(|t| &t.token)
             .unwrap_or(&Token::Eof)
+    }
+
+    /// Run `f` with `allow_struct_literal = false`, restoring the
+    /// prior value on exit. Used for `if` / `while` conditions and
+    /// `for-in` iterables so `if foo { body }` doesn't mis-parse
+    /// as `if (struct-literal-foo) { … }`.
+    fn without_struct_literal<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        let saved = self.allow_struct_literal;
+        self.allow_struct_literal = false;
+        let result = f(self);
+        self.allow_struct_literal = saved;
+        result
     }
 
     fn advance(&mut self) -> &Token {
@@ -325,8 +368,34 @@ impl Parser {
                 })
             }
             Token::Import => self.parse_import(),
+            Token::Struct => self.parse_struct_decl(),
             _ => self.parse_expr_or_assign(),
         }
+    }
+
+    fn parse_struct_decl(&mut self) -> Result<Stmt, BopError> {
+        let line = self.peek_line();
+        self.advance(); // consume `struct`
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::LBrace)?;
+        let mut fields = Vec::new();
+        if !matches!(self.peek(), Token::RBrace) {
+            let (f, _) = self.expect_ident()?;
+            fields.push(f);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RBrace) {
+                    break; // trailing comma
+                }
+                let (f, _) = self.expect_ident()?;
+                fields.push(f);
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Stmt {
+            kind: StmtKind::StructDecl { name, fields },
+            line,
+        })
     }
 
     fn parse_import(&mut self) -> Result<Stmt, BopError> {
@@ -361,7 +430,7 @@ impl Parser {
     fn parse_if_stmt(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
         self.advance(); // consume 'if'
-        let condition = self.parse_expr()?;
+        let condition = self.without_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
 
         let mut else_ifs = Vec::new();
@@ -371,7 +440,7 @@ impl Parser {
             self.advance(); // consume 'else'
             if matches!(self.peek(), Token::If) {
                 self.advance(); // consume 'if'
-                let cond = self.parse_expr()?;
+                let cond = self.without_struct_literal(|p| p.parse_expr())?;
                 let block = self.parse_block()?;
                 else_ifs.push((cond, block));
             } else {
@@ -394,7 +463,7 @@ impl Parser {
     fn parse_while(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
         self.advance(); // consume 'while'
-        let condition = self.parse_expr()?;
+        let condition = self.without_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
         Ok(Stmt {
             kind: StmtKind::While { condition, body },
@@ -407,7 +476,7 @@ impl Parser {
         self.advance(); // consume 'for'
         let (var, _) = self.expect_ident()?;
         self.expect(&Token::In)?;
-        let iterable = self.parse_expr()?;
+        let iterable = self.without_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
         Ok(Stmt {
             kind: StmtKind::ForIn {
@@ -422,7 +491,7 @@ impl Parser {
     fn parse_repeat(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
         self.advance(); // consume 'repeat'
-        let count = self.parse_expr()?;
+        let count = self.without_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
         Ok(Stmt {
             kind: StmtKind::Repeat { count, body },
@@ -702,18 +771,30 @@ impl Parser {
                 Token::Dot => {
                     let line = self.peek_line();
                     self.advance();
-                    let (method, _) = self.expect_ident()?;
-                    self.expect(&Token::LParen)?;
-                    let args = self.parse_args()?;
-                    self.expect(&Token::RParen)?;
-                    expr = Expr {
-                        kind: ExprKind::MethodCall {
-                            object: Box::new(expr),
-                            method,
-                            args,
-                        },
-                        line,
-                    };
+                    let (name, _) = self.expect_ident()?;
+                    if matches!(self.peek(), Token::LParen) {
+                        // Method call: `.name(args)`.
+                        self.advance();
+                        let args = self.parse_args()?;
+                        self.expect(&Token::RParen)?;
+                        expr = Expr {
+                            kind: ExprKind::MethodCall {
+                                object: Box::new(expr),
+                                method: name,
+                                args,
+                            },
+                            line,
+                        };
+                    } else {
+                        // Bare field read: `.name`.
+                        expr = Expr {
+                            kind: ExprKind::FieldAccess {
+                                object: Box::new(expr),
+                                field: name,
+                            },
+                            line,
+                        };
+                    }
                 }
                 _ => break,
             }
@@ -782,6 +863,14 @@ impl Parser {
             }
             Token::Ident(name) => {
                 self.advance();
+                // Struct literal: `Name { field: value, ... }`.
+                // Parsed only when struct literals are allowed in
+                // the current context (see
+                // `without_struct_literal`). This keeps `if foo {
+                // body }` / `for x in arr { body }` parseable.
+                if self.allow_struct_literal && matches!(self.peek(), Token::LBrace) {
+                    return self.parse_struct_literal(name, line);
+                }
                 Ok(Expr {
                     kind: ExprKind::Ident(name),
                     line,
@@ -804,6 +893,34 @@ impl Parser {
                 format!("I didn't expect `{}` here", fmt_token(self.peek())),
             )),
         }
+    }
+
+    fn parse_struct_literal(&mut self, type_name: String, line: u32) -> Result<Expr, BopError> {
+        self.enter()?;
+        self.expect(&Token::LBrace)?;
+        let mut fields: Vec<(String, Expr)> = Vec::new();
+        if !matches!(self.peek(), Token::RBrace) {
+            let (fname, _) = self.expect_ident()?;
+            self.expect(&Token::Colon)?;
+            let fvalue = self.parse_expr()?;
+            fields.push((fname, fvalue));
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RBrace) {
+                    break; // trailing comma
+                }
+                let (fname, _) = self.expect_ident()?;
+                self.expect(&Token::Colon)?;
+                let fvalue = self.parse_expr()?;
+                fields.push((fname, fvalue));
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        self.leave();
+        Ok(Expr {
+            kind: ExprKind::StructConstruct { type_name, fields },
+            line,
+        })
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, BopError> {
@@ -891,7 +1008,7 @@ impl Parser {
     fn parse_if_expr(&mut self) -> Result<Expr, BopError> {
         let line = self.peek_line();
         self.advance(); // consume 'if'
-        let condition = self.parse_expr()?;
+        let condition = self.without_struct_literal(|p| p.parse_expr())?;
         self.expect(&Token::LBrace)?;
         let then_expr = self.parse_expr()?;
         self.expect(&Token::RBrace)?;
@@ -988,6 +1105,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Break => "break",
         Token::Continue => "continue",
         Token::Import => "import",
+        Token::Struct => "struct",
         Token::Plus => "+",
         Token::Minus => "-",
         Token::Star => "*",

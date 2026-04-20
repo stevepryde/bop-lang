@@ -934,6 +934,13 @@ impl Emitter {
                 self.emit_import_stmt(path, line)?;
             }
 
+            StmtKind::StructDecl { .. } => {
+                return Err(BopError::runtime(
+                    "bop-compile: struct declarations are not yet supported by the AOT transpiler",
+                    line,
+                ));
+            }
+
             StmtKind::ExprStmt(expr) => {
                 let src = self.expr_src(expr)?;
                 self.line(&format!("let _ = {};", src));
@@ -1164,6 +1171,20 @@ impl Emitter {
             }
 
             ExprKind::StringInterp(parts) => self.string_interp_src(parts, line)?,
+
+            ExprKind::FieldAccess { .. } => {
+                return Err(BopError::runtime(
+                    "bop-compile: struct field access (obj.field) is not yet supported by the AOT transpiler",
+                    line,
+                ));
+            }
+
+            ExprKind::StructConstruct { .. } => {
+                return Err(BopError::runtime(
+                    "bop-compile: struct literals are not yet supported by the AOT transpiler",
+                    line,
+                ));
+            }
 
             ExprKind::Lambda { params, body } => self.lambda_src(params, body, line)?,
 
@@ -1782,6 +1803,11 @@ fn scan_free_vars_stmt(
             // emit time for the AOT — leave the scan a no-op
             // rather than inventing phantom captures.
         }
+        StmtKind::StructDecl { .. } => {
+            // Struct declarations don't reference any identifiers
+            // — only field names, which are lookup keys, not
+            // bindings. Nothing to capture.
+        }
         StmtKind::ExprStmt(e) => {
             scan_free_vars_expr(e, known, free, outer_scopes, fn_info);
         }
@@ -1877,6 +1903,14 @@ fn scan_free_vars_expr(
                 inner_known.insert(p.clone());
             }
             scan_free_vars_stmts(body, &mut inner_known, free, outer_scopes, fn_info);
+        }
+        ExprKind::FieldAccess { object, .. } => {
+            scan_free_vars_expr(object, known, free, outer_scopes, fn_info);
+        }
+        ExprKind::StructConstruct { fields, .. } => {
+            for (_, v) in fields {
+                scan_free_vars_expr(v, known, free, outer_scopes, fn_info);
+            }
         }
     }
 }

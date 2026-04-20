@@ -28,6 +28,15 @@ pub struct BopArray(Vec<Value>);
 #[derive(Debug)]
 pub struct BopDict(Vec<(String, Value)>);
 
+/// A user-defined struct value. Carries the declared type name
+/// plus its fields in declaration order so iteration (and
+/// deterministic `Display`) stays stable.
+#[derive(Debug)]
+pub struct BopStruct {
+    type_name: String,
+    fields: Vec<(String, Value)>,
+}
+
 /// A Bop function value — the runtime representation of a closure
 /// or a reified `fn foo(...) { ... }` declaration. Shared by `Rc`
 /// so first-class usage (`let g = f; pass(f)`) is cheap.
@@ -98,6 +107,7 @@ pub enum Value {
     Array(BopArray),
     Dict(BopDict),
     Fn(Rc<BopFn>),
+    Struct(BopStruct),
 }
 
 // ─── Tracked constructors ──────────────────────────────────────────────────
@@ -123,6 +133,19 @@ impl Value {
         let key_bytes: usize = entries.iter().map(|(k, _)| k.capacity()).sum();
         bop_alloc(entries.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
         Value::Dict(BopDict(entries))
+    }
+
+    /// Build a user-defined struct value. Tracks the type name
+    /// capacity plus the field buffer — same accounting shape as
+    /// a dict, with an extra string for the type tag.
+    pub fn new_struct(type_name: String, fields: Vec<(String, Value)>) -> Self {
+        let key_bytes: usize = fields.iter().map(|(k, _)| k.capacity()).sum();
+        bop_alloc(
+            type_name.capacity()
+                + fields.capacity() * core::mem::size_of::<(String, Value)>()
+                + key_bytes,
+        );
+        Value::Struct(BopStruct { type_name, fields })
     }
 
     /// Build a tree-walker-ready closure value. The AST body moves
@@ -190,6 +213,22 @@ impl Clone for Value {
                 bop_alloc(cloned.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
                 Value::Dict(BopDict(cloned))
             }
+            Value::Struct(s) => {
+                let cloned_tn = s.type_name.clone();
+                let cloned_fields = s.fields.clone();
+                let key_bytes: usize =
+                    cloned_fields.iter().map(|(k, _)| k.capacity()).sum();
+                bop_alloc(
+                    cloned_tn.capacity()
+                        + cloned_fields.capacity()
+                            * core::mem::size_of::<(String, Value)>()
+                        + key_bytes,
+                );
+                Value::Struct(BopStruct {
+                    type_name: cloned_tn,
+                    fields: cloned_fields,
+                })
+            }
             // Closures are reference-counted: cloning a Value::Fn
             // is O(1) and doesn't duplicate the body or captures.
             // Tracking the captures' memory happens once, at the
@@ -212,6 +251,15 @@ impl Drop for Value {
             Value::Dict(d) => {
                 let key_bytes: usize = d.0.iter().map(|(k, _)| k.capacity()).sum();
                 bop_dealloc(d.0.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
+            }
+            Value::Struct(s) => {
+                let key_bytes: usize = s.fields.iter().map(|(k, _)| k.capacity()).sum();
+                bop_dealloc(
+                    s.type_name.capacity()
+                        + s.fields.capacity()
+                            * core::mem::size_of::<(String, Value)>()
+                        + key_bytes,
+                );
             }
             // Value::Fn drops by releasing its Rc. The inner
             // captures' Drop impls fire only when the refcount
@@ -260,6 +308,19 @@ impl core::fmt::Display for Value {
                 Some(name) => write!(f, "<fn {}>", name),
                 None => write!(f, "<fn>"),
             },
+            Value::Struct(s) => {
+                write!(f, "{} {{", s.type_name)?;
+                for (i, (k, v)) in s.fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, " {}: {}", k, v.inspect())?;
+                }
+                if !s.fields.is_empty() {
+                    write!(f, " ")?;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -289,6 +350,21 @@ impl Value {
             Value::Array(_) => "array",
             Value::Dict(_) => "dict",
             Value::Fn(_) => "fn",
+            // Generic bucket — the *specific* type name lives on
+            // the value itself (`struct_type_name()`). `type()`
+            // returns the Bop type name via the display path, so
+            // `type(Point { ... })` shows `"Point"`.
+            Value::Struct(_) => "struct",
+        }
+    }
+
+    /// The user-facing name for this value's type. For struct
+    /// values it's the declared type (`"Point"`); for built-in
+    /// variants it matches [`Self::type_name`].
+    pub fn display_type_name(&self) -> String {
+        match self {
+            Value::Struct(s) => s.type_name.clone(),
+            other => other.type_name().to_string(),
         }
     }
 
@@ -303,6 +379,11 @@ impl Value {
             // A callable is always a "thing" — match other
             // non-empty runtime objects.
             Value::Fn(_) => true,
+            // Structs carry fielded data and are always truthy,
+            // even if they have no fields (the "unit struct"
+            // use case) — matching how classes / records behave
+            // in most scripting languages.
+            Value::Struct(_) => true,
         }
     }
 }
@@ -354,6 +435,21 @@ impl BopArray {
     }
 }
 
+impl BopStruct {
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn fields(&self) -> &[(String, Value)] {
+        &self.fields
+    }
+
+    /// Look up a field by name. `None` if no such field.
+    pub fn field(&self, name: &str) -> Option<&Value> {
+        self.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+    }
+}
+
 impl BopDict {
     /// Set a key-value pair. If the key exists, replaces the value.
     /// If new, tracks the key's allocation and any Vec capacity growth
@@ -397,6 +493,17 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         // to the same `BopFn` compare equal; structurally identical
         // closures constructed independently do not.
         (Value::Fn(a), Value::Fn(b)) => Rc::ptr_eq(a, b),
+        // Structural equality for user structs: same type name
+        // AND every field equal in declaration order (fields are
+        // stored in a Vec so order is stable).
+        (Value::Struct(a), Value::Struct(b)) => {
+            a.type_name == b.type_name
+                && a.fields.len() == b.fields.len()
+                && a.fields
+                    .iter()
+                    .zip(b.fields.iter())
+                    .all(|((ka, va), (kb, vb))| ka == kb && values_equal(va, vb))
+        }
         _ => false,
     }
 }

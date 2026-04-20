@@ -33,6 +33,7 @@ pub enum Token {
     Break,
     Continue,
     Import,
+    Struct,
 
     // Operators
     Plus,
@@ -536,6 +537,7 @@ impl Lexer {
             "break" => Token::Break,
             "continue" => Token::Continue,
             "import" => Token::Import,
+            "struct" => Token::Struct,
             "true" => Token::True,
             "false" => Token::False,
             "none" => Token::None,

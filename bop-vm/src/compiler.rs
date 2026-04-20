@@ -270,6 +270,13 @@ impl Compiler {
                 self.emit(Instr::Import(n), line);
             }
 
+            StmtKind::StructDecl { .. } => {
+                return Err(err(
+                    line,
+                    "bop-vm: struct declarations are not yet supported in the bytecode VM",
+                ));
+            }
+
             StmtKind::ExprStmt(expr) => {
                 self.compile_expr(expr)?;
                 self.emit(Instr::Pop, line);
@@ -526,6 +533,20 @@ impl Compiler {
 
                 let end = self.current_offset();
                 self.patch_jump(end_jmp, end);
+            }
+
+            ExprKind::FieldAccess { .. } => {
+                return Err(err(
+                    line,
+                    "bop-vm: struct field access (obj.field) is not yet supported in the bytecode VM",
+                ));
+            }
+
+            ExprKind::StructConstruct { .. } => {
+                return Err(err(
+                    line,
+                    "bop-vm: struct literals are not yet supported in the bytecode VM",
+                ));
             }
 
             ExprKind::Lambda { params, body } => {
