@@ -35,7 +35,7 @@ use std::fmt::Write as _;
 use bop::error::BopError;
 use bop::lexer::StringPart;
 use bop::parser::{
-    AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp, VariantKind,
+    AssignOp, AssignTarget, BinOp, Expr, ExprKind, MatchArm, Stmt, StmtKind, UnaryOp, VariantKind,
     VariantPayload,
 };
 
@@ -1505,17 +1505,147 @@ impl Emitter {
                 )
             }
 
-            ExprKind::Match { .. } => {
-                // Pattern matching lands in AOT in a follow-up
-                // commit; for now we reject it at compile time so
-                // the crate still builds.
-                return Err(BopError::runtime(
-                    "match expressions are not yet supported by the AOT backend",
-                    line,
-                ));
-            }
+            ExprKind::Match { scrutinee, arms } => self.match_src(scrutinee, arms, line)?,
         };
         Ok(s)
+    }
+
+    /// Lower a `match` expression to a Rust block expression.
+    ///
+    /// Emitted shape (trimmed for clarity):
+    ///
+    /// ```text
+    /// {
+    ///   let __match_sc_N: Value = <scrutinee>;
+    ///   'match_arms_N: loop {
+    ///     {
+    ///       let __pat: Pattern = <pattern ctor>;
+    ///       let mut __bindings = Vec::new();
+    ///       if bop::pattern_matches(&__pat, &__match_sc_N, &mut __bindings) {
+    ///         let <b1>: Value = __bindings.iter().rev().find(...)...;
+    ///         // ...
+    ///         if (<guard>).is_truthy() {
+    ///           break 'match_arms_N <body>;
+    ///         }
+    ///       }
+    ///     }
+    ///     // ... next arm ...
+    ///     return Err(BopError::runtime("No match arm matched the scrutinee", line));
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// The pattern itself is constructed as a `bop::parser::Pattern`
+    /// value in the emitted Rust and fed through the shared
+    /// `bop::pattern_matches` helper so walker, VM, and AOT all
+    /// apply identical matching rules. Each arm pushes a fresh
+    /// emitter scope so binding names are visible as Rust locals
+    /// inside `expr_src` calls for guard and body.
+    fn match_src(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        line: u32,
+    ) -> Result<String, BopError> {
+        let scrutinee_src = self.expr_src(scrutinee)?;
+        let id = self.tmp_counter;
+        self.tmp_counter += 1;
+        let sc_name = format!("__match_sc_{}", id);
+        let label = format!("match_arms_{}", id);
+
+        let mut src = String::new();
+        src.push_str("{\n");
+        src.push_str(&format!(
+            "    let {}: ::bop::value::Value = {};\n",
+            sc_name, scrutinee_src
+        ));
+        src.push_str(&format!("    '{}: loop {{\n", label));
+
+        for arm in arms {
+            let arm_line = arm.line;
+            let pat_src = pattern_rust(&arm.pattern);
+            // Collect every name this arm's pattern binds. We sort
+            // for deterministic emission and register them as
+            // locals on the emitter's scope stack so `expr_src`
+            // treats them as locals (not free captures) inside the
+            // guard and body.
+            let mut names_set: HashSet<String> = HashSet::new();
+            collect_pattern_bindings(&arm.pattern, &mut names_set);
+            let mut names: Vec<String> = names_set.into_iter().collect();
+            names.sort();
+
+            src.push_str("        {\n");
+            src.push_str(&format!(
+                "            let __pat: ::bop::parser::Pattern = {};\n",
+                pat_src
+            ));
+            src.push_str("            let mut __bindings: ::std::vec::Vec<(::std::string::String, ::bop::value::Value)> = ::std::vec::Vec::new();\n");
+            src.push_str(&format!(
+                "            if ::bop::pattern_matches(&__pat, &{}, &mut __bindings) {{\n",
+                sc_name
+            ));
+
+            self.push_scope();
+            for name in &names {
+                self.bind_local(name);
+                src.push_str(&format!(
+                    "                let {}: ::bop::value::Value = __bindings.iter().rev().find(|(k, _)| k == {}).map(|(_, v)| v.clone()).unwrap_or(::bop::value::Value::None);\n",
+                    rust_ident(name),
+                    rust_string_literal(name)
+                ));
+            }
+
+            // Rust warns if a binding name isn't used in the body
+            // — a common case for wildcard-ish matches where the
+            // programmer bound a name for clarity but didn't need
+            // it. Prefix the lets with `#[allow(unused_variables)]`
+            // scoped blocks? Simpler: emit `let _ = <name>;` to
+            // silence the lint without changing semantics.
+            for name in &names {
+                src.push_str(&format!(
+                    "                let _ = &{};\n",
+                    rust_ident(name)
+                ));
+            }
+
+            if let Some(guard) = &arm.guard {
+                let guard_src = self.expr_src(guard)?;
+                src.push_str(&format!(
+                    "                if ({}).is_truthy() {{\n",
+                    guard_src
+                ));
+                let body_src = self.expr_src(&arm.body)?;
+                src.push_str(&format!(
+                    "                    break '{} {};\n",
+                    label, body_src
+                ));
+                src.push_str("                }\n");
+            } else {
+                let body_src = self.expr_src(&arm.body)?;
+                src.push_str(&format!(
+                    "                break '{} {};\n",
+                    label, body_src
+                ));
+            }
+            self.pop_scope();
+
+            src.push_str("            }\n");
+            src.push_str("        }\n");
+
+            // Keep the per-arm line variable even if unused for
+            // now — ready for future diagnostics that want to
+            // point at a specific arm.
+            let _ = arm_line;
+        }
+
+        src.push_str(&format!(
+            "        #[allow(unreachable_code)]\n        return ::std::result::Result::Err(::bop::error::BopError::runtime(\"No match arm matched the scrutinee\", {}));\n",
+            line
+        ));
+        src.push_str("    }\n");
+        src.push_str("}");
+
+        Ok(src)
     }
 
     fn binary_src(
@@ -2386,6 +2516,148 @@ fn collect_pattern_bindings(pattern: &bop::parser::Pattern, known: &mut HashSet<
             if let Some(first) = alts.first() {
                 collect_pattern_bindings(first, known);
             }
+        }
+    }
+}
+
+/// Emit Rust source that constructs a `bop::parser::Pattern`
+/// value equivalent to `pat`. The emitted expression is used at
+/// runtime by `bop::pattern_matches`, so walker / VM / AOT all
+/// share one matching implementation.
+fn pattern_rust(pat: &bop::parser::Pattern) -> String {
+    use bop::parser::{ArrayRest, Pattern};
+    match pat {
+        Pattern::Wildcard => "::bop::parser::Pattern::Wildcard".to_string(),
+        Pattern::Binding(name) => format!(
+            "::bop::parser::Pattern::Binding({}.to_string())",
+            rust_string_literal(name)
+        ),
+        Pattern::Literal(lit) => format!(
+            "::bop::parser::Pattern::Literal({})",
+            literal_pattern_rust(lit)
+        ),
+        Pattern::EnumVariant {
+            type_name,
+            variant,
+            payload,
+        } => format!(
+            "::bop::parser::Pattern::EnumVariant {{ type_name: {}.to_string(), variant: {}.to_string(), payload: {} }}",
+            rust_string_literal(type_name),
+            rust_string_literal(variant),
+            variant_payload_rust(payload),
+        ),
+        Pattern::Struct {
+            type_name,
+            fields,
+            rest,
+        } => {
+            let fields_src = if fields.is_empty() {
+                "::std::vec::Vec::new()".to_string()
+            } else {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, p)| {
+                        format!(
+                            "({}.to_string(), {})",
+                            rust_string_literal(k),
+                            pattern_rust(p)
+                        )
+                    })
+                    .collect();
+                format!("::std::vec::Vec::from([{}])", parts.join(", "))
+            };
+            format!(
+                "::bop::parser::Pattern::Struct {{ type_name: {}.to_string(), fields: {}, rest: {} }}",
+                rust_string_literal(type_name),
+                fields_src,
+                rest,
+            )
+        }
+        Pattern::Array { elements, rest } => {
+            let elems_src = if elements.is_empty() {
+                "::std::vec::Vec::new()".to_string()
+            } else {
+                let parts: Vec<String> = elements.iter().map(pattern_rust).collect();
+                format!("::std::vec::Vec::from([{}])", parts.join(", "))
+            };
+            let rest_src = match rest {
+                None => "::std::option::Option::None".to_string(),
+                Some(ArrayRest::Ignored) => {
+                    "::std::option::Option::Some(::bop::parser::ArrayRest::Ignored)".to_string()
+                }
+                Some(ArrayRest::Named(n)) => format!(
+                    "::std::option::Option::Some(::bop::parser::ArrayRest::Named({}.to_string()))",
+                    rust_string_literal(n)
+                ),
+            };
+            format!(
+                "::bop::parser::Pattern::Array {{ elements: {}, rest: {} }}",
+                elems_src, rest_src,
+            )
+        }
+        Pattern::Or(alts) => {
+            let parts: Vec<String> = alts.iter().map(pattern_rust).collect();
+            let alts_src = if parts.is_empty() {
+                "::std::vec::Vec::new()".to_string()
+            } else {
+                format!("::std::vec::Vec::from([{}])", parts.join(", "))
+            };
+            format!("::bop::parser::Pattern::Or({})", alts_src)
+        }
+    }
+}
+
+fn literal_pattern_rust(lit: &bop::parser::LiteralPattern) -> String {
+    use bop::parser::LiteralPattern;
+    match lit {
+        LiteralPattern::Number(n) => format!(
+            "::bop::parser::LiteralPattern::Number({})",
+            rust_f64(*n)
+        ),
+        LiteralPattern::Str(s) => format!(
+            "::bop::parser::LiteralPattern::Str({}.to_string())",
+            rust_string_literal(s)
+        ),
+        LiteralPattern::Bool(b) => format!("::bop::parser::LiteralPattern::Bool({})", b),
+        LiteralPattern::None => "::bop::parser::LiteralPattern::None".to_string(),
+    }
+}
+
+fn variant_payload_rust(payload: &bop::parser::VariantPatternPayload) -> String {
+    use bop::parser::VariantPatternPayload;
+    match payload {
+        VariantPatternPayload::Unit => {
+            "::bop::parser::VariantPatternPayload::Unit".to_string()
+        }
+        VariantPatternPayload::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(pattern_rust).collect();
+            let inner = if parts.is_empty() {
+                "::std::vec::Vec::new()".to_string()
+            } else {
+                format!("::std::vec::Vec::from([{}])", parts.join(", "))
+            };
+            format!("::bop::parser::VariantPatternPayload::Tuple({})", inner)
+        }
+        VariantPatternPayload::Struct { fields, rest } => {
+            let fields_src = if fields.is_empty() {
+                "::std::vec::Vec::new()".to_string()
+            } else {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, p)| {
+                        format!(
+                            "({}.to_string(), {})",
+                            rust_string_literal(k),
+                            pattern_rust(p)
+                        )
+                    })
+                    .collect();
+                format!("::std::vec::Vec::from([{}])", parts.join(", "))
+            };
+            format!(
+                "::bop::parser::VariantPatternPayload::Struct {{ fields: {}, rest: {} }}",
+                fields_src, rest,
+            )
         }
     }
 }

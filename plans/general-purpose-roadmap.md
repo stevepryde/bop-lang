@@ -340,7 +340,7 @@ property — equality checks must compare `type_name` +
 `variant_name`, not just payload. Pattern matching (phase 4)
 depends on this working.
 
-### Phase 4 — Pattern matching
+### Phase 4 — Pattern matching ✅
 
 **Why fourth.** Sum types without variant destructuring are
 unusable. Phase 3 introduces enums; phase 4 gives users the
@@ -376,6 +376,32 @@ pattern, and `try_call`'s output is pattern-matched.
   phase 9.
 - No custom matcher protocol, no deref patterns, no range
   patterns (`1..10`). Those are phase-9 polish.
+
+**Delivered.**
+
+- Lexer gains `match`, `=>`, `|`, `..` tokens; parser grows
+  `ExprKind::Match` + the `Pattern` AST (literals, wildcard,
+  binding, enum variants with tuple/struct payloads, struct
+  destructure with `..`, array destructure with `..rest`/`..`,
+  or-patterns, guard clauses).
+- Walker adds `eval_match` plus a shared `pattern_matches`
+  helper (re-exported as `bop::pattern_matches`) so every engine
+  runs the same structural matcher.
+- VM adds a `patterns: Vec<Pattern>` pool on `Chunk` plus two
+  new instructions: `MatchFail { pattern, on_fail }` (pops the
+  candidate, applies bindings on match, jumps on miss) and
+  `MatchExhausted` (raises the runtime error). Each arm
+  compiles to a `PushScope` / `Dup` / `MatchFail` / guard /
+  body / `PopScope` sequence with explicit fall-through.
+- AOT emits a Rust block expression that constructs each
+  `bop::parser::Pattern` inline and dispatches through
+  `bop::pattern_matches`, extracting bindings into Rust locals
+  before the guard and body.
+- **Tests**: 20 walker tests, 16 VM differential tests, 14
+  three-way corpus programs exercising every pattern kind plus
+  guards, or-patterns, nested variants, and the
+  "no-arm-matched" runtime error. All three engines agree on
+  every program.
 
 ### Phase 5 — Error handling (Result + `try`)
 

@@ -653,6 +653,116 @@ fn Wrapper.len(self) { return 99 }
 let w = Wrapper { data: [1, 2, 3] }
 print(w.len())"#,
     ),
+    // ─── Pattern matching (phase 4) ─────────────────────────────
+    (
+        "match_literal_number",
+        r#"let x = 2
+print(match x {
+  1 => "one",
+  2 => "two",
+  _ => "other",
+})"#,
+    ),
+    (
+        "match_wildcard_catches_all",
+        r#"let x = 42
+print(match x {
+  0 => "zero",
+  _ => "big",
+})"#,
+    ),
+    (
+        "match_binding_captures",
+        r#"let x = 7
+print(match x { n => n * 2 })"#,
+    ),
+    (
+        "match_guard_selects_arm",
+        r#"let x = 10
+print(match x {
+  n if n < 5 => "small",
+  n if n < 20 => "medium",
+  _ => "big",
+})"#,
+    ),
+    (
+        "match_or_pattern",
+        r#"let x = 3
+print(match x {
+  1 | 2 | 3 => "low",
+  _ => "other",
+})"#,
+    ),
+    (
+        "match_enum_unit",
+        r#"enum Light { Red, Green }
+let l = Light::Green
+print(match l {
+  Light::Red => "stop",
+  Light::Green => "go",
+})"#,
+    ),
+    (
+        "match_enum_tuple_binds",
+        r#"enum Res { Ok(v), Err(m) }
+let r = Res::Ok(42)
+print(match r {
+  Res::Ok(v) => v,
+  Res::Err(_) => -1,
+})"#,
+    ),
+    (
+        "match_enum_struct_variant_binds",
+        r#"enum Shape { Rect { w, h } }
+let s = Shape::Rect { w: 4, h: 3 }
+print(match s { Shape::Rect { w, h } => w * h })"#,
+    ),
+    (
+        "match_struct_destructure",
+        r#"struct Point { x, y }
+let p = Point { x: 3, y: 4 }
+print(match p { Point { x, y } => x + y })"#,
+    ),
+    (
+        "match_struct_partial_rest",
+        r#"struct Point { x, y, z }
+let p = Point { x: 1, y: 2, z: 3 }
+print(match p { Point { y, .. } => y * 10 })"#,
+    ),
+    (
+        "match_nested_enum_struct",
+        r#"enum FileError { NotFound(path) }
+enum Res { Ok(v), Err(e) }
+let r = Res::Err(FileError::NotFound("missing.txt"))
+print(match r {
+  Res::Ok(_) => "ok",
+  Res::Err(FileError::NotFound(p)) => p,
+})"#,
+    ),
+    (
+        "match_array_exact",
+        r#"let xs = [1, 2, 3]
+print(match xs {
+  [a, b, c] => a + b + c,
+  _ => -1,
+})"#,
+    ),
+    (
+        "match_array_with_rest",
+        r#"let xs = [10, 20, 30, 40]
+print(match xs {
+  [first, ..rest] => first,
+  _ => -1,
+})"#,
+    ),
+    (
+        "match_no_arm_matched_errors",
+        r#"let x = 99
+match x {
+  1 => print("one"),
+  2 => print("two"),
+}"#,
+    ),
 ];
 
 /// Programs that exercise the `import` surface. Each entry
