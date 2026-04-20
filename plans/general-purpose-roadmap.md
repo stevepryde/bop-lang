@@ -941,13 +941,14 @@ shipping, but each one hurts maintenance or future work.
   rewrite can't silently drift the text. One-off per-engine
   messages (e.g. `"VM: stack underflow"`) stay with their
   engine since there's nothing to deduplicate.
-- **`suggest::leak_name` leaks a `&'static str` per match
-  analysis.** The check pass's enum-coverage scan uses it to
-  sidestep lifetime threading. One leak per match expression
-  per parse, so trivial in absolute terms, but it's still
-  unusual. Candidate fix: restructure `gather_variants` so it
-  takes `&mut String` for the target-enum name instead of
-  `&mut Option<&'static str>`.
+- ~~**`suggest::leak_name` leaks a `&'static str` per match
+  analysis.**~~ ✅ Fixed. The check pass now threads an
+  owned `Option<String>` through `gather_variants` instead of
+  a `&mut Option<&'static str>`. The extra allocation is one
+  `String::clone()` per first-enum-variant arm — negligible
+  against the rest of the pass — and the `leak_name` fn
+  (along with its no_std fallback stub) is gone. No behaviour
+  change; all 11 `check::tests` still pass.
 
 ## Deliberately out of scope
 

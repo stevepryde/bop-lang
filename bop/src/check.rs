@@ -275,8 +275,10 @@ fn check_match_exhaustive(
     // same `EnumType::*`, that's the enum we can check. If
     // arms are heterogeneous (literals, structs, arrays, or
     // two different enums), we bail — no coherent coverage
-    // analysis applies.
-    let mut target_enum: Option<&str> = None;
+    // analysis applies. `target_enum` is owned (rather than a
+    // borrow out of the AST) so the check pass doesn't need to
+    // thread lifetimes through every helper.
+    let mut target_enum: Option<String> = None;
     let mut covered: Vec<String> = Vec::new();
     for arm in arms {
         // Guarded arms narrow their variant (the body only
@@ -294,7 +296,7 @@ fn check_match_exhaustive(
         // exhaustiveness-check at this level.
         return;
     };
-    let Some(decl) = enums.get(enum_name) else {
+    let Some(decl) = enums.get(&enum_name) else {
         // Enum isn't declared locally — could be imported;
         // bail rather than warn on a potentially-complete
         // match we can't verify.
@@ -347,7 +349,7 @@ fn is_catch_all(pattern: &Pattern) -> bool {
 /// won't count it toward coverage.
 fn gather_variants(
     pattern: &Pattern,
-    target_enum: &mut Option<&'static str>,
+    target_enum: &mut Option<String>,
     covered: &mut Vec<String>,
     contributes: bool,
 ) -> bool {
@@ -362,19 +364,21 @@ fn gather_variants(
             variant,
             ..
         } => {
-            // SAFETY: `type_name` is owned by the AST; we stash
-            // a `&'static str` copy by leaking the first hit so
-            // subsequent comparisons stay cheap. That's fine
-            // for a short-lived check pass.
+            // `target_enum` is owned (`Option<String>`) so the
+            // first enum-variant pattern seeds it and every
+            // subsequent arm compares against the stored name.
+            // No lifetimes, no leaks — the extra allocation is
+            // one `String` per analysed match, which is
+            // negligible next to the rest of the check pass.
             match target_enum {
                 None => {
-                    *target_enum = Some(leak_name(type_name));
+                    *target_enum = Some(type_name.clone());
                     if contributes {
                         covered.push(variant.clone());
                     }
                     true
                 }
-                Some(existing) if *existing == type_name => {
+                Some(existing) if existing == type_name => {
                     if contributes {
                         covered.push(variant.clone());
                     }
@@ -394,25 +398,6 @@ fn gather_variants(
         // Literal / struct / array patterns on an enum scrutinee
         // don't fit coverage analysis — bail.
         _ => false,
-    }
-}
-
-/// Leak `name` into a `&'static str`. Used only inside the
-/// check pass — the leaked memory is trivial per program and
-/// the compiler pass runs once per parse, so it's cheaper than
-/// threading lifetimes through the whole check state machine.
-fn leak_name(name: &str) -> &'static str {
-    #[cfg(feature = "std")]
-    {
-        Box::leak(name.to_string().into_boxed_str())
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        // `alloc` lacks `Box::leak` in no_std, but leaking
-        // still works through `Box::into_raw` — however we
-        // really don't need this path for no_std builds. Fall
-        // back to an empty static.
-        ""
     }
 }
 
