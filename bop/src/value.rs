@@ -448,6 +448,19 @@ impl BopStruct {
     pub fn field(&self, name: &str) -> Option<&Value> {
         self.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
     }
+
+    /// Replace the value of an existing field. Returns `true` if
+    /// the field was present; `false` if the caller should raise
+    /// a "no such field" error. The old value is dropped (firing
+    /// its allocation tracking); no capacity change in the Vec.
+    pub fn set_field(&mut self, name: &str, value: Value) -> bool {
+        if let Some(entry) = self.fields.iter_mut().find(|(k, _)| k == name) {
+            entry.1 = value;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl BopDict {

@@ -388,6 +388,12 @@ impl Compiler {
                 }
                 self.emit(Instr::StoreVar(name_idx), line);
             }
+            AssignTarget::Field { .. } => {
+                return Err(err(
+                    line,
+                    "bop-vm: struct field assignment is not yet supported in the bytecode VM",
+                ));
+            }
         }
         Ok(())
     }

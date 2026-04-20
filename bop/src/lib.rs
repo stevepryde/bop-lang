@@ -1771,6 +1771,62 @@ print(p.x)"#),
     }
 
     #[test]
+    fn struct_field_assign_basic() {
+        assert_eq!(
+            say(r#"struct Point { x, y }
+let p = Point { x: 1, y: 2 }
+p.x = 99
+print(p.x)
+print(p.y)"#),
+            "2"
+        );
+    }
+
+    #[test]
+    fn struct_field_compound_assign() {
+        assert_eq!(
+            say(r#"struct Counter { n }
+let c = Counter { n: 10 }
+c.n += 5
+c.n *= 2
+print(c.n)"#),
+            "30"
+        );
+    }
+
+    #[test]
+    fn struct_field_assign_unknown_field_errors() {
+        let err = run_err(r#"struct P { x }
+let p = P { x: 1 }
+p.y = 99"#);
+        assert!(err.contains("no field"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_field_assign_on_non_struct_errors() {
+        let err = run_err(r#"let x = 5
+x.field = 1"#);
+        assert!(err.contains("Can't assign to field"), "got: {}", err);
+    }
+
+    #[test]
+    fn struct_field_assign_chain_via_intermediate_var() {
+        // `outer.inner.v = 99` isn't supported yet (needs nested
+        // writeback). Users can re-build through intermediate
+        // vars instead.
+        assert_eq!(
+            say(r#"struct Inner { v }
+struct Outer { inner }
+let o = Outer { inner: Inner { v: 1 } }
+let i = o.inner
+i.v = 99
+o.inner = i
+print(o.inner.v)"#),
+            "99"
+        );
+    }
+
+    #[test]
     fn struct_empty() {
         assert_eq!(
             say(r#"struct Unit { }

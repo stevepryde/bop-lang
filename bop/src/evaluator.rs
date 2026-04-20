@@ -568,6 +568,82 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     ))
                 }
             }
+            AssignTarget::Field { object, field } => {
+                // Support assignment into a named struct field.
+                // Only bare-`Ident` objects are assignable — the
+                // writeback goes through `set_var`, so chains like
+                // `foo().x = 1` or `arr[0].x = 1` aren't
+                // supported yet (matches index-assign behaviour).
+                let name = match &object.kind {
+                    ExprKind::Ident(n) => n.clone(),
+                    _ => {
+                        return Err(error(
+                            line,
+                            "Can only assign to fields of named variables (like `p.x = val`)",
+                        ));
+                    }
+                };
+                let mut obj = self
+                    .get_var(&name)
+                    .ok_or_else(|| {
+                        error(line, format!("Variable `{}` doesn't exist", name))
+                    })?
+                    .clone();
+                let val_to_set = match op {
+                    AssignOp::Eq => new_val,
+                    _ => {
+                        let current = match &obj {
+                            Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
+                                error(
+                                    line,
+                                    format!(
+                                        "Struct `{}` has no field `{}`",
+                                        s.type_name(),
+                                        field
+                                    ),
+                                )
+                            })?,
+                            other => {
+                                return Err(error(
+                                    line,
+                                    format!(
+                                        "Can't assign to field `{}` on {}",
+                                        field,
+                                        other.type_name()
+                                    ),
+                                ));
+                            }
+                        };
+                        self.apply_compound_op(&current, op, &new_val, line)?
+                    }
+                };
+                match &mut obj {
+                    Value::Struct(s) => {
+                        let struct_type = s.type_name().to_string();
+                        if !s.set_field(field, val_to_set) {
+                            return Err(error(
+                                line,
+                                format!(
+                                    "Struct `{}` has no field `{}`",
+                                    struct_type, field
+                                ),
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Can't assign to field `{}` on {}",
+                                field,
+                                other.type_name()
+                            ),
+                        ));
+                    }
+                }
+                self.set_var(&name, obj);
+                Ok(())
+            }
         }
     }
 

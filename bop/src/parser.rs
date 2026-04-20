@@ -162,6 +162,11 @@ pub enum StmtKind {
 pub enum AssignTarget {
     Variable(String),
     Index { object: Expr, index: Expr },
+    /// Assignment to a struct field: `obj.field = v`. Like
+    /// `Index`, only a bare `Ident` for `object` is currently
+    /// assignable — the runtime clones out, mutates, and writes
+    /// back through the variable.
+    Field { object: Expr, field: String },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1076,10 +1081,16 @@ fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError
             object: *object,
             index: *index,
         }),
+        ExprKind::FieldAccess { object, field } => Ok(AssignTarget::Field {
+            object: *object,
+            field,
+        }),
         _ => Err(BopError {
             line: Some(line),
             column: None,
-            message: "You can only assign to a variable or an index (like `arr[0]`)".to_string(),
+            message:
+                "You can only assign to a variable, an index (`arr[0]`), or a struct field (`point.x`)"
+                    .to_string(),
             friendly_hint: None,
         }),
     }

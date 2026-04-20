@@ -1067,6 +1067,10 @@ impl Emitter {
                 }
                 Ok(())
             }
+            AssignTarget::Field { .. } => Err(BopError::runtime(
+                "bop-compile: struct field assignment is not yet supported by the AOT transpiler",
+                line,
+            )),
         }
     }
 
@@ -1732,6 +1736,9 @@ fn scan_free_vars_stmt(
                 AssignTarget::Index { object, index } => {
                     scan_free_vars_expr(object, known, free, outer_scopes, fn_info);
                     scan_free_vars_expr(index, known, free, outer_scopes, fn_info);
+                }
+                AssignTarget::Field { object, .. } => {
+                    scan_free_vars_expr(object, known, free, outer_scopes, fn_info);
                 }
             }
             scan_free_vars_expr(value, known, free, outer_scopes, fn_info);
