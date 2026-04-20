@@ -72,6 +72,29 @@ impl BopHost for RecordHost {
     fn on_print(&mut self, message: &str) {
         self.prints.borrow_mut().push(message.to_string());
     }
+
+    fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+        MODULES.with(|m| m.borrow().get(name).cloned().map(Ok))
+    }
+}
+
+// Per-test module table — tests that use imports populate it via
+// `set_modules` and the `resolve_module` impl above reads from it.
+// Kept in a thread-local so the simple `RecordHost` struct stays
+// shareable between walker and VM runs.
+thread_local! {
+    static MODULES: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn set_modules(modules: &[(&str, &str)]) {
+    MODULES.with(|m| {
+        let mut map = m.borrow_mut();
+        map.clear();
+        for (name, src) in modules {
+            map.insert((*name).to_string(), (*src).to_string());
+        }
+    });
 }
 
 /// Run `code` through both engines with the given limits. Both
@@ -500,6 +523,94 @@ fn fn_recursion() {
 }
 print(fib(10))"#),
         "55"
+    );
+}
+
+// ─── Modules / import ─────────────────────────────────────────────
+
+#[test]
+fn import_basic_let_binding() {
+    set_modules(&[("greet", r#"let hello = "hi""#)]);
+    assert_eq!(
+        say(r#"import greet
+print(hello)"#),
+        "hi"
+    );
+}
+
+#[test]
+fn import_named_fn_callable() {
+    set_modules(&[("math", "fn square(n) { return n * n }")]);
+    assert_eq!(
+        say(r#"import math
+print(square(7))"#),
+        "49"
+    );
+}
+
+#[test]
+fn import_named_fn_as_value() {
+    // Proves the module's named fn survives import as a
+    // first-class `Value::Fn`. Matters because the VM needs to
+    // carry VM-compiled chunks in `Value::Fn`, and an imported
+    // fn is loaded via a sub-VM.
+    set_modules(&[("ops", "fn double(n) { return n * 2 }")]);
+    assert_eq!(
+        say(r#"import ops
+let f = double
+print(f(21))"#),
+        "42"
+    );
+}
+
+#[test]
+fn import_dotted_path() {
+    set_modules(&[("std.math", "let pi = 3")]);
+    assert_eq!(
+        say(r#"import std.math
+print(pi)"#),
+        "3"
+    );
+}
+
+#[test]
+fn import_missing_module_errors() {
+    set_modules(&[]);
+    let msg = run_err("import nope");
+    assert!(msg.contains("Module `nope` not found"), "got: {}", msg);
+}
+
+#[test]
+fn import_transitive_modules() {
+    set_modules(&[
+        ("a", "import b\nlet doubled_pi = pi + pi"),
+        ("b", "let pi = 3"),
+    ]);
+    assert_eq!(
+        say(r#"import a
+print(doubled_pi)"#),
+        "6"
+    );
+}
+
+#[test]
+fn import_circular_detected() {
+    set_modules(&[
+        ("a", "import b\nlet x = 1"),
+        ("b", "import a\nlet y = 2"),
+    ]);
+    let msg = run_err("import a");
+    assert!(msg.contains("Circular import"), "got: {}", msg);
+}
+
+#[test]
+fn import_is_idempotent_at_injection_site() {
+    set_modules(&[("m", "let x = 1")]);
+    assert_eq!(
+        say(r#"import m
+import m
+print(x)"#),
+        "1"
     );
 }
 

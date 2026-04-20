@@ -127,6 +127,13 @@ pub enum StmtKind {
     },
     Break,
     Continue,
+    /// `import foo.bar.baz` — resolves the module named by the
+    /// dot-joined path through `BopHost::resolve_module`, evaluates
+    /// its top-level statements in a fresh scope, and injects the
+    /// module's `let` / `fn` bindings into the importer's scope.
+    Import {
+        path: String,
+    },
     ExprStmt(Expr),
 }
 
@@ -317,8 +324,26 @@ impl Parser {
                     line,
                 })
             }
+            Token::Import => self.parse_import(),
             _ => self.parse_expr_or_assign(),
         }
+    }
+
+    fn parse_import(&mut self) -> Result<Stmt, BopError> {
+        let line = self.peek_line();
+        self.advance(); // consume `import`
+        let (first, _) = self.expect_ident()?;
+        let mut path = first;
+        while matches!(self.peek(), Token::Dot) {
+            self.advance();
+            let (seg, _) = self.expect_ident()?;
+            path.push('.');
+            path.push_str(&seg);
+        }
+        Ok(Stmt {
+            kind: StmtKind::Import { path },
+            line,
+        })
     }
 
     fn parse_let(&mut self) -> Result<Stmt, BopError> {
@@ -962,6 +987,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Repeat => "repeat",
         Token::Break => "break",
         Token::Continue => "continue",
+        Token::Import => "import",
         Token::Plus => "+",
         Token::Minus => "-",
         Token::Star => "*",

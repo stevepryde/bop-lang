@@ -139,6 +139,12 @@ pub enum Instr {
     /// Peek top; jump if truthy (don't pop). For `||` short-circuit.
     JumpIfTruePeek(CodeOffset),
 
+    // ─── Modules ─────────────────────────────────────────────────
+    /// Resolve, parse, compile, and run the module at `name`, then
+    /// inject its top-level bindings into the current scope. The
+    /// VM caches by module path so re-imports are cheap.
+    Import(NameIdx),
+
     // ─── Termination ──────────────────────────────────────────────
     /// End the current chunk (top-level program only).
     Halt,

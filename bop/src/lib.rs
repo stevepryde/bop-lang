@@ -76,6 +76,27 @@ pub trait BopHost {
     fn on_tick(&mut self) -> Result<(), BopError> {
         Ok(())
     }
+
+    /// Resolve an `import` target to Bop source.
+    ///
+    /// The core language doesn't know where modules live — a
+    /// filesystem embedder reads `.bop` files, a browser embedder
+    /// might fetch a URL, an embedded host might look up bundled
+    /// string assets. Returning:
+    ///
+    /// - `None` — "I don't handle this module path": the runtime
+    ///   raises a *module not found* error.
+    /// - `Some(Ok(source))` — the module's source text, to be
+    ///   parsed and executed by the engine.
+    /// - `Some(Err(e))` — the resolver itself failed (I/O error,
+    ///   bad path, …); the engine propagates the error as-is.
+    ///
+    /// The default impl returns `None`, so by default a program
+    /// that imports anything halts with *module not found*.
+    fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+        let _ = name;
+        None
+    }
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────
@@ -1376,5 +1397,210 @@ let x = 1"#,
         let mut host = CustomHost { prints: vec![] };
         let err = run("unknown()", &mut host, &BopLimits::standard()).unwrap_err();
         assert!(err.message.contains("not found"));
+    }
+
+    // ─── Modules / import ──────────────────────────────────────────
+
+    /// Host that resolves modules from an in-memory map keyed by
+    /// the dot-joined import path. Captures prints and tracks how
+    /// many times each module was resolved so we can pin the
+    /// caching behaviour.
+    struct ModuleHost {
+        prints: RefCell<Vec<String>>,
+        modules: std::collections::HashMap<String, String>,
+        resolve_counts: RefCell<std::collections::HashMap<String, u32>>,
+    }
+
+    impl ModuleHost {
+        fn new(modules: &[(&str, &str)]) -> Self {
+            let mut map = std::collections::HashMap::new();
+            for (name, source) in modules {
+                map.insert((*name).to_string(), (*source).to_string());
+            }
+            Self {
+                prints: RefCell::new(Vec::new()),
+                modules: map,
+                resolve_counts: RefCell::new(std::collections::HashMap::new()),
+            }
+        }
+
+        fn prints(&self) -> Vec<String> {
+            self.prints.borrow().clone()
+        }
+
+        fn resolve_count(&self, name: &str) -> u32 {
+            *self
+                .resolve_counts
+                .borrow()
+                .get(name)
+                .unwrap_or(&0)
+        }
+    }
+
+    impl BopHost for ModuleHost {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            None
+        }
+
+        fn on_print(&mut self, message: &str) {
+            self.prints.borrow_mut().push(message.to_string());
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            *self
+                .resolve_counts
+                .borrow_mut()
+                .entry(name.to_string())
+                .or_insert(0) += 1;
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn import_brings_let_binding_into_scope() {
+        let mut host = ModuleHost::new(&[("math", "let pi = 3")]);
+        run(
+            r#"import math
+print(pi)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(host.prints(), vec!["3"]);
+    }
+
+    #[test]
+    fn import_brings_fn_into_scope() {
+        let mut host = ModuleHost::new(&[(
+            "math",
+            r#"fn square(n) { return n * n }
+let pi = 3"#,
+        )]);
+        run(
+            r#"import math
+print(square(5))
+print(pi)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(host.prints(), vec!["25", "3"]);
+    }
+
+    #[test]
+    fn import_dotted_path_passes_through_to_host() {
+        let mut host = ModuleHost::new(&[("std.math", "let e = 2")]);
+        run(
+            r#"import std.math
+print(e)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(host.prints(), vec!["2"]);
+        // Exactly one resolve — `std.math` is the full key.
+        assert_eq!(host.resolve_count("std.math"), 1);
+    }
+
+    #[test]
+    fn import_module_not_found_errors() {
+        let mut host = ModuleHost::new(&[]);
+        let err = run("import nope", &mut host, &BopLimits::standard())
+            .unwrap_err();
+        assert!(
+            err.message.contains("Module `nope` not found"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn import_cache_resolves_once() {
+        // Two imports of the same module in the same run should
+        // only hit the resolver once.
+        let mut host = ModuleHost::new(&[("m", "let x = 1")]);
+        run(
+            r#"import m
+import m
+print(x)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(host.prints(), vec!["1"]);
+        assert_eq!(host.resolve_count("m"), 1);
+    }
+
+    #[test]
+    fn import_module_can_import_other_modules() {
+        let mut host = ModuleHost::new(&[
+            ("a", "import b\nlet doubled_pi = pi + pi"),
+            ("b", "let pi = 3"),
+        ]);
+        run(
+            r#"import a
+print(doubled_pi)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(host.prints(), vec!["6"]);
+    }
+
+    #[test]
+    fn import_circular_detected() {
+        let mut host = ModuleHost::new(&[
+            ("a", "import b\nlet x = 1"),
+            ("b", "import a\nlet y = 2"),
+        ]);
+        let err = run("import a", &mut host, &BopLimits::standard())
+            .unwrap_err();
+        assert!(
+            err.message.contains("Circular import"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn import_would_shadow_local_binding_errors() {
+        let mut host = ModuleHost::new(&[("m", "let x = 99")]);
+        let err = run(
+            r#"let x = 1
+import m"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("would shadow"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn import_module_does_not_see_importer_scope() {
+        // `outer` is defined in the importer's scope; the module
+        // must not be able to reach it.
+        let mut host = ModuleHost::new(&[("m", "fn leak() { return outer }")]);
+        let err = run(
+            r#"let outer = 42
+import m
+print(leak())"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("outer"),
+            "expected 'outer' not-found error, got: {}",
+            err.message
+        );
     }
 }

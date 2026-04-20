@@ -265,6 +265,11 @@ impl Compiler {
                 self.emit(Instr::Jump(target), line);
             }
 
+            StmtKind::Import { path } => {
+                let n = self.add_name(path);
+                self.emit(Instr::Import(n), line);
+            }
+
             StmtKind::ExprStmt(expr) => {
                 self.compile_expr(expr)?;
                 self.emit(Instr::Pop, line);

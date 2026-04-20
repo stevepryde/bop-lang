@@ -157,6 +157,25 @@ must be cheap (envs use `Rc` internally).
 
 ### Phase 2 — Modules and imports
 
+*Status: done for walker + VM + bop-sys; AOT deferred to a
+follow-up. `BopHost::resolve_module(name) -> Option<Result<String,
+BopError>>` added to the core trait with a `None`-returning
+default. `import foo.bar.baz` is now a statement; the walker and
+VM each run the module in a sub-engine that inherits the parent's
+import cache, memory ceiling, and step budget but runs with a
+fresh scope so module code can't see the importer's locals.
+Re-imports of the same path in one `run` hit the cache and are
+no-ops at the injection site. Circular imports surface as a clean
+error via a `Loading` sentinel in the cache. Named fns imported
+from a module come back as engine-compatible `Value::Fn`s —
+walker gets `FnBody::Ast`, VM gets `FnBody::Compiled(Rc<Chunk>)`.
+bop-sys's `StandardHost::with_module_root(path)` maps
+`foo.bar.baz` to `<root>/foo/bar/baz.bop` with path-traversal
+guards. 9 walker tests + 8 differential tests + 3 bop-sys tests.
+AOT rejects `import` with a clear "use walker/VM" error — will
+either compile-time-resolve via an `Options` callback or ship a
+runtime loader in phase 2c.*
+
 **Why second.** Multi-file programs are table stakes. Closures
 without modules would still leave users writing 2000-line single
 files.

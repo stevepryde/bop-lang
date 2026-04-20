@@ -14,6 +14,8 @@ use alloc::rc::Rc;
 #[cfg(feature = "std")]
 use std::rc::Rc;
 
+use core::cell::RefCell;
+
 use crate::builtins::{self, error, error_with_hint};
 use crate::error::BopError;
 use crate::lexer::StringPart;
@@ -22,6 +24,28 @@ use crate::ops;
 use crate::parser::*;
 use crate::value::{BopFn, FnBody, Value};
 use crate::{BopHost, BopLimits};
+
+/// What the tree-walker stores for each imported module once it
+/// has been loaded. Cached by dot-joined path so the same module
+/// imported twice in one `run` only evaluates once.
+///
+/// `Loading` is the in-progress sentinel; if an import request
+/// sees a module already in this state it's a circular import and
+/// halts with a clear error.
+enum ImportSlot {
+    Loading,
+    Loaded(ModuleBindings),
+}
+
+#[derive(Clone)]
+struct ModuleBindings {
+    /// `(name, value)` pairs for every top-level `let` and `fn` in
+    /// the module. Functions are reified as `Value::Fn` carrying
+    /// an `FnBody::Ast` the tree-walker can re-enter.
+    bindings: Vec<(String, Value)>,
+}
+
+type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
 
 const MAX_CALL_DEPTH: usize = 64;
 
@@ -50,6 +74,15 @@ pub struct Evaluator<'h, H: BopHost> {
     call_depth: usize,
     limits: BopLimits,
     rand_state: u64,
+    /// Shared across nested evaluators so recursive imports see
+    /// the same cache — every sub-evaluator inherits the parent's
+    /// `Rc` clone in `new_nested`.
+    imports: ImportCache,
+    /// Paths already injected into *this* evaluator's scope (not
+    /// shared with sub-evaluators). Re-importing the same path at
+    /// the same level is a no-op — matches Python's `import x;
+    /// import x` behaviour.
+    imported_here: alloc_import::collections::BTreeSet<String>,
 }
 
 impl<'h, H: BopHost> Evaluator<'h, H> {
@@ -63,6 +96,30 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             call_depth: 0,
             limits,
             rand_state: 0,
+            imports: Rc::new(RefCell::new(alloc_import::collections::BTreeMap::new())),
+            imported_here: alloc_import::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Build a sub-evaluator for loading a module — inherits the
+    /// parent's import cache, memory ceiling, and step budget, but
+    /// runs with a fresh scope stack so module code can't see the
+    /// importer's locals.
+    fn new_for_module(
+        host: &'h mut H,
+        limits: BopLimits,
+        imports: ImportCache,
+    ) -> Self {
+        Self {
+            scopes: vec![BTreeMap::new()],
+            functions: BTreeMap::new(),
+            host,
+            steps: 0,
+            call_depth: 0,
+            limits,
+            rand_state: 0,
+            imports,
+            imported_here: alloc_import::collections::BTreeSet::new(),
         }
     }
 
@@ -290,11 +347,139 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             StmtKind::Break => Ok(Signal::Break),
             StmtKind::Continue => Ok(Signal::Continue),
 
+            StmtKind::Import { path } => {
+                self.exec_import(path, stmt.line)?;
+                Ok(Signal::None)
+            }
+
             StmtKind::ExprStmt(expr) => {
                 self.eval_expr(expr)?;
                 Ok(Signal::None)
             }
         }
+    }
+
+    fn exec_import(&mut self, path: &str, line: u32) -> Result<(), BopError> {
+        // Idempotent at the injection site: re-importing a module
+        // this evaluator already applied is a no-op. Keeps
+        // `import foo; import foo` clean without requiring the
+        // shadow check to understand "same module re-imported".
+        if self.imported_here.contains(path) {
+            return Ok(());
+        }
+        let bindings = self.load_module(path, line)?;
+        for (name, value) in bindings.bindings {
+            if self.scopes.last().map(|s| s.contains_key(&name)).unwrap_or(false)
+                || self.functions.contains_key(&name)
+            {
+                return Err(error(
+                    line,
+                    format!(
+                        "Import of `{}` from `{}` would shadow an existing binding",
+                        name, path
+                    ),
+                ));
+            }
+            self.define(name, value);
+        }
+        self.imported_here.insert(path.to_string());
+        Ok(())
+    }
+
+    /// Resolve and evaluate a module, caching the result. Returns
+    /// the module's exported bindings.
+    fn load_module(&mut self, path: &str, line: u32) -> Result<ModuleBindings, BopError> {
+        // Fast path: already loaded.
+        {
+            let cache = self.imports.borrow();
+            if let Some(ImportSlot::Loaded(bindings)) = cache.get(path) {
+                return Ok(bindings.clone());
+            }
+            if let Some(ImportSlot::Loading) = cache.get(path) {
+                return Err(error(
+                    line,
+                    format!("Circular import: module `{}` is still loading", path),
+                ));
+            }
+        }
+
+        // Ask the host for source.
+        let source = match self.host.resolve_module(path) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(error(
+                    line,
+                    format!("Module `{}` not found", path),
+                ));
+            }
+        };
+
+        // Mark in-progress before we start evaluating so a
+        // circular import surfaces as a clean error.
+        self.imports
+            .borrow_mut()
+            .insert(path.to_string(), ImportSlot::Loading);
+
+        let result = self.evaluate_module(&source, line);
+
+        match result {
+            Ok(bindings) => {
+                self.imports
+                    .borrow_mut()
+                    .insert(path.to_string(), ImportSlot::Loaded(bindings.clone()));
+                Ok(bindings)
+            }
+            Err(e) => {
+                // Drop the Loading marker so a subsequent, non-
+                // broken context could retry.
+                self.imports.borrow_mut().remove(path);
+                Err(e)
+            }
+        }
+    }
+
+    /// Parse and walk a module source in a fresh scope, returning
+    /// its top-level bindings as a `ModuleBindings`. Reuses the
+    /// parent evaluator's host, limits, and import cache.
+    fn evaluate_module(
+        &mut self,
+        source: &str,
+        line: u32,
+    ) -> Result<ModuleBindings, BopError> {
+        let _ = line;
+        let stmts = crate::parse(source)?;
+        let imports = Rc::clone(&self.imports);
+        let limits = self.limits.clone();
+        let mut sub = Evaluator::new_for_module(self.host, limits, imports);
+        // Run the module body to top — errors propagate as-is.
+        match sub.exec_block(&stmts)? {
+            Signal::Return(_) | Signal::None => {}
+            Signal::Break => {
+                return Err(error(0, "break used outside of a loop"));
+            }
+            Signal::Continue => {
+                return Err(error(0, "continue used outside of a loop"));
+            }
+        }
+        // Collect top-level lets (the sole remaining scope) and
+        // named fns (reified as `Value::Fn`s with `FnBody::Ast`).
+        let mut bindings: Vec<(String, Value)> = Vec::new();
+        if let Some(top_scope) = sub.scopes.into_iter().next() {
+            for (k, v) in top_scope {
+                bindings.push((k, v));
+            }
+        }
+        for (name, func) in sub.functions {
+            let value = Value::new_fn(
+                func.params,
+                Vec::new(),
+                func.body,
+                Some(name.clone()),
+            );
+            bindings.push((name, value));
+        }
+        Ok(ModuleBindings { bindings })
     }
 
     fn exec_assign(

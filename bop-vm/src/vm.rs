@@ -50,10 +50,12 @@ use alloc::{
 #[cfg(feature = "std")]
 use std::rc::Rc;
 
+use core::cell::RefCell;
+
 #[cfg(feature = "std")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use bop::builtins::{self, error, error_with_hint};
 use bop::error::BopError;
@@ -101,6 +103,19 @@ struct FnEntry {
     chunk: Rc<Chunk>,
 }
 
+/// Cached result of loading a module. `Loading` is the
+/// in-progress sentinel for circular-import detection; `Loaded`
+/// carries the extracted `(name, value)` bindings.
+#[allow(clippy::large_enum_variant)]
+enum ImportSlot {
+    Loading,
+    Loaded(Vec<(String, Value)>),
+}
+
+/// Import cache shared across nested VMs so recursive imports
+/// resolve exactly once per top-level run.
+type ImportCache = Rc<RefCell<BTreeMap<String, ImportSlot>>>;
+
 // ─── Next action ───────────────────────────────────────────────────
 
 enum Next {
@@ -121,11 +136,28 @@ pub struct Vm<'h, H: BopHost> {
     steps: u64,
     step_budget: u64,
     rand_state: u64,
+    imports: ImportCache,
+    imported_here: BTreeSet<String>,
+    limits: BopLimits,
 }
 
 impl<'h, H: BopHost> Vm<'h, H> {
     pub fn new(chunk: Chunk, host: &'h mut H, limits: BopLimits) -> Self {
         bop::memory::bop_memory_init(limits.max_memory);
+        Self::new_internal(
+            chunk,
+            host,
+            limits,
+            Rc::new(RefCell::new(BTreeMap::new())),
+        )
+    }
+
+    fn new_internal(
+        chunk: Chunk,
+        host: &'h mut H,
+        limits: BopLimits,
+        imports: ImportCache,
+    ) -> Self {
         let top = Frame {
             chunk: Rc::new(chunk),
             ip: 0,
@@ -142,6 +174,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             steps: 0,
             step_budget,
             rand_state: 0,
+            imports,
+            imported_here: BTreeSet::new(),
+            limits,
         }
     }
 
@@ -571,6 +606,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
             }
 
+            // ─── Modules ─────────────────────────────────────────
+            Instr::Import(name_idx) => {
+                let path = self.current_chunk().name(name_idx).to_string();
+                self.exec_import(&path, line)?;
+            }
+
             // ─── Termination ──────────────────────────────────────
             Instr::Halt => return Ok(Next::Halt),
         }
@@ -942,6 +983,150 @@ impl<'h, H: BopHost> Vm<'h, H> {
             is_function: true,
         });
         Ok(Next::Continue)
+    }
+
+    /// Resolve and evaluate a module via a sub-VM, then inject
+    /// the resulting bindings into the current frame's top scope.
+    fn exec_import(&mut self, path: &str, line: u32) -> Result<(), BopError> {
+        if self.imported_here.contains(path) {
+            return Ok(());
+        }
+        let bindings = self.load_module(path, line)?;
+        // Inject into the current frame's top scope. Reject shadow
+        // conflicts with existing locals or named fns in the same
+        // frame — matches the walker.
+        for (name, value) in bindings {
+            let clashes = self
+                .frames
+                .last()
+                .and_then(|f| f.scopes.last())
+                .map(|s| s.contains_key(&name))
+                .unwrap_or(false)
+                || self.functions.contains_key(&name);
+            if clashes {
+                return Err(error(
+                    line,
+                    format!(
+                        "Import of `{}` from `{}` would shadow an existing binding",
+                        name, path
+                    ),
+                ));
+            }
+            if let Some(frame) = self.frames.last_mut() {
+                if let Some(scope) = frame.scopes.last_mut() {
+                    scope.insert(name, value);
+                }
+            }
+        }
+        self.imported_here.insert(path.to_string());
+        Ok(())
+    }
+
+    fn load_module(
+        &mut self,
+        path: &str,
+        line: u32,
+    ) -> Result<Vec<(String, Value)>, BopError> {
+        {
+            let cache = self.imports.borrow();
+            if let Some(ImportSlot::Loaded(bindings)) = cache.get(path) {
+                return Ok(bindings.clone());
+            }
+            if let Some(ImportSlot::Loading) = cache.get(path) {
+                return Err(error(
+                    line,
+                    format!("Circular import: module `{}` is still loading", path),
+                ));
+            }
+        }
+
+        let source = match self.host.resolve_module(path) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(error(
+                    line,
+                    format!("Module `{}` not found", path),
+                ));
+            }
+        };
+
+        self.imports
+            .borrow_mut()
+            .insert(path.to_string(), ImportSlot::Loading);
+
+        let result = self.evaluate_module(&source);
+
+        match result {
+            Ok(bindings) => {
+                self.imports
+                    .borrow_mut()
+                    .insert(path.to_string(), ImportSlot::Loaded(bindings.clone()));
+                Ok(bindings)
+            }
+            Err(e) => {
+                self.imports.borrow_mut().remove(path);
+                Err(e)
+            }
+        }
+    }
+
+    /// Parse, compile, and execute a module in a nested VM that
+    /// shares the import cache and limits. Returns the module's
+    /// top-level `(name, Value)` bindings, with named fns reified
+    /// as `Value::Fn` carrying VM-compiled chunks so the caller's
+    /// `Call` / `CallValue` paths can dispatch them directly.
+    fn evaluate_module(
+        &mut self,
+        source: &str,
+    ) -> Result<Vec<(String, Value)>, BopError> {
+        let stmts = bop::parse(source)?;
+        let chunk = crate::compile(&stmts)?;
+        let imports = Rc::clone(&self.imports);
+        let limits = self.limits.clone();
+        let mut sub = Vm::new_internal(chunk, self.host, limits, imports);
+        sub.run_internal()?;
+        // Collect top-level lets from the module frame's one
+        // remaining scope…
+        let mut bindings: Vec<(String, Value)> = Vec::new();
+        if let Some(frame) = sub.frames.first() {
+            if let Some(scope) = frame.scopes.first() {
+                for (k, v) in scope {
+                    bindings.push((k.clone(), v.clone()));
+                }
+            }
+        }
+        // …plus named fns reified as VM-compatible `Value::Fn`s.
+        for (name, entry) in sub.functions {
+            let chunk_rc: Rc<Chunk> = entry.chunk.clone();
+            let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
+            let value = Value::new_compiled_fn(
+                entry.params,
+                Vec::new(),
+                body,
+                Some(name.clone()),
+            );
+            bindings.push((name, value));
+        }
+        Ok(bindings)
+    }
+
+    /// Like `run` but keeps `self` around afterwards so the
+    /// caller can inspect the module's final state. Used by
+    /// `evaluate_module`.
+    fn run_internal(&mut self) -> Result<(), BopError> {
+        loop {
+            let (instr, line) = match self.fetch() {
+                Some(x) => x,
+                None => break,
+            };
+            self.tick(line)?;
+            match self.dispatch(instr, line)? {
+                Next::Continue => {}
+                Next::Halt => break,
+            }
+        }
+        Ok(())
     }
 
     fn do_return(&mut self, value: Value) -> Result<Next, BopError> {

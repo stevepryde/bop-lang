@@ -137,6 +137,8 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::JumpIfFalsePeek(t) => format!("JumpIfFalsePeek -> {}", t.0),
         Instr::JumpIfTruePeek(t) => format!("JumpIfTruePeek -> {}", t.0),
 
+        Instr::Import(n) => format!("Import {}", chunk.name(*n)),
+
         Instr::Halt => "Halt".to_string(),
     }
 }

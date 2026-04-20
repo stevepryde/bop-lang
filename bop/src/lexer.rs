@@ -32,6 +32,7 @@ pub enum Token {
     Repeat,
     Break,
     Continue,
+    Import,
 
     // Operators
     Plus,
@@ -534,6 +535,7 @@ impl Lexer {
             "repeat" => Token::Repeat,
             "break" => Token::Break,
             "continue" => Token::Continue,
+            "import" => Token::Import,
             "true" => Token::True,
             "false" => Token::False,
             "none" => Token::None,

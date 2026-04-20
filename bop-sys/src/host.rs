@@ -1,15 +1,28 @@
+use std::path::PathBuf;
+
 use bop::{BopError, BopHost, Value};
 
 /// Standard host for running Bop programs in a normal OS process.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StandardHost;
+#[derive(Debug, Clone, Default)]
+pub struct StandardHost {
+    /// Root directory used to resolve `import` paths. When `None`
+    /// the current working directory at resolve time is used.
+    module_root: Option<PathBuf>,
+}
 
 /// Short name for the standard host.
 pub use StandardHost as StdHost;
 
 impl StandardHost {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Configure the root directory for module resolution. An
+    /// `import foo.bar` then maps to `<root>/foo/bar.bop`.
+    pub fn with_module_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.module_root = Some(root.into());
+        self
     }
 }
 
@@ -35,6 +48,57 @@ impl BopHost for StandardHost {
     fn function_hint(&self) -> &str {
         enabled_function_hint()
     }
+
+    /// Resolve `import foo.bar.baz` to `<root>/foo/bar/baz.bop`.
+    /// Missing files return `None` so the runtime can raise a
+    /// clean *module not found* error; I/O errors (e.g.
+    /// permissions) are surfaced as `Some(Err(...))` instead.
+    fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+        if !is_valid_module_name(name) {
+            return Some(Err(crate::error::io_error(
+                &format!("Invalid module name `{}`", name),
+                None,
+            )));
+        }
+        let root = match self.module_root.clone() {
+            Some(r) => r,
+            None => match std::env::current_dir() {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(Err(crate::error::io_error(
+                        &format!("couldn't read current directory: {}", e),
+                        None,
+                    )));
+                }
+            },
+        };
+        let mut path = root;
+        for segment in name.split('.') {
+            path.push(segment);
+        }
+        path.set_extension("bop");
+        match std::fs::read_to_string(&path) {
+            Ok(source) => Some(Ok(source)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => Some(Err(crate::error::io_error(
+                &format!("couldn't read module `{}`: {}", name, err),
+                None,
+            ))),
+        }
+    }
+}
+
+/// Module-name validation: non-empty dot-separated segments of
+/// `[A-Za-z0-9_]+`. Rejects leading/trailing/double dots and any
+/// character that could escape the module root (`/`, `..`, NUL,
+/// drive letters, …).
+fn is_valid_module_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    name.split('.').all(|seg| {
+        !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 fn enabled_function_hint() -> &'static str {
@@ -128,5 +192,50 @@ mod tests {
         let mut path = std::env::temp_dir();
         path.push(format!("{}_{}", std::process::id(), name));
         path
+    }
+
+    #[test]
+    fn resolve_module_maps_dotted_path_to_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "bop_sys_resolve_{}",
+            std::process::id()
+        ));
+        let sub = dir.join("math");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("util.bop");
+        std::fs::write(&file, "let answer = 42").unwrap();
+
+        let mut host = StandardHost::new().with_module_root(&dir);
+        let source = host
+            .resolve_module("math.util")
+            .expect("module should resolve")
+            .expect("should succeed");
+        assert_eq!(source, "let answer = 42");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_module_missing_returns_none() {
+        let dir = std::env::temp_dir().join(format!(
+            "bop_sys_resolve_none_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut host = StandardHost::new().with_module_root(&dir);
+        assert!(host.resolve_module("does_not_exist").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_module_rejects_bad_names() {
+        let mut host = StandardHost::new();
+        // `..` is forbidden — prevents path traversal.
+        let result = host.resolve_module("..").expect("should error");
+        assert!(result.is_err());
+        let result = host.resolve_module("foo/bar").expect("should error");
+        assert!(result.is_err());
     }
 }

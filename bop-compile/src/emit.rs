@@ -376,13 +376,6 @@ impl Emitter {
 
     // ─── Statements ───────────────────────────────────────────────
 
-    fn emit_block_body(&mut self, stmts: &[Stmt], _wants_value: bool) -> Result<(), BopError> {
-        for stmt in stmts {
-            self.emit_stmt(stmt)?;
-        }
-        Ok(())
-    }
-
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), BopError> {
         let line = stmt.line;
         match &stmt.kind {
@@ -490,6 +483,22 @@ impl Emitter {
 
             StmtKind::Break => self.line("break;"),
             StmtKind::Continue => self.line("continue;"),
+
+            StmtKind::Import { .. } => {
+                // Tracked as a follow-up: the AOT would have to
+                // either (a) resolve modules at transpile time by
+                // asking a resolver supplied via `Options` and
+                // inline the compiled bodies, or (b) ship a
+                // runtime loader that parses+interprets the
+                // imported source via the tree-walker. Both work;
+                // both are follow-up effort. Phase 2 lands the
+                // walker + VM support and leaves a clear error at
+                // the AOT boundary.
+                return Err(BopError::runtime(
+                    "bop-compile: `import` is not yet supported by the AOT transpiler — use `bop::run` or `bop_vm::run` for programs that import modules",
+                    line,
+                ));
+            }
 
             StmtKind::ExprStmt(expr) => {
                 let src = self.expr_src(expr)?;
@@ -1334,6 +1343,11 @@ fn scan_free_vars_stmt(
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
+        StmtKind::Import { .. } => {
+            // Imports inside lambda bodies are already rejected at
+            // emit time for the AOT — leave the scan a no-op
+            // rather than inventing phantom captures.
+        }
         StmtKind::ExprStmt(e) => {
             scan_free_vars_expr(e, known, free, outer_scopes, fn_info);
         }
