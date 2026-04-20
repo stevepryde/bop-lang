@@ -7,7 +7,7 @@
 //! this module cannot access the private inner fields.
 
 #[cfg(not(feature = "std"))]
-use alloc::{format, rc::Rc, string::{String, ToString}, vec::Vec};
+use alloc::{boxed::Box, format, rc::Rc, string::{String, ToString}, vec::Vec};
 
 #[cfg(feature = "std")]
 use std::rc::Rc;
@@ -35,6 +35,26 @@ pub struct BopDict(Vec<(String, Value)>);
 pub struct BopStruct {
     type_name: String,
     fields: Vec<(String, Value)>,
+}
+
+/// A user-defined enum variant value — the concrete data side of
+/// Bop's sum types. Carries the enum's type name, the selected
+/// variant's name, and the variant's payload (if any).
+#[derive(Debug)]
+pub struct BopEnumVariant {
+    type_name: String,
+    variant: String,
+    payload: EnumPayload,
+}
+
+/// Runtime payload attached to a `BopEnumVariant`. Mirrors the
+/// three variant shapes the parser recognises
+/// (`VariantKind::{Unit, Tuple, Struct}`).
+#[derive(Debug)]
+pub enum EnumPayload {
+    Unit,
+    Tuple(Vec<Value>),
+    Struct(Vec<(String, Value)>),
 }
 
 /// A Bop function value — the runtime representation of a closure
@@ -107,7 +127,14 @@ pub enum Value {
     Array(BopArray),
     Dict(BopDict),
     Fn(Rc<BopFn>),
-    Struct(BopStruct),
+    // `Struct` and `EnumVariant` live behind a `Box` so the
+    // `Value` enum stays compact (roughly the size of a `Vec`
+    // header) rather than ballooning to the size of the widest
+    // user-type variant. Keeps per-call stack frames small
+    // enough for deep recursion to halt on the call-depth
+    // counter before overflowing the native stack.
+    Struct(Box<BopStruct>),
+    EnumVariant(Box<BopEnumVariant>),
 }
 
 // ─── Tracked constructors ──────────────────────────────────────────────────
@@ -145,7 +172,48 @@ impl Value {
                 + fields.capacity() * core::mem::size_of::<(String, Value)>()
                 + key_bytes,
         );
-        Value::Struct(BopStruct { type_name, fields })
+        Value::Struct(Box::new(BopStruct { type_name, fields }))
+    }
+
+    pub fn new_enum_unit(type_name: String, variant: String) -> Self {
+        bop_alloc(type_name.capacity() + variant.capacity());
+        Value::EnumVariant(Box::new(BopEnumVariant {
+            type_name,
+            variant,
+            payload: EnumPayload::Unit,
+        }))
+    }
+
+    pub fn new_enum_tuple(type_name: String, variant: String, items: Vec<Value>) -> Self {
+        bop_alloc(
+            type_name.capacity()
+                + variant.capacity()
+                + items.capacity() * core::mem::size_of::<Value>(),
+        );
+        Value::EnumVariant(Box::new(BopEnumVariant {
+            type_name,
+            variant,
+            payload: EnumPayload::Tuple(items),
+        }))
+    }
+
+    pub fn new_enum_struct(
+        type_name: String,
+        variant: String,
+        fields: Vec<(String, Value)>,
+    ) -> Self {
+        let key_bytes: usize = fields.iter().map(|(k, _)| k.capacity()).sum();
+        bop_alloc(
+            type_name.capacity()
+                + variant.capacity()
+                + fields.capacity() * core::mem::size_of::<(String, Value)>()
+                + key_bytes,
+        );
+        Value::EnumVariant(Box::new(BopEnumVariant {
+            type_name,
+            variant,
+            payload: EnumPayload::Struct(fields),
+        }))
     }
 
     /// Build a tree-walker-ready closure value. The AST body moves
@@ -224,10 +292,10 @@ impl Clone for Value {
                             * core::mem::size_of::<(String, Value)>()
                         + key_bytes,
                 );
-                Value::Struct(BopStruct {
+                Value::Struct(Box::new(BopStruct {
                     type_name: cloned_tn,
                     fields: cloned_fields,
-                })
+                }))
             }
             // Closures are reference-counted: cloning a Value::Fn
             // is O(1) and doesn't duplicate the body or captures.
@@ -235,6 +303,43 @@ impl Clone for Value {
             // moment the BopFn is constructed (by `new_fn`), via
             // their own Value Clone/Drop hooks.
             Value::Fn(f) => Value::Fn(Rc::clone(f)),
+            Value::EnumVariant(e) => {
+                let tn = e.type_name.clone();
+                let vn = e.variant.clone();
+                let payload = match &e.payload {
+                    EnumPayload::Unit => {
+                        bop_alloc(tn.capacity() + vn.capacity());
+                        EnumPayload::Unit
+                    }
+                    EnumPayload::Tuple(items) => {
+                        let cloned = items.clone();
+                        bop_alloc(
+                            tn.capacity()
+                                + vn.capacity()
+                                + cloned.capacity() * core::mem::size_of::<Value>(),
+                        );
+                        EnumPayload::Tuple(cloned)
+                    }
+                    EnumPayload::Struct(fields) => {
+                        let cloned = fields.clone();
+                        let key_bytes: usize =
+                            cloned.iter().map(|(k, _)| k.capacity()).sum();
+                        bop_alloc(
+                            tn.capacity()
+                                + vn.capacity()
+                                + cloned.capacity()
+                                    * core::mem::size_of::<(String, Value)>()
+                                + key_bytes,
+                        );
+                        EnumPayload::Struct(cloned)
+                    }
+                };
+                Value::EnumVariant(Box::new(BopEnumVariant {
+                    type_name: tn,
+                    variant: vn,
+                    payload,
+                }))
+            }
         }
     }
 }
@@ -260,6 +365,25 @@ impl Drop for Value {
                             * core::mem::size_of::<(String, Value)>()
                         + key_bytes,
                 );
+            }
+            Value::EnumVariant(e) => {
+                let base = e.type_name.capacity() + e.variant.capacity();
+                match &e.payload {
+                    EnumPayload::Unit => bop_dealloc(base),
+                    EnumPayload::Tuple(items) => bop_dealloc(
+                        base + items.capacity() * core::mem::size_of::<Value>(),
+                    ),
+                    EnumPayload::Struct(fields) => {
+                        let key_bytes: usize =
+                            fields.iter().map(|(k, _)| k.capacity()).sum();
+                        bop_dealloc(
+                            base
+                                + fields.capacity()
+                                    * core::mem::size_of::<(String, Value)>()
+                                + key_bytes,
+                        );
+                    }
+                }
             }
             // Value::Fn drops by releasing its Rc. The inner
             // captures' Drop impls fire only when the refcount
@@ -321,6 +445,32 @@ impl core::fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
+            Value::EnumVariant(e) => match &e.payload {
+                EnumPayload::Unit => write!(f, "{}::{}", e.type_name, e.variant),
+                EnumPayload::Tuple(items) => {
+                    write!(f, "{}::{}(", e.type_name, e.variant)?;
+                    for (i, v) in items.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", v.inspect())?;
+                    }
+                    write!(f, ")")
+                }
+                EnumPayload::Struct(fields) => {
+                    write!(f, "{}::{} {{", e.type_name, e.variant)?;
+                    for (i, (k, v)) in fields.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ",")?;
+                        }
+                        write!(f, " {}: {}", k, v.inspect())?;
+                    }
+                    if !fields.is_empty() {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "}}")
+                }
+            },
         }
     }
 }
@@ -355,15 +505,18 @@ impl Value {
             // returns the Bop type name via the display path, so
             // `type(Point { ... })` shows `"Point"`.
             Value::Struct(_) => "struct",
+            Value::EnumVariant(_) => "enum",
         }
     }
 
     /// The user-facing name for this value's type. For struct
-    /// values it's the declared type (`"Point"`); for built-in
+    /// values it's the declared type (`"Point"`); for enum
+    /// variants it's the enum's type name; for built-in
     /// variants it matches [`Self::type_name`].
     pub fn display_type_name(&self) -> String {
         match self {
             Value::Struct(s) => s.type_name.clone(),
+            Value::EnumVariant(e) => e.type_name.clone(),
             other => other.type_name().to_string(),
         }
     }
@@ -384,6 +537,9 @@ impl Value {
             // use case) — matching how classes / records behave
             // in most scripting languages.
             Value::Struct(_) => true,
+            // Enum variants represent a tagged choice; always
+            // truthy regardless of payload.
+            Value::EnumVariant(_) => true,
         }
     }
 }
@@ -463,6 +619,33 @@ impl BopStruct {
     }
 }
 
+impl BopEnumVariant {
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn variant(&self) -> &str {
+        &self.variant
+    }
+
+    pub fn payload(&self) -> &EnumPayload {
+        &self.payload
+    }
+
+    /// Field access for struct-variant payloads — mirrors
+    /// [`BopStruct::field`]. Returns `None` for unit / tuple
+    /// variants or when the field isn't in this variant's
+    /// payload.
+    pub fn field(&self, name: &str) -> Option<&Value> {
+        match &self.payload {
+            EnumPayload::Struct(fields) => {
+                fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl BopDict {
     /// Set a key-value pair. If the key exists, replaces the value.
     /// If new, tracks the key's allocation and any Vec capacity growth
@@ -516,6 +699,32 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                     .iter()
                     .zip(b.fields.iter())
                     .all(|((ka, va), (kb, vb))| ka == kb && values_equal(va, vb))
+        }
+        // Enum variants: same enum type, same variant name, same
+        // payload shape + structural equality on payload items.
+        (Value::EnumVariant(a), Value::EnumVariant(b)) => {
+            a.type_name == b.type_name
+                && a.variant == b.variant
+                && match (&a.payload, &b.payload) {
+                    (EnumPayload::Unit, EnumPayload::Unit) => true,
+                    (EnumPayload::Tuple(ax), EnumPayload::Tuple(bx)) => {
+                        ax.len() == bx.len()
+                            && ax
+                                .iter()
+                                .zip(bx.iter())
+                                .all(|(x, y)| values_equal(x, y))
+                    }
+                    (EnumPayload::Struct(af), EnumPayload::Struct(bf)) => {
+                        af.len() == bf.len()
+                            && af
+                                .iter()
+                                .zip(bf.iter())
+                                .all(|((ka, va), (kb, vb))| {
+                                    ka == kb && values_equal(va, vb)
+                                })
+                    }
+                    _ => false,
+                }
         }
         _ => false,
     }

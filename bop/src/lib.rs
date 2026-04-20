@@ -1826,6 +1826,162 @@ print(o.inner.v)"#),
         );
     }
 
+    // ─── Enums ────────────────────────────────────────────────────
+
+    #[test]
+    fn enum_unit_variant_basic() {
+        assert_eq!(
+            say(r#"enum Shape { Empty, Circle(r), Square(s) }
+let s = Shape::Empty
+print(s)"#),
+            "Shape::Empty"
+        );
+    }
+
+    #[test]
+    fn enum_tuple_variant() {
+        assert_eq!(
+            say(r#"enum Shape { Empty, Circle(r), Pair(x, y) }
+let p = Shape::Pair(3, 4)
+print(p)"#),
+            "Shape::Pair(3, 4)"
+        );
+    }
+
+    #[test]
+    fn enum_struct_variant() {
+        assert_eq!(
+            say(r#"enum Shape { Rectangle { width, height }, Empty }
+let r = Shape::Rectangle { width: 4, height: 3 }
+print(r)
+print(r.width)
+print(r.height)"#),
+            "3"
+        );
+    }
+
+    #[test]
+    fn enum_equality_same_variant() {
+        assert_eq!(
+            say(r#"enum E { A, B(x) }
+print(E::A == E::A)
+print(E::B(1) == E::B(1))
+print(E::B(1) == E::B(2))
+print(E::A == E::B(1))"#),
+            "false"
+        );
+    }
+
+    #[test]
+    fn enum_different_types_not_equal() {
+        assert_eq!(
+            say(r#"enum A { X }
+enum B { X }
+print(A::X == B::X)"#),
+            "false"
+        );
+    }
+
+    #[test]
+    fn enum_variant_mismatch_unit_given_args() {
+        let err = run_err(r#"enum E { A }
+let x = E::A(1)"#);
+        assert!(err.contains("no payload"), "got: {}", err);
+    }
+
+    #[test]
+    fn enum_variant_mismatch_tuple_arity() {
+        let err = run_err(r#"enum E { P(x, y) }
+let p = E::P(1)"#);
+        assert!(err.contains("expects 2 argument"), "got: {}", err);
+    }
+
+    #[test]
+    fn enum_variant_mismatch_struct_missing_field() {
+        let err = run_err(r#"enum E { R { w, h } }
+let r = E::R { w: 1 }"#);
+        assert!(err.contains("Missing field"), "got: {}", err);
+    }
+
+    #[test]
+    fn enum_variant_mismatch_struct_extra_field() {
+        let err = run_err(r#"enum E { R { w, h } }
+let r = E::R { w: 1, h: 2, extra: 3 }"#);
+        assert!(err.contains("no field"), "got: {}", err);
+    }
+
+    #[test]
+    fn enum_undeclared_variant_errors() {
+        let err = run_err(r#"enum E { A }
+let x = E::Z"#);
+        assert!(err.contains("no variant"), "got: {}", err);
+    }
+
+    #[test]
+    fn enum_undeclared_type_errors() {
+        let err = run_err("let x = Nope::V");
+        assert!(err.contains("not declared"), "got: {}", err);
+    }
+
+    #[test]
+    fn enum_struct_variant_field_access() {
+        assert_eq!(
+            say(r#"enum Shape { Rect { w, h }, Empty }
+let r = Shape::Rect { w: 10, h: 3 }
+print(r.w * r.h)"#),
+            "30"
+        );
+    }
+
+    #[test]
+    fn enum_used_in_if_condition() {
+        // The struct-literal disambiguation flag also covers
+        // enum struct-variants — `if Foo::V { body }` must
+        // parse `V` as a unit variant and `{ body }` as the
+        // if's block.
+        assert_eq!(
+            say(r#"enum E { V }
+if E::V == E::V {
+    print("yes")
+} else {
+    print("no")
+}"#),
+            "yes"
+        );
+    }
+
+    #[test]
+    fn enum_type_name_is_enum() {
+        assert_eq!(
+            say(r#"enum E { V }
+print(type(E::V))"#),
+            "enum"
+        );
+    }
+
+    #[test]
+    fn enum_in_array_of_values() {
+        assert_eq!(
+            say(r#"enum Color { Red, Green, Blue }
+let palette = [Color::Red, Color::Green, Color::Blue]
+print(palette)"#),
+            "[Color::Red, Color::Green, Color::Blue]"
+        );
+    }
+
+    #[test]
+    fn enum_duplicate_decl_errors() {
+        let err = run_err(r#"enum E { A }
+enum E { B }"#);
+        assert!(err.contains("already declared"), "got: {}", err);
+    }
+
+    #[test]
+    fn enum_duplicate_variant_errors() {
+        let err = run_err(r#"enum E { A, A }"#);
+        assert!(err.contains("duplicate variant"), "got: {}", err);
+    }
+
     #[test]
     fn struct_empty() {
         assert_eq!(

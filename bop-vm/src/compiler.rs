@@ -277,6 +277,13 @@ impl Compiler {
                 ));
             }
 
+            StmtKind::EnumDecl { .. } => {
+                return Err(err(
+                    line,
+                    "bop-vm: enum declarations are not yet supported in the bytecode VM",
+                ));
+            }
+
             StmtKind::ExprStmt(expr) => {
                 self.compile_expr(expr)?;
                 self.emit(Instr::Pop, line);
@@ -552,6 +559,13 @@ impl Compiler {
                 return Err(err(
                     line,
                     "bop-vm: struct literals are not yet supported in the bytecode VM",
+                ));
+            }
+
+            ExprKind::EnumConstruct { .. } => {
+                return Err(err(
+                    line,
+                    "bop-vm: enum variant construction is not yet supported in the bytecode VM",
                 ));
             }
 

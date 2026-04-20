@@ -52,6 +52,15 @@ pub enum ExprKind {
         type_name: String,
         fields: Vec<(String, Expr)>,
     },
+    /// Enum variant construction: `Shape::Circle(5)`,
+    /// `Shape::Rectangle { w: 4, h: 3 }`, `Shape::Empty`. The
+    /// payload shape is determined at parse time from the syntax
+    /// at the construction site.
+    EnumConstruct {
+        type_name: String,
+        variant: String,
+        payload: VariantPayload,
+    },
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
@@ -155,7 +164,39 @@ pub enum StmtKind {
         name: String,
         fields: Vec<String>,
     },
+    /// `enum Shape { Circle(radius), Rectangle { w, h }, Empty }`
+    /// — registers a user-defined sum type with named variants.
+    EnumDecl {
+        name: String,
+        variants: Vec<VariantDecl>,
+    },
     ExprStmt(Expr),
+}
+
+/// One variant of an `enum` declaration.
+#[derive(Debug, Clone)]
+pub struct VariantDecl {
+    pub name: String,
+    pub kind: VariantKind,
+}
+
+/// What shape a variant's payload takes.
+#[derive(Debug, Clone)]
+pub enum VariantKind {
+    /// No payload — `Empty`.
+    Unit,
+    /// Positional payload — `Circle(radius)`.
+    Tuple(Vec<String>),
+    /// Named payload — `Rectangle { width, height }`.
+    Struct(Vec<String>),
+}
+
+/// Runtime-side payload at a `T::Variant(...)` construction site.
+#[derive(Debug, Clone)]
+pub enum VariantPayload {
+    Unit,
+    Tuple(Vec<Expr>),
+    Struct(Vec<(String, Expr)>),
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +415,7 @@ impl Parser {
             }
             Token::Import => self.parse_import(),
             Token::Struct => self.parse_struct_decl(),
+            Token::Enum => self.parse_enum_decl(),
             _ => self.parse_expr_or_assign(),
         }
     }
@@ -401,6 +443,73 @@ impl Parser {
             kind: StmtKind::StructDecl { name, fields },
             line,
         })
+    }
+
+    fn parse_enum_decl(&mut self) -> Result<Stmt, BopError> {
+        let line = self.peek_line();
+        self.advance(); // consume `enum`
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::LBrace)?;
+        let mut variants: Vec<VariantDecl> = Vec::new();
+        if !matches!(self.peek(), Token::RBrace) {
+            variants.push(self.parse_variant_decl()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RBrace) {
+                    break; // trailing comma
+                }
+                variants.push(self.parse_variant_decl()?);
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Stmt {
+            kind: StmtKind::EnumDecl { name, variants },
+            line,
+        })
+    }
+
+    fn parse_variant_decl(&mut self) -> Result<VariantDecl, BopError> {
+        let (name, _) = self.expect_ident()?;
+        let kind = match self.peek() {
+            Token::LParen => {
+                self.advance();
+                let mut fields: Vec<String> = Vec::new();
+                if !matches!(self.peek(), Token::RParen) {
+                    let (f, _) = self.expect_ident()?;
+                    fields.push(f);
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Token::RParen) {
+                            break;
+                        }
+                        let (f, _) = self.expect_ident()?;
+                        fields.push(f);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                VariantKind::Tuple(fields)
+            }
+            Token::LBrace => {
+                self.advance();
+                let mut fields: Vec<String> = Vec::new();
+                if !matches!(self.peek(), Token::RBrace) {
+                    let (f, _) = self.expect_ident()?;
+                    fields.push(f);
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Token::RBrace) {
+                            break;
+                        }
+                        let (f, _) = self.expect_ident()?;
+                        fields.push(f);
+                    }
+                }
+                self.expect(&Token::RBrace)?;
+                VariantKind::Struct(fields)
+            }
+            _ => VariantKind::Unit,
+        };
+        Ok(VariantDecl { name, kind })
     }
 
     fn parse_import(&mut self) -> Result<Stmt, BopError> {
@@ -868,6 +977,13 @@ impl Parser {
             }
             Token::Ident(name) => {
                 self.advance();
+                // Enum variant construction: `Type::Variant…`.
+                // Always parse (the `::` is unambiguous); the
+                // payload shape is determined by what follows
+                // the variant name.
+                if matches!(self.peek(), Token::ColonColon) {
+                    return self.parse_enum_variant_tail(name, line);
+                }
                 // Struct literal: `Name { field: value, ... }`.
                 // Parsed only when struct literals are allowed in
                 // the current context (see
@@ -898,6 +1014,68 @@ impl Parser {
                 format!("I didn't expect `{}` here", fmt_token(self.peek())),
             )),
         }
+    }
+
+    fn parse_enum_variant_tail(
+        &mut self,
+        type_name: String,
+        line: u32,
+    ) -> Result<Expr, BopError> {
+        self.advance(); // consume `::`
+        let (variant, _) = self.expect_ident()?;
+        let payload = match self.peek() {
+            Token::LParen => {
+                self.enter()?;
+                self.advance();
+                let mut args: Vec<Expr> = Vec::new();
+                if !matches!(self.peek(), Token::RParen) {
+                    args.push(self.parse_expr()?);
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Token::RParen) {
+                            break;
+                        }
+                        args.push(self.parse_expr()?);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                self.leave();
+                VariantPayload::Tuple(args)
+            }
+            Token::LBrace if self.allow_struct_literal => {
+                self.enter()?;
+                self.advance();
+                let mut fields: Vec<(String, Expr)> = Vec::new();
+                if !matches!(self.peek(), Token::RBrace) {
+                    let (fname, _) = self.expect_ident()?;
+                    self.expect(&Token::Colon)?;
+                    let fvalue = self.parse_expr()?;
+                    fields.push((fname, fvalue));
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Token::RBrace) {
+                            break;
+                        }
+                        let (fname, _) = self.expect_ident()?;
+                        self.expect(&Token::Colon)?;
+                        let fvalue = self.parse_expr()?;
+                        fields.push((fname, fvalue));
+                    }
+                }
+                self.expect(&Token::RBrace)?;
+                self.leave();
+                VariantPayload::Struct(fields)
+            }
+            _ => VariantPayload::Unit,
+        };
+        Ok(Expr {
+            kind: ExprKind::EnumConstruct {
+                type_name,
+                variant,
+                payload,
+            },
+            line,
+        })
     }
 
     fn parse_struct_literal(&mut self, type_name: String, line: u32) -> Result<Expr, BopError> {
@@ -1117,6 +1295,8 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Continue => "continue",
         Token::Import => "import",
         Token::Struct => "struct",
+        Token::Enum => "enum",
+        Token::ColonColon => "::",
         Token::Plus => "+",
         Token::Minus => "-",
         Token::Star => "*",

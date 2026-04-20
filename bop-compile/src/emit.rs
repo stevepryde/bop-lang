@@ -941,6 +941,13 @@ impl Emitter {
                 ));
             }
 
+            StmtKind::EnumDecl { .. } => {
+                return Err(BopError::runtime(
+                    "bop-compile: enum declarations are not yet supported by the AOT transpiler",
+                    line,
+                ));
+            }
+
             StmtKind::ExprStmt(expr) => {
                 let src = self.expr_src(expr)?;
                 self.line(&format!("let _ = {};", src));
@@ -1186,6 +1193,13 @@ impl Emitter {
             ExprKind::StructConstruct { .. } => {
                 return Err(BopError::runtime(
                     "bop-compile: struct literals are not yet supported by the AOT transpiler",
+                    line,
+                ));
+            }
+
+            ExprKind::EnumConstruct { .. } => {
+                return Err(BopError::runtime(
+                    "bop-compile: enum variant construction is not yet supported by the AOT transpiler",
                     line,
                 ));
             }
@@ -1815,6 +1829,10 @@ fn scan_free_vars_stmt(
             // — only field names, which are lookup keys, not
             // bindings. Nothing to capture.
         }
+        StmtKind::EnumDecl { .. } => {
+            // Enum declarations are purely type-level — no free
+            // variables. Treat identically to struct decls.
+        }
         StmtKind::ExprStmt(e) => {
             scan_free_vars_expr(e, known, free, outer_scopes, fn_info);
         }
@@ -1917,6 +1935,22 @@ fn scan_free_vars_expr(
         ExprKind::StructConstruct { fields, .. } => {
             for (_, v) in fields {
                 scan_free_vars_expr(v, known, free, outer_scopes, fn_info);
+            }
+        }
+        ExprKind::EnumConstruct { payload, .. } => {
+            use bop::parser::VariantPayload;
+            match payload {
+                VariantPayload::Unit => {}
+                VariantPayload::Tuple(args) => {
+                    for a in args {
+                        scan_free_vars_expr(a, known, free, outer_scopes, fn_info);
+                    }
+                }
+                VariantPayload::Struct(fields) => {
+                    for (_, v) in fields {
+                        scan_free_vars_expr(v, known, free, outer_scopes, fn_info);
+                    }
+                }
             }
         }
     }

@@ -73,6 +73,10 @@ pub struct Evaluator<'h, H: BopHost> {
     /// declared type name; value is the declared field list in
     /// declaration order.
     struct_defs: BTreeMap<String, Vec<String>>,
+    /// User-defined enum types. Key is the enum name; value is
+    /// the full variant list so construction sites can validate
+    /// shapes.
+    enum_defs: BTreeMap<String, Vec<VariantDecl>>,
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
@@ -96,6 +100,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
             struct_defs: BTreeMap::new(),
+            enum_defs: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -119,6 +124,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
             struct_defs: BTreeMap::new(),
+            enum_defs: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -381,6 +387,45 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 Ok(Signal::None)
             }
 
+            StmtKind::EnumDecl { name, variants } => {
+                if self.enum_defs.contains_key(name) {
+                    return Err(error(
+                        stmt.line,
+                        format!("Enum `{}` is already declared", name),
+                    ));
+                }
+                let mut seen_variants = alloc_import::collections::BTreeSet::new();
+                for v in variants {
+                    if !seen_variants.insert(v.name.clone()) {
+                        return Err(error(
+                            stmt.line,
+                            format!(
+                                "Enum `{}` has duplicate variant `{}`",
+                                name, v.name
+                            ),
+                        ));
+                    }
+                    if let VariantKind::Struct(fields) | VariantKind::Tuple(fields) =
+                        &v.kind
+                    {
+                        let mut seen_fields = alloc_import::collections::BTreeSet::new();
+                        for f in fields {
+                            if !seen_fields.insert(f.clone()) {
+                                return Err(error(
+                                    stmt.line,
+                                    format!(
+                                        "Enum variant `{}::{}` has duplicate field `{}`",
+                                        name, v.name, f
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                self.enum_defs.insert(name.clone(), variants.clone());
+                Ok(Signal::None)
+            }
+
             StmtKind::ExprStmt(expr) => {
                 self.eval_expr(expr)?;
                 Ok(Signal::None)
@@ -509,6 +554,124 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             bindings.push((name, value));
         }
         Ok(ModuleBindings { bindings })
+    }
+
+    fn eval_enum_construct(
+        &mut self,
+        type_name: &str,
+        variant: &str,
+        payload: &VariantPayload,
+        line: u32,
+    ) -> Result<Value, BopError> {
+        let variants = self.enum_defs.get(type_name).ok_or_else(|| {
+            error(line, format!("Enum `{}` is not declared", type_name))
+        })?
+        .clone();
+        let decl = variants.iter().find(|v| v.name == variant).ok_or_else(|| {
+            error(
+                line,
+                format!("Enum `{}` has no variant `{}`", type_name, variant),
+            )
+        })?
+        .clone();
+
+        match (&decl.kind, payload) {
+            (VariantKind::Unit, VariantPayload::Unit) => Ok(Value::new_enum_unit(
+                type_name.to_string(),
+                variant.to_string(),
+            )),
+            (VariantKind::Tuple(fields), VariantPayload::Tuple(args)) => {
+                if args.len() != fields.len() {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{}::{}` expects {} argument{}, but got {}",
+                            type_name,
+                            variant,
+                            fields.len(),
+                            if fields.len() == 1 { "" } else { "s" },
+                            args.len()
+                        ),
+                    ));
+                }
+                let mut items = Vec::with_capacity(args.len());
+                for arg in args {
+                    items.push(self.eval_expr(arg)?);
+                }
+                Ok(Value::new_enum_tuple(
+                    type_name.to_string(),
+                    variant.to_string(),
+                    items,
+                ))
+            }
+            (VariantKind::Struct(decl_fields), VariantPayload::Struct(provided)) => {
+                let mut seen = alloc_import::collections::BTreeSet::new();
+                let mut provided_map: BTreeMap<String, Value> = BTreeMap::new();
+                for (fname, fexpr) in provided {
+                    if !seen.insert(fname.clone()) {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Field `{}` specified twice in `{}::{}`",
+                                fname, type_name, variant
+                            ),
+                        ));
+                    }
+                    if !decl_fields.iter().any(|d| d == fname) {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Variant `{}::{}` has no field `{}`",
+                                type_name, variant, fname
+                            ),
+                        ));
+                    }
+                    provided_map.insert(fname.clone(), self.eval_expr(fexpr)?);
+                }
+                let mut values: Vec<(String, Value)> =
+                    Vec::with_capacity(decl_fields.len());
+                for decl_field in decl_fields {
+                    match provided_map.remove(decl_field) {
+                        Some(v) => values.push((decl_field.clone(), v)),
+                        None => {
+                            return Err(error(
+                                line,
+                                format!(
+                                    "Missing field `{}` in `{}::{}` construction",
+                                    decl_field, type_name, variant
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Ok(Value::new_enum_struct(
+                    type_name.to_string(),
+                    variant.to_string(),
+                    values,
+                ))
+            }
+            (VariantKind::Unit, _) => Err(error(
+                line,
+                format!(
+                    "Variant `{}::{}` takes no payload",
+                    type_name, variant
+                ),
+            )),
+            (VariantKind::Tuple(_), _) => Err(error(
+                line,
+                format!(
+                    "Variant `{}::{}` expects positional arguments `(…)`",
+                    type_name, variant
+                ),
+            )),
+            (VariantKind::Struct(_), _) => Err(error(
+                line,
+                format!(
+                    "Variant `{}::{}` expects named fields `{{ … }}`",
+                    type_name, variant
+                ),
+            )),
+        }
     }
 
     fn exec_assign(
@@ -828,6 +991,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             ),
                         )
                     }),
+                    Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
+                        error(
+                            expr.line,
+                            format!(
+                                "Variant `{}::{}` has no field `{}`",
+                                e.type_name(),
+                                e.variant(),
+                                field
+                            ),
+                        )
+                    }),
                     other => Err(error(
                         expr.line,
                         format!(
@@ -838,6 +1012,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     )),
                 }
             }
+
+            ExprKind::EnumConstruct {
+                type_name,
+                variant,
+                payload,
+            } => self.eval_enum_construct(type_name, variant, payload, expr.line),
 
             ExprKind::StructConstruct { type_name, fields } => {
                 let decl_fields = self.struct_defs.get(type_name).ok_or_else(|| {

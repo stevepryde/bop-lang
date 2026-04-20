@@ -34,6 +34,7 @@ pub enum Token {
     Continue,
     Import,
     Struct,
+    Enum,
 
     // Operators
     Plus,
@@ -66,6 +67,7 @@ pub enum Token {
     RBrace,
     Comma,
     Colon,
+    ColonColon,
     Dot,
     Semicolon,
 
@@ -457,10 +459,18 @@ impl Lexer {
                 }
                 ':' => {
                     self.advance();
-                    tokens.push(SpannedToken {
-                        token: Token::Colon,
-                        line,
-                    });
+                    if self.peek() == Some(':') {
+                        self.advance();
+                        tokens.push(SpannedToken {
+                            token: Token::ColonColon,
+                            line,
+                        });
+                    } else {
+                        tokens.push(SpannedToken {
+                            token: Token::Colon,
+                            line,
+                        });
+                    }
                 }
                 '.' => {
                     self.advance();
@@ -538,6 +548,7 @@ impl Lexer {
             "continue" => Token::Continue,
             "import" => Token::Import,
             "struct" => Token::Struct,
+            "enum" => Token::Enum,
             "true" => Token::True,
             "false" => Token::False,
             "none" => Token::None,
