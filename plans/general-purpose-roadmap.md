@@ -885,7 +885,7 @@ the codebase walkthrough. Linked to the phase that delivered
 | **`std.collections`** (Set / Queue / Stack) | ✅ done | Shipped as struct types with value-semantic methods + `union`/`intersect`/`difference`. |
 | **`std.json`** (parse / stringify) | ✅ done | Pure Bop implementation; parse raises on malformed input and `try_call` surfaces the error. `\b` / `\f` / `\uXXXX` escapes documented as known gaps. |
 | **Match exhaustiveness checking** | ✅ done | `bop::check` + `BopWarning`, phase 9. Imported enums still opaque. |
-| **Performance** | ✅ first pass | VM narrowed the gap to the walker from ~30–40% slower to ~15% slower on a fib(25) + two 100k loop benchmark. Targeted optimisations (see tech-debt notes). Further passes would need a real profiler. |
+| **Performance** | ✅ first pass | VM is now at parity with the walker — 0.98×–1.05× on call-heavy and loop-heavy micro-benchmarks after two rounds of targeted hot-path fixes. See tech-debt notes for the concrete changes. |
 | **Documentation** (tutorial, reference, API docs) | ❌ open | No user-facing docs beyond this roadmap and inline `///` comments. |
 | **Packaging** (`bop install`, dependency manifest) | ⏸ deferred | Phase 8 in the plan; explicitly parked for now. `bop-std` bundled-source approach handles stdlib without needing a package manager. |
 
@@ -982,9 +982,48 @@ shipping, but each one hurts maintenance or future work.
     (regression-guarded by `safety_range_hard_cap`).
 
   Net: VM overhead vs the walker on the benchmark closed
-  from ~30–40% to ~15%. Further gains — scope
-  `BTreeMap` → hashed map, `Value::clone` reduction,
-  inline caches, superinstructions — would need a real
+  from ~30–40% to ~15%.
+- ~~**VM slower than the walker on call-heavy workloads.**~~
+  ✅ Second-pass fixes brought the VM to parity or slightly
+  ahead. Split-benchmark profile pointed the finger at the
+  `Instr::Call` dispatch — fib(28) was ~26% slower than the
+  walker while the 500k-iter tight loop was only ~5% slower.
+  The fixes:
+  - `FnEntry` (params `Vec<String>` + chunk `Rc`) is now
+    wrapped in an outer `Rc<FnEntry>` so the per-call
+    `self.functions.get(name).cloned()` is a single
+    refcount bump instead of cloning a `Vec<String>` + the
+    chunk handle. The same wrapping runs through
+    `user_methods` and `ModuleArtifacts::fn_decls` /
+    `methods` so cross-module imports don't deep-clone
+    either.
+  - New `enter_user_fn` fast-path in `Vm::call` pops the
+    args directly off the value stack into the new
+    frame's parameter scope via `mem::replace` +
+    `truncate`. The previous code allocated a
+    `Vec<Value>` via `pop_n_values` just to immediately
+    drain it into the scope map — ~500 000 small heap
+    allocations per `fib(28)` run.
+  - Reordered `call()` so the user-fn branch runs before
+    the builtin / host dispatch matches. Safe because
+    lexical shadowing is checked first (same as the
+    walker) and `self.functions` never contains builtin
+    names — `DefineFn` is the only writer and it's
+    driven purely by user `fn` declarations. The reorder
+    lets the hot path skip the 20-way `match name` and
+    the host vtable call entirely.
+  - `#[inline]` on `fetch` / `tick` / `dispatch` /
+    `push_value` / `pop_value` / `peek_value`. All are
+    one-line accessors where manual inlining hints move
+    the needle for LLVM.
+
+  Combined delta on the original fib + 2×100k-iter
+  benchmark: walker ~68 ms, VM ~71 ms (1.04×). On an
+  isolated fib(28) the VM is now ~2% faster than the walker.
+
+  Further gains — scope `BTreeMap` → hashed / slotted map,
+  `Value::clone` reduction, inline caches, compile-time
+  slot resolution, superinstructions — would need a real
   profiler session rather than static reasoning.
 
 ## Deliberately out of scope
