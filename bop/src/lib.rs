@@ -1976,6 +1976,129 @@ enum E { B }"#);
         assert!(err.contains("already declared"), "got: {}", err);
     }
 
+    // ─── User-defined methods on structs + enums ──────────────────
+
+    #[test]
+    fn method_on_struct_basic() {
+        assert_eq!(
+            say(r#"struct Point { x, y }
+fn Point.sum(self) { return self.x + self.y }
+let p = Point { x: 3, y: 4 }
+print(p.sum())"#),
+            "7"
+        );
+    }
+
+    #[test]
+    fn method_with_extra_args() {
+        assert_eq!(
+            say(r#"struct Counter { n }
+fn Counter.add(self, delta) { return Counter { n: self.n + delta } }
+let c = Counter { n: 10 }
+let c2 = c.add(5)
+print(c2.n)
+print(c.n)"#),
+            "10"
+        );
+    }
+
+    #[test]
+    fn method_does_not_mutate_receiver() {
+        // Mutating `self` inside a method doesn't propagate —
+        // Bop passes self by value like any other parameter.
+        // Users who want mutation rebind the result.
+        assert_eq!(
+            say(r#"struct Counter { n }
+fn Counter.bump(self) { self.n = self.n + 1 }
+let c = Counter { n: 5 }
+c.bump()
+print(c.n)"#),
+            "5"
+        );
+    }
+
+    #[test]
+    fn method_on_enum_dispatches_on_type() {
+        assert_eq!(
+            say(r#"enum Shape { Circle(r), Rect { w, h }, Empty }
+fn Shape.name(self) { return "shape" }
+print(Shape::Circle(3).name())
+print(Shape::Rect { w: 4, h: 3 }.name())
+print(Shape::Empty.name())"#),
+            "shape"
+        );
+    }
+
+    #[test]
+    fn method_overrides_builtin() {
+        // A user-defined method of the same name as a built-in
+        // wins — matches the walker-level dispatch rule.
+        assert_eq!(
+            say(r#"struct Wrapper { data }
+fn Wrapper.len(self) { return 99 }
+let w = Wrapper { data: [1, 2, 3] }
+print(w.len())"#),
+            "99"
+        );
+    }
+
+    #[test]
+    fn method_unknown_on_struct_errors() {
+        let err = run_err(r#"struct P { x }
+let p = P { x: 1 }
+p.nope()"#);
+        assert!(err.contains(".nope()"), "got: {}", err);
+    }
+
+    #[test]
+    fn method_wrong_arg_count_errors() {
+        let err = run_err(r#"struct P { x }
+fn P.set(self, v) { return P { x: v } }
+let p = P { x: 1 }
+p.set(1, 2)"#);
+        assert!(err.contains("expects"), "got: {}", err);
+    }
+
+    #[test]
+    fn method_chain_user_defined() {
+        assert_eq!(
+            say(r#"struct Adder { n }
+fn Adder.then(self, m) { return Adder { n: self.n + m } }
+let result = Adder { n: 1 }.then(2).then(3).then(4)
+print(result.n)"#),
+            "10"
+        );
+    }
+
+    #[test]
+    fn method_self_is_clone() {
+        // `self` in the method is independent from the caller's
+        // binding, even if the method returns self: structural
+        // equality still holds on the returned clone.
+        assert_eq!(
+            say(r#"struct P { x }
+fn P.identity(self) { return self }
+let a = P { x: 7 }
+let b = a.identity()
+print(a == b)
+print(b.x)"#),
+            "7"
+        );
+    }
+
+    #[test]
+    fn method_on_enum_reads_payload_field() {
+        assert_eq!(
+            say(r#"enum Shape { Circle(r), Rect { w, h } }
+fn Shape.label(self, prefix) {
+    return prefix + "-shape"
+}
+let c = Shape::Circle(5)
+print(c.label("small"))"#),
+            "small-shape"
+        );
+    }
+
     #[test]
     fn enum_duplicate_variant_errors() {
         let err = run_err(r#"enum E { A, A }"#);

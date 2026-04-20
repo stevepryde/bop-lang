@@ -284,6 +284,13 @@ impl Compiler {
                 ));
             }
 
+            StmtKind::MethodDecl { .. } => {
+                return Err(err(
+                    line,
+                    "bop-vm: user-defined methods are not yet supported in the bytecode VM",
+                ));
+            }
+
             StmtKind::ExprStmt(expr) => {
                 self.compile_expr(expr)?;
                 self.emit(Instr::Pop, line);

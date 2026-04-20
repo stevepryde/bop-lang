@@ -77,6 +77,11 @@ pub struct Evaluator<'h, H: BopHost> {
     /// the full variant list so construction sites can validate
     /// shapes.
     enum_defs: BTreeMap<String, Vec<VariantDecl>>,
+    /// User-defined methods. Outer key is the receiver type name
+    /// (e.g. `"Point"`); inner key is the method name; value is
+    /// the fn body. Methods receive the receiver as their first
+    /// parameter (conventionally `self`).
+    methods: BTreeMap<String, BTreeMap<String, FnDef>>,
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
@@ -101,6 +106,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             functions: BTreeMap::new(),
             struct_defs: BTreeMap::new(),
             enum_defs: BTreeMap::new(),
+            methods: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -125,6 +131,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             functions: BTreeMap::new(),
             struct_defs: BTreeMap::new(),
             enum_defs: BTreeMap::new(),
+            methods: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -345,6 +352,25 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         body: body.clone(),
                     },
                 );
+                Ok(Signal::None)
+            }
+
+            StmtKind::MethodDecl {
+                type_name,
+                method_name,
+                params,
+                body,
+            } => {
+                self.methods
+                    .entry(type_name.clone())
+                    .or_default()
+                    .insert(
+                        method_name.clone(),
+                        FnDef {
+                            params: params.clone(),
+                            body: body.clone(),
+                        },
+                    );
                 Ok(Signal::None)
             }
 
@@ -960,6 +986,53 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     eval_args.push(self.eval_expr(arg)?);
                 }
                 let obj_val = self.eval_expr(object)?;
+
+                // User-defined method dispatch comes first — any
+                // user method registered against the receiver's
+                // type wins over built-in methods of the same
+                // name. Enums dispatch on the enum's type, not
+                // the variant's, so all variants of `Shape` share
+                // `fn Shape.area(self)`.
+                let type_key = match &obj_val {
+                    Value::Struct(s) => Some(s.type_name().to_string()),
+                    Value::EnumVariant(e) => Some(e.type_name().to_string()),
+                    _ => None,
+                };
+                if let Some(key) = type_key {
+                    let user = self
+                        .methods
+                        .get(&key)
+                        .and_then(|ms| ms.get(method))
+                        .cloned();
+                    if let Some(m) = user {
+                        if m.params.len() != eval_args.len() + 1 {
+                            return Err(error(
+                                expr.line,
+                                format!(
+                                    "`{}.{}` expects {} argument{} (including `self`), but got {}",
+                                    key,
+                                    method,
+                                    m.params.len(),
+                                    if m.params.len() == 1 { "" } else { "s" },
+                                    eval_args.len() + 1
+                                ),
+                            ));
+                        }
+                        // Prepend receiver as the first parameter
+                        // (`self` by convention).
+                        let mut full_args = Vec::with_capacity(eval_args.len() + 1);
+                        full_args.push(obj_val);
+                        full_args.extend(eval_args);
+                        let bop_fn = Rc::new(BopFn {
+                            params: m.params,
+                            captures: Vec::new(),
+                            body: FnBody::Ast(m.body),
+                            self_name: None,
+                        });
+                        return self.call_bop_fn(&bop_fn, full_args, expr.line);
+                    }
+                }
+
                 let (ret, mutated) = self.call_method(&obj_val, method, &eval_args, expr.line)?;
 
                 if methods::is_mutating_method(method) {

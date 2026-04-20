@@ -948,6 +948,13 @@ impl Emitter {
                 ));
             }
 
+            StmtKind::MethodDecl { .. } => {
+                return Err(BopError::runtime(
+                    "bop-compile: user-defined methods are not yet supported by the AOT transpiler",
+                    line,
+                ));
+            }
+
             StmtKind::ExprStmt(expr) => {
                 let src = self.expr_src(expr)?;
                 self.line(&format!("let _ = {};", src));
@@ -1832,6 +1839,10 @@ fn scan_free_vars_stmt(
         StmtKind::EnumDecl { .. } => {
             // Enum declarations are purely type-level — no free
             // variables. Treat identically to struct decls.
+        }
+        StmtKind::MethodDecl { .. } => {
+            // Method declarations — the AOT rejects them at emit
+            // time; no free-var analysis needed here.
         }
         StmtKind::ExprStmt(e) => {
             scan_free_vars_expr(e, known, free, outer_scopes, fn_info);

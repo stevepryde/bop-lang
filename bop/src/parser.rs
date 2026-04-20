@@ -145,6 +145,17 @@ pub enum StmtKind {
         params: Vec<String>,
         body: Vec<Stmt>,
     },
+    /// `fn Type.method(self, ...) { body }` — declares a method
+    /// on a user-defined struct or enum. At call time
+    /// (`obj.method(...)`) the receiver is passed as the first
+    /// parameter (conventionally named `self`), followed by the
+    /// rest.
+    MethodDecl {
+        type_name: String,
+        method_name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
     Return {
         value: Option<Expr>,
     },
@@ -617,6 +628,38 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // consume 'fn'
         let (name, _) = self.expect_ident()?;
+
+        // Method declaration: `fn Type.method(...)`. The leading
+        // ident is the receiver's type; the post-dot ident is the
+        // method's name. Everything else matches a regular fn
+        // decl.
+        if matches!(self.peek(), Token::Dot) {
+            self.advance();
+            let (method_name, _) = self.expect_ident()?;
+            self.expect(&Token::LParen)?;
+            let mut params = Vec::new();
+            if !matches!(self.peek(), Token::RParen) {
+                let (p, _) = self.expect_ident()?;
+                params.push(p);
+                while matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    let (p, _) = self.expect_ident()?;
+                    params.push(p);
+                }
+            }
+            self.expect(&Token::RParen)?;
+            let body = self.parse_block()?;
+            return Ok(Stmt {
+                kind: StmtKind::MethodDecl {
+                    type_name: name,
+                    method_name,
+                    params,
+                    body,
+                },
+                line,
+            });
+        }
+
         self.expect(&Token::LParen)?;
 
         let mut params = Vec::new();
