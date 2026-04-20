@@ -80,6 +80,14 @@ const MAX_CALL_DEPTH: usize = 64;
 /// small programs like fizzbuzz don't exhaust `standard()`.
 const STEP_SCALE: u64 = 8;
 
+/// Memory-limit check cadence. Checked every `1 << N` ticks; a
+/// power-of-two window lets us AND with a mask instead of
+/// dividing. 256 is a sweet spot — detection still lands within
+/// microseconds of the limit being breached, and a tight
+/// arithmetic loop pays the TLS load once per 256 instructions
+/// instead of every instruction.
+const TICK_MEMCHECK_MASK: u64 = 0xFF;
+
 // ─── Stack slot ────────────────────────────────────────────────────
 
 enum Slot {
@@ -242,11 +250,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
     }
 
     pub fn run(mut self) -> Result<(), BopError> {
+        let mut last_line: u32 = 0;
         loop {
             let (instr, line) = match self.fetch() {
                 Some(x) => x,
                 None => break,
             };
+            last_line = line;
             // Tick errors (resource-limit violations) are always
             // fatal, so `unwind_to_try_call` will short-circuit
             // them. The path still goes through the helper so
@@ -262,6 +272,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     self.unwind_to_try_call(err)?;
                 }
             }
+        }
+        // Programs that allocate past the memory limit and then
+        // finish in fewer ticks than the periodic memory-check
+        // cadence (see `TICK_MEMCHECK_MASK`) would otherwise slip
+        // through silently. Catch them here — cheap, and a
+        // program ending always runs this exactly once.
+        if bop::memory::bop_memory_exceeded() {
+            return Err(error_fatal_with_hint(
+                last_line,
+                "Memory limit exceeded",
+                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+            ));
         }
         Ok(())
     }
@@ -298,7 +320,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 "Check your loops — make sure they have a condition that eventually stops them.",
             ));
         }
-        if bop::memory::bop_memory_exceeded() {
+        // Memory-limit check is a thread-local (or global Cell)
+        // lookup — cheap in absolute terms, but done every
+        // instruction it dominates a tight arithmetic loop.
+        // Allocations enter through `Value::Clone` /
+        // constructors, so we only need to notice when the
+        // counter crosses the limit. Checking every 256 ticks
+        // caps detection latency at ~256 instructions worth of
+        // allocations — negligible for a hard cap that's already
+        // elastic by a few MB.
+        if self.steps & TICK_MEMCHECK_MASK == 0
+            && bop::memory::bop_memory_exceeded()
+        {
             return Err(error_fatal_with_hint(
                 line,
                 "Memory limit exceeded",
@@ -382,10 +415,44 @@ impl<'h, H: BopHost> Vm<'h, H> {
         None
     }
 
+    /// `lookup_var`, but pull the name from the current chunk by
+    /// index. Avoids an `Rc::clone` + separate borrow at the call
+    /// site — the dispatch loop's hottest read path.
+    fn lookup_var_by_idx(&self, idx: NameIdx) -> Option<&Value> {
+        let frame = self.frames.last()?;
+        let name = frame.chunk.name(idx);
+        for scope in frame.scopes.iter().rev() {
+            if let Some(v) = scope.get(name) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
     fn set_existing(&mut self, name: &str, value: Value) -> bool {
         for scope in self.current_scopes_mut().iter_mut().rev() {
-            if scope.contains_key(name) {
-                scope.insert(name.to_string(), value);
+            // Writing through `get_mut` keeps the existing key
+            // allocation in place — we'd otherwise pay a fresh
+            // `String` alloc per loop iteration for every
+            // `StoreVar` in a tight loop (e.g. `i = i + 1`).
+            if let Some(slot) = scope.get_mut(name) {
+                *slot = value;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `set_existing`, but pull the name from the current chunk
+    /// by index. Splits the frame's `&mut` into a `&Rc<Chunk>`
+    /// (for the name slice) and `&mut scopes` (for the walk)
+    /// using field-level borrow splitting — no `Rc::clone`.
+    fn set_existing_by_idx(&mut self, idx: NameIdx, value: Value) -> bool {
+        let frame = self.frames.last_mut().expect("frame present");
+        let name = frame.chunk.name(idx);
+        for scope in frame.scopes.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(name) {
+                *slot = value;
                 return true;
             }
         }
@@ -447,51 +514,68 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
             // ─── Variables ────────────────────────────────────────
             Instr::LoadVar(n) => {
-                let name = self.current_chunk().name(n).to_string();
-                // Lexical scope first, then fall back to the
-                // named-fn registry so `fn fib(...) {...}; let g =
-                // fib` yields a real `Value::Fn` — same synthesis
-                // the walker does via `self.functions`.
-                if let Some(v) = self.lookup_var(&name).cloned() {
-                    self.push_value(v);
-                } else if let Some(entry) = self.functions.get(&name) {
-                    let params = entry.params.clone();
-                    let chunk_rc: Rc<Chunk> = entry.chunk.clone();
-                    // Explicit two-step to drive the `Rc<Chunk>`
-                    // → `Rc<dyn Any>` unsized coercion at assign
-                    // time — `Rc::clone` through an expected
-                    // `&Rc<dyn Any>` doesn't infer through.
-                    let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-                    let v = Value::new_compiled_fn(
-                        params,
-                        Vec::new(),
-                        body,
-                        Some(name.clone()),
-                    );
+                // Fast path: look the name up by index so both
+                // the chunk borrow and the scope walk happen in
+                // one helper — no `Rc::clone` and no intermediate
+                // owned `String`. A tight loop with 3 `LoadVar`s
+                // per iteration previously paid one `Rc::clone`
+                // per access here.
+                if let Some(v) = self.lookup_var_by_idx(n).cloned() {
                     self.push_value(v);
                 } else {
-                    // "did you mean?" first, else the generic
-                    // "use `let`" nudge. Mirrors the walker's
-                    // behaviour for consistency across engines.
-                    let hint = self
-                        .value_candidates_hint(&name)
-                        .unwrap_or_else(|| "Did you forget to create it with `let`?".to_string());
-                    return Err(error_with_hint(
-                        line,
-                        bop::error_messages::variable_not_found(&name),
-                        hint,
-                    ));
+                    // Slow path: fall back to the named-fn
+                    // registry so `fn fib(...) {...}; let g = fib`
+                    // yields a real `Value::Fn`. Only then do we
+                    // need the name as a `&str` / `String`.
+                    let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+                    let name = chunk.name(n);
+                    let fn_parts = self
+                        .functions
+                        .get(name)
+                        .map(|entry| (entry.params.clone(), entry.chunk.clone()));
+                    if let Some((params, chunk_rc)) = fn_parts {
+                        let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
+                        let v = Value::new_compiled_fn(
+                            params,
+                            Vec::new(),
+                            body,
+                            Some(name.to_string()),
+                        );
+                        self.push_value(v);
+                    } else {
+                        // "did you mean?" first, else the generic
+                        // "use `let`" nudge. Mirrors the walker's
+                        // behaviour for consistency across engines.
+                        let hint = self
+                            .value_candidates_hint(name)
+                            .unwrap_or_else(|| {
+                                "Did you forget to create it with `let`?".to_string()
+                            });
+                        return Err(error_with_hint(
+                            line,
+                            bop::error_messages::variable_not_found(name),
+                            hint,
+                        ));
+                    }
                 }
             }
             Instr::DefineLocal(n) => {
+                // `define_local` takes an owned `String` because
+                // it inserts into the scope map — can't skip the
+                // allocation here.
                 let name = self.current_chunk().name(n).to_string();
                 let v = self.pop_value(line)?;
                 self.define_local(name, v);
             }
             Instr::StoreVar(n) => {
-                let name = self.current_chunk().name(n).to_string();
+                // Fast path: look the target up by index so we
+                // neither `Rc::clone` nor allocate the name.
                 let v = self.pop_value(line)?;
-                if !self.set_existing(&name, v) {
+                if !self.set_existing_by_idx(n, v) {
+                    // Cold path: synthesise the error with the
+                    // name — allocation is fine here.
+                    let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+                    let name = chunk.name(n);
                     return Err(error_with_hint(
                         line,
                         format!("Variable `{}` doesn't exist yet", name),
@@ -831,7 +915,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
     // ─── Calls ───────────────────────────────────────────────────
 
     fn call(&mut self, name_idx: NameIdx, argc: usize, line: u32) -> Result<Next, BopError> {
-        let name = self.current_chunk().name(name_idx).to_string();
+        // Borrow the name out of the chunk without allocating a
+        // fresh `String` per call — `fib(25)` dispatches this
+        // path ~75 000 times and even one small allocation per
+        // call shows up in profiles. Holding a local `Rc<Chunk>`
+        // keeps the name slice valid for the whole body.
+        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+        let name: &str = chunk.name(name_idx);
 
         // Pop args (in source order).
         let args = self.pop_n_values(argc, line)?;
@@ -840,7 +930,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // current frame's scopes (e.g. `let f = fn() {...}`), call
         // it as a closure. Matches the tree-walker's
         // "let-binding shadows everything" behaviour.
-        if let Some(value) = self.lookup_var(&name).cloned() {
+        if let Some(value) = self.lookup_var(name).cloned() {
             return match &value {
                 Value::Fn(f) => {
                     let f = Rc::clone(f);
@@ -859,7 +949,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
 
         // 1. Standard-library builtins.
-        match name.as_str() {
+        match name {
             "range" => {
                 let v = builtins::builtin_range(&args, line, &mut self.rand_state)?;
                 self.push_value(v);
@@ -980,34 +1070,34 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
 
         // 2. Host-provided builtins.
-        if let Some(result) = self.host.call(&name, &args, line) {
+        if let Some(result) = self.host.call(name, &args, line) {
             let v = result?;
             self.push_value(v);
             return Ok(Next::Continue);
         }
 
         // 3. User-defined functions.
-        let entry = match self.functions.get(&name) {
+        let entry = match self.functions.get(name) {
             Some(e) => e.clone(),
             None => {
                 // Prefer a specific "did you mean?" hint over
                 // the host's generic suggestion — a typo hint is
                 // more actionable for the user. Only fall through
                 // to the host's hint when nothing's close.
-                if let Some(hint) = self.callable_candidates_hint(&name) {
+                if let Some(hint) = self.callable_candidates_hint(name) {
                     return Err(error_with_hint(
                         line,
-                        bop::error_messages::function_not_found(&name),
+                        bop::error_messages::function_not_found(name),
                         hint,
                     ));
                 }
                 let host_hint = self.host.function_hint().to_string();
                 return Err(if host_hint.is_empty() {
-                    error(line, bop::error_messages::function_not_found(&name))
+                    error(line, bop::error_messages::function_not_found(name))
                 } else {
                     error_with_hint(
                         line,
-                        bop::error_messages::function_not_found(&name),
+                        bop::error_messages::function_not_found(name),
                         host_hint,
                     )
                 });

@@ -12,7 +12,15 @@ use bop::lexer::StringPart;
 /// Operand indices (`ConstIdx`, `NameIdx`, `FnIdx`, `InterpIdx`) are
 /// indices into the owning chunk's pools. Jump targets are absolute
 /// instruction indices inside the same chunk.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Copy` is load-bearing for performance: the dispatch loop
+/// reads one `Instr` per step by value out of the chunk's code
+/// vec. Before `Copy` was added the read compiled to a full
+/// `.clone()` call dispatching through the `Clone` impl's
+/// match arm — surprisingly pricey in the hot path. With
+/// `Copy`, the load is a trivial register-sized memcpy that
+/// LLVM can fold into downstream dispatch.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Instr {
     // ─── Literals ─────────────────────────────────────────────────
     LoadConst(ConstIdx),
@@ -268,7 +276,7 @@ pub struct PatternIdx(pub u32);
 
 /// Shape of an enum variant's payload at the construction site —
 /// tells the VM how many stack entries to pop.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EnumConstructShape {
     Unit,
     Tuple(u32),

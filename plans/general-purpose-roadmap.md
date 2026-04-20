@@ -762,23 +762,31 @@ second".
     `chars`, `reverse`, `is_palindrome`, `count`, `join`.
   - **`std.test`** — `assert`, `assert_eq`, `assert_near`,
     `assert_raises`.
+  - **`std.collections`** — `Stack`, `Queue`, and `Set`
+    struct types with value-semantic methods (caller rebinds
+    the result: `s = s.push(v)`). Set algebra operations —
+    `union`, `intersect`, `difference`. Factory fns `stack()`,
+    `queue()`, `set()`, `set_of(arr)`.
+  - **`std.json`** — `stringify(value)` and `parse(text)` in
+    pure Bop. Parse errors raise a runtime error that
+    `try_call` surfaces; design documented in the module
+    header. Known gaps: `\b`, `\f`, `\uXXXX` escapes not
+    supported (documented).
 - **bop-sys integration** — `StandardHost::resolve_module`
   now tries `bop_std::resolve` first, then falls back to
   filesystem resolution. `bop-cli` users get `import
   std.math` working with no extra config.
-- **Tests**: 24 in-crate stdlib smoke tests (walker), 13 new
-  VM differential tests (stdlib + import type-transfer), 9
-  new three-way corpus programs (stdlib + sibling-fn +
-  type-transfer). All three engines agree on every program.
+- **Tests**: 24 in-crate stdlib smoke tests (walker) + 8 for
+  `std.collections` + 14 for `std.json`, 13 VM differential
+  tests (stdlib + import type-transfer), 9 three-way corpus
+  programs. All three engines agree on every program.
+- **Lexer gap closed for std.json.** Added `\r` to the string
+  escape set so `stringify` / `parse` can round-trip
+  Windows / HTTP line endings. Previously only `\n` and `\t`
+  were supported.
 
 **Deferred.**
 
-- `std.collections` (Set / Queue / Stack) — the framework is
-  in place (type-transfer imports work) but the actual
-  implementation lands in a follow-up.
-- `std.json` — same story; the shape depends on how we want
-  `parse` to surface errors (probably `Result` once we settle
-  the convention across the stdlib).
 - `test("name") { ... }` block-level syntax sugar — `assert*`
   primitives are enough to start, and the block form would
   need parser-level changes.
@@ -874,10 +882,10 @@ the codebase walkthrough. Linked to the phase that delivered
 | Item | Status | Notes |
 |------|--------|-------|
 | **Diagnostics** — column info, source snippets, carat, "did you mean?" | ✅ done | Phase 9 landed across walker / VM / AOT. |
-| **`std.collections`** (Set / Queue / Stack) | ❌ deferred | Phase 7 infrastructure ready (type-transfer imports work); module still to be written. |
-| **`std.json`** (parse / stringify) | ❌ deferred | Needs design on how `parse` surfaces errors — probably `Result`-shaped once the stdlib convention settles. |
+| **`std.collections`** (Set / Queue / Stack) | ✅ done | Shipped as struct types with value-semantic methods + `union`/`intersect`/`difference`. |
+| **`std.json`** (parse / stringify) | ✅ done | Pure Bop implementation; parse raises on malformed input and `try_call` surfaces the error. `\b` / `\f` / `\uXXXX` escapes documented as known gaps. |
 | **Match exhaustiveness checking** | ✅ done | `bop::check` + `BopWarning`, phase 9. Imported enums still opaque. |
-| **Performance** | ❌ open | No profiling / optimisation pass yet. Walker correctness ≫ speed; VM unprofiled. See tech debt below for shape of the work. |
+| **Performance** | ✅ first pass | VM narrowed the gap to the walker from ~30–40% slower to ~15% slower on a fib(25) + two 100k loop benchmark. Targeted optimisations (see tech-debt notes). Further passes would need a real profiler. |
 | **Documentation** (tutorial, reference, API docs) | ❌ open | No user-facing docs beyond this roadmap and inline `///` comments. |
 | **Packaging** (`bop install`, dependency manifest) | ⏸ deferred | Phase 8 in the plan; explicitly parked for now. `bop-std` bundled-source approach handles stdlib without needing a package manager. |
 
@@ -949,6 +957,35 @@ shipping, but each one hurts maintenance or future work.
   against the rest of the pass — and the `leak_name` fn
   (along with its no_std fallback stub) is gone. No behaviour
   change; all 11 `check::tests` still pass.
+- ~~**VM hot-path string allocations.**~~ ✅ First pass
+  landed. On a fib(25) + 2×100 000-iter loop benchmark the
+  VM used to run ~30–40% slower than the tree-walker;
+  profiling pointed at per-instruction `String` allocations
+  and a per-tick TLS lookup. Fixes:
+  - `Instr` / `EnumConstructShape` now derive `Copy` so the
+    dispatch loop's per-step `.clone()` compiles to a
+    register-sized memcpy rather than a `Clone::clone` match.
+  - `Instr::LoadVar` / `Instr::StoreVar` / `call()` /
+    `call_method()` no longer allocate a `String` per
+    invocation to look up their target name; they split-borrow
+    the current frame (`frame.chunk` + `frame.scopes`) and
+    read the name as `&str` straight from the chunk's name
+    pool. `set_existing` writes through `get_mut` instead of
+    re-inserting so the scope map's existing key allocation
+    stays put.
+  - The memory-limit check in `tick()` ran two TLS loads per
+    instruction. Batched to once every 256 ticks (masked
+    with `TICK_MEMCHECK_MASK`), plus a final
+    `bop_memory_exceeded()` check at the end of `run()` so
+    programs that allocate past the cap and then terminate
+    in fewer than 256 remaining instructions still trap
+    (regression-guarded by `safety_range_hard_cap`).
+
+  Net: VM overhead vs the walker on the benchmark closed
+  from ~30–40% to ~15%. Further gains — scope
+  `BTreeMap` → hashed map, `Value::clone` reduction,
+  inline caches, superinstructions — would need a real
+  profiler session rather than static reasoning.
 
 ## Deliberately out of scope
 
