@@ -897,17 +897,19 @@ shipping, but each one hurts maintenance or future work.
   `MAIN_FN` still have two variants (15 and 8 lines each)
   since the `run()` signature genuinely differs — collapsing
   them wouldn't pay for itself.
-- **Walker's `try` unwinding uses a sentinel error.** The
-  mechanism works: `try` on `Err` sets
-  `Evaluator::pending_try_return = Some(value)`, returns a
-  `BopError` whose `.message == "__bop_try_return_signal__"`,
-  and the nearest `call_bop_fn` traps the sentinel and
-  converts it to a regular `Signal::Return`. Clever, but
-  fragile — anyone generating a `BopError` with the sentinel
-  message would break it. Cleaner design: thread a
-  `Result<ExprOutcome, BopError>` through `eval_expr`, where
-  `ExprOutcome = Value | TryReturn(Value)`. Intrusive but
-  eliminates the sentinel.
+- ~~**Walker's `try` unwinding uses a sentinel error.**~~ ✅
+  Fixed. `BopError` gained an `is_try_return: bool` flag;
+  `try` builds one via a new `BopError::try_return_signal`
+  `pub(crate)` constructor and the fn-call boundary checks
+  the flag instead of comparing `.message` against a magic
+  string. The `"__bop_try_return_signal__"` constant is
+  gone. A regression test
+  (`try_sentinel_uses_flag_not_message_string`) pins the
+  invariant that a real runtime error never carries
+  `is_try_return: true`. The value still lives on
+  `Evaluator::pending_try_return` — moving it onto the
+  error itself would cycle `bop::error` ↔ `bop::value`,
+  which isn't worth it.
 - **AOT `TypeRegistry` is flat, not module-scoped.** The
   transpiler collects every struct / enum / method decl from
   all modules into one `TypeRegistry`. Walker and VM scope

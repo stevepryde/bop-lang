@@ -37,6 +37,7 @@ pub fn check(code: &str) -> Option<BopError> {
                     keyword, keyword
                 )),
                 is_fatal: false,
+                is_try_return: false,
             });
         }
 
@@ -60,6 +61,7 @@ pub fn check(code: &str) -> Option<BopError> {
                     keyword, keyword
                 )),
                 is_fatal: false,
+                is_try_return: false,
             });
         }
     }

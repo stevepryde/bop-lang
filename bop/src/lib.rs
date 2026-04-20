@@ -1565,6 +1565,7 @@ let x = 1"#,
                             message: "greet() needs 1 argument".into(),
                             friendly_hint: None,
                             is_fatal: false,
+                            is_try_return: false,
                         }));
                     }
                     Some(Ok(Value::new_str(format!("Hello, {}!", args[0]))))
@@ -1885,6 +1886,42 @@ print(match r {
 })"#),
             "boom"
         );
+    }
+
+    #[test]
+    fn try_sentinel_uses_flag_not_message_string() {
+        // Regression for the tech-debt-2 refactor: the walker
+        // used to check whether a `BopError`'s `.message`
+        // equalled the string `"__bop_try_return_signal__"` to
+        // know whether an error was a `try`-unwinding sentinel.
+        // Now it checks `is_try_return` — a dedicated flag that
+        // user-authored errors can't accidentally set.
+        //
+        // A user program whose code happens to produce that
+        // exact message should NOT trigger try-return unwind;
+        // it should propagate as a normal runtime error.
+        // We can't construct that specific message from Bop
+        // source directly (none of our error sites spell it),
+        // but we can verify the flag-based design by pinning
+        // the BopError the walker produces: a real runtime
+        // failure has `is_try_return: false`, while a `try`-
+        // triggered unwind internally carries `is_try_return:
+        // true` but is caught at the fn boundary and never
+        // reaches the caller.
+        let mut host = TestHost::new();
+        let err = run(
+            "print(1 / 0)",
+            &mut host,
+            &test_limits(),
+        )
+        .unwrap_err();
+        assert_eq!(err.message, "Division by zero");
+        // A real error must not be classified as a try-return
+        // — otherwise it'd silently get swallowed by any
+        // enclosing `try_call`.
+        assert!(!err.is_try_return, "got: {:?}", err);
+        // And the fatal flag is independent of the try flag.
+        assert!(!err.is_fatal, "got: {:?}", err);
     }
 
     #[test]

@@ -404,6 +404,7 @@ pub fn error(line: u32, message: impl Into<String>) -> BopError {
         message: message.into(),
         friendly_hint: None,
         is_fatal: false,
+        is_try_return: false,
     }
 }
 
@@ -418,6 +419,7 @@ pub fn error_with_hint(
         message: message.into(),
         friendly_hint: Some(hint.into()),
         is_fatal: false,
+        is_try_return: false,
     }
 }
 
@@ -437,6 +439,7 @@ pub fn error_fatal_with_hint(
         message: message.into(),
         friendly_hint: Some(hint.into()),
         is_fatal: true,
+        is_try_return: false,
     }
 }
 
@@ -449,6 +452,7 @@ pub fn error_fatal(line: u32, message: impl Into<String>) -> BopError {
         message: message.into(),
         friendly_hint: None,
         is_fatal: true,
+        is_try_return: false,
     }
 }
 

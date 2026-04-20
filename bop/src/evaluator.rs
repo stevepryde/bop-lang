@@ -65,12 +65,12 @@ type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, Import
 
 const MAX_CALL_DEPTH: usize = 64;
 
-/// Sentinel message carried by the `BopError` that `try` raises
-/// when it wants the enclosing fn to early-return with a stored
-/// value. The fn-call wrapper (`call_bop_fn`) swaps the error
-/// for a `Signal::Return` with `pending_try_return`'s value;
-/// outside that wrapper the sentinel never leaks to user code.
-pub(crate) const TRY_RETURN_SENTINEL: &str = "__bop_try_return_signal__";
+// `try` unwinds via `BopError::try_return_signal` — a proper
+// sentinel with `is_try_return = true` rather than the older
+// magic-string approach. The value travels on
+// `Evaluator::pending_try_return` so the `BopError` itself
+// doesn't need to carry a `Value` (which would introduce a
+// module cycle between `bop::error` and `bop::value`).
 
 // ─── Control flow signals ──────────────────────────────────────────────────
 
@@ -1409,10 +1409,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 }
                 self.pending_try_return = Some(value);
                 // Sentinel error whose only job is to unwind up
-                // to the nearest `call_bop_fn`, which converts it
-                // back into a `Signal::Return`. The message is
-                // unused — nothing should observe it.
-                Err(error(line, TRY_RETURN_SENTINEL))
+                // to the nearest `call_bop_fn`, which converts
+                // it back into a `Signal::Return`. The `is_try_return`
+                // flag on `BopError` is the only thing that
+                // matters — line is kept for debug clarity;
+                // message is unused.
+                Err(BopError::try_return_signal(line))
             }
             other => Err(error(
                 line,
@@ -1620,7 +1622,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 Signal::None => Ok(Value::None),
             },
             Err(err) => {
-                if err.message == TRY_RETURN_SENTINEL {
+                // Check the dedicated `is_try_return` flag
+                // instead of inspecting the message — a flag
+                // can't collide with a user-authored error
+                // that happens to spell the same bytes.
+                if err.is_try_return {
                     if let Some(val) = self.pending_try_return.take() {
                         return Ok(val);
                     }

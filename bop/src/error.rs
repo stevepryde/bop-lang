@@ -24,6 +24,24 @@ pub struct BopError {
     /// exceeded`). Any new fatal case must explicitly construct
     /// `BopError::fatal` rather than `BopError::runtime`.
     pub is_fatal: bool,
+    /// True only for the sentinel error the walker uses to
+    /// unwind a `try`-driven early-return out of an enclosing
+    /// fn. When set, the `message` / `line` / `friendly_hint`
+    /// fields are unused — the return value lives on the
+    /// evaluator's `pending_try_return` slot. `call_bop_fn`
+    /// traps errors with this flag and converts them into a
+    /// normal `Signal::Return`.
+    ///
+    /// Always `false` outside that narrow window. Users and
+    /// host code should never construct a `BopError` with this
+    /// flag set; use [`BopError::runtime`] / [`BopError::fatal`]
+    /// for real errors.
+    ///
+    /// Replaces the older `"__bop_try_return_signal__"` message
+    /// sentinel — a field lookup is cheaper than a string
+    /// compare, and a flag can never collide with a user
+    /// message that happens to spell the same bytes.
+    pub is_try_return: bool,
 }
 
 impl BopError {
@@ -35,6 +53,7 @@ impl BopError {
             message: message.into(),
             friendly_hint: None,
             is_fatal: false,
+            is_try_return: false,
         }
     }
 
@@ -49,6 +68,25 @@ impl BopError {
             message: message.into(),
             friendly_hint: None,
             is_fatal: true,
+            is_try_return: false,
+        }
+    }
+
+    /// Build the sentinel error the walker uses to unwind a
+    /// `try`-driven early-return. Private to the crate because
+    /// no one outside the walker's fn-call boundary should be
+    /// constructing one of these — they'd leak a "phantom"
+    /// error to user code. The return value itself travels on
+    /// the evaluator's `pending_try_return` slot (see
+    /// `Evaluator::eval_try`).
+    pub(crate) fn try_return_signal(line: u32) -> Self {
+        Self {
+            line: Some(line),
+            column: None,
+            message: String::new(),
+            friendly_hint: None,
+            is_fatal: false,
+            is_try_return: true,
         }
     }
 }
@@ -189,6 +227,7 @@ impl BopWarning {
             message: self.message,
             friendly_hint: self.friendly_hint,
             is_fatal: false,
+            is_try_return: false,
         }
     }
 
@@ -202,6 +241,7 @@ impl BopWarning {
             message: self.message.clone(),
             friendly_hint: self.friendly_hint.clone(),
             is_fatal: false,
+            is_try_return: false,
         };
         // Swap the leading `error:` for `warning:` so the
         // output is visually distinct. The rest of the carat /
@@ -251,6 +291,8 @@ mod tests {
             message: "something broke".into(),
             friendly_hint: None,
             is_fatal: false,
+
+            is_try_return: false,
         };
         let rendered = err.render(src);
         assert!(rendered.contains("error: something broke"));
@@ -267,6 +309,8 @@ mod tests {
             message: "undefined".into(),
             friendly_hint: Some("did you mean `bar`?".into()),
             is_fatal: false,
+
+            is_try_return: false,
         };
         let rendered = err.render(src);
         assert!(rendered.contains("--> line 2:11"));
@@ -289,6 +333,8 @@ mod tests {
             message: "off the end".into(),
             friendly_hint: None,
             is_fatal: false,
+
+            is_try_return: false,
         };
         // Shouldn't panic; just produces the header without a
         // snippet.
@@ -308,6 +354,8 @@ mod tests {
             message: "undefined".into(),
             friendly_hint: None,
             is_fatal: false,
+
+            is_try_return: false,
         };
         let rendered = err.render(src);
         // The carat line has one tab (from column 1's tab in

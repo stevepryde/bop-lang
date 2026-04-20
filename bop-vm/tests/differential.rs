@@ -2320,6 +2320,7 @@ impl BopHost for CustomHost {
                         message: "greet() needs 1 argument".into(),
                         friendly_hint: None,
                         is_fatal: false,
+                        is_try_return: false,
                     }));
                 }
                 Some(Ok(Value::new_str(format!("Hello, {}!", args[0]))))

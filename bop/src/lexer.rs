@@ -197,6 +197,7 @@ impl Lexer {
             message: message.into(),
             friendly_hint: None,
             is_fatal: false,
+            is_try_return: false,
         }
     }
 
@@ -211,6 +212,7 @@ impl Lexer {
             message: message.into(),
             friendly_hint: Some(hint.into()),
             is_fatal: false,
+            is_try_return: false,
         }
     }
 

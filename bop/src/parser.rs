@@ -495,6 +495,7 @@ impl Parser {
             message: message.into(),
             friendly_hint: None,
             is_fatal: false,
+            is_try_return: false,
         }
     }
 
@@ -1746,6 +1747,7 @@ fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError
                     .to_string(),
             friendly_hint: None,
             is_fatal: false,
+            is_try_return: false,
         }),
     }
 }
