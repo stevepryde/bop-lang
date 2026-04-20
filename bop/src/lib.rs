@@ -7,6 +7,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 pub mod error;
+pub mod error_messages;
 pub mod value;
 pub mod lexer;
 pub mod parser;

@@ -2078,8 +2078,12 @@ impl Emitter {
                     // No fn of that name in scope. Still try the
                     // host first so embedders (e.g. bop-sys's
                     // readline / file / env builtins) keep working.
+                    // Route the generated error through
+                    // `bop::error_messages::function_not_found` so
+                    // the text stays in lockstep with walker / VM
+                    // without any per-engine string duplication.
                     let hint_fallback = format!(
-                        "{{ let hint = ctx.host.function_hint(); if hint.is_empty() {{ ::bop::error::BopError::runtime(format!(\"Function `{}` not found\"), {}) }} else {{ let mut e = ::bop::error::BopError::runtime(format!(\"Function `{}` not found\"), {}); e.friendly_hint = Some(hint.to_string()); e }} }}",
+                        "{{ let hint = ctx.host.function_hint(); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}); e.friendly_hint = Some(hint.to_string()); e }} }}",
                         name, line, name, line
                     );
                     format!(
@@ -2141,7 +2145,7 @@ impl Emitter {
     ) -> Result<String, BopError> {
         let decl = self.types.structs.get(type_name).cloned().ok_or_else(|| {
             BopError::runtime(
-                format!("Struct `{}` is not declared", type_name),
+                bop::error_messages::struct_not_declared(type_name),
                 line,
             )
         })?;
@@ -2159,7 +2163,7 @@ impl Emitter {
             }
             if !decl.iter().any(|d| d == fname) {
                 let mut err = BopError::runtime(
-                    format!("Struct `{}` has no field `{}`", type_name, fname),
+                    bop::error_messages::struct_has_no_field(type_name, fname),
                     line,
                 );
                 if let Some(hint) = bop::suggest::did_you_mean(
@@ -2222,13 +2226,13 @@ impl Emitter {
             .cloned()
             .ok_or_else(|| {
                 BopError::runtime(
-                    format!("Enum `{}` is not declared", type_name),
+                    bop::error_messages::enum_not_declared(type_name),
                     line,
                 )
             })?;
         let declared = variants.get(variant).cloned().ok_or_else(|| {
             let mut err = BopError::runtime(
-                format!("Enum `{}` has no variant `{}`", type_name, variant),
+                bop::error_messages::enum_has_no_variant(type_name, variant),
                 line,
             );
             if let Some(hint) = bop::suggest::did_you_mean(
@@ -3403,7 +3407,7 @@ fn __bop_call_value(
             )),
         },
         other => Err(::bop::error::BopError::runtime(
-            format!("Can't call a {}", other.type_name()),
+            ::bop::error_messages::cant_call_a(other.type_name()),
             line,
         )),
     }
@@ -3477,7 +3481,7 @@ fn __bop_field_get(
     match obj {
         ::bop::value::Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
             let mut err = ::bop::error::BopError::runtime(
-                format!("Struct `{}` has no field `{}`", s.type_name(), field),
+                ::bop::error_messages::struct_has_no_field(s.type_name(), field),
                 line,
             );
             let names = s.fields().iter().map(|(k, _)| k.as_str());
@@ -3488,17 +3492,16 @@ fn __bop_field_get(
         }),
         ::bop::value::Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
             ::bop::error::BopError::runtime(
-                format!(
-                    "Variant `{}::{}` has no field `{}`",
+                ::bop::error_messages::variant_has_no_field(
                     e.type_name(),
                     e.variant(),
-                    field
+                    field,
                 ),
                 line,
             )
         }),
         other => Err(::bop::error::BopError::runtime(
-            format!("Can't read field `{}` on {}", field, other.type_name()),
+            ::bop::error_messages::cant_read_field(field, other.type_name()),
             line,
         )),
     }
@@ -3519,18 +3522,14 @@ fn __bop_field_set(
             let type_name = s.type_name().to_string();
             if !s.set_field(field, value) {
                 return Err(::bop::error::BopError::runtime(
-                    format!("Struct `{}` has no field `{}`", type_name, field),
+                    ::bop::error_messages::struct_has_no_field(&type_name, field),
                     line,
                 ));
             }
             Ok(obj)
         }
         other => Err(::bop::error::BopError::runtime(
-            format!(
-                "Can't assign to field `{}` on {}",
-                field,
-                other.type_name()
-            ),
+            ::bop::error_messages::cant_assign_field(field, other.type_name()),
             line,
         )),
     }
@@ -3550,7 +3549,7 @@ fn __bop_call_method(
         ::bop::value::Value::Str(s) => ::bop::methods::string_method(s.as_str(), method, args, line),
         ::bop::value::Value::Dict(d) => ::bop::methods::dict_method(d, method, args, line),
         _ => Err(::bop::error::BopError::runtime(
-            format!("{} doesn't have a .{}() method", obj.type_name(), method),
+            ::bop::error_messages::no_such_method(obj.type_name(), method),
             line,
         )),
     }
@@ -3580,7 +3579,7 @@ fn __bop_iter_items(
             .map(|c| ::bop::value::Value::new_str(c.to_string()))
             .collect()),
         _ => Err(::bop::error::BopError::runtime(
-            format!("Can't iterate over {}", v.type_name()),
+            ::bop::error_messages::cant_iterate_over(v.type_name()),
             line,
         )),
     }

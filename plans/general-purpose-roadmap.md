@@ -926,12 +926,21 @@ shipping, but each one hurts maintenance or future work.
   win, since walker and VM both reject clashes anyway.
   Methods remain last-wins, matching the walker's
   permissive method-import path.
-- **Error paths have subtly different wording across engines.**
-  Each engine has its own copy of `Variable X not found` etc.
-  Message text is usually identical but could drift. A shared
-  `bop::error_messages` module of format helpers would lock
-  this down. Low priority — differential tests catch drift
-  at the `.message` level.
+- ~~**Error paths have subtly different wording across engines.**~~
+  ✅ Fixed. A new `bop::error_messages` module hosts format
+  helpers for the 12 messages that previously had 2+ copies
+  across engines (`variable_not_found`, `function_not_found`,
+  `struct_has_no_field`, `variant_has_no_field`,
+  `struct_not_declared`, `enum_not_declared`,
+  `enum_has_no_variant`, `cant_read_field`,
+  `cant_assign_field`, `cant_call_a`, `cant_iterate_over`,
+  `no_such_method`). Walker, VM, AOT-compile-time, and AOT's
+  emitted runtime helpers all call the same functions, so a
+  wording change now lands once. 4 unit tests in
+  `error_messages::tests` pin the canonical output — a regex
+  rewrite can't silently drift the text. One-off per-engine
+  messages (e.g. `"VM: stack underflow"`) stay with their
+  engine since there's nothing to deduplicate.
 - **`suggest::leak_name` leaks a `&'static str` per match
   analysis.** The check pass's enum-coverage scan uses it to
   sidestep lifetime threading. One leak per match expression

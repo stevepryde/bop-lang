@@ -399,7 +399,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     other => {
                         return Err(error(
                             stmt.line,
-                            format!("Can't iterate over {}", other.type_name()),
+                            crate::error_messages::cant_iterate_over(other.type_name()),
                         ));
                     }
                 };
@@ -745,11 +745,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         line: u32,
     ) -> Result<Value, BopError> {
         let variants = self.enum_defs.get(type_name).ok_or_else(|| {
-            error(line, format!("Enum `{}` is not declared", type_name))
+            error(line, crate::error_messages::enum_not_declared(type_name))
         })?
         .clone();
         let decl = variants.iter().find(|v| v.name == variant).ok_or_else(|| {
-            let msg = format!("Enum `{}` has no variant `{}`", type_name, variant);
+            let msg = crate::error_messages::enum_has_no_variant(type_name, variant);
             let names = variants.iter().map(|v| v.name.as_str());
             match crate::suggest::did_you_mean(variant, names) {
                 Some(hint) => error_with_hint(line, msg, hint),
@@ -803,9 +803,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     if !decl_fields.iter().any(|d| d == fname) {
                         return Err(error(
                             line,
-                            format!(
-                                "Variant `{}::{}` has no field `{}`",
-                                type_name, variant, fname
+                            crate::error_messages::variant_has_no_field(
+                                type_name, variant, fname,
                             ),
                         ));
                     }
@@ -942,20 +941,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
                                 error(
                                     line,
-                                    format!(
-                                        "Struct `{}` has no field `{}`",
+                                    crate::error_messages::struct_has_no_field(
                                         s.type_name(),
-                                        field
+                                        field,
                                     ),
                                 )
                             })?,
                             other => {
                                 return Err(error(
                                     line,
-                                    format!(
-                                        "Can't assign to field `{}` on {}",
+                                    crate::error_messages::cant_assign_field(
                                         field,
-                                        other.type_name()
+                                        other.type_name(),
                                     ),
                                 ));
                             }
@@ -969,20 +966,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         if !s.set_field(field, val_to_set) {
                             return Err(error(
                                 line,
-                                format!(
-                                    "Struct `{}` has no field `{}`",
-                                    struct_type, field
-                                ),
+                                crate::error_messages::struct_has_no_field(&struct_type, field),
                             ));
                         }
                     }
                     other => {
                         return Err(error(
                             line,
-                            format!(
-                                "Can't assign to field `{}` on {}",
+                            crate::error_messages::cant_assign_field(
                                 field,
-                                other.type_name()
+                                other.type_name(),
                             ),
                         ));
                     }
@@ -1029,7 +1022,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             let val = self
                                 .get_var(name)
                                 .ok_or_else(|| {
-                                    error(expr.line, format!("Variable `{}` not found", name))
+                                    error(expr.line, crate::error_messages::variable_not_found(name))
                                 })?
                                 .clone();
                             result.push_str(&format!("{}", val));
@@ -1068,7 +1061,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     .unwrap_or_else(|| "Did you forget to create it with `let`?".to_string());
                 Err(error_with_hint(
                     expr.line,
-                    format!("Variable `{}` not found", name),
+                    crate::error_messages::variable_not_found(name),
                     hint,
                 ))
             }
@@ -1221,11 +1214,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let obj = self.eval_expr(object)?;
                 match &obj {
                     Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
-                        let msg = format!(
-                            "Struct `{}` has no field `{}`",
-                            s.type_name(),
-                            field,
-                        );
+                        let msg =
+                            crate::error_messages::struct_has_no_field(s.type_name(), field);
                         // Suggest from the struct's own declared
                         // field list — `p.z` when `Point` has `x`
                         // and `y` should point to `x`/`y`.
@@ -1239,21 +1229,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
                         error(
                             expr.line,
-                            format!(
-                                "Variant `{}::{}` has no field `{}`",
+                            crate::error_messages::variant_has_no_field(
                                 e.type_name(),
                                 e.variant(),
-                                field
+                                field,
                             ),
                         )
                     }),
                     other => Err(error(
                         expr.line,
-                        format!(
-                            "Can't read field `{}` on {}",
-                            field,
-                            other.type_name()
-                        ),
+                        crate::error_messages::cant_read_field(field, other.type_name()),
                     )),
                 }
             }
@@ -1268,7 +1253,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let decl_fields = self.struct_defs.get(type_name).ok_or_else(|| {
                     error(
                         expr.line,
-                        format!("Struct `{}` is not declared", type_name),
+                        crate::error_messages::struct_not_declared(type_name),
                     )
                 })?
                 .clone();
@@ -1294,10 +1279,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                     if !decl_fields.iter().any(|d| d == fname) {
-                        let msg = format!(
-                            "Struct `{}` has no field `{}`",
-                            type_name, fname
-                        );
+                        let msg = crate::error_messages::struct_has_no_field(type_name, fname);
                         let err = match crate::suggest::did_you_mean(
                             fname,
                             decl_fields.iter().map(|s| s.as_str()),
@@ -1536,7 +1518,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 )),
                 None => Err(error(
                     line,
-                    format!("Can't call a {}", other.type_name()),
+                    crate::error_messages::cant_call_a(other.type_name()),
                 )),
             },
         }
@@ -1749,17 +1731,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             if let Some(hint) = self.callable_candidates_hint(name) {
                 error_with_hint(
                     line,
-                    format!("Function `{}` not found", name),
+                    crate::error_messages::function_not_found(name),
                     hint,
                 )
             } else {
                 let host_hint = self.host.function_hint();
                 if host_hint.is_empty() {
-                    error(line, format!("Function `{}` not found", name))
+                    error(line, crate::error_messages::function_not_found(name))
                 } else {
                     error_with_hint(
                         line,
-                        format!("Function `{}` not found", name),
+                        crate::error_messages::function_not_found(name),
                         host_hint,
                     )
                 }
@@ -1790,7 +1772,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             Value::Dict(entries) => methods::dict_method(entries, method, args, line),
             _ => Err(error(
                 line,
-                format!("{} doesn't have a .{}() method", obj.type_name(), method),
+                crate::error_messages::no_such_method(obj.type_name(), method),
             )),
         }
     }

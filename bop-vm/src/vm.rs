@@ -478,7 +478,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         .unwrap_or_else(|| "Did you forget to create it with `let`?".to_string());
                     return Err(error_with_hint(
                         line,
-                        format!("Variable `{}` not found", name),
+                        bop::error_messages::variable_not_found(&name),
                         hint,
                     ));
                 }
@@ -650,7 +650,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     other => {
                         return Err(error(
                             line,
-                            format!("Can't iterate over {}", other.type_name()),
+                            bop::error_messages::cant_iterate_over(other.type_name()),
                         ));
                     }
                 };
@@ -813,7 +813,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 StringPart::Literal(s) => result.push_str(s),
                 StringPart::Variable(name) => {
                     let v = self.lookup_var(name).ok_or_else(|| {
-                        error(line, format!("Variable `{}` not found", name))
+                        error(line, bop::error_messages::variable_not_found(&name))
                     })?;
                     result.push_str(&format!("{}", v));
                 }
@@ -997,17 +997,17 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 if let Some(hint) = self.callable_candidates_hint(&name) {
                     return Err(error_with_hint(
                         line,
-                        format!("Function `{}` not found", name),
+                        bop::error_messages::function_not_found(&name),
                         hint,
                     ));
                 }
                 let host_hint = self.host.function_hint().to_string();
                 return Err(if host_hint.is_empty() {
-                    error(line, format!("Function `{}` not found", name))
+                    error(line, bop::error_messages::function_not_found(&name))
                 } else {
                     error_with_hint(
                         line,
-                        format!("Function `{}` not found", name),
+                        bop::error_messages::function_not_found(&name),
                         host_hint,
                     )
                 });
@@ -1068,7 +1068,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
             other => Err(error(
                 line,
-                format!("Can't call a {}", other.type_name()),
+                bop::error_messages::cant_call_a(other.type_name()),
             )),
         }
     }
@@ -1152,7 +1152,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             _ => {
                 return Err(error(
                     line,
-                    format!("{} doesn't have a .{}() method", obj.type_name(), method),
+                    bop::error_messages::no_such_method(obj.type_name(), &method),
                 ));
             }
         };
@@ -1214,7 +1214,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             .ok_or_else(|| {
                 error(
                     line,
-                    format!("Struct `{}` is not declared", type_name_s),
+                    bop::error_messages::struct_not_declared(&type_name_s),
                 )
             })?
             .clone();
@@ -1245,9 +1245,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 ));
             }
             if !decl.iter().any(|d| d == &key_str) {
-                let msg = format!(
-                    "Struct `{}` has no field `{}`",
-                    type_name_s, key_str
+                let msg = bop::error_messages::struct_has_no_field(
+                    &type_name_s,
+                    &key_str,
                 );
                 let err = match bop::suggest::did_you_mean(
                     &key_str,
@@ -1292,7 +1292,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             .enum_defs
             .get(&type_name_s)
             .ok_or_else(|| {
-                error(line, format!("Enum `{}` is not declared", type_name_s))
+                error(line, bop::error_messages::enum_not_declared(&type_name_s))
             })?
             .clone();
         let variant_decl = decl
@@ -1300,9 +1300,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             .find(|(n, _)| n == &variant_s)
             .cloned()
             .ok_or_else(|| {
-                let msg = format!(
-                    "Enum `{}` has no variant `{}`",
-                    type_name_s, variant_s
+                let msg = bop::error_messages::enum_has_no_variant(
+                    &type_name_s,
+                    &variant_s,
                 );
                 match bop::suggest::did_you_mean(
                     &variant_s,
@@ -1360,9 +1360,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     if !decl_fields.iter().any(|d| d == &key_str) {
                         return Err(error(
                             line,
-                            format!(
-                                "Variant `{}::{}` has no field `{}`",
-                                type_name_s, variant_s, key_str
+                            bop::error_messages::variant_has_no_field(
+                                &type_name_s,
+                                &variant_s,
+                                &key_str,
                             ),
                         ));
                     }
@@ -1417,8 +1418,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
     fn field_get(&self, obj: &Value, field: &str, line: u32) -> Result<Value, BopError> {
         match obj {
             Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
-                let msg =
-                    format!("Struct `{}` has no field `{}`", s.type_name(), field);
+                let msg = bop::error_messages::struct_has_no_field(
+                    s.type_name(),
+                    field,
+                );
                 let names = s.fields().iter().map(|(k, _)| k.as_str());
                 match bop::suggest::did_you_mean(field, names) {
                     Some(hint) => error_with_hint(line, msg, hint),
@@ -1428,17 +1431,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
             Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
                 error(
                     line,
-                    format!(
-                        "Variant `{}::{}` has no field `{}`",
+                    bop::error_messages::variant_has_no_field(
                         e.type_name(),
                         e.variant(),
-                        field
+                        field,
                     ),
                 )
             }),
             other => Err(error(
                 line,
-                format!("Can't read field `{}` on {}", field, other.type_name()),
+                bop::error_messages::cant_read_field(field, other.type_name()),
             )),
         }
     }
@@ -1460,18 +1462,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 if !boxed.set_field(field, value) {
                     return Err(error(
                         line,
-                        format!("Struct `{}` has no field `{}`", type_name, field),
+                        bop::error_messages::struct_has_no_field(&type_name, field),
                     ));
                 }
                 Ok(obj)
             }
             other => Err(error(
                 line,
-                format!(
-                    "Can't assign to field `{}` on {}",
-                    field,
-                    other.type_name()
-                ),
+                bop::error_messages::cant_assign_field(field, other.type_name()),
             )),
         }
     }

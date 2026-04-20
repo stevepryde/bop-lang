@@ -157,12 +157,16 @@ fn unknown_call_falls_back_to_host() {
     // `readline` isn't in the builtin list and isn't declared in
     // the program, so the emit should route through ctx.host.call
     // and raise a "not found" error on the None branch.
+    //
+    // Tech-debt-4: the emitted error text now flows through
+    // `bop::error_messages::function_not_found`, so the snapshot
+    // looks for the call site rather than a raw `format!` string.
     let out = compile(r#"let s = readline("> ")"#);
     contains_all(
         &out,
         &[
             "ctx.host.call(\"readline\",",
-            "Function `readline` not found",
+            "::bop::error_messages::function_not_found(\"readline\")",
         ],
     );
     // It should NOT try to call a nonexistent bop_fn_readline.
