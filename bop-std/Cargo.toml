@@ -1,0 +1,22 @@
+[package]
+name = "bop-std"
+description = "Standard library for the Bop programming language, shipped as bundled Bop source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["language", "interpreter", "scripting", "stdlib"]
+categories = ["compilers"]
+
+[lib]
+name = "bop_std"
+
+# No dependencies. The stdlib is pure Bop source bundled as
+# `&'static str` constants; it never runs unless an embedder
+# routes a matching `import` through `bop_std::resolve`.
+
+[dev-dependencies]
+bop = { path = "../bop", package = "bop-lang" }

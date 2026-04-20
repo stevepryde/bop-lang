@@ -1877,7 +1877,25 @@ impl Emitter {
                 build_arg_array(&arg_names),
                 line
             ),
-            "str" | "int" | "float" | "type" | "abs" | "min" | "max" | "len" | "inspect" => {
+            "str"
+            | "int"
+            | "float"
+            | "type"
+            | "abs"
+            | "min"
+            | "max"
+            | "len"
+            | "inspect"
+            | "sqrt"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "floor"
+            | "ceil"
+            | "round"
+            | "pow"
+            | "log"
+            | "exp" => {
                 let fn_name = format!("builtin_{}", name);
                 format!(
                     "::bop::builtins::{}(&{}, {})?",

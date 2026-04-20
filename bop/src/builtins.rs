@@ -186,6 +186,122 @@ fn min_max(a: &Value, b: &Value, pick_smaller: bool, fname: &str, line: u32) -> 
     }
 }
 
+// ─── Math builtins ─────────────────────────────────────────────
+//
+// These wrap `f64::*` operations that can't be implemented in
+// Bop itself. They're always available (no `import` needed);
+// `std.math` in the stdlib exposes constants (`pi`, `e`) plus
+// convenience wrappers that call these under the hood.
+
+/// `sqrt(x)` — non-negative square root. Matches `f64::sqrt`
+/// (returns NaN for negative inputs rather than raising).
+pub fn builtin_sqrt(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("sqrt", args, 1, line)?;
+    let x = expect_number("sqrt", &args[0], line)?;
+    Ok(Value::Number(x.sqrt()))
+}
+
+/// `sin(x)` — sine of `x` in radians.
+pub fn builtin_sin(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("sin", args, 1, line)?;
+    let x = expect_number("sin", &args[0], line)?;
+    Ok(Value::Number(x.sin()))
+}
+
+/// `cos(x)` — cosine of `x` in radians.
+pub fn builtin_cos(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("cos", args, 1, line)?;
+    let x = expect_number("cos", &args[0], line)?;
+    Ok(Value::Number(x.cos()))
+}
+
+/// `tan(x)` — tangent of `x` in radians.
+pub fn builtin_tan(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("tan", args, 1, line)?;
+    let x = expect_number("tan", &args[0], line)?;
+    Ok(Value::Number(x.tan()))
+}
+
+/// `floor(x)` — largest integer ≤ `x`. Returns `Int` when the
+/// result fits in `i64`, else `Number` (matches the widening
+/// convention: we'd rather stay lossless than truncate).
+pub fn builtin_floor(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("floor", args, 1, line)?;
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::Number(n) => Ok(finite_to_int_or_number(n.floor())),
+        other => Err(error(
+            line,
+            format!("`floor` expects a number, but got {}", other.type_name()),
+        )),
+    }
+}
+
+/// `ceil(x)` — smallest integer ≥ `x`. Return-type rules
+/// mirror [`builtin_floor`].
+pub fn builtin_ceil(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("ceil", args, 1, line)?;
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::Number(n) => Ok(finite_to_int_or_number(n.ceil())),
+        other => Err(error(
+            line,
+            format!("`ceil` expects a number, but got {}", other.type_name()),
+        )),
+    }
+}
+
+/// `round(x)` — nearest integer, ties away from zero. Return
+/// type mirrors [`builtin_floor`].
+pub fn builtin_round(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("round", args, 1, line)?;
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::Number(n) => Ok(finite_to_int_or_number(n.round())),
+        other => Err(error(
+            line,
+            format!("`round` expects a number, but got {}", other.type_name()),
+        )),
+    }
+}
+
+/// `pow(base, exp)` — `base` raised to `exp`. Returns `Number`
+/// even for integer inputs — the full result could overflow
+/// `i64` silently otherwise.
+pub fn builtin_pow(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("pow", args, 2, line)?;
+    let base = expect_number("pow", &args[0], line)?;
+    let exp = expect_number("pow", &args[1], line)?;
+    Ok(Value::Number(base.powf(exp)))
+}
+
+/// `log(x)` — natural log (ln). Matches `f64::ln`.
+pub fn builtin_log(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("log", args, 1, line)?;
+    let x = expect_number("log", &args[0], line)?;
+    Ok(Value::Number(x.ln()))
+}
+
+/// `exp(x)` — e^x.
+pub fn builtin_exp(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("exp", args, 1, line)?;
+    let x = expect_number("exp", &args[0], line)?;
+    Ok(Value::Number(x.exp()))
+}
+
+/// Convert a finite `f64` that's already integer-valued into a
+/// `Value::Int` when it fits in `i64`; fall back to
+/// `Value::Number` otherwise. Non-finite inputs stay as
+/// `Number` (the caller's `f64::floor` / `ceil` / `round`
+/// already handled `NaN` / `±inf` correctly).
+fn finite_to_int_or_number(n: f64) -> Value {
+    if n.is_finite() && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+        Value::Int(n as i64)
+    } else {
+        Value::Number(n)
+    }
+}
+
 pub fn builtin_rand(args: &[Value], line: u32, rand_state: &mut u64) -> Result<Value, BopError> {
     expect_args("rand", args, 1, line)?;
     let n = expect_int("rand", &args[0], line)?;

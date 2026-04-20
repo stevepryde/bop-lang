@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use bop::{BopError, BopHost, BopLimits, Value};
-use bop_compile::{Options, modules_from_map, transpile};
+use bop_compile::{Options, transpile};
 
 // ─── Shared test host ─────────────────────────────────────────────
 
@@ -72,7 +72,10 @@ impl BopHost for BufHost {
     }
 
     fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
-        self.modules.get(name).cloned().map(Ok)
+        if let Some(src) = self.modules.get(name) {
+            return Some(Ok(src.clone()));
+        }
+        bop_std::resolve(name).map(|s| Ok(s.to_string()))
     }
 }
 
@@ -130,6 +133,27 @@ struct CorpusEntry {
     modules: &'static [(&'static str, &'static str)],
 }
 
+/// Construct an AOT `ModuleResolver` that looks up corpus-local
+/// overrides first, then falls back to `bop_std::resolve` so
+/// `import std.*` works without every test having to redeclare
+/// the stdlib. Entries with no imports at all still receive a
+/// resolver — it's never called for them, so the extra
+/// allocation is cheap.
+fn build_resolver(
+    overrides: &[(&str, &str)],
+) -> Option<bop_compile::ModuleResolver> {
+    let map: std::collections::HashMap<String, String> = overrides
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    Some(std::rc::Rc::new(std::cell::RefCell::new(move |name: &str| {
+        if let Some(src) = map.get(name) {
+            return Some(Ok(src.clone()));
+        }
+        bop_std::resolve(name).map(|s| Ok(s.to_string()))
+    })))
+}
+
 /// Build the single-file AOT driver that runs every program in the
 /// corpus and emits per-program envelopes on stdout.
 fn build_driver(programs: &[CorpusEntry]) -> String {
@@ -140,13 +164,11 @@ fn build_driver(programs: &[CorpusEntry]) -> String {
     // can't hang the CI machine — the walker and VM run with the
     // same `BopLimits::standard()` so the comparison stays fair.
     for entry in programs {
-        let resolver = if entry.modules.is_empty() {
-            None
-        } else {
-            Some(modules_from_map(
-                entry.modules.iter().map(|(k, v)| (*k, *v)),
-            ))
-        };
+        // Resolver: entry-local modules first, then bop-std
+        // stdlib as a fallback. Programs with no imports and no
+        // stdlib reach get `None` to avoid building an empty
+        // resolver for every no-import corpus entry.
+        let resolver = build_resolver(entry.modules);
         let mod_src = transpile(
             entry.source,
             &Options {
@@ -1031,6 +1053,88 @@ print(doubled)"#,
 import m
 print(x)"#,
         &[("m", "let x = 42")],
+    ),
+    // ─── bop-std stdlib (phase 7) ─────────────────────────────
+    (
+        "std_result_helpers",
+        r#"import std.result
+print(is_ok(Result::Ok(1)))
+print(is_err(Result::Err("x")))
+print(unwrap_or(Result::Err("x"), 42))"#,
+        &[],
+    ),
+    (
+        "std_result_map",
+        r#"import std.result
+let r = map(Result::Ok(5), fn(x) { return x * 2 })
+print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#,
+        &[],
+    ),
+    (
+        "std_math_factorial",
+        r#"import std.math
+print(factorial(5))
+print(gcd(12, 18))
+print(clamp(99, 0, 10))"#,
+        &[],
+    ),
+    (
+        "std_iter_functional_helpers",
+        r#"import std.iter
+let nums = [1, 2, 3, 4, 5]
+print(map(nums, fn(x) { return x + 1 }))
+print(filter(nums, fn(x) { return x % 2 == 0 }))
+print(reduce(nums, 0, fn(a, b) { return a + b }))"#,
+        &[],
+    ),
+    (
+        "std_string_reverse_and_pad",
+        r#"import std.string
+print(reverse("hello"))
+print(pad_left("7", 3, "0"))
+print(is_palindrome("racecar"))"#,
+        &[],
+    ),
+    (
+        "core_math_builtins_no_import",
+        r#"print(sqrt(16))
+print(floor(3.7))
+print(ceil(3.2))
+print(pow(2, 10))"#,
+        &[],
+    ),
+    (
+        "imported_fn_calls_sibling_fn",
+        r#"import helpers
+print(quadruple(3))"#,
+        &[(
+            "helpers",
+            r#"fn double(x) { return x * 2 }
+fn quadruple(x) { return double(double(x)) }"#,
+        )],
+    ),
+    (
+        "imported_struct_type_in_caller",
+        r#"import shapes
+let p = Point { x: 3, y: 4 }
+print(p.x + p.y)"#,
+        &[(
+            "shapes",
+            r#"struct Point { x, y }"#,
+        )],
+    ),
+    (
+        "imported_enum_type_in_caller",
+        r#"import shapes
+let s = Shape::Rect { w: 4, h: 3 }
+print(match s {
+    Shape::Circle(r) => r,
+    Shape::Rect { w, h } => w * h,
+})"#,
+        &[(
+            "shapes",
+            r#"enum Shape { Circle(r), Rect { w, h } }"#,
+        )],
     ),
 ];
 

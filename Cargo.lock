@@ -15,6 +15,7 @@ name = "bop-compile"
 version = "0.2.0"
 dependencies = [
  "bop-lang",
+ "bop-std",
  "bop-vm",
 ]
 
@@ -23,10 +24,18 @@ name = "bop-lang"
 version = "0.2.0"
 
 [[package]]
+name = "bop-std"
+version = "0.2.0"
+dependencies = [
+ "bop-lang",
+]
+
+[[package]]
 name = "bop-sys"
 version = "0.2.0"
 dependencies = [
  "bop-lang",
+ "bop-std",
 ]
 
 [[package]]
@@ -34,4 +43,5 @@ name = "bop-vm"
 version = "0.2.0"
 dependencies = [
  "bop-lang",
+ "bop-std",
 ]

@@ -676,7 +676,7 @@ architectural risk.
   existing `comments_in_code` / `builtin_type` / snapshot
   tests were updated to match the new token + type names.
 
-### Phase 7 — Standard library (`bop-std`)
+### Phase 7 — Standard library (`bop-std`) ✅
 
 **Why seventh.** Everything above enables it, and it's the thing
 that turns "Bop can do it" into "Bop ships with it". Phases 1–6
@@ -724,6 +724,64 @@ its own crate — regex engines are non-trivial).
 **Risks.** None to core. The main risk is bikeshedding naming and
 APIs; enforce "write idiomatic Bop first, Rust library influence
 second".
+
+**Delivered.**
+
+- New `bop-std` crate — zero runtime dependencies, modules
+  bundled via `include_str!`. Exposes `pub fn resolve(name:
+  &str) -> Option<&'static str>` plus a `MODULES` listing.
+- **Cross-engine import-type-transfer.** Before this phase,
+  `import` only transferred top-level `let` and `fn` bindings
+  — struct / enum / method declarations stayed in the
+  sub-evaluator. That made stdlib modules that declare types
+  (like `std.result`) unusable. Walker and VM now both
+  propagate type declarations and `fn_decls` (so cross-fn
+  calls inside a module resolve via the parent's
+  `functions` table). AOT already transferred types via its
+  `TypeRegistry` pre-pass.
+- **Core math builtins** — `sqrt`, `sin`, `cos`, `tan`,
+  `floor`, `ceil`, `round`, `pow`, `log`, `exp`. Always
+  available; no import needed. `floor`/`ceil`/`round` return
+  `Int` when the result fits in `i64` (so `arr[floor(i)]`
+  works without a wrapping `int()`), else `Number`.
+- Also added a `float()` builtin as the Int-to-Number
+  companion to `int()`.
+- Shipped stdlib modules:
+  - **`std.result`** — `enum Result { Ok, Err }`, `struct
+    RuntimeError { message, line }`, and combinators
+    `is_ok` / `is_err` / `unwrap` / `unwrap_or` / `expect`
+    / `map` / `map_err` / `and_then`.
+  - **`std.math`** — `pi`, `e`, `tau` constants plus
+    `clamp`, `sign`, `factorial`, `gcd`, `lcm`, `sum`,
+    `mean`.
+  - **`std.iter`** — `map`, `filter`, `reduce`, `take`,
+    `drop`, `zip`, `enumerate`, `all`, `any`, `count`,
+    `find`, `find_index`, `flatten`, `sum`, `product`,
+    `min_array`, `max_array`.
+  - **`std.string`** — `pad_left`, `pad_right`, `center`,
+    `chars`, `reverse`, `is_palindrome`, `count`, `join`.
+  - **`std.test`** — `assert`, `assert_eq`, `assert_near`,
+    `assert_raises`.
+- **bop-sys integration** — `StandardHost::resolve_module`
+  now tries `bop_std::resolve` first, then falls back to
+  filesystem resolution. `bop-cli` users get `import
+  std.math` working with no extra config.
+- **Tests**: 24 in-crate stdlib smoke tests (walker), 13 new
+  VM differential tests (stdlib + import type-transfer), 9
+  new three-way corpus programs (stdlib + sibling-fn +
+  type-transfer). All three engines agree on every program.
+
+**Deferred.**
+
+- `std.collections` (Set / Queue / Stack) — the framework is
+  in place (type-transfer imports work) but the actual
+  implementation lands in a follow-up.
+- `std.json` — same story; the shape depends on how we want
+  `parse` to surface errors (probably `Result` once we settle
+  the convention across the stdlib).
+- `test("name") { ... }` block-level syntax sugar — `assert*`
+  primitives are enough to start, and the block form would
+  need parser-level changes.
 
 ### — Checkpoint: "MVP general purpose" reached —
 

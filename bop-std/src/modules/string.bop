@@ -1,0 +1,83 @@
+# std.string — helpers that don't fit the method-on-string pattern.
+#
+# The core string methods (`.len()`, `.trim()`, `.upper()`,
+# `.split()`, `.contains()`, `.slice()` etc.) are always
+# available without import. This module adds formatting and
+# character-level helpers that aren't idiomatic as methods.
+
+# Pad `s` on the left with `ch` up to `width` total chars.
+# Already-long strings are returned unchanged. `ch` should be a
+# single-character string.
+fn pad_left(s, width, ch) {
+    let need = width - s.len()
+    if need <= 0 { return s }
+    return ch * need + s
+}
+
+# Pad `s` on the right with `ch` up to `width` total chars.
+fn pad_right(s, width, ch) {
+    let need = width - s.len()
+    if need <= 0 { return s }
+    return s + ch * need
+}
+
+# Centre `s` inside `width` chars using `ch` as the filler.
+# If `width - s.len()` is odd, the extra space goes on the
+# right (matches Python's `str.center`).
+fn center(s, width, ch) {
+    let need = width - s.len()
+    if need <= 0 { return s }
+    let left = need // 2
+    let right = need - left
+    return ch * left + s + ch * right
+}
+
+# Split into an array of single-character strings. Preserves
+# order.
+fn chars(s) {
+    let out = []
+    for c in s { out.push(c) }
+    return out
+}
+
+# Reverse the character sequence. Naive O(n) implementation —
+# works on ASCII and UTF-8 since `for c in s` iterates by Unicode
+# code point.
+fn reverse(s) {
+    let cs = chars(s)
+    let out = ""
+    let i = cs.len() - 1
+    while i >= 0 {
+        out = out + cs[i]
+        i = i - 1
+    }
+    return out
+}
+
+# `true` when `s` reads the same forwards as backwards. Case-
+# sensitive; caller lowercases if they want case-insensitive.
+fn is_palindrome(s) {
+    return s == reverse(s)
+}
+
+# Count non-overlapping occurrences of `needle` in `s`. `""`
+# as needle returns 0 to avoid the "infinite matches at every
+# position" ambiguity.
+fn count(s, needle) {
+    if needle.len() == 0 { return 0 }
+    let c = 0
+    let rest = s
+    while rest.contains(needle) {
+        c = c + 1
+        let i = rest.index_of(needle)
+        rest = rest.slice(i + needle.len(), rest.len())
+    }
+    return c
+}
+
+# Join an array of strings with `sep`. Mirrors the built-in
+# `.join()` method on arrays, surfaced here so stdlib users who
+# start from std.string don't have to look elsewhere.
+fn join(arr, sep) {
+    return arr.join(sep)
+}

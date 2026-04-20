@@ -39,10 +39,26 @@ enum ImportSlot {
 
 #[derive(Clone)]
 struct ModuleBindings {
-    /// `(name, value)` pairs for every top-level `let` and `fn` in
-    /// the module. Functions are reified as `Value::Fn` carrying
-    /// an `FnBody::Ast` the tree-walker can re-enter.
+    /// `(name, value)` pairs for every top-level `let` in the
+    /// module (fns are handled separately — they also need to
+    /// land in `self.functions` so cross-fn calls within the
+    /// module resolve).
     bindings: Vec<(String, Value)>,
+    /// Top-level `fn` declarations, keyed by name. The importer
+    /// registers each both in its `self.functions` table
+    /// (for nested call resolution) and as a scope binding
+    /// (so the fn is also usable as a first-class value).
+    fn_decls: Vec<(String, FnDef)>,
+    /// Struct type declarations the module introduces. Copied
+    /// into the importing evaluator's `struct_defs` so
+    /// `MyStruct { ... }` construction in the caller resolves.
+    struct_defs: Vec<(String, Vec<String>)>,
+    /// Enum type declarations the module introduces. Same role
+    /// as `struct_defs` but for sum types.
+    enum_defs: Vec<(String, Vec<crate::parser::VariantDecl>)>,
+    /// User methods the module declared. `(type_name, method_name,
+    /// fn_def)` — applied to the caller's `methods` table.
+    methods: Vec<(String, String, FnDef)>,
 }
 
 type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
@@ -488,6 +504,72 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             return Ok(());
         }
         let bindings = self.load_module(path, line)?;
+        // Type decls transfer first so the fn bindings below —
+        // which may reference them in default values or capture
+        // them implicitly — resolve cleanly.
+        for (name, fields) in bindings.struct_defs {
+            // Idempotent on identical re-declaration so
+            // re-importing a module via a different path doesn't
+            // trip the duplicate-struct error.
+            if let Some(existing) = self.struct_defs.get(&name) {
+                if existing == &fields {
+                    continue;
+                }
+                return Err(error(
+                    line,
+                    format!(
+                        "Import of `{}` from `{}` clashes with an existing struct of the same name",
+                        name, path
+                    ),
+                ));
+            }
+            self.struct_defs.insert(name, fields);
+        }
+        for (name, variants) in bindings.enum_defs {
+            if let Some(existing) = self.enum_defs.get(&name) {
+                if existing == &variants {
+                    continue;
+                }
+                return Err(error(
+                    line,
+                    format!(
+                        "Import of `{}` from `{}` clashes with an existing enum of the same name",
+                        name, path
+                    ),
+                ));
+            }
+            self.enum_defs.insert(name, variants);
+        }
+        for (type_name, method_name, fn_def) in bindings.methods {
+            let slot = self.methods.entry(type_name).or_default();
+            slot.insert(method_name, fn_def);
+        }
+        // Module fns register in `self.functions` — that's the
+        // call-resolution path for bare-ident calls (including
+        // calls between sibling fns inside the module). They
+        // also land in the current scope as `Value::Fn`s so
+        // first-class use (`let f = some_imported_fn`) works.
+        for (name, fn_def) in bindings.fn_decls {
+            if self.scopes.last().map(|s| s.contains_key(&name)).unwrap_or(false)
+                || self.functions.contains_key(&name)
+            {
+                return Err(error(
+                    line,
+                    format!(
+                        "Import of `{}` from `{}` would shadow an existing binding",
+                        name, path
+                    ),
+                ));
+            }
+            let value = Value::new_fn(
+                fn_def.params.clone(),
+                Vec::new(),
+                fn_def.body.clone(),
+                Some(name.clone()),
+            );
+            self.functions.insert(name.clone(), fn_def);
+            self.define(name, value);
+        }
         for (name, value) in bindings.bindings {
             if self.scopes.last().map(|s| s.contains_key(&name)).unwrap_or(false)
                 || self.functions.contains_key(&name)
@@ -582,24 +664,38 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 return Err(error(0, "continue used outside of a loop"));
             }
         }
-        // Collect top-level lets (the sole remaining scope) and
-        // named fns (reified as `Value::Fn`s with `FnBody::Ast`).
+        // Collect top-level `let` bindings from the module's
+        // one remaining scope. Fns are handled separately so
+        // the importer can register them in `self.functions`
+        // as well as in the scope (see `exec_import`).
         let mut bindings: Vec<(String, Value)> = Vec::new();
         if let Some(top_scope) = sub.scopes.into_iter().next() {
             for (k, v) in top_scope {
                 bindings.push((k, v));
             }
         }
-        for (name, func) in sub.functions {
-            let value = Value::new_fn(
-                func.params,
-                Vec::new(),
-                func.body,
-                Some(name.clone()),
-            );
-            bindings.push((name, value));
+        let fn_decls: Vec<(String, FnDef)> =
+            sub.functions.into_iter().collect();
+        // Type decls and methods transfer too so an importer can
+        // construct / pattern-match on the module's types
+        // without re-declaring them.
+        let struct_defs: Vec<(String, Vec<String>)> =
+            sub.struct_defs.into_iter().collect();
+        let enum_defs: Vec<(String, Vec<crate::parser::VariantDecl>)> =
+            sub.enum_defs.into_iter().collect();
+        let mut methods: Vec<(String, String, FnDef)> = Vec::new();
+        for (type_name, by_method) in sub.methods {
+            for (method_name, fn_def) in by_method {
+                methods.push((type_name.clone(), method_name, fn_def));
+            }
         }
-        Ok(ModuleBindings { bindings })
+        Ok(ModuleBindings {
+            bindings,
+            fn_decls,
+            struct_defs,
+            enum_defs,
+            methods,
+        })
     }
 
     fn eval_enum_construct(
@@ -1545,6 +1641,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             "max" => return builtins::builtin_max(&args, line),
             "rand" => return builtins::builtin_rand(&args, line, &mut self.rand_state),
             "len" => return builtins::builtin_len(&args, line),
+            "sqrt" => return builtins::builtin_sqrt(&args, line),
+            "sin" => return builtins::builtin_sin(&args, line),
+            "cos" => return builtins::builtin_cos(&args, line),
+            "tan" => return builtins::builtin_tan(&args, line),
+            "floor" => return builtins::builtin_floor(&args, line),
+            "ceil" => return builtins::builtin_ceil(&args, line),
+            "round" => return builtins::builtin_round(&args, line),
+            "pow" => return builtins::builtin_pow(&args, line),
+            "log" => return builtins::builtin_log(&args, line),
+            "exp" => return builtins::builtin_exp(&args, line),
             "inspect" => return builtins::builtin_inspect(&args, line),
             "print" => {
                 let message = args

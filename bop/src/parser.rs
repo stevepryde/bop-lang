@@ -297,14 +297,14 @@ pub enum StmtKind {
 }
 
 /// One variant of an `enum` declaration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VariantDecl {
     pub name: String,
     pub kind: VariantKind,
 }
 
 /// What shape a variant's payload takes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum VariantKind {
     /// No payload — `Empty`.
     Unit,

@@ -20,3 +20,6 @@ bop = { version = "0.2.0", path = "../bop", package = "bop-lang", default-featur
 [features]
 default = ["std"]
 std = ["bop/std"]
+
+[dev-dependencies]
+bop-std = { path = "../bop-std" }

@@ -19,3 +19,4 @@ bop = { version = "0.2.0", path = "../bop", package = "bop-lang" }
 
 [dev-dependencies]
 bop-vm = { version = "0.2.0", path = "../bop-vm" }
+bop-std = { path = "../bop-std" }

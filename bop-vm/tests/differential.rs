@@ -74,7 +74,13 @@ impl BopHost for RecordHost {
     }
 
     fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
-        MODULES.with(|m| m.borrow().get(name).cloned().map(Ok))
+        // Test-overrides take priority so an individual test
+        // can shadow a stdlib module by name; otherwise fall
+        // through to the bundled stdlib.
+        if let Some(src) = MODULES.with(|m| m.borrow().get(name).cloned()) {
+            return Some(Ok(src));
+        }
+        bop_std::resolve(name).map(|s| Ok(s.to_string()))
     }
 }
 
@@ -1128,6 +1134,207 @@ print(match x {
     _ => "other",
 })"#),
         "two"
+    );
+}
+
+// ─── bop-std stdlib (phase 7) ─────────────────────────────────────
+//
+// Every stdlib import is resolved via `bop_std::resolve` (see the
+// `RecordHost::resolve_module` fallback), so walker and VM use
+// identical source. These tests confirm the two engines agree on
+// the stdlib's observable behaviour — the type-transfer import
+// path is a new code path this phase introduces.
+
+#[test]
+fn std_result_helpers_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.result
+print(is_ok(Result::Ok(1)))
+print(is_err(Result::Err("boom")))
+print(unwrap_or(Result::Err("x"), 42))"#),
+        "42"
+    );
+}
+
+#[test]
+fn std_result_map_and_and_then_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.result
+fn halve(x) {
+    if x % 2 == 0 { return Result::Ok(x // 2) }
+    return Result::Err("odd")
+}
+let r = and_then(and_then(Result::Ok(8), halve), halve)
+print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#),
+        "2"
+    );
+}
+
+#[test]
+fn std_math_constants_diff() {
+    set_modules(&[]);
+    // The full constants spill a lot of digits. We only care
+    // that walker and VM print identical strings here — the
+    // harness already checks that via `say`.
+    let out = say(r#"import std.math
+print(pi)
+print(e)"#);
+    // Both engines should yield the same string for `e`.
+    assert!(out.starts_with("2.71828"), "got: {}", out);
+}
+
+#[test]
+fn std_math_clamp_sign_factorial_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.math
+print(clamp(5, 0, 10))
+print(clamp(-3, 0, 10))
+print(sign(-7))
+print(factorial(5))"#),
+        "120"
+    );
+}
+
+#[test]
+fn std_math_gcd_lcm_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.math
+print(gcd(12, 18))
+print(lcm(4, 6))"#),
+        "12"
+    );
+}
+
+#[test]
+fn std_iter_map_filter_reduce_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.iter
+let nums = [1, 2, 3, 4, 5]
+let doubled = map(nums, fn(x) { return x * 2 })
+print(doubled)
+let evens = filter(nums, fn(x) { return x % 2 == 0 })
+print(evens)
+print(reduce(nums, 0, fn(a, b) { return a + b }))"#),
+        "15"
+    );
+}
+
+#[test]
+fn std_iter_any_all_find_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.iter
+let is_pos = fn(x) { return x > 0 }
+print(all([1, 2, 3], is_pos))
+print(any([-1, -2, 3], is_pos))
+print(find([1, 2, 3], fn(x) { return x > 1 }))"#),
+        "2"
+    );
+}
+
+#[test]
+fn std_iter_take_drop_zip_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.iter
+print(take([1, 2, 3, 4], 2))
+print(drop([1, 2, 3, 4], 2))
+print(zip([1, 2], ["a", "b"]))"#),
+        "[[1, \"a\"], [2, \"b\"]]"
+    );
+}
+
+#[test]
+fn std_string_helpers_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.string
+print(pad_left("42", 5, " "))
+print(reverse("hello"))
+print(is_palindrome("racecar"))"#),
+        "true"
+    );
+}
+
+#[test]
+fn std_test_assertions_pass_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"import std.test
+assert(true, "ok")
+assert_eq(1 + 1, 2)
+print("done")"#),
+        "done"
+    );
+}
+
+#[test]
+fn core_math_builtins_no_import_diff() {
+    set_modules(&[]);
+    assert_eq!(say("print(sqrt(16))"), "4");
+    set_modules(&[]);
+    assert_eq!(say("print(floor(3.7))"), "3");
+    set_modules(&[]);
+    assert_eq!(say("print(ceil(3.2))"), "4");
+    set_modules(&[]);
+    assert_eq!(say("print(pow(2, 10))"), "1024");
+}
+
+#[test]
+fn imported_fn_can_call_sibling_fn_diff() {
+    // Regression for the phase-7 import path: an imported fn
+    // whose body references another imported sibling needs to
+    // resolve both — walker and VM should agree.
+    set_modules(&[(
+        "helpers",
+        r#"fn double(x) { return x * 2 }
+fn quadruple(x) { return double(double(x)) }"#,
+    )]);
+    assert_eq!(
+        say(r#"import helpers
+print(quadruple(3))"#),
+        "12"
+    );
+}
+
+#[test]
+fn imported_struct_type_usable_in_caller_diff() {
+    // Type transfer: a struct declared in a module can be
+    // constructed and pattern-matched in the importer.
+    set_modules(&[(
+        "shapes",
+        r#"struct Point { x, y }
+fn make_point(x, y) { return Point { x: x, y: y } }"#,
+    )]);
+    assert_eq!(
+        say(r#"import shapes
+let p = make_point(3, 4)
+print(p.x + p.y)
+let q = Point { x: 1, y: 2 }
+print(q.x)"#),
+        "1"
+    );
+}
+
+#[test]
+fn imported_enum_type_usable_in_caller_diff() {
+    set_modules(&[(
+        "shapes",
+        r#"enum Shape { Circle(r), Rect { w, h } }"#,
+    )]);
+    assert_eq!(
+        say(r#"import shapes
+let s = Shape::Rect { w: 4, h: 3 }
+print(match s {
+    Shape::Circle(r) => r,
+    Shape::Rect { w, h } => w * h,
+})"#),
+        "12"
     );
 }
 

@@ -334,7 +334,7 @@ pub struct EnumVariantDef {
 }
 
 /// Payload shape of a declared enum variant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EnumVariantShape {
     Unit,
     Tuple(Vec<String>),

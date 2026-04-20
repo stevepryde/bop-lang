@@ -114,13 +114,48 @@ struct FnEntry {
     chunk: Rc<Chunk>,
 }
 
+/// Structural equality check for two enum-variant lists.
+/// Used when the same module is resolved via two paths so a
+/// re-import is idempotent rather than an error.
+fn shapes_match(
+    a: &[(String, EnumVariantShape)],
+    b: &[(String, EnumVariantShape)],
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|((an, av), (bn, bv))| an == bn && av == bv)
+}
+
 /// Cached result of loading a module. `Loading` is the
 /// in-progress sentinel for circular-import detection; `Loaded`
-/// carries the extracted `(name, value)` bindings.
+/// carries every top-level export — bindings, struct/enum
+/// decls, and methods — so the importer can rebuild the
+/// module's visible surface without re-evaluating it.
 #[allow(clippy::large_enum_variant)]
 enum ImportSlot {
     Loading,
-    Loaded(Vec<(String, Value)>),
+    Loaded(ModuleArtifacts),
+}
+
+#[derive(Clone)]
+struct ModuleArtifacts {
+    /// Top-level `let` bindings, reified as `Value`s. Fns live
+    /// in `fn_decls` instead so the importer can register them
+    /// in `self.functions` for cross-fn call resolution.
+    bindings: Vec<(String, Value)>,
+    /// Top-level `fn` declarations. The importer copies each
+    /// into its own `self.functions` table AND pushes a
+    /// `Value::Fn` into the current scope so first-class use
+    /// (`let g = some_imported_fn`) still works.
+    fn_decls: Vec<(String, FnEntry)>,
+    /// Struct-type declarations introduced by the module.
+    struct_defs: Vec<(String, Vec<String>)>,
+    /// Enum-type declarations introduced by the module.
+    enum_defs: Vec<(String, Vec<(String, EnumVariantShape)>)>,
+    /// `(type_name, method_name, FnEntry)` for every method
+    /// the module declared on its own types.
+    methods: Vec<(String, String, FnEntry)>,
 }
 
 /// Import cache shared across nested VMs so recursive imports
@@ -833,6 +868,56 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 self.push_value(v);
                 return Ok(Next::Continue);
             }
+            "sqrt" => {
+                let v = builtins::builtin_sqrt(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "sin" => {
+                let v = builtins::builtin_sin(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "cos" => {
+                let v = builtins::builtin_cos(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "tan" => {
+                let v = builtins::builtin_tan(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "floor" => {
+                let v = builtins::builtin_floor(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "ceil" => {
+                let v = builtins::builtin_ceil(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "round" => {
+                let v = builtins::builtin_round(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "pow" => {
+                let v = builtins::builtin_pow(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "log" => {
+                let v = builtins::builtin_log(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "exp" => {
+                let v = builtins::builtin_exp(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
             "inspect" => {
                 let v = builtins::builtin_inspect(&args, line)?;
                 self.push_value(v);
@@ -1534,11 +1619,89 @@ impl<'h, H: BopHost> Vm<'h, H> {
         if self.imported_here.contains(path) {
             return Ok(());
         }
-        let bindings = self.load_module(path, line)?;
+        let artifacts = self.load_module(path, line)?;
+        // Type decls transfer first so an arriving fn binding
+        // whose body references them resolves at dispatch time.
+        // Duplicate decls are idempotent when shapes match (the
+        // same module imported via two different paths); a real
+        // clash is rejected with a friendly error.
+        for (name, fields) in artifacts.struct_defs {
+            if let Some(existing) = self.struct_defs.get(&name) {
+                if existing == &fields {
+                    continue;
+                }
+                return Err(error(
+                    line,
+                    format!(
+                        "Import of `{}` from `{}` clashes with an existing struct of the same name",
+                        name, path
+                    ),
+                ));
+            }
+            self.struct_defs.insert(name, fields);
+        }
+        for (name, variants) in artifacts.enum_defs {
+            if let Some(existing) = self.enum_defs.get(&name) {
+                if shapes_match(existing, &variants) {
+                    continue;
+                }
+                return Err(error(
+                    line,
+                    format!(
+                        "Import of `{}` from `{}` clashes with an existing enum of the same name",
+                        name, path
+                    ),
+                ));
+            }
+            self.enum_defs.insert(name, variants);
+        }
+        for (type_name, method_name, entry) in artifacts.methods {
+            self.user_methods
+                .entry(type_name)
+                .or_default()
+                .insert(method_name, entry);
+        }
+        // Module fns go into `self.functions` (so cross-fn bare
+        // calls inside the module resolve) AND into the scope as
+        // `Value::Fn`s (so first-class use `let g = some_fn`
+        // works). Clashes with existing bindings are rejected
+        // up front.
+        for (name, entry) in artifacts.fn_decls {
+            let clashes = self
+                .frames
+                .last()
+                .and_then(|f| f.scopes.last())
+                .map(|s| s.contains_key(&name))
+                .unwrap_or(false)
+                || self.functions.contains_key(&name);
+            if clashes {
+                return Err(error(
+                    line,
+                    format!(
+                        "Import of `{}` from `{}` would shadow an existing binding",
+                        name, path
+                    ),
+                ));
+            }
+            let chunk_rc: Rc<Chunk> = entry.chunk.clone();
+            let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
+            let value = Value::new_compiled_fn(
+                entry.params.clone(),
+                Vec::new(),
+                body,
+                Some(name.clone()),
+            );
+            self.functions.insert(name.clone(), entry);
+            if let Some(frame) = self.frames.last_mut() {
+                if let Some(scope) = frame.scopes.last_mut() {
+                    scope.insert(name, value);
+                }
+            }
+        }
         // Inject into the current frame's top scope. Reject shadow
         // conflicts with existing locals or named fns in the same
         // frame — matches the walker.
-        for (name, value) in bindings {
+        for (name, value) in artifacts.bindings {
             let clashes = self
                 .frames
                 .last()
@@ -1569,7 +1732,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         &mut self,
         path: &str,
         line: u32,
-    ) -> Result<Vec<(String, Value)>, BopError> {
+    ) -> Result<ModuleArtifacts, BopError> {
         {
             let cache = self.imports.borrow();
             if let Some(ImportSlot::Loaded(bindings)) = cache.get(path) {
@@ -1622,7 +1785,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
     fn evaluate_module(
         &mut self,
         source: &str,
-    ) -> Result<Vec<(String, Value)>, BopError> {
+    ) -> Result<ModuleArtifacts, BopError> {
         let stmts = bop::parse(source)?;
         let chunk = crate::compile(&stmts)?;
         let imports = Rc::clone(&self.imports);
@@ -1639,19 +1802,34 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
             }
         }
-        // …plus named fns reified as VM-compatible `Value::Fn`s.
-        for (name, entry) in sub.functions {
-            let chunk_rc: Rc<Chunk> = entry.chunk.clone();
-            let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-            let value = Value::new_compiled_fn(
-                entry.params,
-                Vec::new(),
-                body,
-                Some(name.clone()),
-            );
-            bindings.push((name, value));
+        // Named fn entries go out separately so the importer
+        // can register them in `self.functions` for bare-ident
+        // call resolution. Reified `Value::Fn`s for the same
+        // fns are synthesised at the import site (see
+        // `exec_import`).
+        let fn_decls: Vec<(String, FnEntry)> =
+            sub.functions.into_iter().collect();
+        // Type decls & methods come along for the ride — the
+        // importer needs them so pattern-matching and
+        // construction against the module's types works
+        // without re-declaration.
+        let struct_defs: Vec<(String, Vec<String>)> =
+            sub.struct_defs.into_iter().collect();
+        let enum_defs: Vec<(String, Vec<(String, EnumVariantShape)>)> =
+            sub.enum_defs.into_iter().collect();
+        let mut methods: Vec<(String, String, FnEntry)> = Vec::new();
+        for (type_name, by_method) in sub.user_methods {
+            for (method_name, entry) in by_method {
+                methods.push((type_name.clone(), method_name, entry));
+            }
         }
-        Ok(bindings)
+        Ok(ModuleArtifacts {
+            bindings,
+            fn_decls,
+            struct_defs,
+            enum_defs,
+            methods,
+        })
     }
 
     /// Like `run` but keeps `self` around afterwards so the
