@@ -791,9 +791,15 @@ and a standard library. A competent developer can write a
 non-trivial program in it. The core crate is still zero-dep
 embeddable. The remaining phases are tooling and polish.
 
-### Phase 8 — Package manager (`bop-pkg`)
+### Phase 8 — Package manager (`bop-pkg`) — parked
 
-Its own plan doc when the time comes. Rough shape:
+*Explicitly deferred; no active work.* The `bop-std`
+bundled-source approach (phase 7) already covers the stdlib
+story without a package manager, and external-dependency
+management is a separate product concern.
+
+Left here as a future-work sketch. Its own plan doc when the
+time comes. Rough shape:
 
 - `bop-pkg` CLI: `bop install foo`, `bop publish`.
 - `bop.toml` manifest at the root of a project: name, version,
@@ -819,114 +825,107 @@ Ongoing, not a discrete phase:
 - Performance pass once the feature set is stable: VM dispatch
   tuning, Value cloning reduction, inline caches.
 
-**Landed so far.**
+**Landed.**
 
-- **Source-pointer error rendering.** Lexer tracks column
-  alongside line; `SpannedToken` carries both; parser errors
-  populate `BopError::column`. `BopError::render(source: &str)`
-  prints an `error:` header, a `--> line N[:col]` location,
-  the offending source line with a gutter, and — when column
-  is known — a carat `^` under the exact character. Friendly
-  hints (existing field) render as a trailing `hint:` line.
-  The renderer gracefully degrades for runtime errors (which
-  don't yet carry a column): snippet without carat. Out-of-
-  range lines produce the header alone. Tab-indented source
-  has its carat padded with tabs so alignment holds.
-- **`bop-cli` uses the renderer** for both file execution and
-  the REPL, so every CLI user gets the snippet-with-carat
-  treatment out of the box.
-- **Tests**: 4 new error-render unit tests + 4 new walker
-  integration tests covering parse errors, runtime errors,
-  multi-line programs, and tab alignment. No regressions
-  across the 597-test workspace suite.
-
-**Also landed: "did you mean?" suggestions.**
-
-- New `bop::suggest` module with Wagner–Fischer Levenshtein,
-  a length-difference prune, and a per-target edit budget
-  (~1 edit per 3 chars, clamped 1–3).
-- Walker's error paths now enrich their hints:
-  - `Variable X not found` → closest match from the current
-    scope stack + top-level fns.
-  - `Function X not found` → closest match from user fns +
-    core builtins (`range`, `print`, `sqrt`, …). Host hint
-    still wins when no user-level suggestion applies.
-  - `Struct X has no field Y` at construction and at field
-    access → closest match from the declared field list.
-  - `Enum X has no variant Y` → closest match from the
-    enum's variant list.
-- When the hint slots in it renders as a trailing `hint:`
-  line in the source-snippet output, e.g.
-  ```
-  error: Struct `Point` has no field `z`
-    --> line 3
-    |
-  3 | print(p.z)
-    |
-  hint: Did you mean `x`?
-  ```
-- 9 new unit tests in `suggest::tests` + 8 walker integration
-  tests (`typo_*`) covering user fns, builtins, struct fields
-  at construction and access, enum variants, and the
-  "fall back when nothing's close" path.
-
-**Also landed: VM + AOT suggestion parity.**
-
-- The walker's "did you mean?" hints now fire from the VM and
-  AOT paths too. `bop::suggest::CORE_CALLABLE_BUILTINS` is
-  the single shared source of builtin names — each engine
-  feeds it into `did_you_mean` alongside its own fn /
-  scope / decl tables.
-- VM error sites updated: `Variable X not found`,
-  `Function X not found`, `Struct X has no field Y` (at
-  construction and at field access), `Enum X has no variant
-  Y`.
-- AOT error sites updated: the compile-time
-  struct-field-unknown and enum-variant-unknown raises in
-  `emit.rs`, plus the emitted-at-runtime `__bop_field_get`
-  helper in both sandbox and non-sandbox preambles (so
-  `p.z` in compiled code yields the same hint).
-- 6 new VM differential tests (`vm_*_suggests_*`) lock in
-  parity with the walker's hint output.
-
-**Also landed: match exhaustiveness warnings.**
-
-- New `bop::check` module runs after parse. Currently does
-  one thing: flag `match` expressions on an enum type where
-  some declared variants aren't covered by any arm.
-- Conservative by design — only fires when every arm is an
-  `EnumType::Variant` pattern on the same enum, no
-  wildcard/binding catch-all exists, and the enum is
-  declared locally (imported enums stay opaque). Guarded
-  arms don't count toward coverage (the guard can veto).
-  Or-patterns with variants contribute each variant.
-- New `BopWarning` type shares the render pipeline with
-  `BopError` — `warning:` header, snippet, carat,
-  `hint:` line — so CLI output is visually consistent.
-- New public entry point `bop::parse_with_warnings(source)`
-  returns the AST alongside the warning list. `bop-cli`
-  runs this first and prints any warnings before executing;
-  the program still runs regardless (warnings are
-  informational). Embedders who want `-Werror` behaviour
-  call `BopWarning::into_error` to promote.
-- 11 new tests in `check::tests` covering catch-all
-  detection, guarded arms, or-patterns, heterogeneous
-  matches, unknown enums (no false positives), and match
-  expressions nested inside fns / if-branches.
+- ✅ **Source-pointer error rendering.** Lexer tracks column;
+  `SpannedToken` carries it; `BopError::render(source)` prints
+  an `error:` header, `--> line N[:col]` location, source
+  snippet with gutter, a carat under the column (when known),
+  and a trailing `hint:` line. Tab-aware carat padding.
+  `bop-cli` uses it for both file runs and REPL.
+- ✅ **"Did you mean?" suggestions.** New `bop::suggest`
+  module (Wagner–Fischer Levenshtein + length prune +
+  per-target edit budget). Walker, VM, and AOT all populate
+  hints on `Variable X not found`, `Function X not found`,
+  `Struct X has no field Y` (construction + access), and
+  `Enum X has no variant Y`. Shared
+  `suggest::CORE_CALLABLE_BUILTINS` list keeps builtin
+  suggestions consistent across engines.
+- ✅ **Match exhaustiveness warnings.** New `bop::check`
+  module + `BopWarning` type + `bop::parse_with_warnings`
+  entry point. Flags enum matches that miss variants when
+  there's no catch-all; conservative (guards don't count;
+  imported enums are opaque). `bop-cli` prints warnings
+  before running.
 
 **Still open.**
 
-- Runtime errors don't yet carry column (would require adding
-  `column` to `Expr` / `Stmt` — 47 constructor sites). The
-  renderer falls back cleanly, and runtime errors usually
-  point at a whole expression anyway; parse errors, where the
-  carat matters most, already have column.
-- REPL multi-line input, history, tab completion.
-- Exhaustiveness check doesn't yet follow `import`s —
-  imported enums are opaque to the analysis. A second pass
-  that loads the import graph's type decls would close that
-  gap.
-- Performance pass.
+- **Runtime errors don't yet carry column.** Would require
+  adding `column` to `Expr` / `Stmt` — 47 constructor sites.
+  The renderer falls back cleanly and parse errors (where
+  the carat matters most) already have column info.
+- **REPL multi-line input, history, tab completion.** Needs
+  a line-editor dep (rustyline or similar) in `bop-cli`.
+- **Exhaustiveness check doesn't follow `import`s.** Imported
+  enums are opaque to `bop::check`; a second pass that walks
+  the import graph would close that gap.
+- **Documentation.** Tutorial + language reference + stdlib
+  API docs. Nothing formally written yet beyond this roadmap.
+- **Performance pass.** See "Known tech debt" below.
+- **Language server / debugger hook / tracebacks.** Far-future
+  items kept in the original list for reference.
+
+## Ship-it readiness tracker
+
+A running tally of the "what's missing before 1.0" items from
+the codebase walkthrough. Linked to the phase that delivered
+(or will deliver) each one.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| **Diagnostics** — column info, source snippets, carat, "did you mean?" | ✅ done | Phase 9 landed across walker / VM / AOT. |
+| **`std.collections`** (Set / Queue / Stack) | ❌ deferred | Phase 7 infrastructure ready (type-transfer imports work); module still to be written. |
+| **`std.json`** (parse / stringify) | ❌ deferred | Needs design on how `parse` surfaces errors — probably `Result`-shaped once the stdlib convention settles. |
+| **Match exhaustiveness checking** | ✅ done | `bop::check` + `BopWarning`, phase 9. Imported enums still opaque. |
+| **Performance** | ❌ open | No profiling / optimisation pass yet. Walker correctness ≫ speed; VM unprofiled. See tech debt below for shape of the work. |
+| **Documentation** (tutorial, reference, API docs) | ❌ open | No user-facing docs beyond this roadmap and inline `///` comments. |
+| **Packaging** (`bop install`, dependency manifest) | ⏸ deferred | Phase 8 in the plan; explicitly parked for now. `bop-std` bundled-source approach handles stdlib without needing a package manager. |
+
+## Known tech debt
+
+Items worth fixing when convenient — none of them blocks
+shipping, but each one hurts maintenance or future work.
+
+- **AOT preamble duplication.** `bop-compile/src/emit.rs`
+  ships two copies of the runtime preamble as string literals
+  (`RUNTIME_PREAMBLE` + `RUNTIME_PREAMBLE_SANDBOX`). Every
+  time a new runtime helper lands (most recently `__bop_try_call`
+  and the `did-you-mean` hint in `__bop_field_get`), both
+  copies have to be edited. Candidate fix: factor the shared
+  helpers into one string, with sandbox-specific bits
+  appended. Would roughly halve `emit.rs`'s line count.
+- **Walker's `try` unwinding uses a sentinel error.** The
+  mechanism works: `try` on `Err` sets
+  `Evaluator::pending_try_return = Some(value)`, returns a
+  `BopError` whose `.message == "__bop_try_return_signal__"`,
+  and the nearest `call_bop_fn` traps the sentinel and
+  converts it to a regular `Signal::Return`. Clever, but
+  fragile — anyone generating a `BopError` with the sentinel
+  message would break it. Cleaner design: thread a
+  `Result<ExprOutcome, BopError>` through `eval_expr`, where
+  `ExprOutcome = Value | TryReturn(Value)`. Intrusive but
+  eliminates the sentinel.
+- **AOT `TypeRegistry` is flat, not module-scoped.** The
+  transpiler collects every struct / enum / method decl from
+  all modules into one `TypeRegistry`. Walker and VM scope
+  types per evaluator / VM so two modules declaring
+  `enum Tag { … }` are isolated; AOT would silently pick
+  whichever module came last. Documented as a known AOT
+  divergence; matters only for large multi-module programs
+  that reuse type names across modules.
+- **Error paths have subtly different wording across engines.**
+  Each engine has its own copy of `Variable X not found` etc.
+  Message text is usually identical but could drift. A shared
+  `bop::error_messages` module of format helpers would lock
+  this down. Low priority — differential tests catch drift
+  at the `.message` level.
+- **`suggest::leak_name` leaks a `&'static str` per match
+  analysis.** The check pass's enum-coverage scan uses it to
+  sidestep lifetime threading. One leak per match expression
+  per parse, so trivial in absolute terms, but it's still
+  unusual. Candidate fix: restructure `gather_variants` so it
+  takes `&mut String` for the target-enum name instead of
+  `&mut Option<&'static str>`.
 
 ## Deliberately out of scope
 
