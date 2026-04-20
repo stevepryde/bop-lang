@@ -391,3 +391,140 @@ print(type(round(3.5)))"#,
         vec!["int", "int", "int"]
     );
 }
+
+// ─── std.collections ──────────────────────────────────────────
+
+#[test]
+fn collections_stack_push_top_pop() {
+    let host = run(
+        r#"import std.collections
+let s = stack()
+s = s.push(1)
+s = s.push(2)
+s = s.push(3)
+print(s.top())
+print(s.size())
+s = s.pop()
+print(s.top())
+print(s.size())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["3", "3", "2", "2"]
+    );
+}
+
+#[test]
+fn collections_stack_pop_empty_is_noop() {
+    let host = run(
+        r#"import std.collections
+let s = stack()
+s = s.pop()
+print(s.is_empty())
+print(s.top())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["true", "none"]
+    );
+}
+
+#[test]
+fn collections_queue_fifo_order() {
+    let host = run(
+        r#"import std.collections
+let q = queue()
+q = q.enqueue("a")
+q = q.enqueue("b")
+q = q.enqueue("c")
+print(q.front())
+print(q.size())
+q = q.dequeue()
+print(q.front())
+q = q.dequeue()
+print(q.front())
+q = q.dequeue()
+print(q.is_empty())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["a", "3", "b", "c", "true"]
+    );
+}
+
+#[test]
+fn collections_set_add_remove_has() {
+    let host = run(
+        r#"import std.collections
+let s = set()
+s = s.add(1)
+s = s.add(2)
+s = s.add(2)  # duplicate, no-op
+s = s.add(3)
+print(s.size())
+print(s.has(2))
+print(s.has(99))
+s = s.remove(2)
+print(s.has(2))
+print(s.size())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["3", "true", "false", "false", "2"]
+    );
+}
+
+#[test]
+fn collections_set_of_handles_duplicates() {
+    let host = run(
+        r#"import std.collections
+let s = set_of([1, 2, 1, 3, 2])
+print(s.size())
+print(s.values())"#,
+    );
+    let prints = host.prints.borrow();
+    assert_eq!(prints[0], "3");
+    assert_eq!(prints[1], "[1, 2, 3]");
+}
+
+#[test]
+fn collections_set_union_intersect_difference() {
+    let host = run(
+        r#"import std.collections
+let a = set_of([1, 2, 3])
+let b = set_of([2, 3, 4])
+print(a.union(b).values())
+print(a.intersect(b).values())
+print(a.difference(b).values())"#,
+    );
+    let prints = host.prints.borrow();
+    // Union: [1,2,3,4]. intersect: [2,3]. difference: [1].
+    assert_eq!(prints[0], "[1, 2, 3, 4]");
+    assert_eq!(prints[1], "[2, 3]");
+    assert_eq!(prints[2], "[1]");
+}
+
+#[test]
+fn collections_remove_preserves_order() {
+    let host = run(
+        r#"import std.collections
+let s = set_of([1, 2, 3, 4, 5])
+s = s.remove(3)
+print(s.values())"#,
+    );
+    assert_eq!(host.prints.borrow()[0], "[1, 2, 4, 5]");
+}
+
+#[test]
+fn collections_composes_with_std_iter() {
+    // Collections + iter helpers interoperate because a Set's
+    // .values() / a Queue's items are ordinary arrays.
+    let host = run(
+        r#"import std.collections
+import std.iter
+let s = set_of([1, 2, 3, 4, 5])
+let evens = filter(s.values(), fn(x) { return x % 2 == 0 })
+print(evens)"#,
+    );
+    assert_eq!(host.prints.borrow()[0], "[2, 4]");
+}
