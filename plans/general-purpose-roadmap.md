@@ -886,14 +886,17 @@ the codebase walkthrough. Linked to the phase that delivered
 Items worth fixing when convenient — none of them blocks
 shipping, but each one hurts maintenance or future work.
 
-- **AOT preamble duplication.** `bop-compile/src/emit.rs`
-  ships two copies of the runtime preamble as string literals
-  (`RUNTIME_PREAMBLE` + `RUNTIME_PREAMBLE_SANDBOX`). Every
-  time a new runtime helper lands (most recently `__bop_try_call`
-  and the `did-you-mean` hint in `__bop_field_get`), both
-  copies have to be edited. Candidate fix: factor the shared
-  helpers into one string, with sandbox-specific bits
-  appended. Would roughly halve `emit.rs`'s line count.
+- ~~**AOT preamble duplication.**~~ ✅ Fixed. The two
+  preamble string literals (`RUNTIME_PREAMBLE` +
+  `RUNTIME_PREAMBLE_SANDBOX`) were refactored into four
+  composable pieces — `RUNTIME_HEADER`, `CTX_BASE` /
+  `CTX_SANDBOX`, `RUNTIME_SHARED`, and `TICK_HELPER` — that
+  `emit_runtime_preamble` stitches together. New runtime
+  helpers now land once in `RUNTIME_SHARED` instead of
+  twice; `emit.rs` lost ~170 lines. `PUBLIC_ENTRY` and
+  `MAIN_FN` still have two variants (15 and 8 lines each)
+  since the `run()` signature genuinely differs — collapsing
+  them wouldn't pay for itself.
 - **Walker's `try` unwinding uses a sentinel error.** The
   mechanism works: `try` on `Err` sets
   `Evaluator::pending_try_return = Some(value)`, returns a
