@@ -364,6 +364,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // ─── Literals ─────────────────────────────────────────
             Instr::LoadConst(idx) => {
                 let value = match self.current_chunk().constant(idx) {
+                    Constant::Int(n) => Value::Int(*n),
                     Constant::Number(n) => Value::Number(*n),
                     Constant::Str(s) => Value::new_str(s.clone()),
                 };
@@ -458,6 +459,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             Instr::Sub => self.binary(line, ops::sub)?,
             Instr::Mul => self.binary(line, ops::mul)?,
             Instr::Div => self.binary(line, ops::div)?,
+            Instr::IntDiv => self.binary(line, ops::int_div)?,
             Instr::Rem => self.binary(line, ops::rem)?,
             Instr::Eq => self.binary_infallible(line, |a, b, _| Ok(ops::eq(a, b)))?,
             Instr::NotEq => self.binary_infallible(line, |a, b, _| Ok(ops::not_eq(a, b)))?,
@@ -595,6 +597,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             Instr::MakeRepeatCount => {
                 let v = self.pop_value(line)?;
                 let n = match v {
+                    Value::Int(n) => n,
                     Value::Number(n) => n as i64,
                     other => {
                         return Err(error(
@@ -792,6 +795,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
             "int" => {
                 let v = builtins::builtin_int(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            "float" => {
+                let v = builtins::builtin_float(&args, line)?;
                 self.push_value(v);
                 return Ok(Next::Continue);
             }

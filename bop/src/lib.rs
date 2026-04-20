@@ -847,7 +847,10 @@ print(d.len())"#),
 
     #[test]
     fn builtin_type() {
-        assert_eq!(say("print(type(42))"), "number");
+        // Phase 6 split numeric types: `42` is an int, `42.0`
+        // is a number.
+        assert_eq!(say("print(type(42))"), "int");
+        assert_eq!(say("print(type(42.0))"), "number");
         assert_eq!(say(r#"print(type("hi"))"#), "string");
         assert_eq!(say("print(type(true))"), "bool");
         assert_eq!(say("print(type(none))"), "none");
@@ -986,9 +989,12 @@ print(d.len())"#),
 
     #[test]
     fn comments_in_code() {
+        // Phase 6 swapped line comments from `//` (needed for
+        // integer division) to `#` (Python-style). Single-line
+        // only; no block-comment form.
         assert_eq!(
-            say(r#"// this is a comment
-let x = 42 // inline comment
+            say(r#"# this is a comment
+let x = 42 # inline comment
 print(x)"#),
             "42"
         );
@@ -1992,6 +1998,157 @@ print(match r {
 })"#),
             "Division by zero"
         );
+    }
+
+    // ─── Integer type (phase 6) ────────────────────────────────────
+
+    #[test]
+    fn int_literal_produces_int_value() {
+        assert_eq!(say("print(type(42))"), "int");
+        assert_eq!(say("print(type(-3))"), "int");
+        assert_eq!(say("print(type(0))"), "int");
+    }
+
+    #[test]
+    fn float_literal_produces_number_value() {
+        assert_eq!(say("print(type(42.0))"), "number");
+        assert_eq!(say("print(type(3.14))"), "number");
+        assert_eq!(say("print(type(-0.5))"), "number");
+    }
+
+    #[test]
+    fn int_int_arithmetic_stays_int() {
+        assert_eq!(say("print(type(1 + 2))"), "int");
+        assert_eq!(say("print(1 + 2)"), "3");
+        assert_eq!(say("print(10 - 4)"), "6");
+        assert_eq!(say("print(3 * 4)"), "12");
+        assert_eq!(say("print(10 % 3)"), "1");
+    }
+
+    #[test]
+    fn int_division_slash_returns_number() {
+        // `/` always floats, even Int/Int. Matches Python.
+        assert_eq!(say("print(type(10 / 3))"), "number");
+        assert_eq!(say("print(10 / 4)"), "2.5");
+    }
+
+    #[test]
+    fn int_division_slash_slash_returns_int() {
+        // `//` — integer division, truncating toward zero.
+        assert_eq!(say("print(type(10 // 3))"), "int");
+        assert_eq!(say("print(10 // 3)"), "3");
+        assert_eq!(say("print(-7 // 2)"), "-3");
+        assert_eq!(say("print(10 // -3)"), "-3");
+    }
+
+    #[test]
+    fn int_number_mixed_widens_to_number() {
+        assert_eq!(say("print(type(1 + 2.0))"), "number");
+        assert_eq!(say("print(1 + 2.0)"), "3");
+        assert_eq!(say("print(3 * 0.5)"), "1.5");
+        assert_eq!(say("print(type(2.0 - 1))"), "number");
+    }
+
+    #[test]
+    fn int_comparison_uses_exact_integer_ordering() {
+        assert_eq!(say("print(10 < 20)"), "true");
+        assert_eq!(say("print(10 == 10)"), "true");
+        // Cross-type numeric equality: int == number when
+        // numerically equal.
+        assert_eq!(say("print(1 == 1.0)"), "true");
+        assert_eq!(say("print(2 > 1.5)"), "true");
+    }
+
+    #[test]
+    fn int_division_by_zero_errors() {
+        let msg = run_err("print(10 // 0)");
+        assert!(msg.contains("Division by zero"), "got: {}", msg);
+    }
+
+    #[test]
+    fn int_overflow_on_add_errors() {
+        // i64::MAX + 1 overflows. The message should mention
+        // "overflow".
+        let msg = run_err("print(9223372036854775807 + 1)");
+        assert!(msg.contains("Integer overflow"), "got: {}", msg);
+    }
+
+    #[test]
+    fn int_overflow_on_neg_of_i64_min_errors() {
+        // `i64::MIN` can't be written as a literal (its magnitude
+        // exceeds `i64::MAX`), so we build it arithmetically and
+        // then negate — which overflows.
+        let msg = run_err(
+            "let x = -9223372036854775807 - 1\nprint(-x)",
+        );
+        assert!(msg.contains("overflow"), "got: {}", msg);
+    }
+
+    #[test]
+    fn int_builtin_converts_to_int() {
+        assert_eq!(say("print(int(3.7))"), "3");
+        assert_eq!(say("print(type(int(3.7)))"), "int");
+        assert_eq!(say(r#"print(int("42"))"#), "42");
+        assert_eq!(say(r#"print(type(int("42")))"#), "int");
+        // Truncating a string that looks float-y still works.
+        assert_eq!(say(r#"print(int("3.7"))"#), "3");
+    }
+
+    #[test]
+    fn float_builtin_converts_to_number() {
+        assert_eq!(say("print(float(42))"), "42");
+        assert_eq!(say("print(type(float(42)))"), "number");
+        assert_eq!(say(r#"print(float("3.14"))"#), "3.14");
+    }
+
+    #[test]
+    fn len_returns_int() {
+        assert_eq!(say(r#"print(type(len("hi")))"#), "int");
+        assert_eq!(say("print(type(len([1, 2, 3])))"), "int");
+    }
+
+    #[test]
+    fn range_produces_int_elements() {
+        assert_eq!(say("print(type(range(3)[0]))"), "int");
+    }
+
+    #[test]
+    fn array_index_accepts_int_and_float() {
+        // Both `arr[0]` (Int) and `arr[0.0]` (Number-via-cast)
+        // should work — keeps legacy code with `0.0` running.
+        assert_eq!(say("let a = [10, 20]\nprint(a[0])"), "10");
+        assert_eq!(say("let a = [10, 20]\nprint(a[0.0])"), "10");
+    }
+
+    #[test]
+    fn int_match_literal_pattern() {
+        assert_eq!(
+            say(r#"let x = 2
+print(match x {
+    1 => "one",
+    2 => "two",
+    _ => "other",
+})"#),
+            "two"
+        );
+    }
+
+    #[test]
+    fn repeat_accepts_int() {
+        assert_eq!(
+            say(r#"let n = 0
+repeat 5 { n = n + 1 }
+print(n)"#),
+            "5"
+        );
+    }
+
+    #[test]
+    fn int_overflow_literal_parse_errors() {
+        // Integer literal that doesn't fit in i64 is a
+        // lex-time error, not a silent downgrade to float.
+        let msg = parse_err("let x = 99999999999999999999");
+        assert!(msg.contains("out of range"), "got: {}", msg);
     }
 
     // ─── Modules / import ──────────────────────────────────────────

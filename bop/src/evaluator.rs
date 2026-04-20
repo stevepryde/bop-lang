@@ -308,6 +308,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
             StmtKind::Repeat { count, body } => {
                 let n = match self.eval_expr(count)? {
+                    Value::Int(n) => n,
                     Value::Number(n) => n as i64,
                     other => {
                         return Err(error(
@@ -876,6 +877,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, BopError> {
         match &expr.kind {
+            ExprKind::Int(n) => Ok(Value::Int(*n)),
             ExprKind::Number(n) => Ok(Value::Number(*n)),
             ExprKind::Str(s) => Ok(Value::new_str(s.clone())),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
@@ -1316,6 +1318,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             BinOp::Sub => ops::sub(left, right, line),
             BinOp::Mul => ops::mul(left, right, line),
             BinOp::Div => ops::div(left, right, line),
+            BinOp::IntDiv => ops::int_div(left, right, line),
             BinOp::Mod => ops::rem(left, right, line),
             BinOp::Eq => Ok(ops::eq(left, right)),
             BinOp::NotEq => Ok(ops::not_eq(left, right)),
@@ -1535,6 +1538,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             "range" => return builtins::builtin_range(&args, line, &mut self.rand_state),
             "str" => return builtins::builtin_str(&args, line),
             "int" => return builtins::builtin_int(&args, line),
+            "float" => return builtins::builtin_float(&args, line),
             "type" => return builtins::builtin_type(&args, line),
             "abs" => return builtins::builtin_abs(&args, line),
             "min" => return builtins::builtin_min(&args, line),
@@ -1635,7 +1639,13 @@ pub fn pattern_matches(
             true
         }
         Pattern::Literal(lit) => match (lit, value) {
+            (LiteralPattern::Int(a), Value::Int(b)) => a == b,
             (LiteralPattern::Number(a), Value::Number(b)) => a == b,
+            // Cross-type numeric literal patterns — same rule
+            // as `values_equal`: `match 1 { 1.0 => ... }` and
+            // `match 1.0 { 1 => ... }` both match.
+            (LiteralPattern::Int(a), Value::Number(b)) => (*a as f64) == *b,
+            (LiteralPattern::Number(a), Value::Int(b)) => *a == (*b as f64),
             (LiteralPattern::Str(a), Value::Str(b)) => a.as_str() == b.as_str(),
             (LiteralPattern::Bool(a), Value::Bool(b)) => a == b,
             (LiteralPattern::None, Value::None) => true,

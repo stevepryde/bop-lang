@@ -12,6 +12,11 @@ pub enum StringPart {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Literals
+    /// Integer literal — a digit sequence with no `.` part.
+    /// Lexed to `i64` at scan time; the parser maps it to
+    /// `ExprKind::Int` which the engines evaluate as
+    /// `Value::Int`.
+    Int(i64),
     Number(f64),
     Str(String),
     StringInterp(Vec<StringPart>),
@@ -43,6 +48,10 @@ pub enum Token {
     Minus,
     Star,
     Slash,
+    /// `//` integer division (phase 6). Distinct from `/` so
+    /// `10 / 3 == 3.3…` (Number) and `10 // 3 == 3` (Int)
+    /// behave predictably — same Python convention.
+    SlashSlash,
     Percent,
     EqEq,
     BangEq,
@@ -98,6 +107,7 @@ fn triggers_semicolon(token: &Token) -> bool {
     matches!(
         token,
         Token::Ident(_)
+            | Token::Int(_)
             | Token::Number(_)
             | Token::Str(_)
             | Token::StringInterp(_)
@@ -218,8 +228,11 @@ impl Lexer {
                     });
                 }
 
-                '/' if self.peek_next() == Some('/') => {
-                    // Line comment — skip to end of line
+                '#' => {
+                    // Line comment — Python-style. Phase 6 moved
+                    // off `//` so integer division can claim that
+                    // token. Runs to end of line; no block-comment
+                    // form.
                     while let Some(c) = self.peek() {
                         if c == '\n' {
                             break;
@@ -300,6 +313,16 @@ impl Lexer {
                         self.advance();
                         tokens.push(SpannedToken {
                             token: Token::SlashEq,
+                            line,
+                        });
+                    } else if self.peek() == Some('/') {
+                        // `//` integer division. Line-comment
+                        // duty stays with `#` (Bop never used
+                        // `//` for comments) so there's no
+                        // ambiguity here.
+                        self.advance();
+                        tokens.push(SpannedToken {
+                            token: Token::SlashSlash,
                             line,
                         });
                     } else {
@@ -532,7 +555,13 @@ impl Lexer {
                 break;
             }
         }
-        if self.peek() == Some('.') && self.peek_next().is_some_and(|c| c.is_ascii_digit()) {
+        // A trailing `.<digit>` promotes to a float; `42..foo`
+        // or `42.` at EOF stays an Int so chained method calls
+        // (`42.str()`) and inclusive array-rest patterns still
+        // parse.
+        let is_float = if self.peek() == Some('.')
+            && self.peek_next().is_some_and(|c| c.is_ascii_digit())
+        {
             s.push('.');
             self.advance();
             while let Some(ch) = self.peek() {
@@ -543,11 +572,28 @@ impl Lexer {
                     break;
                 }
             }
+            true
+        } else {
+            false
+        };
+        if is_float {
+            let n: f64 = s
+                .parse()
+                .map_err(|_| self.error(format!("Invalid number: {}", s)))?;
+            Ok(Token::Number(n))
+        } else {
+            // Integer literal — try `i64`. Out-of-range values
+            // surface as a lex-time error rather than silently
+            // wrapping or degrading to `f64`, since that's the
+            // ergonomic opposite of "exact int arithmetic".
+            match s.parse::<i64>() {
+                Ok(n) => Ok(Token::Int(n)),
+                Err(_) => Err(self.error(format!(
+                    "Integer literal out of range for i64: {}",
+                    s
+                ))),
+            }
         }
-        let n: f64 = s
-            .parse()
-            .map_err(|_| self.error(format!("Invalid number: {}", s)))?;
-        Ok(Token::Number(n))
     }
 
     fn lex_ident_or_keyword(&mut self) -> Token {
@@ -705,7 +751,8 @@ mod tests {
 
     #[test]
     fn integer() {
-        assert_eq!(toks("42"), vec![Token::Number(42.0)]);
+        // Integer literals now lex to `Token::Int` (phase 6).
+        assert_eq!(toks("42"), vec![Token::Int(42)]);
     }
 
     #[test]
@@ -876,14 +923,24 @@ mod tests {
     #[test]
     fn line_comment_skipped() {
         assert_eq!(
-            toks("1 // comment\n2"),
-            vec![Token::Number(1.0), Token::Semicolon, Token::Number(2.0),]
+            toks("1 # comment\n2"),
+            vec![Token::Int(1), Token::Semicolon, Token::Int(2)]
         );
     }
 
     #[test]
     fn comment_at_end() {
-        assert_eq!(toks("x // done"), vec![Token::Ident("x".into())]);
+        assert_eq!(toks("x # done"), vec![Token::Ident("x".into())]);
+    }
+
+    #[test]
+    fn double_slash_is_int_division_not_comment() {
+        // Since phase 6, `//` is the integer-division operator
+        // (`Token::SlashSlash`). `#` is the line comment.
+        assert_eq!(
+            toks("10 // 3"),
+            vec![Token::Int(10), Token::SlashSlash, Token::Int(3)]
+        );
     }
 
     // ─── Auto-semicolons ──────────────────────────────────────────
@@ -904,7 +961,7 @@ mod tests {
     fn auto_semi_after_number() {
         assert_eq!(
             toks("42\n10"),
-            vec![Token::Number(42.0), Token::Semicolon, Token::Number(10.0),]
+            vec![Token::Int(42), Token::Semicolon, Token::Int(10)]
         );
     }
 

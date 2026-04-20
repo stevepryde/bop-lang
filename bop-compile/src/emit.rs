@@ -1084,6 +1084,7 @@ impl Emitter {
                 let n_tmp = self.fresh_tmp();
                 self.line(&format!("let {} = {};", count_tmp, count_src));
                 self.open_block(&format!("let {}: i64 = match {}", n_tmp, count_tmp));
+                self.line("::bop::value::Value::Int(n) => n,");
                 self.line("::bop::value::Value::Number(n) => n as i64,");
                 self.line(&format!(
                     "other => return Err(::bop::error::BopError::runtime(format!(\"repeat needs a number, but got {{}}\", other.type_name()), {})),",
@@ -1412,6 +1413,7 @@ impl Emitter {
     fn expr_src(&mut self, expr: &Expr) -> Result<String, BopError> {
         let line = expr.line;
         let s = match &expr.kind {
+            ExprKind::Int(n) => format!("::bop::value::Value::Int({}i64)", n),
             ExprKind::Number(n) => format!("::bop::value::Value::Number({}f64)", rust_f64(*n)),
             ExprKind::Str(s) => format!(
                 "::bop::value::Value::new_str({}.to_string())",
@@ -1875,7 +1877,7 @@ impl Emitter {
                 build_arg_array(&arg_names),
                 line
             ),
-            "str" | "int" | "type" | "abs" | "min" | "max" | "len" | "inspect" => {
+            "str" | "int" | "float" | "type" | "abs" | "min" | "max" | "len" | "inspect" => {
                 let fn_name = format!("builtin_{}", name);
                 format!(
                     "::bop::builtins::{}(&{}, {})?",
@@ -2731,6 +2733,10 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
 fn literal_pattern_rust(lit: &bop::parser::LiteralPattern) -> String {
     use bop::parser::LiteralPattern;
     match lit {
+        LiteralPattern::Int(n) => format!(
+            "::bop::parser::LiteralPattern::Int({}i64)",
+            n
+        ),
         LiteralPattern::Number(n) => format!(
             "::bop::parser::LiteralPattern::Number({})",
             rust_f64(*n)
@@ -2791,7 +2797,8 @@ fn scan_free_vars_expr(
     fn_info: &FnInfo,
 ) {
     match &expr.kind {
-        ExprKind::Number(_)
+        ExprKind::Int(_)
+        | ExprKind::Number(_)
         | ExprKind::Str(_)
         | ExprKind::Bool(_)
         | ExprKind::None => {}
@@ -2929,6 +2936,7 @@ fn bin_op_path(op: BinOp) -> &'static str {
         BinOp::Sub => "::bop::ops::sub",
         BinOp::Mul => "::bop::ops::mul",
         BinOp::Div => "::bop::ops::div",
+        BinOp::IntDiv => "::bop::ops::int_div",
         BinOp::Mod => "::bop::ops::rem",
         BinOp::Eq => "::bop::ops::eq",
         BinOp::NotEq => "::bop::ops::not_eq",

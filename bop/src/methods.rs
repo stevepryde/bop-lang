@@ -13,7 +13,7 @@ pub fn array_method(
     line: u32,
 ) -> Result<(Value, Option<Value>), BopError> {
     match method {
-        "len" => Ok((Value::Number(arr.len() as f64), None)),
+        "len" => Ok((Value::Int(arr.len() as i64), None)),
         "push" => {
             if args.len() != 1 {
                 return Err(error(line, ".push() needs exactly 1 argument"));
@@ -39,7 +39,7 @@ pub fn array_method(
                 return Err(error(line, ".index_of() needs exactly 1 argument"));
             }
             let idx = arr.iter().position(|v| values_equal(v, &args[0]));
-            Ok((Value::Number(idx.map_or(-1.0, |i| i as f64)), None))
+            Ok((Value::Int(idx.map_or(-1, |i| i as i64)), None))
         }
         "insert" => {
             if args.len() != 2 {
@@ -83,9 +83,19 @@ pub fn array_method(
         "sort" => {
             let mut new_arr = arr.to_vec();
             new_arr.sort_by(|a, b| match (a, b) {
+                (Value::Int(x), Value::Int(y)) => x.cmp(y),
                 (Value::Number(x), Value::Number(y)) => {
                     x.partial_cmp(y).unwrap_or(core::cmp::Ordering::Equal)
                 }
+                // Mixed numeric sort — widen through f64 so
+                // `[1, 2.5, 0]` sorts in the obvious numeric
+                // order.
+                (Value::Int(x), Value::Number(y)) => (*x as f64)
+                    .partial_cmp(y)
+                    .unwrap_or(core::cmp::Ordering::Equal),
+                (Value::Number(x), Value::Int(y)) => x
+                    .partial_cmp(&(*y as f64))
+                    .unwrap_or(core::cmp::Ordering::Equal),
                 (Value::Str(x), Value::Str(y)) => x.cmp(y),
                 _ => core::cmp::Ordering::Equal,
             });
@@ -117,7 +127,7 @@ pub fn string_method(
     line: u32,
 ) -> Result<(Value, Option<Value>), BopError> {
     match method {
-        "len" => Ok((Value::Number(s.chars().count() as f64), None)),
+        "len" => Ok((Value::Int(s.chars().count() as i64), None)),
         "contains" => {
             if args.len() != 1 {
                 return Err(error(line, ".contains() needs 1 argument"));
@@ -156,8 +166,8 @@ pub fn string_method(
                 Value::Str(s) => s.as_str(),
                 _ => return Err(error(line, ".index_of() needs a string")),
             };
-            let idx = s.find(substr).map_or(-1.0, |i| i as f64);
-            Ok((Value::Number(idx), None))
+            let idx = s.find(substr).map_or(-1, |i| i as i64);
+            Ok((Value::Int(idx), None))
         }
         "split" => {
             if args.len() != 1 {
@@ -222,7 +232,7 @@ pub fn dict_method(
     line: u32,
 ) -> Result<(Value, Option<Value>), BopError> {
     match method {
-        "len" => Ok((Value::Number(entries.len() as f64), None)),
+        "len" => Ok((Value::Int(entries.len() as i64), None)),
         "keys" => {
             let keys: Vec<Value> = entries
                 .iter()

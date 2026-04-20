@@ -14,6 +14,10 @@ pub struct Expr {
 
 #[derive(Debug, Clone)]
 pub enum ExprKind {
+    /// Integer literal (phase 6). Produced by integer tokens
+    /// like `42`; distinct from `Number` so each engine can
+    /// emit a `Value::Int(i64)` directly.
+    Int(i64),
     Number(f64),
     Str(String),
     StringInterp(Vec<StringPart>),
@@ -156,6 +160,9 @@ pub enum Pattern {
 
 #[derive(Debug, Clone)]
 pub enum LiteralPattern {
+    /// Integer literal pattern (e.g. `match x { 1 => ... }`).
+    /// Added in phase 6 alongside `Value::Int`.
+    Int(i64),
     Number(f64),
     Str(String),
     Bool(bool),
@@ -187,6 +194,11 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// `//` integer division (phase 6). Unlike `/` (which
+    /// always returns a `Number`), `//` always returns an
+    /// `Int` — truncating toward zero, with overflow and
+    /// divide-by-zero surfacing as runtime errors.
+    IntDiv,
     Mod,
     Eq,
     NotEq,
@@ -942,11 +954,15 @@ impl Parser {
 
     fn parse_multiply(&mut self) -> Result<Expr, BopError> {
         let mut left = self.parse_unary()?;
-        while matches!(self.peek(), Token::Star | Token::Slash | Token::Percent) {
+        while matches!(
+            self.peek(),
+            Token::Star | Token::Slash | Token::SlashSlash | Token::Percent
+        ) {
             let line = self.peek_line();
             let op = match self.peek() {
                 Token::Star => BinOp::Mul,
                 Token::Slash => BinOp::Div,
+                Token::SlashSlash => BinOp::IntDiv,
                 _ => BinOp::Mod,
             };
             self.advance();
@@ -1090,6 +1106,13 @@ impl Parser {
         let line = self.peek_line();
 
         match self.peek().clone() {
+            Token::Int(n) => {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Int(n),
+                    line,
+                })
+            }
             Token::Number(n) => {
                 self.advance();
                 Ok(Expr {
@@ -1392,6 +1415,10 @@ impl Parser {
         self.enter()?;
         let line = self.peek_line();
         let result = match self.peek().clone() {
+            Token::Int(n) => {
+                self.advance();
+                Ok(Pattern::Literal(LiteralPattern::Int(n)))
+            }
             Token::Number(n) => {
                 self.advance();
                 Ok(Pattern::Literal(LiteralPattern::Number(n)))
@@ -1416,6 +1443,23 @@ impl Parser {
                 // Negative number literal: `-1`, `-3.14`.
                 self.advance();
                 match self.peek().clone() {
+                    Token::Int(n) => {
+                        self.advance();
+                        // `i64::MIN` has no positive counterpart
+                        // — negating it overflows. Raise a clear
+                        // parse error rather than silently
+                        // wrapping.
+                        match n.checked_neg() {
+                            Some(neg) => Ok(Pattern::Literal(LiteralPattern::Int(neg))),
+                            None => Err(self.error(
+                                line,
+                                format!(
+                                    "Integer literal `-{}` is out of range for i64",
+                                    n
+                                ),
+                            )),
+                        }
+                    }
                     Token::Number(n) => {
                         self.advance();
                         Ok(Pattern::Literal(LiteralPattern::Number(-n)))
@@ -1692,6 +1736,7 @@ fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError
 
 pub fn fmt_token(token: &Token) -> &'static str {
     match token {
+        Token::Int(_) => "an integer",
         Token::Number(_) => "a number",
         Token::Str(_) | Token::StringInterp(_) => "a string",
         Token::True => "true",
@@ -1722,6 +1767,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Minus => "-",
         Token::Star => "*",
         Token::Slash => "/",
+        Token::SlashSlash => "//",
         Token::Percent => "%",
         Token::EqEq => "==",
         Token::BangEq => "!=",

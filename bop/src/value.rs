@@ -120,6 +120,15 @@ impl core::fmt::Debug for FnBody {
 
 #[derive(Debug)]
 pub enum Value {
+    /// 64-bit signed integer. The go-to type for counts,
+    /// indices, and any arithmetic that wants exactness. Added
+    /// in phase 6; produced by integer literals (`42`), the
+    /// `int()` builtin, `len`, `range` elements, and the new
+    /// `//` integer-division operator.
+    Int(i64),
+    /// 64-bit IEEE-754 float. Produced by decimal literals
+    /// (`3.14`, `4.0`), the `float()` builtin, and by `/` on
+    /// any numeric pair (Python-style: `/` always floats).
     Number(f64),
     Str(BopStr),
     Bool(bool),
@@ -262,6 +271,7 @@ impl Value {
 impl Clone for Value {
     fn clone(&self) -> Self {
         match self {
+            Value::Int(n) => Value::Int(*n),
             Value::Number(n) => Value::Number(*n),
             Value::Bool(b) => Value::Bool(*b),
             Value::None => Value::None,
@@ -398,6 +408,7 @@ impl Drop for Value {
 impl core::fmt::Display for Value {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Value::Int(n) => write!(f, "{}", n),
             Value::Number(n) => {
                 if *n == (*n as i64 as f64) && *n - *n == 0.0 {
                     write!(f, "{}", *n as i64)
@@ -493,6 +504,7 @@ impl Value {
 
     pub fn type_name(&self) -> &'static str {
         match self {
+            Value::Int(_) => "int",
             Value::Number(_) => "number",
             Value::Str(_) => "string",
             Value::Bool(_) => "bool",
@@ -525,6 +537,7 @@ impl Value {
         match self {
             Value::Bool(b) => *b,
             Value::None => false,
+            Value::Int(n) => *n != 0,
             Value::Number(n) => *n != 0.0,
             Value::Str(s) => !s.0.is_empty(),
             Value::Array(a) => !a.0.is_empty(),
@@ -670,7 +683,15 @@ impl BopDict {
 
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x == y,
+        // Cross-type numeric equality: `1 == 1.0` is true, same
+        // as Python / JS. Widens the Int through f64 for the
+        // comparison — lossy for magnitudes above 2^53, but
+        // that's the cost of the convenience. Stricter-typed
+        // code can call `int()` / `float()` explicitly first.
+        (Value::Int(x), Value::Number(y)) => (*x as f64) == *y,
+        (Value::Number(x), Value::Int(y)) => *x == (*y as f64),
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::None, Value::None) => true,

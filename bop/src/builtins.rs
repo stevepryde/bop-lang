@@ -17,21 +17,23 @@ pub fn builtin_range(
     rand_state: &mut u64,
 ) -> Result<Value, BopError> {
     let _ = rand_state; // unused here, keeping signature uniform
+    // `range` operates in integer space — matches Python and
+    // keeps `range(5)[2]` predictable. Float args error out.
     let (start, end, step) = match args.len() {
         1 => {
-            let n = expect_number("range", &args[0], line)?;
-            (0.0, n, 1.0)
+            let n = expect_int("range", &args[0], line)?;
+            (0i64, n, 1i64)
         }
         2 => {
-            let start = expect_number("range", &args[0], line)?;
-            let end = expect_number("range", &args[1], line)?;
-            (start, end, if start <= end { 1.0 } else { -1.0 })
+            let start = expect_int("range", &args[0], line)?;
+            let end = expect_int("range", &args[1], line)?;
+            (start, end, if start <= end { 1 } else { -1 })
         }
         3 => {
-            let start = expect_number("range", &args[0], line)?;
-            let end = expect_number("range", &args[1], line)?;
-            let step = expect_number("range", &args[2], line)?;
-            if step == 0.0 {
+            let start = expect_int("range", &args[0], line)?;
+            let end = expect_int("range", &args[1], line)?;
+            let step = expect_int("range", &args[2], line)?;
+            if step == 0 {
                 return Err(error(line, "range step can't be 0"));
             }
             (start, end, step)
@@ -42,15 +44,21 @@ pub fn builtin_range(
     let mut result = Vec::new();
     let mut i = start;
     let max_items = 10_000usize;
-    if step > 0.0 {
+    if step > 0 {
         while i < end && result.len() < max_items {
-            result.push(Value::Number(i));
-            i += step;
+            result.push(Value::Int(i));
+            i = match i.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
     } else {
         while i > end && result.len() < max_items {
-            result.push(Value::Number(i));
-            i += step;
+            result.push(Value::Int(i));
+            i = match i.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
     }
     Ok(Value::new_array(result))
@@ -64,17 +72,46 @@ pub fn builtin_str(args: &[Value], line: u32) -> Result<Value, BopError> {
 pub fn builtin_int(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("int", args, 1, line)?;
     match &args[0] {
-        Value::Number(n) => Ok(Value::Number(*n as i64 as f64)),
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::Number(n) => Ok(Value::Int(*n as i64)),
+        Value::Str(s) => {
+            // Integer-first parse so `int("42")` stays an Int.
+            // Fall back to float-then-truncate for strings like
+            // `"3.7"` that Python's `int()` also accepts in a
+            // limited way (we allow it via float coercion).
+            if let Ok(n) = s.parse::<i64>() {
+                return Ok(Value::Int(n));
+            }
+            let n: f64 = s.parse().map_err(|_| {
+                error(line, format!("Can't convert \"{}\" to a number", s))
+            })?;
+            Ok(Value::Int(n as i64))
+        }
+        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+        _ => Err(error(
+            line,
+            format!("Can't convert {} to int", args[0].type_name()),
+        )),
+    }
+}
+
+/// `float(x)` — phase-6 companion to `int(x)`. Coerces any
+/// numeric or numeric-string value to a `Value::Number`.
+pub fn builtin_float(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("float", args, 1, line)?;
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Number(*n as f64)),
+        Value::Number(n) => Ok(Value::Number(*n)),
         Value::Str(s) => {
             let n: f64 = s.parse().map_err(|_| {
                 error(line, format!("Can't convert \"{}\" to a number", s))
             })?;
-            Ok(Value::Number(n as i64 as f64))
+            Ok(Value::Number(n))
         }
         Value::Bool(b) => Ok(Value::Number(if *b { 1.0 } else { 0.0 })),
         _ => Err(error(
             line,
-            format!("Can't convert {} to int", args[0].type_name()),
+            format!("Can't convert {} to float", args[0].type_name()),
         )),
     }
 }
@@ -86,27 +123,72 @@ pub fn builtin_type(args: &[Value], line: u32) -> Result<Value, BopError> {
 
 pub fn builtin_abs(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("abs", args, 1, line)?;
-    let n = expect_number("abs", &args[0], line)?;
-    Ok(Value::Number(n.abs()))
+    match &args[0] {
+        Value::Int(n) => n
+            .checked_abs()
+            .map(Value::Int)
+            .ok_or_else(|| error(line, "Integer overflow in `abs`")),
+        Value::Number(n) => Ok(Value::Number(n.abs())),
+        other => Err(error(
+            line,
+            format!("`abs` expects a number, but got {}", other.type_name()),
+        )),
+    }
 }
 
 pub fn builtin_min(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("min", args, 2, line)?;
-    let a = expect_number("min", &args[0], line)?;
-    let b = expect_number("min", &args[1], line)?;
-    Ok(Value::Number(a.min(b)))
+    min_max(&args[0], &args[1], true, "min", line)
 }
 
 pub fn builtin_max(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("max", args, 2, line)?;
-    let a = expect_number("max", &args[0], line)?;
-    let b = expect_number("max", &args[1], line)?;
-    Ok(Value::Number(a.max(b)))
+    min_max(&args[0], &args[1], false, "max", line)
+}
+
+/// Shared `min` / `max` implementation that preserves the input
+/// type when both operands are the same numeric shape (Int /
+/// Int → Int; Number / Number → Number) and widens to Number
+/// on mixed operands.
+fn min_max(a: &Value, b: &Value, pick_smaller: bool, fname: &str, line: u32) -> Result<Value, BopError> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => {
+            let pick = if pick_smaller {
+                (*x).min(*y)
+            } else {
+                (*x).max(*y)
+            };
+            Ok(Value::Int(pick))
+        }
+        (Value::Number(x), Value::Number(y)) => {
+            let pick = if pick_smaller { x.min(*y) } else { x.max(*y) };
+            Ok(Value::Number(pick))
+        }
+        (Value::Int(x), Value::Number(y)) => {
+            let xf = *x as f64;
+            let pick = if pick_smaller { xf.min(*y) } else { xf.max(*y) };
+            Ok(Value::Number(pick))
+        }
+        (Value::Number(x), Value::Int(y)) => {
+            let yf = *y as f64;
+            let pick = if pick_smaller { x.min(yf) } else { x.max(yf) };
+            Ok(Value::Number(pick))
+        }
+        _ => Err(error(
+            line,
+            format!(
+                "`{}` expects two numbers, but got {} and {}",
+                fname,
+                a.type_name(),
+                b.type_name()
+            ),
+        )),
+    }
 }
 
 pub fn builtin_rand(args: &[Value], line: u32, rand_state: &mut u64) -> Result<Value, BopError> {
     expect_args("rand", args, 1, line)?;
-    let n = expect_number("rand", &args[0], line)? as i64;
+    let n = expect_int("rand", &args[0], line)?;
     if n <= 0 {
         return Err(error(line, "rand needs a positive number"));
     }
@@ -115,15 +197,16 @@ pub fn builtin_rand(args: &[Value], line: u32, rand_state: &mut u64) -> Result<V
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);
     let value = (*rand_state >> 33) % (n as u64);
-    Ok(Value::Number(value as f64))
+    Ok(Value::Int(value as i64))
 }
 
 pub fn builtin_len(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("len", args, 1, line)?;
     match &args[0] {
-        Value::Str(s) => Ok(Value::Number(s.chars().count() as f64)),
-        Value::Array(a) => Ok(Value::Number(a.len() as f64)),
-        Value::Dict(d) => Ok(Value::Number(d.len() as f64)),
+        // `len` returns a count — always an Int now.
+        Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+        Value::Array(a) => Ok(Value::Int(a.len() as i64)),
+        Value::Dict(d) => Ok(Value::Int(d.len() as i64)),
         _ => Err(error(line, format!("Can't get length of {}", args[0].type_name()))),
     }
 }
@@ -163,11 +246,34 @@ pub fn expect_number(
     line: u32,
 ) -> Result<f64, BopError> {
     match val {
+        Value::Int(n) => Ok(*n as f64),
         Value::Number(n) => Ok(*n),
         _ => Err(error(
             line,
             format!(
                 "`{}` expects a number, but got {}",
+                func_name,
+                val.type_name()
+            ),
+        )),
+    }
+}
+
+/// Like [`expect_number`] but strictly requires an `Int`. Used
+/// by builtins that have to produce exact integer counts
+/// (e.g. `range`, `rand`). `Number` inputs are rejected rather
+/// than silently truncated.
+pub fn expect_int(
+    func_name: &str,
+    val: &Value,
+    line: u32,
+) -> Result<i64, BopError> {
+    match val {
+        Value::Int(n) => Ok(*n),
+        _ => Err(error(
+            line,
+            format!(
+                "`{}` expects an int, but got {}",
                 func_name,
                 val.type_name()
             ),
@@ -262,7 +368,9 @@ pub fn make_try_call_ok(value: Value) -> Value {
 /// variant `try_call` returns on a caught non-fatal error.
 pub fn make_try_call_err(err: &BopError) -> Value {
     let message = Value::new_str(err.message.clone());
-    let line = Value::Number(err.line.unwrap_or(0) as f64);
+    // Line numbers are integers — use Int now that phase 6
+    // distinguishes them from floats.
+    let line = Value::Int(err.line.unwrap_or(0) as i64);
     let mut fields: Vec<(String, Value)> = Vec::with_capacity(2);
     fields.push((String::from("message"), message));
     fields.push((String::from("line"), line));

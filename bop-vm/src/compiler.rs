@@ -83,6 +83,7 @@ impl Compiler {
         // on programs that reuse literals heavily.
         if let Some(i) = self.chunk.constants.iter().position(|existing| {
             match (existing, &c) {
+                (Constant::Int(a), Constant::Int(b)) => a == b,
                 (Constant::Number(a), Constant::Number(b)) => a.to_bits() == b.to_bits(),
                 (Constant::Str(a), Constant::Str(b)) => a == b,
                 _ => false,
@@ -493,6 +494,10 @@ impl Compiler {
     fn compile_expr(&mut self, expr: &Expr) -> Result<(), BopError> {
         let line = expr.line;
         match &expr.kind {
+            ExprKind::Int(n) => {
+                let c = self.add_const(Constant::Int(*n));
+                self.emit(Instr::LoadConst(c), line);
+            }
             ExprKind::Number(n) => {
                 let c = self.add_const(Constant::Number(*n));
                 self.emit(Instr::LoadConst(c), line);
@@ -875,6 +880,7 @@ impl Compiler {
             BinOp::Sub => Instr::Sub,
             BinOp::Mul => Instr::Mul,
             BinOp::Div => Instr::Div,
+            BinOp::IntDiv => Instr::IntDiv,
             BinOp::Mod => Instr::Rem,
             BinOp::Eq => Instr::Eq,
             BinOp::NotEq => Instr::NotEq,

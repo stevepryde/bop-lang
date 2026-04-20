@@ -858,6 +858,79 @@ doit()"#,
         r#"enum Result { Ok(v), Err(e) }
 let r = try Result::Err("boom")"#,
     ),
+    // ─── Integer type (phase 6) ─────────────────────────────────
+    (
+        "int_literal_type",
+        r#"print(type(42))
+print(type(42.0))
+print(type(-3))"#,
+    ),
+    (
+        "int_arithmetic_stays_int",
+        r#"print(1 + 2)
+print(type(1 + 2))
+print(10 - 4)
+print(3 * 4)"#,
+    ),
+    (
+        "slash_returns_number_int_div_returns_int",
+        r#"print(10 / 3)
+print(type(10 / 3))
+print(10 // 3)
+print(type(10 // 3))
+print(-7 // 2)"#,
+    ),
+    (
+        "int_number_mixed_widens",
+        r#"print(1 + 2.0)
+print(type(1 + 2.0))
+print(3 * 0.5)"#,
+    ),
+    (
+        "int_number_equality_is_numeric",
+        r#"print(1 == 1.0)
+print(2 > 1.5)"#,
+    ),
+    (
+        "int_div_by_zero_errors",
+        "print(10 // 0)",
+    ),
+    (
+        "int_overflow_add_errors",
+        "print(9223372036854775807 + 1)",
+    ),
+    (
+        "int_builtin_and_float_builtin",
+        r#"print(int(3.7))
+print(type(int(3.7)))
+print(float(42))
+print(type(float(42)))"#,
+    ),
+    (
+        "len_returns_int",
+        r#"print(type(len("hi")))
+print(type(len([1, 2, 3])))"#,
+    ),
+    (
+        "range_int_elements",
+        r#"let r = range(3)
+print(type(r[0]))"#,
+    ),
+    (
+        "int_match_literal",
+        r#"let x = 2
+print(match x {
+    1 => "one",
+    2 => "two",
+    _ => "other",
+})"#,
+    ),
+    (
+        "repeat_accepts_int",
+        r#"let n = 0
+repeat 5 { n = n + 1 }
+print(n)"#,
+    ),
     // ─── `try_call` builtin ─────────────────────────────────────
     (
         "try_call_wraps_ok",

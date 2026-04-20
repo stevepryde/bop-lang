@@ -65,6 +65,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::Sub => "Sub".to_string(),
         Instr::Mul => "Mul".to_string(),
         Instr::Div => "Div".to_string(),
+        Instr::IntDiv => "IntDiv".to_string(),
         Instr::Rem => "Rem".to_string(),
         Instr::Eq => "Eq".to_string(),
         Instr::NotEq => "NotEq".to_string(),
@@ -200,6 +201,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
 
 fn render_constant(c: &Constant) -> String {
     match c {
+        Constant::Int(n) => format!("{}", n),
         Constant::Number(n) => {
             if *n == (*n as i64 as f64) && n.is_finite() {
                 format!("{}", *n as i64)

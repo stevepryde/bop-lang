@@ -1039,6 +1039,98 @@ print(match sum_until_err() {
     );
 }
 
+// ─── Integer type (phase 6) ───────────────────────────────────────
+
+#[test]
+fn int_literal_type_diff() {
+    assert_eq!(say("print(type(42))"), "int");
+}
+
+#[test]
+fn float_literal_type_diff() {
+    assert_eq!(say("print(type(42.0))"), "number");
+}
+
+#[test]
+fn int_arithmetic_stays_int_diff() {
+    assert_eq!(say("print(1 + 2)"), "3");
+    assert_eq!(say("print(type(1 + 2))"), "int");
+    assert_eq!(say("print(10 - 4)"), "6");
+    assert_eq!(say("print(3 * 4)"), "12");
+}
+
+#[test]
+fn int_div_slash_returns_number_diff() {
+    assert_eq!(say("print(type(10 / 3))"), "number");
+    assert_eq!(say("print(10 / 4)"), "2.5");
+}
+
+#[test]
+fn int_div_slash_slash_returns_int_diff() {
+    assert_eq!(say("print(type(10 // 3))"), "int");
+    assert_eq!(say("print(10 // 3)"), "3");
+    assert_eq!(say("print(-7 // 2)"), "-3");
+}
+
+#[test]
+fn int_mixed_widens_to_number_diff() {
+    assert_eq!(say("print(type(1 + 2.0))"), "number");
+    assert_eq!(say("print(1 + 2.0)"), "3");
+}
+
+#[test]
+fn int_number_equality_is_numeric_diff() {
+    assert_eq!(say("print(1 == 1.0)"), "true");
+    assert_eq!(say("print(2 > 1.5)"), "true");
+}
+
+#[test]
+fn int_div_by_zero_errors_diff() {
+    let msg = run_err("print(10 // 0)");
+    assert!(msg.contains("Division by zero"), "got: {}", msg);
+}
+
+#[test]
+fn int_overflow_errors_diff() {
+    let msg = run_err("print(9223372036854775807 + 1)");
+    assert!(msg.contains("Integer overflow"), "got: {}", msg);
+}
+
+#[test]
+fn len_returns_int_diff() {
+    assert_eq!(say(r#"print(type(len("hi")))"#), "int");
+}
+
+#[test]
+fn range_int_elements_diff() {
+    assert_eq!(say("print(type(range(3)[0]))"), "int");
+}
+
+#[test]
+fn int_builtin_diff() {
+    assert_eq!(say("print(int(3.7))"), "3");
+    assert_eq!(say("print(type(int(3.7)))"), "int");
+}
+
+#[test]
+fn float_builtin_diff() {
+    assert_eq!(say("print(float(42))"), "42");
+    assert_eq!(say("print(type(float(42)))"), "number");
+}
+
+#[test]
+fn int_match_literal_diff() {
+    assert_eq!(
+        say(r#"let x = 2
+print(match x {
+    1 => "one",
+    2 => "two",
+    _ => "other",
+})"#),
+        "two"
+    );
+}
+
 // ─── `try_call` builtin ───────────────────────────────────────────
 
 #[test]
@@ -1577,7 +1669,9 @@ fn builtin_int() {
 
 #[test]
 fn builtin_type() {
-    assert_eq!(say("print(type(42))"), "number");
+    // Phase 6 split numeric types.
+    assert_eq!(say("print(type(42))"), "int");
+    assert_eq!(say("print(type(42.0))"), "number");
     assert_eq!(say(r#"print(type("hi"))"#), "string");
     assert_eq!(say("print(type(true))"), "bool");
     assert_eq!(say("print(type(none))"), "none");
@@ -1710,9 +1804,11 @@ fn method_chain() {
 
 #[test]
 fn comments_in_code() {
+    // Phase 6: `#` is the line-comment leader; `//` is integer
+    // division.
     assert_eq!(
-        say(r#"// this is a comment
-let x = 42 // inline comment
+        say(r#"# this is a comment
+let x = 42 # inline comment
 print(x)"#),
         "42"
     );

@@ -589,7 +589,7 @@ they have their own error conventions.
   (`message: Str`, `line: Number`) are already set by
   `make_try_call_err`.
 
-### Phase 6 — Integer type
+### Phase 6 — Integer type ✅
 
 **Why sixth.** `f64`-only arithmetic bites real use cases: bit
 twiddling, array indices past 2^53, any domain where
@@ -625,6 +625,56 @@ No arbitrary precision. One integer type.
 **Risks.** Every single `f64` pattern match in `ops.rs`,
 `methods.rs`, `builtins.rs` needs an `Int` arm. Tedious; no
 architectural risk.
+
+**Delivered.**
+
+- `Value::Int(i64)` variant. Eq / Clone / Drop / Display /
+  `type_name` / `is_truthy` all extended.
+- Literals: integer-shaped tokens (`42`, `-3`, `0`) lex to
+  `Token::Int`; anything with a decimal (`42.0`, `3.14`) stays
+  `Token::Number`. Out-of-range integer literals surface as a
+  lex-time error rather than silently downgrading to float.
+- Lexer: new `Token::Int(i64)`, new `Token::SlashSlash`. **Line
+  comments switched from `//` to `#`** so `//` can claim the
+  integer-division slot — the only breaking-source-compat
+  change phase 6 lands.
+- Parser: `ExprKind::Int`, `LiteralPattern::Int`,
+  `BinOp::IntDiv`. Pattern `-42` is an `Int` literal (the
+  negation is checked so `-i64::MIN` as a literal errors
+  rather than wraps).
+- Ops: Int/Int arithmetic with `checked_add`/`sub`/`mul`/`rem`
+  — overflow → `BopError`. Cross-type Int/Number widens to
+  Number. `/` is always Number (Python rule); `//` is always
+  Int, truncating toward zero. `%` follows the same widening
+  rule. Comparisons are exact for Int/Int (sidestepping
+  f64 precision loss past 2^53) and widen for mixed pairs.
+  `neg(i64::MIN)` → `BopError`.
+- Indexing: both `arr[0]` (Int) and `arr[0.0]` (Number-via-
+  cast) keep working, so legacy code composes unchanged.
+- Builtins: `int()` returns Int (direct for Int input, `as
+  i64` for Number, integer-first parse for strings with a
+  float-then-truncate fallback). New `float()` companion for
+  the reverse coercion. `len` / `range` / `array.len` /
+  `array.index_of` / `string.len` / `string.index_of` /
+  `dict.len` all return Int. `type()` distinguishes
+  `"int"` vs `"number"`. `min` / `max` preserve the input
+  shape (Int/Int → Int, Number/Number → Number, mixed →
+  Number).
+- Walker: `eval_expr` handles `ExprKind::Int`; repeat
+  statement accepts both Int and Number; pattern-match
+  literal comparison does cross-type equality.
+- VM: new `Constant::Int(i64)`, `Instr::IntDiv`. Disasm
+  renders them. `MakeRepeatCount` accepts Int.
+- AOT: emits `Value::Int(42i64)` for Int literals,
+  `::bop::ops::int_div` for `//`. The `repeat` lowering
+  accepts both variants. `float` wired into the builtin
+  dispatcher.
+- **Tests**: 16 walker tests, 13 VM differential tests, 12
+  three-way corpus programs. Overflow, div-by-zero, cross-
+  type arithmetic, `//` truncation toward zero, pattern
+  matching, repeat with Int — all three engines agree. The
+  existing `comments_in_code` / `builtin_type` / snapshot
+  tests were updated to match the new token + type names.
 
 ### Phase 7 — Standard library (`bop-std`)
 

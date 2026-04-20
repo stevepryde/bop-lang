@@ -46,11 +46,13 @@ fn print_42_emits_on_print_call() {
     let out = compile("print(42)");
     // The body must format args via __bop_format_print and send to
     // ctx.host.on_print — mirroring the tree-walker's print impl.
+    // `42` is an int literal in phase 6, so the emitted value is
+    // `Value::Int`.
     contains_all(
         &out,
         &[
             "ctx.host.on_print(&__bop_format_print(",
-            "::bop::value::Value::Number(42",
+            "::bop::value::Value::Int(42",
         ],
     );
 }
@@ -61,7 +63,7 @@ fn let_emits_mut_binding() {
     contains_all(
         &out,
         &[
-            "let mut x: ::bop::value::Value = ::bop::value::Value::Number(10",
+            "let mut x: ::bop::value::Value = ::bop::value::Value::Int(10",
         ],
     );
 }

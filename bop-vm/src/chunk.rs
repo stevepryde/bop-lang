@@ -45,6 +45,10 @@ pub enum Instr {
     Sub,
     Mul,
     Div,
+    /// `//` — integer division (phase 6). Distinct from `Div`
+    /// because `/` always returns a `Number` while `//` always
+    /// returns an `Int`.
+    IntDiv,
     Rem,
     Eq,
     NotEq,
@@ -275,6 +279,10 @@ pub enum EnumConstructShape {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
+    /// Exact integer constant (phase 6). Lowered from
+    /// `ExprKind::Int` and materialised as `Value::Int` at
+    /// `LoadConst` time.
+    Int(i64),
     Number(f64),
     Str(String),
 }
