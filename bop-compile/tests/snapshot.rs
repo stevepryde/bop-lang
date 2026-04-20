@@ -10,7 +10,7 @@
 //! produce the tree-walker's output) lives in `tests/e2e.rs` behind
 //! `#[ignore]`.
 
-use bop_compile::{Options, transpile};
+use bop_compile::{Options, modules_from_map, transpile};
 
 fn compile(code: &str) -> String {
     transpile(code, &Options::default()).expect("transpile")
@@ -474,5 +474,119 @@ fn options_without_main_skip_entry_point() {
         out.contains("pub fn run<H: ::bop::BopHost>"),
         "expected `run` to still be emitted:\n{}",
         out
+    );
+}
+
+// ─── Cross-module type clashes (tech debt #3) ─────────────────────
+//
+// The AOT folds struct / enum decls into a single flat registry
+// (see `collect_type_registry` in `emit.rs`). Prior to the
+// tech-debt-3 refactor, two modules that declared types with the
+// same name would silently overwrite each other — the last one
+// seen won. Walker and VM raise on conflicting imports; now AOT
+// does too.
+
+fn compile_with_modules(
+    code: &str,
+    modules: &[(&str, &str)],
+) -> Result<String, ::bop::error::BopError> {
+    let resolver = modules_from_map(modules.iter().map(|(k, v)| (*k, *v)));
+    transpile(
+        code,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: false,
+            module_name: None,
+            module_resolver: Some(resolver),
+        },
+    )
+}
+
+#[test]
+fn same_named_struct_same_shape_across_modules_is_ok() {
+    // Two different modules both declare `struct Point { x, y }`.
+    // Same shape → idempotent, mirrors the walker's re-import
+    // behaviour.
+    let out = compile_with_modules(
+        "import geom_a\nimport geom_b",
+        &[
+            ("geom_a", "struct Point { x, y }"),
+            ("geom_b", "struct Point { x, y }"),
+        ],
+    );
+    assert!(out.is_ok(), "expected success, got {:?}", out.err());
+}
+
+#[test]
+fn same_named_struct_different_shape_across_modules_errors() {
+    // `Point` with different fields in two modules → transpile-time
+    // error pointing at both sites.
+    let err = compile_with_modules(
+        "import geom_a\nimport geom_b",
+        &[
+            ("geom_a", "struct Point { x, y }"),
+            ("geom_b", "struct Point { x, y, z }"),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("struct `Point`")
+            && err.message.contains("different fields")
+            && err.message.contains("geom_a")
+            && err.message.contains("geom_b"),
+        "got: {}",
+        err.message,
+    );
+}
+
+#[test]
+fn same_named_enum_different_variants_across_modules_errors() {
+    let err = compile_with_modules(
+        "import a\nimport b",
+        &[
+            ("a", "enum Tag { Red, Green }"),
+            ("b", "enum Tag { Red, Green, Blue }"),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("enum `Tag`")
+            && err.message.contains("different variants")
+            && err.message.contains("a")
+            && err.message.contains("b"),
+        "got: {}",
+        err.message,
+    );
+}
+
+#[test]
+fn same_named_enum_same_variants_across_modules_is_ok() {
+    let out = compile_with_modules(
+        "import a\nimport b",
+        &[
+            ("a", "enum Tag { Red, Green }"),
+            ("b", "enum Tag { Red, Green }"),
+        ],
+    );
+    assert!(out.is_ok(), "expected success, got {:?}", out.err());
+}
+
+#[test]
+fn clash_between_root_program_and_module_is_rejected() {
+    // Symmetric to module-vs-module: if the root program and a
+    // module both declare a type with the same name but different
+    // shape, AOT errors.
+    let err = compile_with_modules(
+        r#"struct Point { x, y }
+import geom"#,
+        &[("geom", "struct Point { x, y, z }")],
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("struct `Point`")
+            && err.message.contains("<root>"),
+        "expected message to name <root>, got: {}",
+        err.message,
     );
 }

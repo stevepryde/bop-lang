@@ -47,7 +47,7 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
     // surface before any Rust is written.
     let modules = build_module_graph(stmts, opts)?;
     let info = collect_fn_info(stmts);
-    let types = collect_type_registry(stmts, &modules);
+    let types = collect_type_registry(stmts, &modules)?;
     let mut emitter = Emitter::new(opts.clone(), info, modules, types);
     emitter.emit_program(stmts)?;
     Ok(emitter.finish())
@@ -57,11 +57,17 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
 //
 // User-defined types and methods are collected across the root
 // program and every transitively-imported module at pre-pass time,
-// then flattened into a single registry. The AOT assumes a type is
-// visible anywhere in the emitted Rust once it's declared
-// *somewhere* — a simplification over walker/VM's scoped imports,
-// but it keeps the generated code straightforward. Documented as a
-// known AOT divergence.
+// then flattened into a single registry. The AOT emits a single
+// Rust definition per type, so two modules that declare types with
+// the *same name and shape* fold together (matching the walker's
+// idempotent re-import behaviour), while *different-shape* clashes
+// surface as a transpile-time error pointing at both decl sites.
+//
+// Per-module scoping of types would require renaming every type
+// reference in the emitted Rust — possible, but much more
+// intrusive. Detecting clashes up front and erroring is the
+// walker's behaviour anyway, so matching it here keeps the two
+// engines consistent.
 
 pub(crate) struct TypeRegistry {
     /// Struct name → ordered field list.
@@ -84,37 +90,135 @@ pub(crate) struct MethodEntry {
     pub module_prefix: String,
 }
 
-fn collect_type_registry(root: &[Stmt], modules: &ModuleGraph) -> TypeRegistry {
+/// Where a struct / enum was first declared — threaded through
+/// the registry so clash errors can point at the *original*
+/// declaration site. Path is the dot-joined module name, or
+/// `<root>` for the top-level program.
+#[derive(Clone)]
+struct DeclOrigin {
+    path: String,
+    /// Line in that module's source. Matches the usual
+    /// 1-indexed Bop line numbering.
+    line: u32,
+}
+
+fn collect_type_registry(
+    root: &[Stmt],
+    modules: &ModuleGraph,
+) -> Result<TypeRegistry, BopError> {
     let mut reg = TypeRegistry {
         structs: HashMap::new(),
         enums: HashMap::new(),
         methods: HashMap::new(),
     };
+    // Parallel "where was this first declared?" tables so
+    // clash diagnostics can name both sites.
+    let mut struct_origins: HashMap<String, DeclOrigin> = HashMap::new();
+    let mut enum_origins: HashMap<String, DeclOrigin> = HashMap::new();
+
     // Root program contributes with an empty prefix.
-    collect_types_from_stmts(root, "", &mut reg);
+    collect_types_from_stmts(
+        root,
+        "",
+        "<root>",
+        &mut reg,
+        &mut struct_origins,
+        &mut enum_origins,
+    )?;
     // Then every module's AST. Module prefix matches the emitter's
-    // slug scheme (dots → underscores, trailing `__`).
+    // slug scheme (dots → underscores, trailing `__`). The `name`
+    // string (pre-slug) is what shows up in error messages so users
+    // can find the file they wrote.
     for name in &modules.order {
         if let Some(entry) = modules.modules.get(name) {
             let prefix = format!("{}__", module_slug(name));
-            collect_types_from_stmts(&entry.ast, &prefix, &mut reg);
+            collect_types_from_stmts(
+                &entry.ast,
+                &prefix,
+                name,
+                &mut reg,
+                &mut struct_origins,
+                &mut enum_origins,
+            )?;
         }
     }
-    reg
+    Ok(reg)
 }
 
-fn collect_types_from_stmts(stmts: &[Stmt], prefix: &str, reg: &mut TypeRegistry) {
+fn collect_types_from_stmts(
+    stmts: &[Stmt],
+    prefix: &str,
+    module_path: &str,
+    reg: &mut TypeRegistry,
+    struct_origins: &mut HashMap<String, DeclOrigin>,
+    enum_origins: &mut HashMap<String, DeclOrigin>,
+) -> Result<(), BopError> {
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::StructDecl { name, fields } => {
+                if let Some(existing) = reg.structs.get(name) {
+                    // Same shape is fine — mirrors the walker's
+                    // idempotent-on-match rule for re-imports of
+                    // the same module via different paths.
+                    if existing == fields {
+                        continue;
+                    }
+                    let origin = struct_origins
+                        .get(name)
+                        .cloned()
+                        .unwrap_or(DeclOrigin {
+                            path: "<unknown>".to_string(),
+                            line: 0,
+                        });
+                    return Err(BopError::runtime(
+                        format!(
+                            "struct `{}` declared with different fields in `{}` (line {}) and `{}` (line {})",
+                            name, origin.path, origin.line, module_path, stmt.line
+                        ),
+                        stmt.line,
+                    ));
+                }
                 reg.structs.insert(name.clone(), fields.clone());
+                struct_origins.insert(
+                    name.clone(),
+                    DeclOrigin {
+                        path: module_path.to_string(),
+                        line: stmt.line,
+                    },
+                );
             }
             StmtKind::EnumDecl { name, variants } => {
                 let mut v_map = HashMap::new();
                 for v in variants {
                     v_map.insert(v.name.clone(), v.kind.clone());
                 }
+                if let Some(existing) = reg.enums.get(name) {
+                    if existing == &v_map {
+                        continue;
+                    }
+                    let origin = enum_origins
+                        .get(name)
+                        .cloned()
+                        .unwrap_or(DeclOrigin {
+                            path: "<unknown>".to_string(),
+                            line: 0,
+                        });
+                    return Err(BopError::runtime(
+                        format!(
+                            "enum `{}` declared with different variants in `{}` (line {}) and `{}` (line {})",
+                            name, origin.path, origin.line, module_path, stmt.line
+                        ),
+                        stmt.line,
+                    ));
+                }
                 reg.enums.insert(name.clone(), v_map);
+                enum_origins.insert(
+                    name.clone(),
+                    DeclOrigin {
+                        path: module_path.to_string(),
+                        line: stmt.line,
+                    },
+                );
             }
             StmtKind::MethodDecl {
                 type_name,
@@ -122,6 +226,10 @@ fn collect_types_from_stmts(stmts: &[Stmt], prefix: &str, reg: &mut TypeRegistry
                 params,
                 body,
             } => {
+                // Methods stay last-wins to match the walker,
+                // which uses `slot.insert` in its import path
+                // without a shape check. A conflicting method
+                // overwrite here is the same behaviour.
                 reg.methods.insert(
                     (type_name.clone(), method_name.clone()),
                     MethodEntry {
@@ -139,6 +247,7 @@ fn collect_types_from_stmts(stmts: &[Stmt], prefix: &str, reg: &mut TypeRegistry
             _ => {}
         }
     }
+    Ok(())
 }
 
 // ─── Module graph ──────────────────────────────────────────────────

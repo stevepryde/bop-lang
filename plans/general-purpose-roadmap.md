@@ -910,14 +910,22 @@ shipping, but each one hurts maintenance or future work.
   `Evaluator::pending_try_return` — moving it onto the
   error itself would cycle `bop::error` ↔ `bop::value`,
   which isn't worth it.
-- **AOT `TypeRegistry` is flat, not module-scoped.** The
-  transpiler collects every struct / enum / method decl from
-  all modules into one `TypeRegistry`. Walker and VM scope
-  types per evaluator / VM so two modules declaring
-  `enum Tag { … }` are isolated; AOT would silently pick
-  whichever module came last. Documented as a known AOT
-  divergence; matters only for large multi-module programs
-  that reuse type names across modules.
+- ~~**AOT `TypeRegistry` is flat, not module-scoped.**~~ ✅
+  Fixed by detecting clashes at transpile time instead of
+  scoping. Walker rejects cross-module type redeclarations
+  with different shapes; AOT used to silently pick whichever
+  module was seen last. `collect_type_registry` now returns
+  `Result<TypeRegistry, BopError>` and raises when two
+  modules declare a struct/enum with the same name but
+  different fields / variants. Same-shape redeclarations
+  stay idempotent (mirrors the walker's re-import behaviour
+  for a module imported via two paths). Error message names
+  both declaration sites with line numbers. Full module
+  scoping would have required renaming every type reference
+  in the emitted Rust — much more invasive for no semantic
+  win, since walker and VM both reject clashes anyway.
+  Methods remain last-wins, matching the walker's
+  permissive method-import path.
 - **Error paths have subtly different wording across engines.**
   Each engine has its own copy of `Variable X not found` etc.
   Message text is usually identical but could drift. A shared
