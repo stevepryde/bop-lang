@@ -708,6 +708,17 @@ impl Compiler {
             ExprKind::Match { scrutinee, arms } => {
                 self.compile_match(scrutinee, arms, line)?;
             }
+
+            ExprKind::Try(inner) => {
+                // Compile the scrutinee, then a single `TryUnwrap`
+                // opcode inspects the result variant: unwraps
+                // `Ok`, fast-returns on `Err`, or raises on any
+                // other shape. Bundling the logic into one
+                // instruction keeps the dispatch predictable and
+                // lines up with walker / AOT behaviour.
+                self.compile_expr(inner)?;
+                self.emit(Instr::TryUnwrap, line);
+            }
         }
         Ok(())
     }

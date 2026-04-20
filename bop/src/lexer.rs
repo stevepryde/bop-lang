@@ -36,6 +36,7 @@ pub enum Token {
     Struct,
     Enum,
     Match,
+    Try,
 
     // Operators
     Plus,
@@ -573,6 +574,7 @@ impl Lexer {
             "struct" => Token::Struct,
             "enum" => Token::Enum,
             "match" => Token::Match,
+            "try" => Token::Try,
             "true" => Token::True,
             "false" => Token::False,
             "none" => Token::None,

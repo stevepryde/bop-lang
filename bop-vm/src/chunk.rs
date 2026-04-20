@@ -210,6 +210,17 @@ pub enum Instr {
     /// no arm that applies is observable as a runtime error.
     MatchExhausted,
 
+    /// `try <expr>` handler. Pops the top value and inspects it:
+    /// - `Ok(v)` (single tuple payload)  → push `v`, fall through
+    /// - `Ok`    (unit variant)          → push `none`, fall through
+    /// - `Err(...)`                       → act like `Return` from
+    ///   the current frame, carrying the whole `Err` variant as
+    ///   the returned value. Raises at the engine boundary if
+    ///   the current frame is the top-level program (no fn to
+    ///   return from).
+    /// - any other shape → raise a runtime error.
+    TryUnwrap,
+
     // ─── Termination ──────────────────────────────────────────────
     /// End the current chunk (top-level program only).
     Halt,

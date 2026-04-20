@@ -667,6 +667,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 return Err(error(line, "No match arm matched the scrutinee"));
             }
 
+            // ─── try ─────────────────────────────────────────────
+            Instr::TryUnwrap => {
+                return self.try_unwrap(line);
+            }
+
             // ─── Termination ──────────────────────────────────────
             Instr::Halt => return Ok(Next::Halt),
         }
@@ -1310,6 +1315,73 @@ impl<'h, H: BopHost> Vm<'h, H> {
             self.jump(on_fail);
         }
         Ok(())
+    }
+
+    /// Implement `try`: pop the top value and inspect the
+    /// `Ok` / `Err` shape.
+    ///
+    /// - `Ok(v)` (single tuple payload) / `Ok` (unit) → push the
+    ///   unwrapped value (`v` or `Value::None`) and continue.
+    /// - `Err(...)` → act like `Return` from the current frame,
+    ///   carrying the whole `Err` variant as the returned value.
+    ///   If the current frame is the top-level program, raise a
+    ///   runtime error instead (there's no fn to return from).
+    /// - Anything else → runtime error.
+    ///
+    /// Mirrors the walker's `eval_try` so all three engines agree
+    /// on the same shape recognition rules.
+    fn try_unwrap(&mut self, line: u32) -> Result<Next, BopError> {
+        let value = self.pop_value(line)?;
+        match &value {
+            Value::EnumVariant(ev) if ev.variant() == "Ok" => {
+                use bop::value::EnumPayload;
+                let payload = match ev.payload() {
+                    EnumPayload::Tuple(items) if items.len() == 1 => items[0].clone(),
+                    EnumPayload::Unit => Value::None,
+                    EnumPayload::Tuple(items) => {
+                        return Err(error(
+                            line,
+                            format!(
+                                "try: Ok variant must carry exactly one value, got {}",
+                                items.len()
+                            ),
+                        ));
+                    }
+                    EnumPayload::Struct(_) => {
+                        return Err(error(
+                            line,
+                            "try: Ok variant must carry a single positional value, not named fields",
+                        ));
+                    }
+                };
+                self.push_value(payload);
+                Ok(Next::Continue)
+            }
+            Value::EnumVariant(ev) if ev.variant() == "Err" => {
+                let current_is_fn = self
+                    .frames
+                    .last()
+                    .map(|f| f.is_function)
+                    .unwrap_or(false);
+                if !current_is_fn {
+                    return Err(error_with_hint(
+                        line,
+                        "try encountered Err at top-level",
+                        "Wrap the calling code in a fn, or use `match` to handle both arms explicitly.",
+                    ));
+                }
+                // Fast-return with the Err value: identical path
+                // to an ordinary `return err`.
+                self.do_return(value)
+            }
+            other => Err(error(
+                line,
+                format!(
+                    "try expected a Result-shaped value (Ok/Err variant), got {}",
+                    other.type_name()
+                ),
+            )),
+        }
     }
 
     fn define_fn(&mut self, idx: FnIdx) {

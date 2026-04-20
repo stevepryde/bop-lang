@@ -403,7 +403,7 @@ pattern, and `try_call`'s output is pattern-matched.
   "no-arm-matched" runtime error. All three engines agree on
   every program.
 
-### Phase 5 — Error handling (Result + `try`)
+### Phase 5 — Error handling (Result + `try`) — partial ✅
 
 **Why fifth.** Programs past a few hundred lines need a way for
 libraries to signal recoverable failures without either aborting
@@ -512,6 +512,56 @@ they have their own error conventions.
   the cost of polluting the global namespace. Lean
   default-imported like Rust's prelude; embedders who want it
   strict can skip loading `bop-std`.
+
+**Delivered so far (`try` operator only).**
+
+- Lexer gains the `try` keyword; parser grows
+  `ExprKind::Try(Box<Expr>)` as a prefix expression that binds
+  tighter than binary ops and looser than postfix operators
+  (mirrors Rust's `?`).
+- **Shape-based recognition**: `try` accepts any enum value
+  whose variant is named `Ok` or `Err`. `Result` itself lives
+  in `bop-std` (phase 7); user code declares its own
+  `enum Result { Ok(v), Err(e) }` (or any two-variant enum
+  following the same naming) until the stdlib lands.
+- Walker: `eval_try` unwraps `Ok(v)` to `v`, raises for
+  malformed `Ok`/`Err`-on-non-Result values, and uses a
+  sentinel `BopError` + `pending_try_return` field on the
+  evaluator to carry the `Err` variant back up to the
+  enclosing `call_bop_fn`, which converts it to a regular
+  `Signal::Return`. Top-level `try` on `Err`
+  (`call_depth == 0`) surfaces as a real runtime error with a
+  friendly hint — the roadmap's "top-level `try` on `Err` is
+  an error" rule is honoured.
+- VM: new `TryUnwrap` instruction. Pops the candidate,
+  unwraps `Ok` to the stack, fast-returns on `Err` via the
+  existing `do_return` path, raises at the top-level frame,
+  and bails on non-Result-shaped inputs.
+- AOT: `try <expr>` emits a Rust `match` over the `Value`'s
+  `EnumVariant` / `EnumPayload`. An emitter-state flag
+  (`in_top_level`) picks between `return Ok(err_value)`
+  (inside user fns / lambdas, which return
+  `Result<Value, BopError>`) and `return Err(BopError::…)`
+  (inside `run_program`, which returns `Result<(), BopError>`
+  — no way to thread a value through). Closures explicitly
+  reset the flag so a lambda inside `run_program` still
+  routes through the fn-level path.
+- **Tests**: 10 walker tests, 8 VM differential tests, and 8
+  three-way corpus programs covering unwrap, Err propagation,
+  nested-fn chaining, unit-variant Ok, lambda short-circuit,
+  for-loop short-circuit, top-level-Err error, and
+  non-Result-shape error. All three engines agree on every
+  program.
+
+**Still pending.**
+
+- `Result` + helper fns in `bop-std` (deferred to phase 7 per
+  the plan — the std library crate lands as a single batch).
+- `try_call(f)` builtin (Lua-style `pcall` with `is_fatal`
+  honoured). Not blocking for most use cases; can follow.
+- `RuntimeError` struct for `try_call`'s `Err` payload.
+- `BopError::is_fatal` flag wired into the resource-limit
+  paths so `try_call` can't swallow them.
 
 ### Phase 6 — Integer type
 

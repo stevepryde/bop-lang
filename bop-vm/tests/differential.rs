@@ -911,6 +911,134 @@ print(n)"#,
     assert!(msg.contains("not found") || msg.contains("Variable"), "got: {}", msg);
 }
 
+// ─── `try` operator ───────────────────────────────────────────────
+
+#[test]
+fn try_unwraps_ok_diff() {
+    assert_eq!(
+        say(r#"enum Result { Ok(v), Err(e) }
+fn doit() {
+    let v = try Result::Ok(42)
+    return v
+}
+print(doit())"#),
+        "42"
+    );
+}
+
+#[test]
+fn try_propagates_err_diff() {
+    assert_eq!(
+        say(r#"enum Result { Ok(v), Err(e) }
+fn doit() {
+    let v = try Result::Err("boom")
+    return Result::Ok(v)
+}
+let r = doit()
+print(match r {
+    Result::Ok(v) => v,
+    Result::Err(e) => e,
+})"#),
+        "boom"
+    );
+}
+
+#[test]
+fn try_chains_through_nested_calls_diff() {
+    assert_eq!(
+        say(r#"enum Result { Ok(v), Err(e) }
+fn leaf() { return Result::Err("leaf-err") }
+fn middle() {
+    let v = try leaf()
+    return Result::Ok(v + 1)
+}
+fn top() {
+    let v = try middle()
+    return Result::Ok(v * 2)
+}
+print(match top() {
+    Result::Ok(v) => v,
+    Result::Err(e) => e,
+})"#),
+        "leaf-err"
+    );
+}
+
+#[test]
+fn try_ok_unit_variant_diff() {
+    assert_eq!(
+        say(r#"enum Result { Ok, Err(e) }
+fn doit() {
+    let v = try Result::Ok
+    return type(v)
+}
+print(doit())"#),
+        "none"
+    );
+}
+
+#[test]
+fn try_inside_lambda_returns_from_lambda_diff() {
+    assert_eq!(
+        say(r#"enum Result { Ok(v), Err(e) }
+let f = fn() {
+    let v = try Result::Err("inner")
+    return Result::Ok(v)
+}
+let r = f()
+print(match r {
+    Result::Ok(_) => "ok",
+    Result::Err(e) => e,
+})"#),
+        "inner"
+    );
+}
+
+#[test]
+fn try_on_non_result_errors_diff() {
+    let msg = run_err(
+        r#"fn doit() {
+    let v = try 42
+    return v
+}
+doit()"#,
+    );
+    assert!(msg.contains("Result-shaped"), "got: {}", msg);
+}
+
+#[test]
+fn try_at_top_level_on_err_errors_diff() {
+    let msg = run_err(
+        r#"enum Result { Ok(v), Err(e) }
+let r = try Result::Err("boom")"#,
+    );
+    assert!(msg.contains("top-level"), "got: {}", msg);
+}
+
+#[test]
+fn try_in_for_loop_short_circuits_diff() {
+    assert_eq!(
+        say(r#"enum Result { Ok(v), Err(e) }
+fn lookup(i) {
+    if i == 2 { return Result::Err("stop") }
+    return Result::Ok(i * 10)
+}
+fn sum_until_err() {
+    let total = 0
+    for i in range(5) {
+        let v = try lookup(i)
+        total = total + v
+    }
+    return Result::Ok(total)
+}
+print(match sum_until_err() {
+    Result::Ok(v) => v,
+    Result::Err(e) => e,
+})"#),
+        "stop"
+    );
+}
+
 // ─── Modules / import ─────────────────────────────────────────────
 
 #[test]

@@ -87,6 +87,25 @@ pub enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+
+    /// `try <expr>` — inspect a Result-shaped enum variant.
+    /// If `<expr>` evaluates to an `Ok(value)`-shaped variant,
+    /// unwrap to `value`. If it evaluates to an `Err(...)`-shaped
+    /// variant, short-circuit the enclosing function's return
+    /// with that value (same mechanism as a `return` statement).
+    /// At top-level scope (no enclosing fn) or on a non-Result
+    /// scrutinee, `try` raises a runtime error.
+    ///
+    /// Desugars roughly to the match:
+    /// ```text
+    /// match <expr> {
+    ///     Ok(v) => v,
+    ///     Err(_) => return <expr>,
+    /// }
+    /// ```
+    /// but is its own AST node so each engine can compile it
+    /// directly without paying the pattern-construction cost.
+    Try(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -969,6 +988,19 @@ impl Parser {
                     line,
                 })
             }
+            Token::Try => {
+                // `try <expr>` binds tighter than binary ops but
+                // looser than postfix (calls, methods, indexing),
+                // mirroring Rust's `?`. Recursing into
+                // `parse_unary` lets `try try foo()` parse as
+                // `try (try foo())` without a special case.
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr {
+                    kind: ExprKind::Try(Box::new(expr)),
+                    line,
+                })
+            }
             _ => self.parse_postfix(),
         };
         self.leave();
@@ -1679,6 +1711,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Struct => "struct",
         Token::Enum => "enum",
         Token::Match => "match",
+        Token::Try => "try",
         Token::ColonColon => "::",
         Token::DotDot => "..",
         Token::FatArrow => "=>",

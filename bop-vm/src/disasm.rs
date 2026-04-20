@@ -192,6 +192,8 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         }
         Instr::MatchExhausted => "MatchExhausted".to_string(),
 
+        Instr::TryUnwrap => "TryUnwrap".to_string(),
+
         Instr::Halt => "Halt".to_string(),
     }
 }

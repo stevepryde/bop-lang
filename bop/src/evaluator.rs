@@ -22,7 +22,7 @@ use crate::lexer::StringPart;
 use crate::methods;
 use crate::ops;
 use crate::parser::*;
-use crate::value::{BopFn, FnBody, Value};
+use crate::value::{BopFn, EnumPayload, FnBody, Value};
 use crate::{BopHost, BopLimits};
 
 /// What the tree-walker stores for each imported module once it
@@ -48,6 +48,13 @@ struct ModuleBindings {
 type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
 
 const MAX_CALL_DEPTH: usize = 64;
+
+/// Sentinel message carried by the `BopError` that `try` raises
+/// when it wants the enclosing fn to early-return with a stored
+/// value. The fn-call wrapper (`call_bop_fn`) swaps the error
+/// for a `Signal::Return` with `pending_try_return`'s value;
+/// outside that wrapper the sentinel never leaks to user code.
+pub(crate) const TRY_RETURN_SENTINEL: &str = "__bop_try_return_signal__";
 
 // ─── Control flow signals ──────────────────────────────────────────────────
 
@@ -96,6 +103,14 @@ pub struct Evaluator<'h, H: BopHost> {
     /// the same level is a no-op — matches Python's `import x;
     /// import x` behaviour.
     imported_here: alloc_import::collections::BTreeSet<String>,
+    /// Set by `try` when it sees an `Err(...)` variant and wants
+    /// the enclosing fn to early-return with that value. The
+    /// expression that raised stuffs the value here and returns
+    /// a sentinel `BopError`; the fn-call wrapper detects the
+    /// sentinel, takes the value, and converts it to
+    /// `Signal::Return`. Always `None` outside the narrow
+    /// unwinding window.
+    pending_try_return: Option<Value>,
 }
 
 impl<'h, H: BopHost> Evaluator<'h, H> {
@@ -114,6 +129,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             rand_state: 0,
             imports: Rc::new(RefCell::new(alloc_import::collections::BTreeMap::new())),
             imported_here: alloc_import::collections::BTreeSet::new(),
+            pending_try_return: None,
         }
     }
 
@@ -139,6 +155,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             rand_state: 0,
             imports,
             imported_here: alloc_import::collections::BTreeSet::new(),
+            pending_try_return: None,
         }
     }
 
@@ -1179,6 +1196,71 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
 
             ExprKind::Match { scrutinee, arms } => self.eval_match(scrutinee, arms, expr.line),
+
+            ExprKind::Try(inner) => self.eval_try(inner, expr.line),
+        }
+    }
+
+    /// `try` expression handler. Evaluates the inner expression,
+    /// matches the conventional Result-shape (any enum variant
+    /// named `Ok` or `Err`), and either unwraps `Ok` or stashes
+    /// the `Err` value into `pending_try_return` so the enclosing
+    /// `call_bop_fn` can convert it to `Signal::Return`.
+    ///
+    /// Top-level `try` on `Err` (call_depth == 0) surfaces as a
+    /// real runtime error — there's no enclosing fn to return
+    /// from, and the roadmap explicitly rejects the idea of
+    /// swallowing it silently.
+    fn eval_try(&mut self, inner: &Expr, line: u32) -> Result<Value, BopError> {
+        let value = self.eval_expr(inner)?;
+        // An earlier `try` in `inner` might have already fired —
+        // e.g. `try try foo()` — in which case we just keep
+        // propagating without poking at the unwound value.
+        if self.pending_try_return.is_some() {
+            return Ok(Value::None);
+        }
+        match &value {
+            Value::EnumVariant(ev) if ev.variant() == "Ok" => {
+                // Extract the single payload for `Ok(v)`, or fall
+                // back to `none` for `Ok` used as a unit variant.
+                match ev.payload() {
+                    EnumPayload::Tuple(items) if items.len() == 1 => Ok(items[0].clone()),
+                    EnumPayload::Unit => Ok(Value::None),
+                    EnumPayload::Tuple(items) => Err(error(
+                        line,
+                        format!(
+                            "try: Ok variant must carry exactly one value, got {}",
+                            items.len()
+                        ),
+                    )),
+                    EnumPayload::Struct(_) => Err(error(
+                        line,
+                        "try: Ok variant must carry a single positional value, not named fields",
+                    )),
+                }
+            }
+            Value::EnumVariant(ev) if ev.variant() == "Err" => {
+                if self.call_depth == 0 {
+                    return Err(error_with_hint(
+                        line,
+                        "try encountered Err at top-level",
+                        "Wrap the calling code in a fn, or use `match` to handle both arms explicitly.",
+                    ));
+                }
+                self.pending_try_return = Some(value);
+                // Sentinel error whose only job is to unwind up
+                // to the nearest `call_bop_fn`, which converts it
+                // back into a `Signal::Return`. The message is
+                // unused — nothing should observe it.
+                Err(error(line, TRY_RETURN_SENTINEL))
+            }
+            other => Err(error(
+                line,
+                format!(
+                    "try expected a Result-shaped value (Ok/Err variant), got {}",
+                    other.type_name()
+                ),
+            )),
         }
     }
 
@@ -1363,11 +1445,27 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         self.scopes = saved_scopes;
         self.call_depth -= 1;
 
-        match result? {
-            Signal::Return(val) => Ok(val),
-            Signal::Break => Err(error(line, "break used outside of a loop")),
-            Signal::Continue => Err(error(line, "continue used outside of a loop")),
-            Signal::None => Ok(Value::None),
+        // `try` unwinds as a sentinel `BopError`; the call
+        // boundary trades that error for the stashed value and
+        // treats it as a normal return. Any other error
+        // propagates as usual. Always clears
+        // `pending_try_return` so a leftover can't contaminate
+        // a later call.
+        match result {
+            Ok(sig) => match sig {
+                Signal::Return(val) => Ok(val),
+                Signal::Break => Err(error(line, "break used outside of a loop")),
+                Signal::Continue => Err(error(line, "continue used outside of a loop")),
+                Signal::None => Ok(Value::None),
+            },
+            Err(err) => {
+                if err.message == TRY_RETURN_SENTINEL {
+                    if let Some(val) = self.pending_try_return.take() {
+                        return Ok(val);
+                    }
+                }
+                Err(err)
+            }
         }
     }
 

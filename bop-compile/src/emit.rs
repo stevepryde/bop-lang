@@ -427,6 +427,15 @@ struct Emitter {
     /// a fresh set on entry and pops on exit. User-fn and
     /// lambda parameters are inserted into the freshly-pushed set.
     scope_stack: Vec<HashSet<String>>,
+    /// True while emitting the body of `run_program` (the Rust fn
+    /// that returns `Result<(), BopError>`). User fns and lambdas
+    /// toggle this off for the duration of their body — inside
+    /// them, the enclosing Rust fn returns `Result<Value,
+    /// BopError>`, so `return Ok(value)` is the Bop-level return
+    /// path. Read by `try`'s codegen to decide whether an `Err`
+    /// arm should propagate via `return Ok(...)` (fn body) or
+    /// raise a real error (top-level program).
+    in_top_level: bool,
 }
 
 impl Emitter {
@@ -447,6 +456,7 @@ impl Emitter {
             module_prefix: String::new(),
             imported_in_scope: HashSet::new(),
             scope_stack: Vec::new(),
+            in_top_level: false,
         }
     }
 
@@ -964,6 +974,11 @@ impl Emitter {
         writeln!(self.out, "fn run_program(ctx: &mut Ctx<'_>) -> Result<(), ::bop::error::BopError> {{").unwrap();
         self.indent = 1;
         self.tmp_counter = 0;
+        // Mark the body as top-level so `try` lowers `Err` to a
+        // real runtime error rather than an impossible
+        // `return Ok(value)` (run_program returns `()`).
+        let saved_top_level = self.in_top_level;
+        self.in_top_level = true;
         self.emit_tick(0);
         self.push_scope();
         // Top-level fn decls were already emitted at module scope;
@@ -980,6 +995,7 @@ impl Emitter {
         self.line("Ok(())");
         self.indent = 0;
         self.out.push_str("}\n\n");
+        self.in_top_level = saved_top_level;
         Ok(())
     }
 
@@ -1356,6 +1372,12 @@ impl Emitter {
         self.open_block(&sig);
         let saved_tmp = self.tmp_counter;
         self.tmp_counter = 0;
+        // Inside a user fn: the enclosing Rust fn returns
+        // `Result<Value, BopError>`, so a Bop-level return from
+        // `try` on `Err` is `return Ok(err_value)` rather than a
+        // real error.
+        let saved_top_level = self.in_top_level;
+        self.in_top_level = false;
         // Function-entry checkpoint — matches the plan's "step-count
         // checks at loop backedges / function entry". No-op outside
         // sandbox mode.
@@ -1376,6 +1398,7 @@ impl Emitter {
         // the warning for bodies that always return explicitly.
         self.line("Ok(::bop::value::Value::None)");
         self.tmp_counter = saved_tmp;
+        self.in_top_level = saved_top_level;
         self.close_block();
         Ok(())
     }
@@ -1506,8 +1529,79 @@ impl Emitter {
             }
 
             ExprKind::Match { scrutinee, arms } => self.match_src(scrutinee, arms, line)?,
+
+            ExprKind::Try(inner) => self.try_src(inner, line)?,
         };
         Ok(s)
+    }
+
+    /// Lower `try <expr>` to a Rust block expression. The shape
+    /// matches the walker / VM: inspect the variant name, unwrap
+    /// `Ok`, short-circuit on `Err`, raise on anything else.
+    ///
+    /// `Err` short-circuits differently depending on whether
+    /// we're inside a user fn (in which case the enclosing Rust
+    /// fn returns `Result<Value, BopError>` and `return Ok(v)`
+    /// propagates the Err variant as that fn's result) or
+    /// top-level `run_program` (which returns `Result<(),
+    /// BopError>` — no way to thread a value through, so we raise
+    /// a real runtime error instead, matching the walker's
+    /// "try at top-level" rule).
+    fn try_src(&mut self, inner: &Expr, line: u32) -> Result<String, BopError> {
+        let inner_src = self.expr_src(inner)?;
+        let id = self.tmp_counter;
+        self.tmp_counter += 1;
+        let v_name = format!("__try_v_{}", id);
+        let err_arm = if self.in_top_level {
+            format!(
+                "return ::std::result::Result::Err(::bop::error::BopError::runtime(\"try encountered Err at top-level\", {}));",
+                line
+            )
+        } else {
+            // Inside a user fn: a Bop-level `return err` is
+            // spelled `return Ok(err_value)` at the Rust level.
+            format!("return ::std::result::Result::Ok({}.clone());", v_name)
+        };
+        // We construct a block that:
+        //   1. evaluates the scrutinee once into a local;
+        //   2. inspects its variant;
+        //   3. either yields the unwrapped value, returns early,
+        //      or raises.
+        //
+        // The block's type is `::bop::value::Value` — the `Ok`
+        // arm's unwrapped payload, or one of two `!`-typed
+        // returns. `#[allow(unreachable_code)]` guards the
+        // pattern where the Rust compiler can prove the block
+        // always returns (e.g. a bare `try` at the end of a fn).
+        Ok(format!(
+            "{{\n    \
+             let {v}: ::bop::value::Value = {inner};\n    \
+             match &{v} {{\n        \
+                 ::bop::value::Value::EnumVariant(ev) if ev.variant() == \"Ok\" => {{\n            \
+                     match ev.payload() {{\n                \
+                         ::bop::value::EnumPayload::Tuple(items) if items.len() == 1 => items[0].clone(),\n                \
+                         ::bop::value::EnumPayload::Unit => ::bop::value::Value::None,\n                \
+                         ::bop::value::EnumPayload::Tuple(items) => {{\n                    \
+                             return ::std::result::Result::Err(::bop::error::BopError::runtime(format!(\"try: Ok variant must carry exactly one value, got {{}}\", items.len()), {line}));\n                \
+                         }}\n                \
+                         ::bop::value::EnumPayload::Struct(_) => {{\n                    \
+                             return ::std::result::Result::Err(::bop::error::BopError::runtime(\"try: Ok variant must carry a single positional value, not named fields\", {line}));\n                \
+                         }}\n            \
+                     }}\n        \
+                 }}\n        \
+                 ::bop::value::Value::EnumVariant(ev) if ev.variant() == \"Err\" => {{\n            \
+                     {err_arm}\n        \
+                 }}\n        \
+                 other => {{\n            \
+                     return ::std::result::Result::Err(::bop::error::BopError::runtime(format!(\"try expected a Result-shaped value (Ok/Err variant), got {{}}\", other.type_name()), {line}));\n        \
+                 }}\n    \
+             }}\n\
+             }}",
+            v = v_name,
+            inner = inner_src,
+            err_arm = err_arm,
+            line = line,
+        ))
     }
 
     /// Lower a `match` expression to a Rust block expression.
@@ -2257,18 +2351,25 @@ impl Emitter {
 
         // Emit body into a side buffer so we can splice it into
         // the closure literal without disturbing indentation or
-        // the tmp counter.
+        // the tmp counter. The closure expands to a Rust move
+        // closure that returns `Result<Value, BopError>`, so
+        // `try` inside the body propagates via `return Ok(...)`
+        // like any other user fn — never via the top-level
+        // raise path.
         let saved_out = core::mem::take(&mut self.out);
         let saved_indent = self.indent;
         let saved_tmp = self.tmp_counter;
+        let saved_top_level = self.in_top_level;
         self.indent = 0;
         self.tmp_counter = 0;
+        self.in_top_level = false;
         for s in body {
             self.emit_stmt(s)?;
         }
         let body_src = core::mem::replace(&mut self.out, saved_out);
         self.indent = saved_indent;
         self.tmp_counter = saved_tmp;
+        self.in_top_level = saved_top_level;
 
         self.pop_scope();
         self.scope_stack = saved_scope_stack;
@@ -2777,12 +2878,9 @@ fn scan_free_vars_expr(
             }
         }
         ExprKind::Match { scrutinee, arms } => {
-            // AOT rejects match at emit time (see `expr_src`), but
-            // the free-var scan still has to walk it so exhaustive
-            // matching on `ExprKind` holds. For each arm we treat
-            // pattern-bound names as locally `known` so references
-            // inside the arm body don't bubble up as unrelated
-            // captures.
+            // Recurse into scrutinee, and each arm treats pattern
+            // bindings as locals so guard/body references don't
+            // bubble up as captures.
             scan_free_vars_expr(scrutinee, known, free, outer_scopes, fn_info);
             for arm in arms {
                 let mut arm_known = known.clone();
@@ -2792,6 +2890,9 @@ fn scan_free_vars_expr(
                 }
                 scan_free_vars_expr(&arm.body, &mut arm_known, free, outer_scopes, fn_info);
             }
+        }
+        ExprKind::Try(inner) => {
+            scan_free_vars_expr(inner, known, free, outer_scopes, fn_info);
         }
     }
 }

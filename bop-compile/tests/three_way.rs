@@ -763,6 +763,101 @@ match x {
   2 => print("two"),
 }"#,
     ),
+    // ─── `try` operator (phase 5) ────────────────────────────────
+    (
+        "try_unwraps_ok",
+        r#"enum Result { Ok(v), Err(e) }
+fn doit() {
+    let v = try Result::Ok(42)
+    return v
+}
+print(doit())"#,
+    ),
+    (
+        "try_propagates_err",
+        r#"enum Result { Ok(v), Err(e) }
+fn doit() {
+    let v = try Result::Err("boom")
+    return Result::Ok(v)
+}
+let r = doit()
+print(match r {
+    Result::Ok(v) => v,
+    Result::Err(e) => e,
+})"#,
+    ),
+    (
+        "try_chains_through_nested_calls",
+        r#"enum Result { Ok(v), Err(e) }
+fn leaf() { return Result::Err("leaf-err") }
+fn middle() {
+    let v = try leaf()
+    return Result::Ok(v + 1)
+}
+fn top() {
+    let v = try middle()
+    return Result::Ok(v * 2)
+}
+print(match top() {
+    Result::Ok(v) => v,
+    Result::Err(e) => e,
+})"#,
+    ),
+    (
+        "try_ok_unit_variant_yields_none",
+        r#"enum Result { Ok, Err(e) }
+fn doit() {
+    let v = try Result::Ok
+    return type(v)
+}
+print(doit())"#,
+    ),
+    (
+        "try_inside_lambda_returns_from_lambda",
+        r#"enum Result { Ok(v), Err(e) }
+let f = fn() {
+    let v = try Result::Err("inner")
+    return Result::Ok(v)
+}
+let r = f()
+print(match r {
+    Result::Ok(_) => "ok",
+    Result::Err(e) => e,
+})"#,
+    ),
+    (
+        "try_in_for_loop_short_circuits",
+        r#"enum Result { Ok(v), Err(e) }
+fn lookup(i) {
+    if i == 2 { return Result::Err("stop") }
+    return Result::Ok(i * 10)
+}
+fn sum_until_err() {
+    let total = 0
+    for i in range(5) {
+        let v = try lookup(i)
+        total = total + v
+    }
+    return Result::Ok(total)
+}
+print(match sum_until_err() {
+    Result::Ok(v) => v,
+    Result::Err(e) => e,
+})"#,
+    ),
+    (
+        "try_on_non_result_errors",
+        r#"fn doit() {
+    let v = try 42
+    return v
+}
+doit()"#,
+    ),
+    (
+        "try_top_level_on_err_errors",
+        r#"enum Result { Ok(v), Err(e) }
+let r = try Result::Err("boom")"#,
+    ),
 ];
 
 /// Programs that exercise the `import` surface. Each entry
