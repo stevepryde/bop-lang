@@ -588,6 +588,71 @@ print(ops[1](2, 3))"#,
     ),
     ("iife_value_call", "print((fn(x) { return x * 3 })(4))"),
     ("type_of_fn_is_fn", "fn f() { }\nprint(type(f))"),
+    // ─── Structs / enums / user methods (phase 3) ───────────────
+    (
+        "struct_basic",
+        r#"struct Point { x, y }
+let p = Point { x: 3, y: 4 }
+print(p.x + p.y)
+print(p)"#,
+    ),
+    (
+        "struct_field_assign",
+        r#"struct Counter { n }
+let c = Counter { n: 10 }
+c.n += 5
+c.n *= 2
+print(c.n)"#,
+    ),
+    (
+        "struct_equality",
+        r#"struct P { x, y }
+let a = P { x: 1, y: 2 }
+let b = P { x: 1, y: 2 }
+print(a == b)"#,
+    ),
+    (
+        "enum_unit_and_tuple",
+        r#"enum E { A, B(n) }
+print(E::A == E::A)
+print(E::B(1) == E::B(1))
+print(E::B(1) == E::B(2))"#,
+    ),
+    (
+        "enum_struct_variant",
+        r#"enum Shape { Rect { w, h } }
+let r = Shape::Rect { w: 4, h: 3 }
+print(r.w * r.h)
+print(r)"#,
+    ),
+    (
+        "method_on_struct",
+        r#"struct Point { x, y }
+fn Point.sum(self) { return self.x + self.y }
+let p = Point { x: 3, y: 4 }
+print(p.sum())"#,
+    ),
+    (
+        "method_chain_user",
+        r#"struct Adder { n }
+fn Adder.then(self, m) { return Adder { n: self.n + m } }
+let r = Adder { n: 1 }.then(2).then(3).then(4)
+print(r.n)"#,
+    ),
+    (
+        "method_on_enum",
+        r#"enum Shape { Circle(r), Rect { w, h } }
+fn Shape.label(self) { return "shape" }
+print(Shape::Circle(5).label())
+print(Shape::Rect { w: 4, h: 3 }.label())"#,
+    ),
+    (
+        "method_overrides_builtin",
+        r#"struct Wrapper { data }
+fn Wrapper.len(self) { return 99 }
+let w = Wrapper { data: [1, 2, 3] }
+print(w.len())"#,
+    ),
 ];
 
 /// Programs that exercise the `import` surface. Each entry

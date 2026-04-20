@@ -222,6 +222,55 @@ module scope is its own lexical environment.
 
 ### Phase 3 — User-defined types (structs and enums)
 
+*Status: done across all three engines.* `struct Name { f1, f2 }`
+and `enum Shape { Empty, Circle(r), Rect { w, h } }` declare
+product and sum types respectively. Construction is strict
+(missing / extra / duplicate fields all error at emit or runtime).
+Enums ship unit / tuple / struct variants; `::` is the path
+separator (`Shape::Circle(5)`, `Shape::Rect { w: 4, h: 3 }`).
+Field access is `obj.field` for structs and struct-shaped enum
+payloads; field assignment (`obj.f = v`, `obj.f += v`) works on
+bare-ident targets. Methods declared via `fn Type.method(self,
+...) { body }` live in a per-engine registry keyed by
+(type_name, method_name); enum methods dispatch by enum type,
+not variant, so all variants of `Shape` share `fn Shape.area`.
+User methods win over builtin method dispatch of the same name.
+`self` is passed by value (matching how params work elsewhere);
+idiomatic mutation is `c = c.bump()`, not in-place.
+
+Walker, VM, and AOT all implement the same semantics:
+
+- Walker: `struct_defs`, `enum_defs`, `methods` BTreeMaps on
+  `Evaluator`; `Value::Struct(Box<BopStruct>)` and
+  `Value::EnumVariant(Box<BopEnumVariant>)` with boxed payloads
+  so the enum stays compact (important for deep recursion —
+  otherwise per-call stack frames overflow before the call-depth
+  counter kicks in).
+- VM: new `DefineStruct` / `DefineEnum` / `DefineMethod` /
+  `ConstructStruct` / `ConstructEnum` / `FieldGet` / `FieldSet`
+  opcodes; `chunk.struct_defs` / `chunk.enum_defs` pools;
+  `vm.user_methods` registry; `CallMethod` checks user methods
+  before the built-in dispatch.
+- AOT: compile-time `TypeRegistry` collected across the root +
+  every transitively-imported module; each user method emits as
+  a mangled Rust fn (`bop_fn_<prefix>method_<Type>__<name>`); a
+  generated `__bop_try_user_method` dispatcher runtime-matches
+  `(type_name, method_name)` and returns `Some(Value)` or falls
+  through to the builtin. `self` is remapped to `bop_self`
+  because Rust reserves `self` for inherent methods on trait
+  impls.
+
+Known AOT divergence: user types are globally visible regardless
+of where the `import` appeared, because the AOT resolves types
+statically; walker / VM gate visibility on import. In practice,
+well-formed multi-module programs behave identically — the
+divergence only shows for "use before import" patterns that
+would be bugs anyway.
+
+Tests: 46 new walker tests, 15 new walker↔VM differential tests,
+8 new AOT e2e tests, 9 new three-way corpus entries (68 total).
+All green.
+
 **Why third.** Dicts-with-convention simulate structs badly, and
 tag-field workarounds simulate tagged unions even worse. Real data
 modeling wants named fields, a type identity, and — for sum types

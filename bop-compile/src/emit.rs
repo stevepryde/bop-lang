@@ -34,7 +34,10 @@ use std::fmt::Write as _;
 
 use bop::error::BopError;
 use bop::lexer::StringPart;
-use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
+use bop::parser::{
+    AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp, VariantKind,
+    VariantPayload,
+};
 
 use crate::Options;
 
@@ -44,9 +47,98 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
     // surface before any Rust is written.
     let modules = build_module_graph(stmts, opts)?;
     let info = collect_fn_info(stmts);
-    let mut emitter = Emitter::new(opts.clone(), info, modules);
+    let types = collect_type_registry(stmts, &modules);
+    let mut emitter = Emitter::new(opts.clone(), info, modules, types);
     emitter.emit_program(stmts)?;
     Ok(emitter.finish())
+}
+
+// ─── Type / method registry ────────────────────────────────────────
+//
+// User-defined types and methods are collected across the root
+// program and every transitively-imported module at pre-pass time,
+// then flattened into a single registry. The AOT assumes a type is
+// visible anywhere in the emitted Rust once it's declared
+// *somewhere* — a simplification over walker/VM's scoped imports,
+// but it keeps the generated code straightforward. Documented as a
+// known AOT divergence.
+
+pub(crate) struct TypeRegistry {
+    /// Struct name → ordered field list.
+    pub structs: HashMap<String, Vec<String>>,
+    /// Enum name → variant name → payload shape.
+    pub enums: HashMap<String, HashMap<String, VariantKind>>,
+    /// All user methods, keyed by (type_name, method_name). Holds
+    /// the Bop parameter list (including the explicit `self`) and
+    /// the body. Module prefix is stored too so the emitted Rust
+    /// fn name can be reconstructed uniquely.
+    pub methods: HashMap<(String, String), MethodEntry>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MethodEntry {
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
+    /// Module prefix the method came from (empty for root). Only
+    /// used to mangle the Rust fn name; doesn't affect dispatch.
+    pub module_prefix: String,
+}
+
+fn collect_type_registry(root: &[Stmt], modules: &ModuleGraph) -> TypeRegistry {
+    let mut reg = TypeRegistry {
+        structs: HashMap::new(),
+        enums: HashMap::new(),
+        methods: HashMap::new(),
+    };
+    // Root program contributes with an empty prefix.
+    collect_types_from_stmts(root, "", &mut reg);
+    // Then every module's AST. Module prefix matches the emitter's
+    // slug scheme (dots → underscores, trailing `__`).
+    for name in &modules.order {
+        if let Some(entry) = modules.modules.get(name) {
+            let prefix = format!("{}__", module_slug(name));
+            collect_types_from_stmts(&entry.ast, &prefix, &mut reg);
+        }
+    }
+    reg
+}
+
+fn collect_types_from_stmts(stmts: &[Stmt], prefix: &str, reg: &mut TypeRegistry) {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::StructDecl { name, fields } => {
+                reg.structs.insert(name.clone(), fields.clone());
+            }
+            StmtKind::EnumDecl { name, variants } => {
+                let mut v_map = HashMap::new();
+                for v in variants {
+                    v_map.insert(v.name.clone(), v.kind.clone());
+                }
+                reg.enums.insert(name.clone(), v_map);
+            }
+            StmtKind::MethodDecl {
+                type_name,
+                method_name,
+                params,
+                body,
+            } => {
+                reg.methods.insert(
+                    (type_name.clone(), method_name.clone()),
+                    MethodEntry {
+                        params: params.clone(),
+                        body: body.clone(),
+                        module_prefix: prefix.to_string(),
+                    },
+                );
+            }
+            // Type decls inside control-flow bodies are legal in
+            // the walker, but the emitter treats them as top-level
+            // for registry purposes. Nested fn decls get skipped —
+            // their inner struct/enum decls (if any) aren't
+            // reachable from outside the fn anyway.
+            _ => {}
+        }
+    }
 }
 
 // ─── Module graph ──────────────────────────────────────────────────
@@ -312,6 +404,7 @@ struct Emitter {
     opts: Options,
     fn_info: FnInfo,
     modules: ModuleGraph,
+    types: TypeRegistry,
     /// Counter for temporary locals (`__t0`, `__t1`, …). Reset at
     /// the start of each fn / top-level program so the names stay
     /// short.
@@ -337,13 +430,19 @@ struct Emitter {
 }
 
 impl Emitter {
-    fn new(opts: Options, fn_info: FnInfo, modules: ModuleGraph) -> Self {
+    fn new(
+        opts: Options,
+        fn_info: FnInfo,
+        modules: ModuleGraph,
+        types: TypeRegistry,
+    ) -> Self {
         Self {
             out: String::new(),
             indent: 0,
             opts,
             fn_info,
             modules,
+            types,
             tmp_counter: 0,
             module_prefix: String::new(),
             imported_in_scope: HashSet::new(),
@@ -397,6 +496,12 @@ impl Emitter {
         // wrappers (also at module scope) can reference them, and
         // `let g = fib` works even before `fib` is called.
         self.emit_top_level_fn_decls(stmts)?;
+        // User methods and the runtime dispatcher go at module
+        // scope. Methods can live in different Bop modules; the
+        // emitter mangles their Rust fn names by the source
+        // module's slug so there's never a collision.
+        self.emit_user_methods()?;
+        self.emit_method_dispatcher();
         self.emit_run_program(stmts)?;
         self.emit_fn_value_wrappers();
         self.emit_public_entry();
@@ -725,6 +830,106 @@ impl Emitter {
         }
     }
 
+    /// Emit each user-defined method as a Rust fn with a mangled
+    /// name, so module prefix + receiver type + method name don't
+    /// collide.
+    fn emit_user_methods(&mut self) -> Result<(), BopError> {
+        // Sort for deterministic output.
+        let mut entries: Vec<((String, String), MethodEntry)> = self
+            .types
+            .methods
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for ((type_name, method_name), entry) in &entries {
+            let saved_prefix = std::mem::replace(
+                &mut self.module_prefix,
+                format!("{}method_{}__", entry.module_prefix, type_name),
+            );
+            let saved_fn_info = std::mem::replace(
+                &mut self.fn_info,
+                collect_fn_info(&entry.body),
+            );
+            self.emit_fn_decl(
+                method_name,
+                &entry.params,
+                &entry.body,
+                0,
+            )?;
+            self.fn_info = saved_fn_info;
+            self.module_prefix = saved_prefix;
+        }
+        Ok(())
+    }
+
+    /// Emit a runtime dispatcher that maps `(type_name,
+    /// method_name)` pairs to their compiled user-method Rust fns.
+    /// The method-call emitter calls this first; on `None` it
+    /// falls back to built-in method dispatch.
+    fn emit_method_dispatcher(&mut self) {
+        self.out.push_str(
+            "\nfn __bop_try_user_method(\n",
+        );
+        self.out.push_str(
+            "    ctx: &mut Ctx<'_>,\n    obj: &::bop::value::Value,\n    method: &str,\n    args: &[::bop::value::Value],\n    line: u32,\n) -> Result<::std::option::Option<::bop::value::Value>, ::bop::error::BopError> {\n",
+        );
+        self.out.push_str(
+            "    let type_name: ::std::option::Option<&str> = match obj {\n",
+        );
+        self.out.push_str(
+            "        ::bop::value::Value::Struct(s) => Some(s.type_name()),\n",
+        );
+        self.out.push_str(
+            "        ::bop::value::Value::EnumVariant(e) => Some(e.type_name()),\n",
+        );
+        self.out.push_str("        _ => None,\n    };\n");
+        self.out.push_str(
+            "    let type_name = match type_name { Some(t) => t, None => return Ok(None) };\n",
+        );
+        self.out.push_str("    match (type_name, method) {\n");
+
+        let mut entries: Vec<((String, String), MethodEntry)> = self
+            .types
+            .methods
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for ((type_name, method_name), entry) in &entries {
+            let fn_name = format!(
+                "bop_fn_{}method_{}__{}",
+                entry.module_prefix, type_name, method_name
+            );
+            let arity = entry.params.len();
+            let arity_minus_one = arity.saturating_sub(1);
+            let arity_check = format!(
+                "if args.len() != {expected} {{ return Err(::bop::error::BopError::runtime(format!(\"`{type_name}.{method_name}` expects {arity} argument{s} (including `self`), but got {{}}\", args.len() + 1), line)); }}",
+                expected = arity_minus_one,
+                type_name = type_name,
+                method_name = method_name,
+                arity = arity,
+                s = if arity == 1 { "" } else { "s" },
+            );
+            let args_pass: String = (0..arity_minus_one)
+                .map(|i| format!(", args[{}].clone()", i))
+                .collect::<Vec<_>>()
+                .join("");
+            writeln!(
+                self.out,
+                "        ({type_lit}, {method_lit}) => {{ {arity_check} Ok(Some({fn_name}(ctx, obj.clone(){args_pass})?)) }}",
+                type_lit = rust_string_literal(type_name),
+                method_lit = rust_string_literal(method_name),
+                arity_check = arity_check,
+                fn_name = fn_name,
+                args_pass = args_pass,
+            )
+            .unwrap();
+        }
+
+        self.out.push_str("        _ => Ok(None),\n    }\n}\n\n");
+    }
+
     // ─── Preamble / footer ────────────────────────────────────────
 
     fn emit_header(&mut self) {
@@ -934,25 +1139,14 @@ impl Emitter {
                 self.emit_import_stmt(path, line)?;
             }
 
-            StmtKind::StructDecl { .. } => {
-                return Err(BopError::runtime(
-                    "bop-compile: struct declarations are not yet supported by the AOT transpiler",
-                    line,
-                ));
-            }
-
-            StmtKind::EnumDecl { .. } => {
-                return Err(BopError::runtime(
-                    "bop-compile: enum declarations are not yet supported by the AOT transpiler",
-                    line,
-                ));
-            }
-
-            StmtKind::MethodDecl { .. } => {
-                return Err(BopError::runtime(
-                    "bop-compile: user-defined methods are not yet supported by the AOT transpiler",
-                    line,
-                ));
+            StmtKind::StructDecl { .. }
+            | StmtKind::EnumDecl { .. }
+            | StmtKind::MethodDecl { .. } => {
+                // Type declarations are compile-time only in the
+                // AOT. The pre-pass collected them into
+                // `self.types`; nothing to emit at the decl
+                // site.
+                let _ = line;
             }
 
             StmtKind::ExprStmt(expr) => {
@@ -1081,10 +1275,57 @@ impl Emitter {
                 }
                 Ok(())
             }
-            AssignTarget::Field { .. } => Err(BopError::runtime(
-                "bop-compile: struct field assignment is not yet supported by the AOT transpiler",
-                line,
-            )),
+            AssignTarget::Field { object, field } => {
+                let target = match &object.kind {
+                    ExprKind::Ident(n) => rust_ident(n),
+                    _ => {
+                        return Err(BopError::runtime(
+                            "Can only assign to fields of named variables (like `p.x = val`)",
+                            line,
+                        ));
+                    }
+                };
+                let val_src = self.expr_src(value)?;
+                let val_tmp = self.fresh_tmp();
+                self.line(&format!("let {} = {};", val_tmp, val_src));
+                match op {
+                    AssignOp::Eq => {
+                        self.line(&format!(
+                            "{} = __bop_field_set({}, {}, {}, {})?;",
+                            target,
+                            target,
+                            rust_string_literal(field),
+                            val_tmp,
+                            line
+                        ));
+                    }
+                    compound => {
+                        let op_path = compound_op_path(*compound);
+                        let cur_tmp = self.fresh_tmp();
+                        let new_tmp = self.fresh_tmp();
+                        self.line(&format!(
+                            "let {} = __bop_field_get(&{}, {}, {})?;",
+                            cur_tmp,
+                            target,
+                            rust_string_literal(field),
+                            line
+                        ));
+                        self.line(&format!(
+                            "let {} = {}(&{}, &{}, {})?;",
+                            new_tmp, op_path, cur_tmp, val_tmp, line
+                        ));
+                        self.line(&format!(
+                            "{} = __bop_field_set({}, {}, {}, {})?;",
+                            target,
+                            target,
+                            rust_string_literal(field),
+                            new_tmp,
+                            line
+                        ));
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1190,26 +1431,27 @@ impl Emitter {
 
             ExprKind::StringInterp(parts) => self.string_interp_src(parts, line)?,
 
-            ExprKind::FieldAccess { .. } => {
-                return Err(BopError::runtime(
-                    "bop-compile: struct field access (obj.field) is not yet supported by the AOT transpiler",
-                    line,
-                ));
+            ExprKind::FieldAccess { object, field } => {
+                let obj_src = self.expr_src(object)?;
+                let obj_tmp = self.fresh_tmp();
+                format!(
+                    "{{ let {tmp} = {obj}; __bop_field_get(&{tmp}, {field_lit}, {line})? }}",
+                    tmp = obj_tmp,
+                    obj = obj_src,
+                    field_lit = rust_string_literal(field),
+                    line = line,
+                )
             }
 
-            ExprKind::StructConstruct { .. } => {
-                return Err(BopError::runtime(
-                    "bop-compile: struct literals are not yet supported by the AOT transpiler",
-                    line,
-                ));
+            ExprKind::StructConstruct { type_name, fields } => {
+                self.struct_construct_src(type_name, fields, line)?
             }
 
-            ExprKind::EnumConstruct { .. } => {
-                return Err(BopError::runtime(
-                    "bop-compile: enum variant construction is not yet supported by the AOT transpiler",
-                    line,
-                ));
-            }
+            ExprKind::EnumConstruct {
+                type_name,
+                variant,
+                payload,
+            } => self.enum_construct_src(type_name, variant, payload, line)?,
 
             ExprKind::Lambda { params, body } => self.lambda_src(params, body, line)?,
 
@@ -1496,6 +1738,216 @@ impl Emitter {
         ))
     }
 
+    fn struct_construct_src(
+        &mut self,
+        type_name: &str,
+        fields: &[(String, Expr)],
+        line: u32,
+    ) -> Result<String, BopError> {
+        let decl = self.types.structs.get(type_name).cloned().ok_or_else(|| {
+            BopError::runtime(
+                format!("Struct `{}` is not declared", type_name),
+                line,
+            )
+        })?;
+        // Compile-time validation: set matches exactly, no dups.
+        let mut seen = HashSet::new();
+        for (fname, _) in fields {
+            if !seen.insert(fname.clone()) {
+                return Err(BopError::runtime(
+                    format!(
+                        "Field `{}` specified twice in `{}` construction",
+                        fname, type_name
+                    ),
+                    line,
+                ));
+            }
+            if !decl.iter().any(|d| d == fname) {
+                return Err(BopError::runtime(
+                    format!("Struct `{}` has no field `{}`", type_name, fname),
+                    line,
+                ));
+            }
+        }
+        for declared in &decl {
+            if !seen.contains(declared) {
+                return Err(BopError::runtime(
+                    format!(
+                        "Missing field `{}` in `{}` construction",
+                        declared, type_name
+                    ),
+                    line,
+                ));
+            }
+        }
+        // Emit field bindings in provided order so any side
+        // effects in sub-expressions happen source-order, then
+        // assemble the fields vec in declaration order.
+        let mut lets = String::new();
+        let mut provided_tmps: HashMap<String, String> = HashMap::new();
+        for (fname, fexpr) in fields {
+            let src = self.expr_src(fexpr)?;
+            let tmp = self.fresh_tmp();
+            write!(lets, "let {} = {}; ", tmp, src).unwrap();
+            provided_tmps.insert(fname.clone(), tmp);
+        }
+        let ordered: Vec<String> = decl
+            .iter()
+            .map(|name| {
+                let tmp = provided_tmps.remove(name).unwrap();
+                format!("({}.to_string(), {})", rust_string_literal(name), tmp)
+            })
+            .collect();
+        Ok(format!(
+            "{{ {}::bop::value::Value::new_struct({}.to_string(), vec![{}]) }}",
+            lets,
+            rust_string_literal(type_name),
+            ordered.join(", ")
+        ))
+    }
+
+    fn enum_construct_src(
+        &mut self,
+        type_name: &str,
+        variant: &str,
+        payload: &VariantPayload,
+        line: u32,
+    ) -> Result<String, BopError> {
+        let variants = self
+            .types
+            .enums
+            .get(type_name)
+            .cloned()
+            .ok_or_else(|| {
+                BopError::runtime(
+                    format!("Enum `{}` is not declared", type_name),
+                    line,
+                )
+            })?;
+        let declared = variants.get(variant).cloned().ok_or_else(|| {
+            BopError::runtime(
+                format!("Enum `{}` has no variant `{}`", type_name, variant),
+                line,
+            )
+        })?;
+        let tn_lit = rust_string_literal(type_name);
+        let vn_lit = rust_string_literal(variant);
+        match (&declared, payload) {
+            (VariantKind::Unit, VariantPayload::Unit) => Ok(format!(
+                "::bop::value::Value::new_enum_unit({}.to_string(), {}.to_string())",
+                tn_lit, vn_lit
+            )),
+            (VariantKind::Tuple(decl_fields), VariantPayload::Tuple(args)) => {
+                if decl_fields.len() != args.len() {
+                    return Err(BopError::runtime(
+                        format!(
+                            "`{}::{}` expects {} argument{}, but got {}",
+                            type_name,
+                            variant,
+                            decl_fields.len(),
+                            if decl_fields.len() == 1 { "" } else { "s" },
+                            args.len()
+                        ),
+                        line,
+                    ));
+                }
+                let mut lets = String::new();
+                let mut names = Vec::with_capacity(args.len());
+                for a in args {
+                    let src = self.expr_src(a)?;
+                    let tmp = self.fresh_tmp();
+                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
+                    names.push(tmp);
+                }
+                Ok(format!(
+                    "{{ {lets}::bop::value::Value::new_enum_tuple({tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    lets = lets,
+                    tn = tn_lit,
+                    vn = vn_lit,
+                    items = names.join(", ")
+                ))
+            }
+            (VariantKind::Struct(decl_fields), VariantPayload::Struct(provided)) => {
+                let mut seen = HashSet::new();
+                for (fname, _) in provided {
+                    if !seen.insert(fname.clone()) {
+                        return Err(BopError::runtime(
+                            format!(
+                                "Field `{}` specified twice in `{}::{}`",
+                                fname, type_name, variant
+                            ),
+                            line,
+                        ));
+                    }
+                    if !decl_fields.iter().any(|d| d == fname) {
+                        return Err(BopError::runtime(
+                            format!(
+                                "Variant `{}::{}` has no field `{}`",
+                                type_name, variant, fname
+                            ),
+                            line,
+                        ));
+                    }
+                }
+                for declared in decl_fields {
+                    if !seen.contains(declared) {
+                        return Err(BopError::runtime(
+                            format!(
+                                "Missing field `{}` in `{}::{}` construction",
+                                declared, type_name, variant
+                            ),
+                            line,
+                        ));
+                    }
+                }
+                let mut lets = String::new();
+                let mut provided_tmps: HashMap<String, String> = HashMap::new();
+                for (fname, fexpr) in provided {
+                    let src = self.expr_src(fexpr)?;
+                    let tmp = self.fresh_tmp();
+                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
+                    provided_tmps.insert(fname.clone(), tmp);
+                }
+                let ordered: Vec<String> = decl_fields
+                    .iter()
+                    .map(|name| {
+                        let tmp = provided_tmps.remove(name).unwrap();
+                        format!(
+                            "({}.to_string(), {})",
+                            rust_string_literal(name),
+                            tmp
+                        )
+                    })
+                    .collect();
+                Ok(format!(
+                    "{{ {lets}::bop::value::Value::new_enum_struct({tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    lets = lets,
+                    tn = tn_lit,
+                    vn = vn_lit,
+                    items = ordered.join(", ")
+                ))
+            }
+            (VariantKind::Unit, _) => Err(BopError::runtime(
+                format!("Variant `{}::{}` takes no payload", type_name, variant),
+                line,
+            )),
+            (VariantKind::Tuple(_), _) => Err(BopError::runtime(
+                format!(
+                    "Variant `{}::{}` expects positional arguments `(…)`",
+                    type_name, variant
+                ),
+                line,
+            )),
+            (VariantKind::Struct(_), _) => Err(BopError::runtime(
+                format!(
+                    "Variant `{}::{}` expects named fields `{{ … }}`",
+                    type_name, variant
+                ),
+                line,
+            )),
+        }
+    }
+
     fn string_interp_src(
         &mut self,
         parts: &[StringPart],
@@ -1552,7 +2004,23 @@ impl Emitter {
 
         let obj_src = self.expr_src(object)?;
         let obj_tmp = self.fresh_tmp();
-        let args_arr = build_arg_array(&arg_tmps);
+        // Two slices of the same args: one for the user
+        // dispatcher, one for the builtin fallback. Cloning lets
+        // each site own its own copy and matches the walker's
+        // value-semantics (args are already cloned when passed to
+        // user methods).
+        let args_arr = if arg_tmps.is_empty() {
+            "[]".to_string()
+        } else {
+            format!(
+                "[{}]",
+                arg_tmps
+                    .iter()
+                    .map(|t| format!("{}.clone()", t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
 
         // Method name goes into a Rust string literal; we also look
         // up "is this mutating?" up-front so we only emit the
@@ -1570,22 +2038,36 @@ impl Emitter {
 
         let mut body = String::new();
         write!(body, "{{ {}let {} = {}; ", arg_lets, obj_tmp, obj_src).unwrap();
+        // Try user-defined methods first — the dispatcher returns
+        // `Some(Value)` when a match is found, else `None`
+        // (meaning "fall through to the built-in method
+        // dispatch"). Matches walker / VM precedence.
         match ident_target {
             Some(target) => {
                 write!(
                     body,
-                    "let (__ret, __mutated) = __bop_call_method(&{}, {}, &{}, {})?; \
-                     if let Some(__new_obj) = __mutated {{ {} = __new_obj; }} \
-                     __ret }}",
-                    obj_tmp, method_lit, args_arr, line, target
+                    "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
+                        Some(v) => v, \
+                        None => {{ \
+                            let (__r, __mutated) = __bop_call_method(&{}, {}, &{}, {})?; \
+                            if let Some(__new_obj) = __mutated {{ {} = __new_obj; }} \
+                            __r \
+                        }}, \
+                    }}; __ret }}",
+                    obj_tmp, method_lit, args_arr, line, obj_tmp, method_lit, args_arr, line, target
                 )
                 .unwrap();
             }
             None => {
                 write!(
                     body,
-                    "let (__ret, _) = __bop_call_method(&{}, {}, &{}, {})?; __ret }}",
-                    obj_tmp, method_lit, args_arr, line
+                    "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
+                        Some(v) => v, \
+                        None => {{ \
+                            let (__r, _) = __bop_call_method(&{}, {}, &{}, {})?; __r \
+                        }}, \
+                    }}; __ret }}",
+                    obj_tmp, method_lit, args_arr, line, obj_tmp, method_lit, args_arr, line
                 )
                 .unwrap();
             }
@@ -2010,9 +2492,14 @@ fn build_arg_array(arg_names: &[String]) -> String {
 }
 
 /// Render a Bop identifier as a Rust identifier, escaping Rust
-/// keywords with the raw-identifier prefix when needed.
+/// keywords with the raw-identifier prefix when needed. `self` is
+/// special-cased: Rust reserves it for method receivers and
+/// refuses to raw-escape it, so we remap to `bop_self`
+/// consistently across param lists and body references.
 fn rust_ident(name: &str) -> String {
-    if is_rust_keyword(name) {
+    if name == "self" {
+        "bop_self".to_string()
+    } else if is_rust_keyword(name) {
         format!("r#{}", name)
     } else {
         name.to_string()
@@ -2225,6 +2712,72 @@ fn __bop_call_value(
     }
 }
 
+/// Field read for `Value::Struct` and struct-payload enum
+/// variants. Returns a cloned value; missing fields surface as
+/// a runtime error with the type name in the message.
+#[inline]
+fn __bop_field_get(
+    obj: &::bop::value::Value,
+    field: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    match obj {
+        ::bop::value::Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
+            ::bop::error::BopError::runtime(
+                format!("Struct `{}` has no field `{}`", s.type_name(), field),
+                line,
+            )
+        }),
+        ::bop::value::Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
+            ::bop::error::BopError::runtime(
+                format!(
+                    "Variant `{}::{}` has no field `{}`",
+                    e.type_name(),
+                    e.variant(),
+                    field
+                ),
+                line,
+            )
+        }),
+        other => Err(::bop::error::BopError::runtime(
+            format!("Can't read field `{}` on {}", field, other.type_name()),
+            line,
+        )),
+    }
+}
+
+/// Write a struct field in place (on the owned Value), returning
+/// the modified struct. Mirrors the walker's clone-mutate-store
+/// pattern.
+#[inline]
+fn __bop_field_set(
+    mut obj: ::bop::value::Value,
+    field: &str,
+    value: ::bop::value::Value,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    match &mut obj {
+        ::bop::value::Value::Struct(s) => {
+            let type_name = s.type_name().to_string();
+            if !s.set_field(field, value) {
+                return Err(::bop::error::BopError::runtime(
+                    format!("Struct `{}` has no field `{}`", type_name, field),
+                    line,
+                ));
+            }
+            Ok(obj)
+        }
+        other => Err(::bop::error::BopError::runtime(
+            format!(
+                "Can't assign to field `{}` on {}",
+                field,
+                other.type_name()
+            ),
+            line,
+        )),
+    }
+}
+
 /// Mirror of Evaluator::call_method from bop-lang: dispatches a
 /// method call to the right family for the receiver's type.
 #[inline]
@@ -2411,6 +2964,72 @@ fn __bop_tick(ctx: &mut Ctx<'_>, line: u32) -> Result<(), ::bop::error::BopError
     }
     ctx.host.on_tick()?;
     Ok(())
+}
+
+/// Field read for `Value::Struct` and struct-payload enum
+/// variants. Returns a cloned value; missing fields surface as
+/// a runtime error with the type name in the message.
+#[inline]
+fn __bop_field_get(
+    obj: &::bop::value::Value,
+    field: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    match obj {
+        ::bop::value::Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
+            ::bop::error::BopError::runtime(
+                format!("Struct `{}` has no field `{}`", s.type_name(), field),
+                line,
+            )
+        }),
+        ::bop::value::Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
+            ::bop::error::BopError::runtime(
+                format!(
+                    "Variant `{}::{}` has no field `{}`",
+                    e.type_name(),
+                    e.variant(),
+                    field
+                ),
+                line,
+            )
+        }),
+        other => Err(::bop::error::BopError::runtime(
+            format!("Can't read field `{}` on {}", field, other.type_name()),
+            line,
+        )),
+    }
+}
+
+/// Write a struct field in place (on the owned Value), returning
+/// the modified struct. Mirrors the walker's clone-mutate-store
+/// pattern.
+#[inline]
+fn __bop_field_set(
+    mut obj: ::bop::value::Value,
+    field: &str,
+    value: ::bop::value::Value,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    match &mut obj {
+        ::bop::value::Value::Struct(s) => {
+            let type_name = s.type_name().to_string();
+            if !s.set_field(field, value) {
+                return Err(::bop::error::BopError::runtime(
+                    format!("Struct `{}` has no field `{}`", type_name, field),
+                    line,
+                ));
+            }
+            Ok(obj)
+        }
+        other => Err(::bop::error::BopError::runtime(
+            format!(
+                "Can't assign to field `{}` on {}",
+                field,
+                other.type_name()
+            ),
+            line,
+        )),
+    }
 }
 
 /// Mirror of Evaluator::call_method from bop-lang: dispatches a

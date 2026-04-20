@@ -591,6 +591,104 @@ print(x)"#,
     );
 }
 
+// ─── Structs / enums / user methods ──────────────────────────────
+
+#[test]
+#[ignore]
+fn e2e_struct_basic() {
+    assert_aot_matches(
+        "struct_basic",
+        r#"struct Point { x, y }
+let p = Point { x: 3, y: 4 }
+print(p.x + p.y)
+print(p)"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_struct_field_assign() {
+    assert_aot_matches(
+        "struct_field_assign",
+        r#"struct Counter { n }
+let c = Counter { n: 10 }
+c.n += 5
+c.n *= 2
+print(c.n)"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_enum_variants() {
+    assert_aot_matches(
+        "enum_variants",
+        r#"enum Shape { Circle(r), Rect { w, h }, Empty }
+print(Shape::Circle(3))
+print(Shape::Rect { w: 4, h: 3 })
+print(Shape::Empty)"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_enum_struct_variant_field_access() {
+    assert_aot_matches(
+        "enum_struct_access",
+        r#"enum Shape { Rect { w, h } }
+let r = Shape::Rect { w: 4, h: 3 }
+print(r.w * r.h)"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_method_on_struct() {
+    assert_aot_matches(
+        "method_struct",
+        r#"struct Point { x, y }
+fn Point.sum(self) { return self.x + self.y }
+let p = Point { x: 3, y: 4 }
+print(p.sum())"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_method_chain() {
+    assert_aot_matches(
+        "method_chain",
+        r#"struct Adder { n }
+fn Adder.then(self, m) { return Adder { n: self.n + m } }
+let r = Adder { n: 1 }.then(2).then(3).then(4)
+print(r.n)"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_method_on_enum() {
+    assert_aot_matches(
+        "method_enum",
+        r#"enum Shape { Circle(r), Rect { w, h } }
+fn Shape.label(self) { return "shape" }
+print(Shape::Circle(5).label())
+print(Shape::Rect { w: 4, h: 3 }.label())"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_method_overrides_builtin() {
+    assert_aot_matches(
+        "method_override",
+        r#"struct Wrapper { data }
+fn Wrapper.len(self) { return 99 }
+let w = Wrapper { data: [1, 2, 3] }
+print(w.len())"#,
+    );
+}
+
 #[test]
 #[ignore]
 fn e2e_closure_basic_lambda() {
