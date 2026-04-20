@@ -819,6 +819,39 @@ Ongoing, not a discrete phase:
 - Performance pass once the feature set is stable: VM dispatch
   tuning, Value cloning reduction, inline caches.
 
+**Landed so far.**
+
+- **Source-pointer error rendering.** Lexer tracks column
+  alongside line; `SpannedToken` carries both; parser errors
+  populate `BopError::column`. `BopError::render(source: &str)`
+  prints an `error:` header, a `--> line N[:col]` location,
+  the offending source line with a gutter, and — when column
+  is known — a carat `^` under the exact character. Friendly
+  hints (existing field) render as a trailing `hint:` line.
+  The renderer gracefully degrades for runtime errors (which
+  don't yet carry a column): snippet without carat. Out-of-
+  range lines produce the header alone. Tab-indented source
+  has its carat padded with tabs so alignment holds.
+- **`bop-cli` uses the renderer** for both file execution and
+  the REPL, so every CLI user gets the snippet-with-carat
+  treatment out of the box.
+- **Tests**: 4 new error-render unit tests + 4 new walker
+  integration tests covering parse errors, runtime errors,
+  multi-line programs, and tab alignment. No regressions
+  across the 597-test workspace suite.
+
+**Still open.**
+
+- Runtime errors don't yet carry column (would require adding
+  `column` to `Expr` / `Stmt` — 47 constructor sites). The
+  renderer falls back cleanly, and runtime errors usually
+  point at a whole expression anyway; parse errors, where the
+  carat matters most, already have column.
+- "Did you mean?" suggestions for typo'd identifiers.
+- REPL multi-line input, history, tab completion.
+- Match exhaustiveness warnings.
+- Performance pass.
+
 ## Deliberately out of scope
 
 Keeping this list is as important as the roadmap itself.

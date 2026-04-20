@@ -987,6 +987,70 @@ print(d.len())"#),
         assert_eq!(say(r#"print("  HELLO  ".trim().lower())"#), "hello");
     }
 
+    // ─── Error diagnostics (phase 8 polish) ──────────────────────
+
+    #[test]
+    fn parse_error_carries_column_info() {
+        // "let 42" is a parse error — the int `42` shows up
+        // where a name was expected. Column should point at the
+        // start of the `42` token (column 5).
+        let err = parse_err_full("let 42");
+        assert_eq!(err.line, Some(1), "err: {:?}", err);
+        assert_eq!(err.column, Some(5), "err: {:?}", err);
+        assert!(err.message.contains("Expected a name"));
+    }
+
+    #[test]
+    fn parse_error_renders_with_snippet_and_carat() {
+        let src = "let 42";
+        let err = parse_err_full(src);
+        let rendered = err.render(src);
+        assert!(rendered.contains("--> line 1:5"), "rendered:\n{}", rendered);
+        assert!(rendered.contains("let 42"));
+        // Four spaces for `let ` before the carat at col 5.
+        assert!(rendered.contains("    ^"), "rendered:\n{}", rendered);
+    }
+
+    #[test]
+    fn parse_error_on_line_2_points_at_line_2() {
+        let src = "let x = 1\nlet = 2";
+        let err = parse_err_full(src);
+        assert_eq!(err.line, Some(2), "err: {:?}", err);
+        let rendered = err.render(src);
+        assert!(
+            rendered.contains("let = 2"),
+            "rendered:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn runtime_error_renders_without_column() {
+        // Runtime errors don't currently carry column; the
+        // renderer should still produce a readable snippet.
+        let src = "let x = 1 / 0";
+        let err = run_err_full(src);
+        assert_eq!(err.line, Some(1));
+        assert!(err.column.is_none());
+        let rendered = err.render(src);
+        assert!(rendered.contains("--> line 1"));
+        assert!(rendered.contains("let x = 1 / 0"));
+        // No carat line (column unknown).
+        assert!(!rendered.contains("^"), "rendered:\n{}", rendered);
+    }
+
+    /// Like `parse_err` but returns the full `BopError` so
+    /// tests can inspect line / column fields directly.
+    fn parse_err_full(code: &str) -> BopError {
+        parse(code).unwrap_err()
+    }
+
+    /// Like `run_err` but returns the full `BopError`.
+    fn run_err_full(code: &str) -> BopError {
+        let mut host = TestHost::new();
+        run(code, &mut host, &test_limits()).unwrap_err()
+    }
+
     #[test]
     fn comments_in_code() {
         // Phase 6 swapped line comments from `//` (needed for

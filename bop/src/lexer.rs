@@ -95,6 +95,10 @@ pub enum Token {
 pub struct SpannedToken {
     pub token: Token,
     pub line: u32,
+    /// 1-indexed column where the token starts. Used by the
+    /// parser and runtime to point error carats at the exact
+    /// offending character rather than just the line.
+    pub column: u32,
 }
 
 pub fn lex(source: &str) -> Result<Vec<SpannedToken>, BopError> {
@@ -132,6 +136,7 @@ fn insert_semicolons(raw: Vec<SpannedToken>) -> Vec<SpannedToken> {
                     result.push(SpannedToken {
                         token: Token::Semicolon,
                         line: token.line,
+                        column: token.column,
                     });
                 }
             }
@@ -146,6 +151,9 @@ struct Lexer {
     chars: Vec<char>,
     pos: usize,
     line: u32,
+    /// 1-indexed column of the *next* character to consume.
+    /// Reset to 1 after each newline; incremented by `advance`.
+    column: u32,
 }
 
 impl Lexer {
@@ -154,6 +162,7 @@ impl Lexer {
             chars: source.chars().collect(),
             pos: 0,
             line: 1,
+            column: 1,
         }
     }
 
@@ -168,13 +177,23 @@ impl Lexer {
     fn advance(&mut self) -> Option<char> {
         let ch = self.chars.get(self.pos).copied()?;
         self.pos += 1;
+        if ch == '\n' {
+            // The newline itself belongs to the line it
+            // terminates; the next character starts at column 1
+            // of the *following* line. `line` gets bumped by the
+            // lexer's dispatch loop when it sees `\n`, so we
+            // only reset the column here.
+            self.column = 1;
+        } else {
+            self.column += 1;
+        }
         Some(ch)
     }
 
     fn error(&self, message: impl Into<String>) -> BopError {
         BopError {
             line: Some(self.line),
-            column: None,
+            column: Some(self.column),
             message: message.into(),
             friendly_hint: None,
             is_fatal: false,
@@ -188,7 +207,7 @@ impl Lexer {
     ) -> BopError {
         BopError {
             line: Some(self.line),
-            column: None,
+            column: Some(self.column),
             message: message.into(),
             friendly_hint: Some(hint.into()),
             is_fatal: false,
@@ -212,11 +231,16 @@ impl Lexer {
                 tokens.push(SpannedToken {
                     token: Token::Eof,
                     line: self.line,
+                    column: self.column,
                 });
                 break;
             };
 
+            // Capture the token's start position before we start
+            // consuming characters — `self.line` / `self.column`
+            // move as we advance.
             let line = self.line;
+            let column = self.column;
 
             match ch {
                 '\n' => {
@@ -225,6 +249,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::Newline,
                         line,
+                    column,
                     });
                 }
 
@@ -245,6 +270,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: self.lex_string()?,
                         line,
+                    column,
                     });
                 }
 
@@ -252,6 +278,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: self.lex_number()?,
                         line,
+                    column,
                     });
                 }
 
@@ -259,6 +286,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: self.lex_ident_or_keyword(),
                         line,
+                    column,
                     });
                 }
 
@@ -269,11 +297,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::PlusEq,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Plus,
                             line,
+                        column,
                         });
                     }
                 }
@@ -284,11 +314,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::MinusEq,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Minus,
                             line,
+                        column,
                         });
                     }
                 }
@@ -299,11 +331,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::StarEq,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Star,
                             line,
+                        column,
                         });
                     }
                 }
@@ -314,6 +348,7 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::SlashEq,
                             line,
+                        column,
                         });
                     } else if self.peek() == Some('/') {
                         // `//` integer division. Line-comment
@@ -324,11 +359,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::SlashSlash,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Slash,
                             line,
+                        column,
                         });
                     }
                 }
@@ -339,11 +376,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::PercentEq,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Percent,
                             line,
+                        column,
                         });
                     }
                 }
@@ -355,17 +394,20 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::EqEq,
                             line,
+                        column,
                         });
                     } else if self.peek() == Some('>') {
                         self.advance();
                         tokens.push(SpannedToken {
                             token: Token::FatArrow,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Eq,
                             line,
+                        column,
                         });
                     }
                 }
@@ -376,11 +418,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::BangEq,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Bang,
                             line,
+                        column,
                         });
                     }
                 }
@@ -391,11 +435,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::LtEq,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Lt,
                             line,
+                        column,
                         });
                     }
                 }
@@ -406,11 +452,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::GtEq,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Gt,
                             line,
+                        column,
                         });
                     }
                 }
@@ -422,6 +470,7 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::AmpAmp,
                             line,
+                        column,
                         });
                     } else {
                         return Err(
@@ -436,6 +485,7 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::PipePipe,
                             line,
+                        column,
                         });
                     } else {
                         // Single `|` is now the or-pattern
@@ -445,6 +495,7 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::Pipe,
                             line,
+                        column,
                         });
                     }
                 }
@@ -454,6 +505,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::LParen,
                         line,
+                    column,
                     });
                 }
                 ')' => {
@@ -461,6 +513,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::RParen,
                         line,
+                    column,
                     });
                 }
                 '[' => {
@@ -468,6 +521,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::LBracket,
                         line,
+                    column,
                     });
                 }
                 ']' => {
@@ -475,6 +529,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::RBracket,
                         line,
+                    column,
                     });
                 }
                 '{' => {
@@ -482,6 +537,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::LBrace,
                         line,
+                    column,
                     });
                 }
                 '}' => {
@@ -489,6 +545,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::RBrace,
                         line,
+                    column,
                     });
                 }
                 ',' => {
@@ -496,6 +553,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::Comma,
                         line,
+                    column,
                     });
                 }
                 ':' => {
@@ -505,11 +563,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::ColonColon,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Colon,
                             line,
+                        column,
                         });
                     }
                 }
@@ -520,11 +580,13 @@ impl Lexer {
                         tokens.push(SpannedToken {
                             token: Token::DotDot,
                             line,
+                        column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Dot,
                             line,
+                        column,
                         });
                     }
                 }
@@ -533,6 +595,7 @@ impl Lexer {
                     tokens.push(SpannedToken {
                         token: Token::Semicolon,
                         line,
+                    column,
                     });
                 }
 

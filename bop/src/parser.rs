@@ -398,6 +398,13 @@ impl Parser {
         self.tokens.get(self.pos).map(|t| t.line).unwrap_or(0)
     }
 
+    /// 1-indexed column of the current token's first character.
+    /// Used for parse-error reporting so the carat under the
+    /// offending line points at the right place.
+    fn peek_column(&self) -> u32 {
+        self.tokens.get(self.pos).map(|t| t.column).unwrap_or(0)
+    }
+
     fn peek_at(&self, offset: usize) -> &Token {
         self.tokens
             .get(self.pos + offset)
@@ -473,9 +480,18 @@ impl Parser {
     }
 
     fn error(&self, line: u32, message: impl Into<String>) -> BopError {
+        // Use the current token's column; if we've already
+        // advanced past the token that triggered the complaint,
+        // column 0 (unknown) is the honest answer rather than
+        // silently misreporting.
+        let column = if self.tokens.get(self.pos).map(|t| t.line) == Some(line) {
+            Some(self.peek_column())
+        } else {
+            None
+        };
         BopError {
             line: Some(line),
-            column: None,
+            column,
             message: message.into(),
             friendly_hint: None,
             is_fatal: false,

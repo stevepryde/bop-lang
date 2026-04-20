@@ -18,7 +18,10 @@ fn main() {
         };
         let mut host = StdHost::new();
         if let Err(e) = bop::run(&source, &mut host, &BopLimits::standard()) {
-            eprintln!("{}", e);
+            // Render with the source so parse errors show the
+            // offending line + a carat under the column. Runtime
+            // errors (no column) still get the snippet.
+            eprint!("{}", e.render(&source));
             std::process::exit(1);
         }
     } else {
@@ -50,7 +53,7 @@ fn repl() {
 
         match bop::run(&line, &mut host, &BopLimits::standard()) {
             Ok(()) => {}
-            Err(e) => eprintln!("{}", e),
+            Err(e) => eprint!("{}", e.render(&line)),
         }
 
         print!("> ");
