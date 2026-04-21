@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="../toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -194,22 +194,14 @@ true false none
 <tr><th>Function</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>range(n)</code> / <code>range(s, e)</code> / <code>range(s, e, step)</code></td><td>array</td><td>Integer range</td></tr>
-<tr><td><code>str(x)</code></td><td>string</td><td>Display-based string conversion</td></tr>
-<tr><td><code>int(x)</code></td><td>int</td><td>Truncate / parse to <code>int</code></td></tr>
-<tr><td><code>float(x)</code></td><td>number</td><td>Widen / parse to <code>number</code></td></tr>
-<tr><td><code>type(x)</code></td><td>string</td><td>One of <code>int</code>, <code>number</code>, <code>string</code>, <code>bool</code>, <code>none</code>, <code>array</code>, <code>dict</code>, <code>fn</code>, <code>struct</code>, <code>enum</code>, <code>module</code></td></tr>
-<tr><td><code>abs(x)</code></td><td>int / number</td><td>Absolute value (preserves type)</td></tr>
-<tr><td><code>min(a, b)</code> / <code>max(a, b)</code></td><td>int / number</td><td>Pair-wise min / max</td></tr>
-<tr><td><code>rand(n)</code></td><td>int</td><td>Pseudo-random <code>0..n</code></td></tr>
-<tr><td><code>len(x)</code></td><td>int</td><td>Length of string / array / dict</td></tr>
 <tr><td><code>print(args...)</code></td><td>none</td><td>Host-captured output</td></tr>
-<tr><td><code>inspect(x)</code></td><td>string</td><td>Debug repr (strings quoted)</td></tr>
+<tr><td><code>range(n)</code> / <code>range(s, e)</code> / <code>range(s, e, step)</code></td><td>array</td><td>Integer range</td></tr>
+<tr><td><code>rand(n)</code></td><td>int</td><td>Pseudo-random <code>0..n</code></td></tr>
 <tr><td><code>try_call(f)</code></td><td>Result</td><td>Run <code>f</code>, return <code>Ok(v)</code> or <code>Err(RuntimeError)</code></td></tr>
-<tr><td><code>sqrt</code>, <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>floor</code>, <code>ceil</code>, <code>round</code>, <code>pow</code>, <code>log</code>, <code>exp</code></td><td>int / number</td><td>Math</td></tr>
 </tbody>
 </table>
 </div>
+<p>All math and conversion operations are <a href="methods.html">methods on values</a>: <code>x.type()</code>, <code>x.to_str()</code>, <code>x.to_int()</code>, <code>x.to_float()</code>, <code>x.abs()</code>, <code>a.min(b)</code>, <code>x.sqrt()</code>, <code>x.len()</code>, etc.</p>
 <h2 id="grammar-1"><a class="header" href="#grammar-1">Grammar</a></h2>
 <p>Informal EBNF. Whitespace is insignificant <em>except</em> for newlines, which auto-insert semicolons (see below).</p>
 <pre><code>program     = statement*
@@ -335,11 +327,11 @@ print("Hello, {name}!")     // works
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../reference/builtins.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../reference/methods.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../embedding.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../stdlib/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -349,11 +341,11 @@ print("Hello, {name}!")     // works
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../reference/builtins.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../reference/methods.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../embedding.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../stdlib/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

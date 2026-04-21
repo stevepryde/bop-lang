@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="../toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -188,7 +188,7 @@ struct Player { name, hp, inventory }
 <pre><code class="language-bop">let p = Point { x: 3, y: 4 }
 print(p)                  // Point { x: 3, y: 4 }
 print(p.x)                // 3
-print(type(p))            // "struct"
+print(p.type())           // "struct"
 </code></pre>
 <p>Construction is <strong>strict</strong>: fields you provide must match the declaration exactly (no unknown fields, no duplicates, no missing ones). Extra fields or typos become parse or runtime errors with a “did you mean?” suggestion.</p>
 <h3 id="field-access-and-assignment"><a class="header" href="#field-access-and-assignment">Field access and assignment</a></h3>
@@ -232,7 +232,7 @@ print(b)                 // Point { x: 11, y: 2 }
 <pre><code class="language-bop">let a = Shape::Circle(5)
 let b = Shape::Rectangle { w: 4, h: 3 }
 let c = Shape::Empty
-print(type(a))           // "enum"
+print(a.type())          // "enum"
 </code></pre>
 <p>Variants with a struct payload expose their fields via <code>.field</code> just like structs:</p>
 <pre><code class="language-bop">let r = Shape::Rectangle { w: 4, h: 3 }

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>std.collections - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -177,103 +177,116 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
-}
+                        <h1 id="stdcollections"><a class="header" href="#stdcollections">std.collections</a></h1>
+<p><code>Stack</code>, <code>Queue</code>, and <code>Set</code> as value-semantics structs.</p>
+<h2 id="value-semantics"><a class="header" href="#value-semantics">Value semantics</a></h2>
+<p>Bop’s user methods pass <code>self</code> by value, so these collections all return a <strong>fresh instance</strong> on mutation and you rebind:</p>
+<pre><code class="language-bop">let s = stack()
+s = s.push(1)
+s = s.push(2)
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
+<p>The pattern trades a little boilerplate for predictable semantics: <code>let a = b</code> doesn’t alias, and method calls never surprise you by mutating out of band.</p>
+<h2 id="import"><a class="header" href="#import">Import</a></h2>
+<pre><code class="language-bop">use std.collections                          // glob
+use std.collections.{stack, queue, set}      // selective
+use std.collections as c                     // aliased
 </code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
+<h2 id="stack-lifo"><a class="header" href="#stack-lifo"><code>Stack</code> (LIFO)</a></h2>
+<pre><code class="language-bop">use std.collections.{stack}
+
+let s = stack()
+s = s.push(1)
+s = s.push(2)
+s = s.push(3)
+print(s.top())       // 3
+print(s.size())      // 3
+
+s = s.pop()
+print(s.top())       // 2
 </code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
-  }
-  i += 1
-}
-print("Sum exceeded 100 at i=" + i.to_str())
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>stack()</code></td><td><code>Stack</code></td><td>Empty constructor</td></tr>
+<tr><td><code>s.is_empty()</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.size()</code></td><td>int</td><td></td></tr>
+<tr><td><code>s.push(v)</code></td><td><code>Stack</code></td><td>New stack with <code>v</code> on top</td></tr>
+<tr><td><code>s.top()</code></td><td>value</td><td>Top element, or <code>none</code> if empty</td></tr>
+<tr><td><code>s.pop()</code></td><td><code>Stack</code></td><td>New stack without the top; popping empty is a no-op</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="queue-fifo"><a class="header" href="#queue-fifo"><code>Queue</code> (FIFO)</a></h2>
+<pre><code class="language-bop">use std.collections.{queue}
+
+let q = queue()
+q = q.enqueue("a")
+q = q.enqueue("b")
+q = q.enqueue("c")
+print(q.front())    // "a"
+
+q = q.dequeue()
+print(q.front())    // "b"
 </code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
-}
-print("Found " + count.to_str())
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>queue()</code></td><td><code>Queue</code></td><td>Empty constructor</td></tr>
+<tr><td><code>q.is_empty()</code></td><td>bool</td><td></td></tr>
+<tr><td><code>q.size()</code></td><td>int</td><td></td></tr>
+<tr><td><code>q.enqueue(v)</code></td><td><code>Queue</code></td><td>New queue with <code>v</code> at the back</td></tr>
+<tr><td><code>q.front()</code></td><td>value</td><td>Front element, or <code>none</code> if empty</td></tr>
+<tr><td><code>q.dequeue()</code></td><td><code>Queue</code></td><td>New queue without the front; dequeuing empty is a no-op</td></tr>
+</tbody>
+</table>
+</div>
+<p>Dequeue is O(n) in this naive implementation — good enough for scripting workloads. If you need tighter bounds, write an array-backed ring buffer.</p>
+<h2 id="set-unique-insertion-ordered"><a class="header" href="#set-unique-insertion-ordered"><code>Set</code> (unique, insertion-ordered)</a></h2>
+<pre><code class="language-bop">use std.collections.{set, set_of}
+
+let a = set_of([1, 2, 3])
+let b = set_of([2, 3, 4])
+
+print(a.union(b).values())         // [1, 2, 3, 4]
+print(a.intersect(b).values())     // [2, 3]
+print(a.difference(b).values())    // [1]
 </code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(i.to_str())     // 0, 1, 2, 3, 4
-}
-</code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(i.to_str())     // 2, 3, 4, 5, 6, 7
-}
-</code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
-}
-</code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = scores[name].to_str()
-  print(name + ": " + s)
-}
-</code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
-}
-</code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + row.to_str() + ", " + col.to_str() + ")")
-  }
-}
-</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>set()</code></td><td><code>Set</code></td><td>Empty constructor</td></tr>
+<tr><td><code>set_of(arr)</code></td><td><code>Set</code></td><td>From an array (duplicates collapse, first-seen wins)</td></tr>
+<tr><td><code>s.is_empty()</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.size()</code></td><td>int</td><td></td></tr>
+<tr><td><code>s.has(v)</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.add(v)</code></td><td><code>Set</code></td><td>New set with <code>v</code>. Idempotent.</td></tr>
+<tr><td><code>s.remove(v)</code></td><td><code>Set</code></td><td>New set without <code>v</code>. Removing absent is a no-op.</td></tr>
+<tr><td><code>s.values()</code></td><td>array</td><td>Elements in insertion order</td></tr>
+<tr><td><code>s.union(other)</code></td><td><code>Set</code></td><td></td></tr>
+<tr><td><code>s.intersect(other)</code></td><td><code>Set</code></td><td></td></tr>
+<tr><td><code>s.difference(other)</code></td><td><code>Set</code></td><td><code>self</code> minus <code>other</code></td></tr>
+</tbody>
+</table>
+</div>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../stdlib/iter.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../stdlib/string.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +296,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../stdlib/iter.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../stdlib/string.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

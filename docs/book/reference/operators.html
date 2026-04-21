@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="../toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -205,10 +205,10 @@ print([1, 2] + [3])                // [1, 2, 3]
 print("ha" * 3)                    // "hahaha"
 </code></pre>
 <h3 id="integer-results"><a class="header" href="#integer-results">Integer results</a></h3>
-<p>There is no dedicated integer-division operator. <code>/</code> always widens to <code>number</code>, which avoids the classic “1 / 2 == 0” footgun. When you need an integer result, cast with <code>int(...)</code>:</p>
-<pre><code class="language-bop">let mid = int((low + high) / 2)
+<p>There is no dedicated integer-division operator. <code>/</code> always widens to <code>number</code>, which avoids the classic “1 / 2 == 0” footgun. When you need an integer result, coerce the quotient with <code>.to_int()</code>:</p>
+<pre><code class="language-bop">let mid = ((low + high) / 2).to_int()
 </code></pre>
-<p><code>int(x)</code> truncates toward zero; <code>abs(x)</code> preserves the numeric type.</p>
+<p><code>.to_int()</code> truncates toward zero; <code>.abs()</code> preserves the numeric type.</p>
 <h3 id="overflow-and-divide-by-zero"><a class="header" href="#overflow-and-divide-by-zero">Overflow and divide-by-zero</a></h3>
 <ul>
 <li><code>int + int</code>, <code>int - int</code>, <code>int * int</code> use checked arithmetic — overflow is a runtime error, not silent wrap.</li>

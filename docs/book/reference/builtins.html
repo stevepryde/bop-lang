@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="../toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -178,112 +178,16 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="built-in-functions"><a class="header" href="#built-in-functions">Built-in Functions</a></h1>
-<p>Bop ships a compact set of built-in functions that are always in scope. They can’t be shadowed by user-defined fns. Host-backed builtins (I/O, time) are provided separately by the embedding host — see <code>bop-sys</code>’s <code>StandardHost</code> for the reference implementation.</p>
-<h2 id="output"><a class="header" href="#output">Output</a></h2>
-<h3 id="printargs"><a class="header" href="#printargs"><code>print(args...)</code></a></h3>
+<p>Bop ships a very small set of built-in functions that are always in scope. They can’t be shadowed by user-defined fns. Host-backed builtins (I/O, time) are provided separately by the embedding host — see <code>bop-sys</code>’s <code>StandardHost</code> for the reference implementation.</p>
+<p>Anything math- or conversion-shaped lives as a <a href="methods.html">method on a value</a>, not as a global — <code>(-5).abs()</code>, <code>"42".to_int()</code>, <code>[1, 2, 3].len()</code>. The global list is deliberately short: only things that are variadic (<code>print</code>), constructor-shaped (<code>range</code>), session-stateful (<code>rand</code>), or that take a callable (<code>try_call</code>).</p>
+<h2 id="printargs"><a class="header" href="#printargs"><code>print(args...)</code></a></h2>
 <p>Prints values to the host’s stdout, separated by spaces. Returns <code>none</code>.</p>
 <pre><code class="language-bop">print("hello")           // hello
 print("x =", 42)         // x = 42
 print(1, "plus", 2)      // 1 plus 2
 </code></pre>
-<p>Accepts any number of arguments (including zero). Each argument is converted to its string representation (Display) automatically.</p>
-<h3 id="inspectvalue"><a class="header" href="#inspectvalue"><code>inspect(value)</code></a></h3>
-<p>Returns a debug representation of a value as a string. Strings are wrapped in quotes; every other type matches its normal Display but nested strings remain quoted.</p>
-<pre><code class="language-bop">print(inspect("hello"))    // "hello"
-print(inspect(42))         // 42
-print(inspect([1, 2]))     // [1, 2]
-print(inspect([1, "two"])) // [1, "two"]
-</code></pre>
-<p>Use it when you need to distinguish strings from other types at a glance.</p>
-<h2 id="type-conversion"><a class="header" href="#type-conversion">Type conversion</a></h2>
-<h3 id="strvalue"><a class="header" href="#strvalue"><code>str(value)</code></a></h3>
-<p>Converts any value to its string representation:</p>
-<pre><code class="language-bop">str(42)        // "42"
-str(3.14)      // "3.14"
-str(true)      // "true"
-str(none)      // "none"
-str([1, 2])    // "[1, 2]"
-</code></pre>
-<h3 id="intvalue"><a class="header" href="#intvalue"><code>int(value)</code></a></h3>
-<p>Coerces to an <code>int</code>. Truncates toward zero for numbers; parses strings as integer-then-float.</p>
-<pre><code class="language-bop">int(3.9)       // 3
-int(-2.7)      // -2
-int("42")      // 42
-int("3.7")     // 3
-int(true)      // 1
-int(false)     // 0
-</code></pre>
-<p>Raises a runtime error if a string can’t be parsed.</p>
-<h3 id="floatvalue"><a class="header" href="#floatvalue"><code>float(value)</code></a></h3>
-<p>Coerces to a <code>number</code>. Widens ints, parses strings.</p>
-<pre><code class="language-bop">float(5)       // 5       (stored as number)
-float("3.14")  // 3.14
-float(true)    // 1
-</code></pre>
-<h3 id="typevalue"><a class="header" href="#typevalue"><code>type(value)</code></a></h3>
-<p>Returns the type name as a string:</p>
-<pre><code class="language-bop">type(42)           // "int"
-type(3.14)         // "number"
-type("hello")      // "string"
-type(true)         // "bool"
-type(none)         // "none"
-type([1, 2])       // "array"
-type({"a": 1})     // "dict"
-type(fn(x){x})     // "fn"
-type(Point{x:0,y:0})   // "struct"    (assuming `struct Point`)
-type(Color::Red)       // "enum"      (assuming `enum Color`)
-</code></pre>
-<h2 id="math"><a class="header" href="#math">Math</a></h2>
-<h3 id="absx"><a class="header" href="#absx"><code>abs(x)</code></a></h3>
-<p>Absolute value. Preserves the numeric type (<code>int</code> stays <code>int</code>; <code>number</code> stays <code>number</code>).</p>
-<pre><code class="language-bop">abs(-5)     // 5
-abs(-2.7)   // 2.7
-</code></pre>
-<p>Integer overflow on <code>abs(i64::MIN)</code> surfaces as a runtime error.</p>
-<h3 id="mina-b--maxa-b"><a class="header" href="#mina-b--maxa-b"><code>min(a, b)</code> / <code>max(a, b)</code></a></h3>
-<p>Pair-wise min / max. Preserves type when both sides match; widens to <code>number</code> on mixed <code>int</code> / <code>number</code>.</p>
-<pre><code class="language-bop">min(3, 7)      // 3
-max(-1, -5)    // -1
-max(1, 2.5)    // 2.5   (widened)
-</code></pre>
-<h3 id="randn"><a class="header" href="#randn"><code>rand(n)</code></a></h3>
-<p>Returns a random integer from <code>0</code> to <code>n - 1</code>, inclusive. <code>n</code> must be a positive integer.</p>
-<pre><code class="language-bop">rand(6)     // 0..=5 (die roll)
-rand(2)     // 0 or 1 (coin flip)
-</code></pre>
-<p>Uses a deterministic PRNG seeded per-session. The same inputs produce the same sequence — handy for tests, surprising for crypto (don’t use it for that).</p>
-<h3 id="sqrtx-sinx-cosx-tanx"><a class="header" href="#sqrtx-sinx-cosx-tanx"><code>sqrt(x)</code>, <code>sin(x)</code>, <code>cos(x)</code>, <code>tan(x)</code></a></h3>
-<p>Standard trigonometric / root functions. Take an <code>int</code> or <code>number</code>, always return <code>number</code>.</p>
-<pre><code class="language-bop">sqrt(9)      // 3
-sqrt(2)      // 1.4142135623730951
-sin(0)       // 0
-cos(0)       // 1
-</code></pre>
-<h3 id="floorx-ceilx-roundx"><a class="header" href="#floorx-ceilx-roundx"><code>floor(x)</code>, <code>ceil(x)</code>, <code>round(x)</code></a></h3>
-<p>Round to an integer. When the rounded result fits in an <code>i64</code>, the return type is <code>int</code>; otherwise it’s a <code>number</code> (so <code>floor(1e30)</code> stays a <code>number</code> rather than overflowing).</p>
-<pre><code class="language-bop">floor(3.7)           // 3    (int)
-ceil(3.2)            // 4    (int)
-round(2.5)           // 3    (ties away from zero)
-type(floor(3.7))     // "int"
-type(floor(1.0e30))  // "number"
-</code></pre>
-<h3 id="powbase-exp-logx-expx"><a class="header" href="#powbase-exp-logx-expx"><code>pow(base, exp)</code>, <code>log(x)</code>, <code>exp(x)</code></a></h3>
-<p>Floating-point power, natural log, and <code>e^x</code>. All return <code>number</code>.</p>
-<pre><code class="language-bop">pow(2, 10)     // 1024
-log(2.718281828459045)   // 1
-exp(1)         // 2.718281828459045
-</code></pre>
-<h2 id="collections"><a class="header" href="#collections">Collections</a></h2>
-<h3 id="lenvalue"><a class="header" href="#lenvalue"><code>len(value)</code></a></h3>
-<p>Returns the length of a string, array, or dict, as an <code>int</code>.</p>
-<pre><code class="language-bop">len("hello")       // 5
-len([1, 2, 3])     // 3
-len({"a": 1})      // 1
-len("")            // 0
-len([])            // 0
-</code></pre>
-<p>Raises a runtime error for numbers, bools, <code>none</code>, and functions.</p>
-<h3 id="rangen--rangestart-end--rangestart-end-step"><a class="header" href="#rangen--rangestart-end--rangestart-end-step"><code>range(n)</code> / <code>range(start, end)</code> / <code>range(start, end, step)</code></a></h3>
+<p>Accepts any number of arguments (including zero). Each argument is converted to its string representation (Display) automatically — you don’t need <code>.to_str()</code> first.</p>
+<h2 id="rangen--rangestart-end--rangestart-end-step"><a class="header" href="#rangen--rangestart-end--rangestart-end-step"><code>range(n)</code> / <code>range(start, end)</code> / <code>range(start, end, step)</code></a></h2>
 <p>Builds an array of <code>int</code> values.</p>
 <pre><code class="language-bop">range(5)           // [0, 1, 2, 3, 4]
 range(2, 6)        // [2, 3, 4, 5]
@@ -298,8 +202,13 @@ range(10, 0, -3)   // [10, 7, 4, 1]
 <li>All arguments must be <code>int</code> — floats are rejected.</li>
 <li>Maximum 10,000 elements. Bigger ranges raise a runtime error so loops can’t build gigabyte arrays by accident.</li>
 </ul>
-<h2 id="errors"><a class="header" href="#errors">Errors</a></h2>
-<h3 id="try_callcallable"><a class="header" href="#try_callcallable"><code>try_call(callable)</code></a></h3>
+<h2 id="randn"><a class="header" href="#randn"><code>rand(n)</code></a></h2>
+<p>Returns a random integer from <code>0</code> to <code>n - 1</code>, inclusive. <code>n</code> must be a positive integer.</p>
+<pre><code class="language-bop">rand(6)     // 0..=5 (die roll)
+rand(2)     // 0 or 1 (coin flip)
+</code></pre>
+<p>Uses a deterministic PRNG seeded per-session. The same inputs produce the same sequence — handy for tests, surprising for crypto (don’t use it for that).</p>
+<h2 id="try_callcallable"><a class="header" href="#try_callcallable"><code>try_call(callable)</code></a></h2>
 <p>Runs <code>callable</code> with no arguments and catches any non-fatal runtime error:</p>
 <pre><code class="language-bop">let r = try_call(fn() { return 1 / 0 })
 print(match r {
@@ -310,6 +219,24 @@ print(match r {
 </code></pre>
 <p>On success returns <code>Result::Ok(value)</code>; on a non-fatal error returns <code>Result::Err(RuntimeError { message, line })</code>. Fatal errors (step-limit / memory-limit / fn-call-depth) are <em>not</em> caught — they propagate past <code>try_call</code> unchanged so the sandbox invariant holds.</p>
 <p>See <a href="../errors.html">Error Handling</a> for the full story on <code>try</code>, <code>try_call</code>, <code>Result</code>, and <code>RuntimeError</code>.</p>
+<h2 id="everything-else-lives-on-a-value"><a class="header" href="#everything-else-lives-on-a-value">Everything else lives on a value</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Category</th><th>Was</th><th>Now</th></tr>
+</thead>
+<tbody>
+<tr><td>Introspection</td><td><code>type(x)</code>, <code>inspect(x)</code></td><td><code>x.type()</code>, <code>x.inspect()</code></td></tr>
+<tr><td>Conversion</td><td><code>str(x)</code>, <code>int(x)</code>, <code>float(x)</code></td><td><code>x.to_str()</code>, <code>x.to_int()</code>, <code>x.to_float()</code></td></tr>
+<tr><td>Length</td><td><code>len(x)</code></td><td><code>x.len()</code> (arrays, strings, dicts)</td></tr>
+<tr><td>Absolute / min / max</td><td><code>abs(x)</code>, <code>min(a, b)</code>, <code>max(a, b)</code></td><td><code>x.abs()</code>, <code>a.min(b)</code>, <code>a.max(b)</code></td></tr>
+<tr><td>Trig / roots</td><td><code>sqrt(x)</code>, <code>sin(x)</code>, <code>cos(x)</code>, <code>tan(x)</code></td><td><code>x.sqrt()</code>, <code>x.sin()</code>, <code>x.cos()</code>, <code>x.tan()</code></td></tr>
+<tr><td>Rounding</td><td><code>floor(x)</code>, <code>ceil(x)</code>, <code>round(x)</code></td><td><code>x.floor()</code>, <code>x.ceil()</code>, <code>x.round()</code></td></tr>
+<tr><td>Power / log / exp</td><td><code>pow(b, e)</code>, <code>log(x)</code>, <code>exp(x)</code></td><td><code>b.pow(e)</code>, <code>x.log()</code>, <code>x.exp()</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>See <a href="methods.html">Methods</a> for the full per-type method catalogue.</p>
 
                     </main>
 
@@ -319,7 +246,7 @@ print(match r {
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../reference/grammar.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../reference/methods.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -333,7 +260,7 @@ print(match r {
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../reference/grammar.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../reference/methods.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

@@ -360,7 +360,7 @@ impl AppHost {
                 fn median(xs) {
                     let sorted = xs
                     sorted.sort()
-                    let mid = int(len(sorted) / 2)
+                    let mid = (sorted.len() / 2).to_int()
                     return sorted[mid]
                 }
             "#),
@@ -428,7 +428,7 @@ fn main() {
         }
         let avg = average()
         let mid = median([10, 20, 30, 40, 50])
-        print("Average: " + str(avg) + ", median: " + str(mid))
+        print("Average: " + avg.to_str() + ", median: " + mid.to_str())
     "#;
 
     let mut host = AppHost::new();

@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="../toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -188,7 +188,7 @@ while true {
   }
   i += 1
 }
-print("Stopped at " + str(i))
+print("Stopped at " + i.to_str())
 </code></pre>
 <h3 id="searching-for-something"><a class="header" href="#searching-for-something">Searching for something</a></h3>
 <pre><code class="language-bop">let numbers = [4, 8, 15, 16, 23, 42]
@@ -212,7 +212,7 @@ if found {
   if i % 2 == 0 {
     continue
   }
-  print(str(i))    // 1, 3, 5, 7, 9
+  print(i.to_str())    // 1, 3, 5, 7, 9
 }
 </code></pre>
 <h3 id="filter-and-process"><a class="header" href="#filter-and-process">Filter and process</a></h3>
@@ -231,7 +231,7 @@ for word in words {
   if n &lt; 10 {
     break
   }
-  print(str(n))
+  print(n.to_str())
 }
 </code></pre>
 <blockquote>

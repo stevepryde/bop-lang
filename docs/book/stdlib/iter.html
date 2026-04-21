@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>std.iter - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -177,103 +177,107 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
-}
+                        <h1 id="stditer"><a class="header" href="#stditer">std.iter</a></h1>
+<p>Functional helpers on arrays. Array-in, array-out — there’s no lazy iterator protocol. If you care about allocation, a hand-written <code>for</code> loop will always beat these.</p>
+<p>Every helper handles empty arrays gracefully and preserves relative order.</p>
+<h2 id="import"><a class="header" href="#import">Import</a></h2>
+<pre><code class="language-bop">use std.iter                                // glob
+use std.iter.{map, filter, reduce}          // selective
+use std.iter as i                           // aliased
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
+<h2 id="higher-order"><a class="header" href="#higher-order">Higher-order</a></h2>
+<h3 id="maparr-f"><a class="header" href="#maparr-f"><code>map(arr, f)</code></a></h3>
+<p>Apply <code>f</code> to each element; return a new array of results.</p>
+<pre><code class="language-bop">use std.iter.{map}
+print(map([1, 2, 3], fn(x) { return x * 2 }))     // [2, 4, 6]
 </code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
+<h3 id="filterarr-pred"><a class="header" href="#filterarr-pred"><code>filter(arr, pred)</code></a></h3>
+<p>Keep only the elements for which <code>pred(x)</code> is truthy.</p>
+<pre><code class="language-bop">use std.iter.{filter}
+let evens = filter([1, 2, 3, 4, 5], fn(n) { return n % 2 == 0 })
+print(evens)    // [2, 4]
 </code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
-  }
-  i += 1
-}
-print("Sum exceeded 100 at i=" + i.to_str())
+<h3 id="reducearr-initial-combine"><a class="header" href="#reducearr-initial-combine"><code>reduce(arr, initial, combine)</code></a></h3>
+<p>Fold over the array left-to-right with a two-arg combiner.</p>
+<pre><code class="language-bop">use std.iter.{reduce}
+let sum = reduce([1, 2, 3, 4], 0, fn(acc, x) { return acc + x })
+print(sum)    // 10
 </code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
-}
-print("Found " + count.to_str())
+<h3 id="allarr-pred-anyarr-pred"><a class="header" href="#allarr-pred-anyarr-pred"><code>all(arr, pred)</code>, <code>any(arr, pred)</code></a></h3>
+<p><code>all</code> returns <code>true</code> when every element passes (vacuously true for empty). <code>any</code> returns <code>true</code> when at least one element passes.</p>
+<pre><code class="language-bop">use std.iter.{all, any}
+print(all([2, 4, 6], fn(n) { return n % 2 == 0 }))    // true
+print(any([1, 3, 4], fn(n) { return n % 2 == 0 }))    // true
 </code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(i.to_str())     // 0, 1, 2, 3, 4
-}
+<h3 id="countarr-pred"><a class="header" href="#countarr-pred"><code>count(arr, pred)</code></a></h3>
+<p>Count elements for which <code>pred(x)</code> is truthy.</p>
+<pre><code class="language-bop">use std.iter.{count}
+print(count([1, 2, 3, 4, 5], fn(n) { return n &gt; 2 }))   // 3
 </code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(i.to_str())     // 2, 3, 4, 5, 6, 7
-}
+<h3 id="findarr-pred--find_indexarr-pred"><a class="header" href="#findarr-pred--find_indexarr-pred"><code>find(arr, pred)</code> / <code>find_index(arr, pred)</code></a></h3>
+<p><code>find</code> returns the first matching element, or <code>none</code> if no match. <code>find_index</code> returns the 0-based index, or <code>-1</code>.</p>
+<pre><code class="language-bop">use std.iter.{find, find_index}
+print(find([1, 2, 3, 4], fn(n) { return n &gt; 2 }))          // 3
+print(find_index([1, 2, 3, 4], fn(n) { return n &gt; 2 }))    // 2
 </code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
-}
+<h2 id="slicing"><a class="header" href="#slicing">Slicing</a></h2>
+<h3 id="takearr-n"><a class="header" href="#takearr-n"><code>take(arr, n)</code></a></h3>
+<p>First <code>n</code> elements (or the whole array if it’s shorter). Negative <code>n</code> yields an empty array.</p>
+<pre><code class="language-bop">use std.iter.{take}
+print(take([1, 2, 3, 4, 5], 3))    // [1, 2, 3]
+print(take([1, 2], 10))            // [1, 2]
 </code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = scores[name].to_str()
-  print(name + ": " + s)
-}
+<h3 id="droparr-n"><a class="header" href="#droparr-n"><code>drop(arr, n)</code></a></h3>
+<p>Drop the first <code>n</code> elements. Negative <code>n</code> yields a full copy; <code>n &gt;= arr.len()</code> yields <code>[]</code>.</p>
+<pre><code class="language-bop">use std.iter.{drop}
+print(drop([1, 2, 3, 4, 5], 2))    // [3, 4, 5]
 </code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
-}
+<h2 id="combining"><a class="header" href="#combining">Combining</a></h2>
+<h3 id="zipa-b"><a class="header" href="#zipa-b"><code>zip(a, b)</code></a></h3>
+<p>Pair elements from two arrays. Stops at the shorter array’s length.</p>
+<pre><code class="language-bop">use std.iter.{zip}
+print(zip([1, 2, 3], ["a", "b", "c"]))    // [[1, "a"], [2, "b"], [3, "c"]]
 </code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + row.to_str() + ", " + col.to_str() + ")")
-  }
-}
+<h3 id="enumeratearr"><a class="header" href="#enumeratearr"><code>enumerate(arr)</code></a></h3>
+<p>Pair each element with its 0-based index.</p>
+<pre><code class="language-bop">use std.iter.{enumerate}
+print(enumerate(["a", "b"]))    // [[0, "a"], [1, "b"]]
 </code></pre>
+<h3 id="flattenarr"><a class="header" href="#flattenarr"><code>flatten(arr)</code></a></h3>
+<p>Flatten an array of arrays one level down.</p>
+<pre><code class="language-bop">use std.iter.{flatten}
+print(flatten([[1, 2], [3, 4], [5]]))    // [1, 2, 3, 4, 5]
+</code></pre>
+<h2 id="reductions"><a class="header" href="#reductions">Reductions</a></h2>
+<h3 id="sumarr"><a class="header" href="#sumarr"><code>sum(arr)</code></a></h3>
+<p>Sum of a numeric array. Empty → <code>0</code>.</p>
+<pre><code class="language-bop">use std.iter.{sum}
+print(sum([1, 2, 3, 4]))     // 10
+print(sum([]))               // 0
+</code></pre>
+<h3 id="productarr"><a class="header" href="#productarr"><code>product(arr)</code></a></h3>
+<p>Product of a numeric array. Empty → <code>1</code> (multiplicative identity, matching NumPy / Python’s <code>math.prod</code>).</p>
+<pre><code class="language-bop">use std.iter.{product}
+print(product([2, 3, 4]))    // 24
+print(product([]))           // 1
+</code></pre>
+<h3 id="min_arrayarr--max_arrayarr"><a class="header" href="#min_arrayarr--max_arrayarr"><code>min_array(arr)</code> / <code>max_array(arr)</code></a></h3>
+<p>Minimum / maximum of a numeric array. Raises on empty input so callers notice.</p>
+<pre><code class="language-bop">use std.iter.{min_array, max_array}
+print(min_array([3, 1, 4, 1, 5]))    // 1
+print(max_array([3, 1, 4, 1, 5]))    // 5
+</code></pre>
+<p>For pairwise min / max use the <code>.min()</code> / <code>.max()</code> <a href="../reference/methods.html#numeric-methods--int-and-number">numeric methods</a> instead.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../stdlib/math.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../stdlib/collections.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +287,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../stdlib/math.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../stdlib/collections.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

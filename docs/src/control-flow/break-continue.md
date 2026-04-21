@@ -14,7 +14,7 @@ while true {
   }
   i += 1
 }
-print("Stopped at " + str(i))
+print("Stopped at " + i.to_str())
 ```
 
 ### Searching for something
@@ -45,7 +45,7 @@ for i in range(10) {
   if i % 2 == 0 {
     continue
   }
-  print(str(i))    // 1, 3, 5, 7, 9
+  print(i.to_str())    // 1, 3, 5, 7, 9
 }
 ```
 
@@ -71,7 +71,7 @@ repeat 10 {
   if n < 10 {
     break
   }
-  print(str(n))
+  print(n.to_str())
 }
 ```
 

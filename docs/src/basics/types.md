@@ -1,9 +1,9 @@
 # Types
 
-Bop is dynamically typed — variables can hold any type, and types are checked at runtime. The `type()` builtin returns a name for each:
+Bop is dynamically typed — variables can hold any type, and types are checked at runtime. Every value has a `.type()` method that returns its type name:
 
-| `type()` returns | Description | Literal examples |
-|------------------|-------------|------------------|
+| `.type()` returns | Description | Literal examples |
+|-------------------|-------------|------------------|
 | `"int"` | 64-bit signed integer | `0`, `42`, `-7` |
 | `"number"` | 64-bit floating point | `3.14`, `-0.5`, `4.0` |
 | `"string"` | UTF-8 text | `"hello"`, `"got {n} items"` |
@@ -18,18 +18,18 @@ Bop is dynamically typed — variables can hold any type, and types are checked 
 
 ```bop
 let x = 42
-print(type(x))      // "int"
+print(x.type())      // "int"
 
 let y = 3.14
-print(type(y))      // "number"
+print(y.type())      // "number"
 
 let s = "hello"
-print(type(s))      // "string"
+print(s.type())      // "string"
 ```
 
 ## Integers and floats
 
-Integer literals (`42`, `-7`) produce `int` values; anything with a decimal point or `e`-exponent (`3.14`, `4.0`, `1e6`) produces `number`. The two coexist — arithmetic between them widens to `number`, and `==` compares numerically across the split:
+Integer literals (`42`, `-7`) produce `int` values; anything with a decimal point (`3.14`, `4.0`) produces `number`. There's no exponent-shaped literal — write the full decimal or build large values by multiplication. The two numeric types coexist: arithmetic widens to `number` on mixed operands, and `==` compares numerically across the split:
 
 ```bop
 print(1 + 1)         // 2       (int + int → int)
@@ -37,35 +37,37 @@ print(1 + 1.0)       // 2       (int + number → number, prints as whole)
 print(1 == 1.0)      // true    (cross-type numeric equality)
 ```
 
-Use `int(x)` to truncate a number to an integer (toward zero), and `float(x)` to widen an int to a number:
+Use `.to_int()` to truncate a number to an integer (toward zero), and `.to_float()` to widen an int to a number:
 
 ```bop
-print(int(3.7))      // 3
-print(int(-2.7))     // -2
-print(float(5))      // 5       (now a number internally)
+print((3.7).to_int())      // 3
+print((-2.7).to_int())     // -2
+print((5).to_float())      // 5       (now a number internally)
 ```
+
+Number literals need parens before a method call (otherwise `3.7.to_int()` looks like a decimal followed by a field). Variables don't: `let x = 3.7; print(x.to_int())`.
 
 ### Division
 
 `/` always produces a `number`, even for `int / int`:
 
 ```bop
-print(7 / 2)           // 3.5
-print(6 / 2)           // 3        (whole value — still a number)
-print(type(6 / 2))     // "number"
+print(7 / 2)              // 3.5
+print(6 / 2)              // 3        (whole value — still a number)
+print((6 / 2).type())     // "number"
 ```
 
 This sidesteps the classic "1 / 2 == 0" footgun that trips beginners in C / Rust / Java.
 
-When you *do* want an integer result (index math, bucketing, etc.), coerce the quotient back with `int(...)`:
+When you *do* want an integer result (index math, bucketing, etc.), coerce the quotient back with `.to_int()`:
 
 ```bop
-print(int(7 / 2))      // 3
-print(int(-7 / 2))     // -3
-print(type(int(7 / 2))) // "int"
+print((7 / 2).to_int())           // 3
+print((-7 / 2).to_int())          // -3
+print((7 / 2).to_int().type())    // "int"
 ```
 
-`int(...)` truncates toward zero. `/` raises a runtime error on division by zero.
+`.to_int()` truncates toward zero. `/` raises a runtime error on division by zero.
 
 ## Strings
 
@@ -105,7 +107,7 @@ let doubled = count * 2
 print("Double: {doubled}")
 
 // Or use concatenation:
-print("Double: " + str(count * 2))
+print("Double: " + (count * 2).to_str())
 ```
 
 To include a literal `{` or `}` in a string, escape it with a backslash:
@@ -120,8 +122,8 @@ print("Use \{name\} for interpolation")
 `+` joins two strings, or a string and a number (the number is converted first):
 
 ```bop
-print("Score: " + str(42))    // "Score: 42"
-print("n=" + 7)                // "n=7"   (int auto-stringified)
+print("Score: " + (42).to_str())    // "Score: 42"
+print("n=" + 7)                      // "n=7"   (int auto-stringified)
 ```
 
 ## Booleans

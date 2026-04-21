@@ -20,7 +20,7 @@ Brings every public export of a module into the current scope as a bare name:
 ```bop
 use std.math
 print(pi)            // constant from std.math
-print(sqrt(9))       // fn from std.math
+print(factorial(5))  // fn from std.math → 120
 ```
 
 Names that start with `_` are considered **private by convention** and glob imports skip them:
@@ -43,10 +43,10 @@ Glob is idempotent at the injection site — running `use foo` twice in the same
 Pick exactly which names you want:
 
 ```bop
-use std.math.{pi, sqrt}
+use std.math.{pi, factorial}
 print(pi)
-print(sqrt(16))
-// print(sin(0))   // error — not imported
+print(factorial(4))
+// print(clamp(1, 0, 10))   // error — not imported
 ```
 
 Selective imports can reach private names explicitly:
@@ -65,18 +65,18 @@ Binds the whole module as a single value under the alias:
 ```bop
 use std.math as m
 print(m.pi)
-print(m.sqrt(9))
+print(m.factorial(5))
 ```
 
-`m` is a `Value::Module` — `type(m)` is `"module"`. You access its exports via the `.` operator. Methods on aliased modules (`m.helper(...)`) work the same way they would on a bare imported fn.
+`m` is a `Value::Module` — `m.type()` is `"module"`. You access its exports via the `.` operator. Methods on aliased modules (`m.helper(...)`) work the same way they would on a bare imported fn.
 
 Combine with selective to shrink the alias's surface:
 
 ```bop
-use std.math.{pi, sqrt} as m
+use std.math.{pi, factorial} as m
 print(m.pi)
-print(m.sqrt(9))
-// print(m.sin(0))   // error — `sin` wasn't imported
+print(m.factorial(5))
+// print(m.clamp(1, 0, 10))   // error — `clamp` wasn't imported
 ```
 
 ## Namespaced types

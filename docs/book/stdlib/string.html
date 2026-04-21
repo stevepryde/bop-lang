@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>std.string - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -177,103 +177,68 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
-}
+                        <h1 id="stdstring"><a class="header" href="#stdstring">std.string</a></h1>
+<p>Formatting and character-level helpers that don’t fit the method-on-string pattern.</p>
+<blockquote>
+<p>The core string operations — <code>.len()</code>, <code>.trim()</code>, <code>.upper()</code>, <code>.split()</code>, <code>.contains()</code>, <code>.slice()</code>, <code>.replace()</code>, <code>.to_int()</code>, <code>.to_float()</code>, etc. — are <a href="../reference/methods.html#string-methods--string">methods on strings</a>. This module adds things that are awkward as methods.</p>
+</blockquote>
+<h2 id="import"><a class="header" href="#import">Import</a></h2>
+<pre><code class="language-bop">use std.string
+use std.string.{pad_left, center}
+use std.string as str
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
+<h2 id="padding"><a class="header" href="#padding">Padding</a></h2>
+<h3 id="pad_lefts-width-ch--pad_rights-width-ch"><a class="header" href="#pad_lefts-width-ch--pad_rights-width-ch"><code>pad_left(s, width, ch)</code> / <code>pad_right(s, width, ch)</code></a></h3>
+<p>Pad <code>s</code> on the left (or right) with <code>ch</code> until it reaches <code>width</code> total characters. Already-long strings are returned unchanged. <code>ch</code> should be a single-character string.</p>
+<pre><code class="language-bop">use std.string.{pad_left, pad_right}
+print(pad_left("42", 5, "0"))      // "00042"
+print(pad_right("hi", 6, "."))     // "hi...."
 </code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
+<h3 id="centers-width-ch"><a class="header" href="#centers-width-ch"><code>center(s, width, ch)</code></a></h3>
+<p>Centre <code>s</code> inside <code>width</code> chars using <code>ch</code> as filler. Odd leftover space goes on the right (matches Python’s <code>str.center</code>).</p>
+<pre><code class="language-bop">use std.string.{center}
+print(center("OK", 6, "-"))     // "--OK--"
+print(center("OK", 7, "-"))     // "--OK---"
 </code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
-  }
-  i += 1
-}
-print("Sum exceeded 100 at i=" + i.to_str())
+<h2 id="character-level"><a class="header" href="#character-level">Character-level</a></h2>
+<h3 id="charss"><a class="header" href="#charss"><code>chars(s)</code></a></h3>
+<p>Split <code>s</code> into an array of single-character strings, preserving order.</p>
+<pre><code class="language-bop">use std.string.{chars}
+print(chars("abc"))    // ["a", "b", "c"]
 </code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
-}
-print("Found " + count.to_str())
+<h3 id="reverses"><a class="header" href="#reverses"><code>reverse(s)</code></a></h3>
+<p>Reverse the character sequence. Works on ASCII and UTF-8 (iterates by code point).</p>
+<pre><code class="language-bop">use std.string.{reverse}
+print(reverse("hello"))    // "olleh"
 </code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(i.to_str())     // 0, 1, 2, 3, 4
-}
+<h3 id="is_palindromes"><a class="header" href="#is_palindromes"><code>is_palindrome(s)</code></a></h3>
+<p><code>true</code> when <code>s</code> reads the same forwards and backwards. Case-sensitive — lowercase the input first if you need case-insensitive comparison.</p>
+<pre><code class="language-bop">use std.string.{is_palindrome}
+print(is_palindrome("racecar"))    // true
+print(is_palindrome("Racecar"))    // false
 </code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(i.to_str())     // 2, 3, 4, 5, 6, 7
-}
+<h2 id="other-helpers"><a class="header" href="#other-helpers">Other helpers</a></h2>
+<h3 id="counts-needle"><a class="header" href="#counts-needle"><code>count(s, needle)</code></a></h3>
+<p>Count non-overlapping occurrences of <code>needle</code> in <code>s</code>. An empty <code>needle</code> returns <code>0</code> (avoids the “infinite matches at every position” ambiguity).</p>
+<pre><code class="language-bop">use std.string.{count}
+print(count("banana", "a"))      // 3
+print(count("aaaa", "aa"))       // 2  (non-overlapping)
 </code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
-}
-</code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = scores[name].to_str()
-  print(name + ": " + s)
-}
-</code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
-}
-</code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + row.to_str() + ", " + col.to_str() + ")")
-  }
-}
+<h3 id="joinarr-sep"><a class="header" href="#joinarr-sep"><code>join(arr, sep)</code></a></h3>
+<p>Join an array of strings with <code>sep</code>. This is a thin wrapper around the built-in <code>arr.join(sep)</code> <a href="../reference/methods.html#array-methods--array">array method</a> — it’s here so users starting from <code>std.string</code> don’t have to look elsewhere.</p>
+<pre><code class="language-bop">use std.string.{join}
+print(join(["a", "b", "c"], "-"))    // "a-b-c"
 </code></pre>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../stdlib/collections.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../stdlib/result.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +248,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../stdlib/collections.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../stdlib/result.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

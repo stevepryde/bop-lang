@@ -69,7 +69,7 @@ fn process(value) {
   if value == none {
     return
   }
-  print("Processing: " + str(value))
+  print("Processing: " + value.to_str())
 }
 ```
 

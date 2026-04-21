@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>std.result - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -177,103 +177,91 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
-}
+                        <h1 id="stdresult"><a class="header" href="#stdresult">std.result</a></h1>
+<p>Combinators for the built-in <code>Result</code> type.</p>
+<blockquote>
+<p><code>Result { Ok(value), Err(error) }</code> and <code>RuntimeError { message, line }</code> are <strong>engine built-ins</strong> — you don’t need <code>use std.result</code> to write <code>Result::Ok(v)</code> or match on <code>Result::Err(e)</code>. See <a href="../errors.html">Error Handling</a>. This module only adds the helpers.</p>
+</blockquote>
+<h2 id="import"><a class="header" href="#import">Import</a></h2>
+<pre><code class="language-bop">use std.result                                  // glob
+use std.result.{is_ok, unwrap_or, map}          // selective
+use std.result as r                             // aliased
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
+<h2 id="predicates"><a class="header" href="#predicates">Predicates</a></h2>
+<h3 id="is_okr--is_errr"><a class="header" href="#is_okr--is_errr"><code>is_ok(r)</code> / <code>is_err(r)</code></a></h3>
+<pre><code class="language-bop">use std.result.{is_ok, is_err}
+print(is_ok(Result::Ok(1)))         // true
+print(is_err(Result::Err("oops"))) // true
 </code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
+<h2 id="unwrapping"><a class="header" href="#unwrapping">Unwrapping</a></h2>
+<h3 id="unwrapr"><a class="header" href="#unwrapr"><code>unwrap(r)</code></a></h3>
+<p>Return the <code>Ok</code> payload; raise a runtime error on <code>Err</code>. Use sparingly — prefer <code>try</code> or pattern matching in production code.</p>
+<pre><code class="language-bop">use std.result.{unwrap}
+print(unwrap(Result::Ok(42)))     // 42
+// unwrap(Result::Err("bad"))     // runtime error
 </code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
-  }
-  i += 1
-}
-print("Sum exceeded 100 at i=" + i.to_str())
+<h3 id="expectr-message"><a class="header" href="#expectr-message"><code>expect(r, message)</code></a></h3>
+<p>Like <code>unwrap</code>, but raises with a caller-supplied message on <code>Err</code>.</p>
+<pre><code class="language-bop">use std.result.{expect}
+print(expect(Result::Ok(42), "couldn't compute"))  // 42
 </code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
-}
-print("Found " + count.to_str())
+<h3 id="unwrap_orr-default"><a class="header" href="#unwrap_orr-default"><code>unwrap_or(r, default)</code></a></h3>
+<p>Return the <code>Ok</code> payload, or <code>default</code> on <code>Err</code>.</p>
+<pre><code class="language-bop">use std.result.{unwrap_or}
+print(unwrap_or(Result::Ok(10), 0))         // 10
+print(unwrap_or(Result::Err("fail"), 0))    // 0
 </code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(i.to_str())     // 0, 1, 2, 3, 4
-}
+<h2 id="transforms"><a class="header" href="#transforms">Transforms</a></h2>
+<h3 id="mapr-f"><a class="header" href="#mapr-f"><code>map(r, f)</code></a></h3>
+<p>Apply <code>f</code> to the <code>Ok</code> payload; pass <code>Err</code> through unchanged.</p>
+<pre><code class="language-bop">use std.result.{map}
+print(map(Result::Ok(5), fn(n) { return n * n }))      // Result::Ok(25)
+print(map(Result::Err("x"), fn(n) { return n * n }))   // Result::Err("x")
 </code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(i.to_str())     // 2, 3, 4, 5, 6, 7
-}
+<h3 id="map_errr-f"><a class="header" href="#map_errr-f"><code>map_err(r, f)</code></a></h3>
+<p>Apply <code>f</code> to the <code>Err</code> payload; pass <code>Ok</code> through unchanged.</p>
+<pre><code class="language-bop">use std.result.{map_err}
+print(map_err(Result::Err("fail"), fn(e) { return e + "!" }))
+// Result::Err("fail!")
 </code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
+<h3 id="and_thenr-f"><a class="header" href="#and_thenr-f"><code>and_then(r, f)</code></a></h3>
+<p>Monadic bind — if <code>r</code> is <code>Ok(v)</code>, run <code>f(v)</code> (which should itself return a <code>Result</code>). If <code>Err</code>, pass it through.</p>
+<pre><code class="language-bop">use std.result.{and_then}
+
+fn halve(x) {
+  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
+  return Result::Err("odd")
 }
+
+print(and_then(and_then(Result::Ok(8), halve), halve))    // Result::Ok(2)
+print(and_then(Result::Ok(7), halve))                      // Result::Err("odd")
 </code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = scores[name].to_str()
-  print(name + ": " + s)
-}
-</code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
-}
-</code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + row.to_str() + ", " + col.to_str() + ")")
-  }
-}
-</code></pre>
+<h2 id="when-to-reach-for-each"><a class="header" href="#when-to-reach-for-each">When to reach for each</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Situation</th><th>Tool</th></tr>
+</thead>
+<tbody>
+<tr><td>Have a Result, want the value or propagate</td><td><code>try</code> (operator — <a href="../errors.html#the-try-operator">Error Handling</a>)</td></tr>
+<tr><td>Have a Result, need a default</td><td><code>unwrap_or</code></td></tr>
+<tr><td>Have a Result, want to apply a pure function to <code>Ok</code></td><td><code>map</code></td></tr>
+<tr><td>Chaining several fallible steps</td><td><code>and_then</code></td></tr>
+<tr><td>Catching a raised runtime error</td><td><code>try_call</code> (built-in — <a href="../errors.html#try_callf">Errors</a>)</td></tr>
+<tr><td>You know it’s Ok and want to panic if not</td><td><code>unwrap</code> / <code>expect</code></td></tr>
+</tbody>
+</table>
+</div>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../stdlib/string.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../stdlib/json.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +271,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../stdlib/string.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../stdlib/json.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

@@ -155,10 +155,10 @@ Variables can hold any type. You can even change the type of a variable by reass
 
 ```bop
 let val = 42
-print(type(val))    // "int"
+print(val.type())   // "int"
 
 val = "hello"
-print(type(val))    // "string"
+print(val.type())   // "string"
 ```
 
 This flexibility is useful but can be surprising — the error only surfaces when some later operation expects the original type. Case conventions help: a `count`-like variable holding a string usually means the wrong thing landed in it upstream.

@@ -36,10 +36,12 @@ person["email"] = "a@b.com"   // add new entry
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `d.len()` | number | Number of entries |
+| `d.len()` | int | Number of entries |
 | `d.keys()` | array | Array of all keys |
 | `d.values()` | array | Array of all values |
 | `d.has(key)` | bool | Whether the key exists |
+
+Plus the universal `d.type()`, `d.to_str()`, `d.inspect()`.
 
 ## Practical examples
 
@@ -57,7 +59,7 @@ for word in words {
 }
 
 for key in counts {
-  print(key + ": " + str(counts[key]))
+  print(key + ": " + counts[key].to_str())
 }
 ```
 
@@ -65,8 +67,8 @@ for key in counts {
 
 ```bop
 let point = {"x": 10, "y": 20}
-let x = str(point["x"])
-let y = str(point["y"])
+let x = point["x"].to_str()
+let y = point["y"].to_str()
 print("Position: ({x}, {y})")
 ```
 
@@ -75,7 +77,7 @@ print("Position: ({x}, {y})")
 ```bop
 let config = {"width": 800, "height": 600, "title": "My App"}
 for key in config {
-  let val = str(config[key])
+  let val = config[key].to_str()
   print(key + ": " + val)
 }
 ```
@@ -86,7 +88,7 @@ for key in config {
 let settings = {"volume": 80}
 
 if settings.has("volume") {
-  let v = str(settings["volume"])
+  let v = settings["volume"].to_str()
   print("Volume is {v}")
 } else {
   print("Using default volume")

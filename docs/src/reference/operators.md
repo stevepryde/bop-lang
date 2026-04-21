@@ -26,13 +26,13 @@ print("ha" * 3)                    // "hahaha"
 
 ### Integer results
 
-There is no dedicated integer-division operator. `/` always widens to `number`, which avoids the classic "1 / 2 == 0" footgun. When you need an integer result, cast with `int(...)`:
+There is no dedicated integer-division operator. `/` always widens to `number`, which avoids the classic "1 / 2 == 0" footgun. When you need an integer result, coerce the quotient with `.to_int()`:
 
 ```bop
-let mid = int((low + high) / 2)
+let mid = ((low + high) / 2).to_int()
 ```
 
-`int(x)` truncates toward zero; `abs(x)` preserves the numeric type.
+`.to_int()` truncates toward zero; `.abs()` preserves the numeric type.
 
 ### Overflow and divide-by-zero
 

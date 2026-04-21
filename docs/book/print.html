@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-d974ebe2.js"></script>
+        <script src="toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -273,11 +273,11 @@ true false none
 <p>There are no word-spelled logical operators — use <code>&amp;&amp;</code>, <code>||</code>, <code>!</code> rather than <code>and</code>, <code>or</code>, <code>not</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="types"><a class="header" href="#types">Types</a></h1>
-<p>Bop is dynamically typed — variables can hold any type, and types are checked at runtime. The <code>type()</code> builtin returns a name for each:</p>
+<p>Bop is dynamically typed — variables can hold any type, and types are checked at runtime. Every value has a <code>.type()</code> method that returns its type name:</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th><code>type()</code> returns</th><th>Description</th><th>Literal examples</th></tr>
+<tr><th><code>.type()</code> returns</th><th>Description</th><th>Literal examples</th></tr>
 </thead>
 <tbody>
 <tr><td><code>"int"</code></td><td>64-bit signed integer</td><td><code>0</code>, <code>42</code>, <code>-7</code></td></tr>
@@ -295,38 +295,39 @@ true false none
 </table>
 </div>
 <pre><code class="language-bop">let x = 42
-print(type(x))      // "int"
+print(x.type())      // "int"
 
 let y = 3.14
-print(type(y))      // "number"
+print(y.type())      // "number"
 
 let s = "hello"
-print(type(s))      // "string"
+print(s.type())      // "string"
 </code></pre>
 <h2 id="integers-and-floats"><a class="header" href="#integers-and-floats">Integers and floats</a></h2>
-<p>Integer literals (<code>42</code>, <code>-7</code>) produce <code>int</code> values; anything with a decimal point or <code>e</code>-exponent (<code>3.14</code>, <code>4.0</code>, <code>1e6</code>) produces <code>number</code>. The two coexist — arithmetic between them widens to <code>number</code>, and <code>==</code> compares numerically across the split:</p>
+<p>Integer literals (<code>42</code>, <code>-7</code>) produce <code>int</code> values; anything with a decimal point (<code>3.14</code>, <code>4.0</code>) produces <code>number</code>. There’s no exponent-shaped literal — write the full decimal or build large values by multiplication. The two numeric types coexist: arithmetic widens to <code>number</code> on mixed operands, and <code>==</code> compares numerically across the split:</p>
 <pre><code class="language-bop">print(1 + 1)         // 2       (int + int → int)
 print(1 + 1.0)       // 2       (int + number → number, prints as whole)
 print(1 == 1.0)      // true    (cross-type numeric equality)
 </code></pre>
-<p>Use <code>int(x)</code> to truncate a number to an integer (toward zero), and <code>float(x)</code> to widen an int to a number:</p>
-<pre><code class="language-bop">print(int(3.7))      // 3
-print(int(-2.7))     // -2
-print(float(5))      // 5       (now a number internally)
+<p>Use <code>.to_int()</code> to truncate a number to an integer (toward zero), and <code>.to_float()</code> to widen an int to a number:</p>
+<pre><code class="language-bop">print((3.7).to_int())      // 3
+print((-2.7).to_int())     // -2
+print((5).to_float())      // 5       (now a number internally)
 </code></pre>
+<p>Number literals need parens before a method call (otherwise <code>3.7.to_int()</code> looks like a decimal followed by a field). Variables don’t: <code>let x = 3.7; print(x.to_int())</code>.</p>
 <h3 id="division"><a class="header" href="#division">Division</a></h3>
 <p><code>/</code> always produces a <code>number</code>, even for <code>int / int</code>:</p>
-<pre><code class="language-bop">print(7 / 2)           // 3.5
-print(6 / 2)           // 3        (whole value — still a number)
-print(type(6 / 2))     // "number"
+<pre><code class="language-bop">print(7 / 2)              // 3.5
+print(6 / 2)              // 3        (whole value — still a number)
+print((6 / 2).type())     // "number"
 </code></pre>
 <p>This sidesteps the classic “1 / 2 == 0” footgun that trips beginners in C / Rust / Java.</p>
-<p>When you <em>do</em> want an integer result (index math, bucketing, etc.), coerce the quotient back with <code>int(...)</code>:</p>
-<pre><code class="language-bop">print(int(7 / 2))      // 3
-print(int(-7 / 2))     // -3
-print(type(int(7 / 2))) // "int"
+<p>When you <em>do</em> want an integer result (index math, bucketing, etc.), coerce the quotient back with <code>.to_int()</code>:</p>
+<pre><code class="language-bop">print((7 / 2).to_int())           // 3
+print((-7 / 2).to_int())          // -3
+print((7 / 2).to_int().type())    // "int"
 </code></pre>
-<p><code>int(...)</code> truncates toward zero. <code>/</code> raises a runtime error on division by zero.</p>
+<p><code>.to_int()</code> truncates toward zero. <code>/</code> raises a runtime error on division by zero.</p>
 <h2 id="strings"><a class="header" href="#strings">Strings</a></h2>
 <p>Strings use double quotes only. Supported escape sequences: <code>\"</code>, <code>\\</code>, <code>\n</code>, <code>\t</code>, <code>\r</code>, <code>\{</code>, <code>\}</code>.</p>
 <pre><code class="language-bop">let greeting = "Hello, world!"
@@ -352,7 +353,7 @@ print("Hello, {name}! You have {count} items.")
 print("Double: {doubled}")
 
 // Or use concatenation:
-print("Double: " + str(count * 2))
+print("Double: " + (count * 2).to_str())
 </code></pre>
 <p>To include a literal <code>{</code> or <code>}</code> in a string, escape it with a backslash:</p>
 <pre><code class="language-bop">print("Use \{name\} for interpolation")
@@ -360,8 +361,8 @@ print("Double: " + str(count * 2))
 </code></pre>
 <h3 id="string-concatenation"><a class="header" href="#string-concatenation">String concatenation</a></h3>
 <p><code>+</code> joins two strings, or a string and a number (the number is converted first):</p>
-<pre><code class="language-bop">print("Score: " + str(42))    // "Score: 42"
-print("n=" + 7)                // "n=7"   (int auto-stringified)
+<pre><code class="language-bop">print("Score: " + (42).to_str())    // "Score: 42"
+print("n=" + 7)                      // "n=7"   (int auto-stringified)
 </code></pre>
 <h2 id="booleans"><a class="header" href="#booleans">Booleans</a></h2>
 <p><code>true</code> and <code>false</code>. Used in conditions and comparisons:</p>
@@ -490,10 +491,10 @@ print(original)      // [1, 2, 3, 99]
 <h2 id="dynamic-typing"><a class="header" href="#dynamic-typing">Dynamic typing</a></h2>
 <p>Variables can hold any type. You can even change the type of a variable by reassigning it:</p>
 <pre><code class="language-bop">let val = 42
-print(type(val))    // "int"
+print(val.type())   // "int"
 
 val = "hello"
-print(type(val))    // "string"
+print(val.type())   // "string"
 </code></pre>
 <p>This flexibility is useful but can be surprising — the error only surfaces when some later operation expects the original type. Case conventions help: a <code>count</code>-like variable holding a string usually means the wrong thing landed in it upstream.</p>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -544,7 +545,7 @@ print(message)
   if value == none {
     return
   }
-  print("Processing: " + str(value))
+  print("Processing: " + value.to_str())
 }
 </code></pre>
 <h3 id="classify-a-value"><a class="header" href="#classify-a-value">Classify a value</a></h3>
@@ -601,7 +602,7 @@ while true {
   }
   i += 1
 }
-print("Sum exceeded 100 at i=" + str(i))
+print("Sum exceeded 100 at i=" + i.to_str())
 </code></pre>
 <h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
 <pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
@@ -613,18 +614,18 @@ while n &lt; 50 {
   }
   n += 1
 }
-print("Found " + str(count))
+print("Found " + count.to_str())
 </code></pre>
 <h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
 <p>Iterates over ranges, arrays, or dictionary keys.</p>
 <h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
 <pre><code class="language-bop">for i in range(5) {
-  print(str(i))     // 0, 1, 2, 3, 4
+  print(i.to_str())     // 0, 1, 2, 3, 4
 }
 </code></pre>
 <p>With a start value:</p>
 <pre><code class="language-bop">for i in range(2, 8) {
-  print(str(i))     // 2, 3, 4, 5, 6, 7
+  print(i.to_str())     // 2, 3, 4, 5, 6, 7
 }
 </code></pre>
 <h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
@@ -636,7 +637,7 @@ for fruit in fruits {
 <h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
 <pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
 for name in scores {
-  let s = str(scores[name])
+  let s = scores[name].to_str()
   print(name + ": " + s)
 }
 </code></pre>
@@ -651,7 +652,7 @@ for ch in word {
 <p>Loops can be nested. This is useful for working with grids or combinations:</p>
 <pre><code class="language-bop">for row in range(3) {
   for col in range(4) {
-    print("(" + str(row) + ", " + str(col) + ")")
+    print("(" + row.to_str() + ", " + col.to_str() + ")")
   }
 }
 </code></pre>
@@ -667,7 +668,7 @@ while true {
   }
   i += 1
 }
-print("Stopped at " + str(i))
+print("Stopped at " + i.to_str())
 </code></pre>
 <h3 id="searching-for-something"><a class="header" href="#searching-for-something">Searching for something</a></h3>
 <pre><code class="language-bop">let numbers = [4, 8, 15, 16, 23, 42]
@@ -691,7 +692,7 @@ if found {
   if i % 2 == 0 {
     continue
   }
-  print(str(i))    // 1, 3, 5, 7, 9
+  print(i.to_str())    // 1, 3, 5, 7, 9
 }
 </code></pre>
 <h3 id="filter-and-process"><a class="header" href="#filter-and-process">Filter and process</a></h3>
@@ -710,7 +711,7 @@ for word in words {
   if n &lt; 10 {
     break
   }
-  print(str(n))
+  print(n.to_str())
 }
 </code></pre>
 <blockquote>
@@ -865,20 +866,21 @@ print(items)    // [99, 20, 30]
 <tr><th>Method</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>arr.len()</code></td><td>number</td><td>Number of elements</td></tr>
+<tr><td><code>arr.len()</code></td><td>int</td><td>Number of elements</td></tr>
 <tr><td><code>arr.push(val)</code></td><td>none</td><td>Append to end</td></tr>
 <tr><td><code>arr.pop()</code></td><td>value</td><td>Remove and return last element</td></tr>
 <tr><td><code>arr.has(val)</code></td><td>bool</td><td>Whether the array contains the value</td></tr>
-<tr><td><code>arr.index_of(val)</code></td><td>number or none</td><td>Index of first occurrence, or <code>none</code></td></tr>
+<tr><td><code>arr.index_of(val)</code></td><td>int</td><td>Index of first occurrence, or <code>-1</code></td></tr>
 <tr><td><code>arr.insert(i, val)</code></td><td>none</td><td>Insert at index, shifting elements right</td></tr>
 <tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at index, shifting elements left</td></tr>
-<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>New sub-array (both args optional)</td></tr>
-<tr><td><code>arr.reverse()</code></td><td>array</td><td>Reverse in place, returns the array</td></tr>
-<tr><td><code>arr.sort()</code></td><td>array</td><td>Sort in place, returns the array</td></tr>
+<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>New sub-array</td></tr>
+<tr><td><code>arr.reverse()</code></td><td>none</td><td>Reverse in place</td></tr>
+<tr><td><code>arr.sort()</code></td><td>none</td><td>Sort in place</td></tr>
 <tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join elements into a string</td></tr>
 </tbody>
 </table>
 </div>
+<p>Plus the universal <code>arr.type()</code>, <code>arr.to_str()</code>, <code>arr.inspect()</code>.</p>
 <h2 id="practical-examples"><a class="header" href="#practical-examples">Practical examples</a></h2>
 <h3 id="building-a-list"><a class="header" href="#building-a-list">Building a list</a></h3>
 <pre><code class="language-bop">let squares = []
@@ -937,11 +939,11 @@ let count = 5
 print("Hello, {name}! You have {count} items.")
 </code></pre>
 <p>Only variable names are allowed inside <code>{}</code>. For expressions, use a temporary variable:</p>
-<pre><code class="language-bop">let total = str(count * 2)
+<pre><code class="language-bop">let total = (count * 2).to_str()
 print("Double: {total}")
 </code></pre>
 <p>Or use concatenation:</p>
-<pre><code class="language-bop">print("Double: " + str(count * 2))
+<pre><code class="language-bop">print("Double: " + (count * 2).to_str())
 </code></pre>
 <p>To include a literal <code>{</code> or <code>}</code> in a string, escape it with <code>\{</code> and <code>\}</code>:</p>
 <pre><code class="language-bop">print("Use \{name\} for interpolation")
@@ -952,8 +954,8 @@ print("Double: {total}")
 <pre><code class="language-bop">let full = "Hello" + ", " + "world!"
 print(full)    // "Hello, world!"
 </code></pre>
-<p>Numbers must be converted with <code>str()</code> first:</p>
-<pre><code class="language-bop">let msg = "Score: " + str(42)
+<p>Numbers must be converted with <code>.to_str()</code> first:</p>
+<pre><code class="language-bop">let msg = "Score: " + (42).to_str()
 </code></pre>
 <h2 id="methods-1"><a class="header" href="#methods-1">Methods</a></h2>
 <div class="table-wrapper">
@@ -962,20 +964,23 @@ print(full)    // "Hello, world!"
 <tr><th>Method</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>s.len()</code></td><td>number</td><td>Number of characters</td></tr>
+<tr><td><code>s.len()</code></td><td>int</td><td>Number of characters</td></tr>
 <tr><td><code>s.contains(sub)</code></td><td>bool</td><td>Whether the string contains <code>sub</code></td></tr>
 <tr><td><code>s.starts_with(prefix)</code></td><td>bool</td><td>Whether it starts with <code>prefix</code></td></tr>
 <tr><td><code>s.ends_with(suffix)</code></td><td>bool</td><td>Whether it ends with <code>suffix</code></td></tr>
-<tr><td><code>s.index_of(sub)</code></td><td>number or none</td><td>Index of first occurrence, or <code>none</code></td></tr>
+<tr><td><code>s.index_of(sub)</code></td><td>int</td><td>Index of first occurrence, or <code>-1</code></td></tr>
 <tr><td><code>s.split(sep)</code></td><td>array</td><td>Split into array of strings on <code>sep</code></td></tr>
 <tr><td><code>s.replace(old, new)</code></td><td>string</td><td>Replace all occurrences</td></tr>
 <tr><td><code>s.upper()</code></td><td>string</td><td>Uppercase copy</td></tr>
 <tr><td><code>s.lower()</code></td><td>string</td><td>Lowercase copy</td></tr>
 <tr><td><code>s.trim()</code></td><td>string</td><td>Copy with leading/trailing whitespace removed</td></tr>
-<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring (both args optional)</td></tr>
+<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring</td></tr>
+<tr><td><code>s.to_int()</code></td><td>int</td><td>Parse. <code>"3.7".to_int()</code> → <code>3</code> (float-then-truncate). Raises on junk.</td></tr>
+<tr><td><code>s.to_float()</code></td><td>number</td><td>Parse. Raises on junk.</td></tr>
 </tbody>
 </table>
 </div>
+<p>Plus the universal <code>s.type()</code>, <code>s.to_str()</code>, <code>s.inspect()</code>.</p>
 <h2 id="practical-examples-1"><a class="header" href="#practical-examples-1">Practical examples</a></h2>
 <h3 id="parsing-csv-data"><a class="header" href="#parsing-csv-data">Parsing CSV data</a></h3>
 <pre><code class="language-bop">let input = "Alice,95,A"
@@ -991,7 +996,7 @@ if filename.ends_with(".csv") {
 </code></pre>
 <h3 id="building-a-formatted-string"><a class="header" href="#building-a-formatted-string">Building a formatted string</a></h3>
 <pre><code class="language-bop">let items = ["apple", "banana", "cherry"]
-let count = str(items.len())
+let count = items.len().to_str()
 let list = items.join(", ")
 print("Found {count} items: {list}")
 </code></pre>
@@ -1022,13 +1027,14 @@ person["email"] = "a@b.com"   // add new entry
 <tr><th>Method</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>d.len()</code></td><td>number</td><td>Number of entries</td></tr>
+<tr><td><code>d.len()</code></td><td>int</td><td>Number of entries</td></tr>
 <tr><td><code>d.keys()</code></td><td>array</td><td>Array of all keys</td></tr>
 <tr><td><code>d.values()</code></td><td>array</td><td>Array of all values</td></tr>
 <tr><td><code>d.has(key)</code></td><td>bool</td><td>Whether the key exists</td></tr>
 </tbody>
 </table>
 </div>
+<p>Plus the universal <code>d.type()</code>, <code>d.to_str()</code>, <code>d.inspect()</code>.</p>
 <h2 id="practical-examples-2"><a class="header" href="#practical-examples-2">Practical examples</a></h2>
 <h3 id="counting-occurrences"><a class="header" href="#counting-occurrences">Counting occurrences</a></h3>
 <pre><code class="language-bop">let words = ["apple", "banana", "apple", "cherry", "banana", "apple"]
@@ -1042,19 +1048,19 @@ for word in words {
 }
 
 for key in counts {
-  print(key + ": " + str(counts[key]))
+  print(key + ": " + counts[key].to_str())
 }
 </code></pre>
 <h3 id="storing-structured-data"><a class="header" href="#storing-structured-data">Storing structured data</a></h3>
 <pre><code class="language-bop">let point = {"x": 10, "y": 20}
-let x = str(point["x"])
-let y = str(point["y"])
+let x = point["x"].to_str()
+let y = point["y"].to_str()
 print("Position: ({x}, {y})")
 </code></pre>
 <h3 id="iterating-over-entries"><a class="header" href="#iterating-over-entries">Iterating over entries</a></h3>
 <pre><code class="language-bop">let config = {"width": 800, "height": 600, "title": "My App"}
 for key in config {
-  let val = str(config[key])
+  let val = config[key].to_str()
   print(key + ": " + val)
 }
 </code></pre>
@@ -1062,7 +1068,7 @@ for key in config {
 <pre><code class="language-bop">let settings = {"volume": 80}
 
 if settings.has("volume") {
-  let v = str(settings["volume"])
+  let v = settings["volume"].to_str()
   print("Volume is {v}")
 } else {
   print("Using default volume")
@@ -1080,7 +1086,7 @@ struct Player { name, hp, inventory }
 <pre><code class="language-bop">let p = Point { x: 3, y: 4 }
 print(p)                  // Point { x: 3, y: 4 }
 print(p.x)                // 3
-print(type(p))            // "struct"
+print(p.type())           // "struct"
 </code></pre>
 <p>Construction is <strong>strict</strong>: fields you provide must match the declaration exactly (no unknown fields, no duplicates, no missing ones). Extra fields or typos become parse or runtime errors with a “did you mean?” suggestion.</p>
 <h3 id="field-access-and-assignment"><a class="header" href="#field-access-and-assignment">Field access and assignment</a></h3>
@@ -1124,7 +1130,7 @@ print(b)                 // Point { x: 11, y: 2 }
 <pre><code class="language-bop">let a = Shape::Circle(5)
 let b = Shape::Rectangle { w: 4, h: 3 }
 let c = Shape::Empty
-print(type(a))           // "enum"
+print(a.type())          // "enum"
 </code></pre>
 <p>Variants with a struct payload expose their fields via <code>.field</code> just like structs:</p>
 <pre><code class="language-bop">let r = Shape::Rectangle { w: 4, h: 3 }
@@ -1325,7 +1331,7 @@ use path.{a, b} as m        // aliased + selective
 <p>Brings every public export of a module into the current scope as a bare name:</p>
 <pre><code class="language-bop">use std.math
 print(pi)            // constant from std.math
-print(sqrt(9))       // fn from std.math
+print(factorial(5))  // fn from std.math → 120
 </code></pre>
 <p>Names that start with <code>_</code> are considered <strong>private by convention</strong> and glob imports skip them:</p>
 <pre><code class="language-bop">// In module `foo`:
@@ -1340,10 +1346,10 @@ print(public())      // 42
 <p>Glob is idempotent at the injection site — running <code>use foo</code> twice in the same scope is a no-op (matches Python’s <code>import foo; import foo</code>). When two glob imports would introduce the same name, the first wins and the second emits a runtime warning — explicit selective imports are the way to disambiguate.</p>
 <h2 id="selective-use"><a class="header" href="#selective-use">Selective <code>use</code></a></h2>
 <p>Pick exactly which names you want:</p>
-<pre><code class="language-bop">use std.math.{pi, sqrt}
+<pre><code class="language-bop">use std.math.{pi, factorial}
 print(pi)
-print(sqrt(16))
-// print(sin(0))   // error — not imported
+print(factorial(4))
+// print(clamp(1, 0, 10))   // error — not imported
 </code></pre>
 <p>Selective imports can reach private names explicitly:</p>
 <pre><code class="language-bop">use foo.{_helper}
@@ -1354,14 +1360,14 @@ print(_helper())     // ok — explicit opt-in
 <p>Binds the whole module as a single value under the alias:</p>
 <pre><code class="language-bop">use std.math as m
 print(m.pi)
-print(m.sqrt(9))
+print(m.factorial(5))
 </code></pre>
-<p><code>m</code> is a <code>Value::Module</code> — <code>type(m)</code> is <code>"module"</code>. You access its exports via the <code>.</code> operator. Methods on aliased modules (<code>m.helper(...)</code>) work the same way they would on a bare imported fn.</p>
+<p><code>m</code> is a <code>Value::Module</code> — <code>m.type()</code> is <code>"module"</code>. You access its exports via the <code>.</code> operator. Methods on aliased modules (<code>m.helper(...)</code>) work the same way they would on a bare imported fn.</p>
 <p>Combine with selective to shrink the alias’s surface:</p>
-<pre><code class="language-bop">use std.math.{pi, sqrt} as m
+<pre><code class="language-bop">use std.math.{pi, factorial} as m
 print(m.pi)
-print(m.sqrt(9))
-// print(m.sin(0))   // error — `sin` wasn't imported
+print(m.factorial(5))
+// print(m.clamp(1, 0, 10))   // error — `clamp` wasn't imported
 </code></pre>
 <h2 id="namespaced-types"><a class="header" href="#namespaced-types">Namespaced types</a></h2>
 <p>User-defined <code>struct</code> and <code>enum</code> types can be constructed and pattern-matched through the alias:</p>
@@ -1442,7 +1448,7 @@ fn describe(c) {
 </code></pre>
 <p>By convention, <code>Ok(v)</code> carries the successful value and <code>Err(e)</code> carries whatever describes the failure — a string, a struct, anything. Values from fallible operations are the typical shape:</p>
 <pre><code class="language-bop">fn parse_positive(s) {
-  let n = int(s)
+  let n = s.to_int()
   if n &lt;= 0 {
     return Result::Err("must be positive, got {n}")
   }
@@ -1507,7 +1513,7 @@ print(map(Result::Err("x"), fn(n) { return n * n }))  // Result::Err("x")
 
 // and_then — monadic bind (for chaining fallible steps)
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok(int(x / 2)) }
+  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
   return Result::Err("odd")
 }
 print(and_then(and_then(Result::Ok(8), halve), halve))   // Result::Ok(2)
@@ -1659,10 +1665,10 @@ print([1, 2] + [3])                // [1, 2, 3]
 print("ha" * 3)                    // "hahaha"
 </code></pre>
 <h3 id="integer-results"><a class="header" href="#integer-results">Integer results</a></h3>
-<p>There is no dedicated integer-division operator. <code>/</code> always widens to <code>number</code>, which avoids the classic “1 / 2 == 0” footgun. When you need an integer result, cast with <code>int(...)</code>:</p>
-<pre><code class="language-bop">let mid = int((low + high) / 2)
+<p>There is no dedicated integer-division operator. <code>/</code> always widens to <code>number</code>, which avoids the classic “1 / 2 == 0” footgun. When you need an integer result, coerce the quotient with <code>.to_int()</code>:</p>
+<pre><code class="language-bop">let mid = ((low + high) / 2).to_int()
 </code></pre>
-<p><code>int(x)</code> truncates toward zero; <code>abs(x)</code> preserves the numeric type.</p>
+<p><code>.to_int()</code> truncates toward zero; <code>.abs()</code> preserves the numeric type.</p>
 <h3 id="overflow-and-divide-by-zero"><a class="header" href="#overflow-and-divide-by-zero">Overflow and divide-by-zero</a></h3>
 <ul>
 <li><code>int + int</code>, <code>int - int</code>, <code>int * int</code> use checked arithmetic — overflow is a runtime error, not silent wrap.</li>
@@ -1816,112 +1822,16 @@ print("hello".upper())   // "HELLO"
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="built-in-functions"><a class="header" href="#built-in-functions">Built-in Functions</a></h1>
-<p>Bop ships a compact set of built-in functions that are always in scope. They can’t be shadowed by user-defined fns. Host-backed builtins (I/O, time) are provided separately by the embedding host — see <code>bop-sys</code>’s <code>StandardHost</code> for the reference implementation.</p>
-<h2 id="output"><a class="header" href="#output">Output</a></h2>
-<h3 id="printargs"><a class="header" href="#printargs"><code>print(args...)</code></a></h3>
+<p>Bop ships a very small set of built-in functions that are always in scope. They can’t be shadowed by user-defined fns. Host-backed builtins (I/O, time) are provided separately by the embedding host — see <code>bop-sys</code>’s <code>StandardHost</code> for the reference implementation.</p>
+<p>Anything math- or conversion-shaped lives as a <a href="#methods-4">method on a value</a>, not as a global — <code>(-5).abs()</code>, <code>"42".to_int()</code>, <code>[1, 2, 3].len()</code>. The global list is deliberately short: only things that are variadic (<code>print</code>), constructor-shaped (<code>range</code>), session-stateful (<code>rand</code>), or that take a callable (<code>try_call</code>).</p>
+<h2 id="printargs"><a class="header" href="#printargs"><code>print(args...)</code></a></h2>
 <p>Prints values to the host’s stdout, separated by spaces. Returns <code>none</code>.</p>
 <pre><code class="language-bop">print("hello")           // hello
 print("x =", 42)         // x = 42
 print(1, "plus", 2)      // 1 plus 2
 </code></pre>
-<p>Accepts any number of arguments (including zero). Each argument is converted to its string representation (Display) automatically.</p>
-<h3 id="inspectvalue"><a class="header" href="#inspectvalue"><code>inspect(value)</code></a></h3>
-<p>Returns a debug representation of a value as a string. Strings are wrapped in quotes; every other type matches its normal Display but nested strings remain quoted.</p>
-<pre><code class="language-bop">print(inspect("hello"))    // "hello"
-print(inspect(42))         // 42
-print(inspect([1, 2]))     // [1, 2]
-print(inspect([1, "two"])) // [1, "two"]
-</code></pre>
-<p>Use it when you need to distinguish strings from other types at a glance.</p>
-<h2 id="type-conversion"><a class="header" href="#type-conversion">Type conversion</a></h2>
-<h3 id="strvalue"><a class="header" href="#strvalue"><code>str(value)</code></a></h3>
-<p>Converts any value to its string representation:</p>
-<pre><code class="language-bop">str(42)        // "42"
-str(3.14)      // "3.14"
-str(true)      // "true"
-str(none)      // "none"
-str([1, 2])    // "[1, 2]"
-</code></pre>
-<h3 id="intvalue"><a class="header" href="#intvalue"><code>int(value)</code></a></h3>
-<p>Coerces to an <code>int</code>. Truncates toward zero for numbers; parses strings as integer-then-float.</p>
-<pre><code class="language-bop">int(3.9)       // 3
-int(-2.7)      // -2
-int("42")      // 42
-int("3.7")     // 3
-int(true)      // 1
-int(false)     // 0
-</code></pre>
-<p>Raises a runtime error if a string can’t be parsed.</p>
-<h3 id="floatvalue"><a class="header" href="#floatvalue"><code>float(value)</code></a></h3>
-<p>Coerces to a <code>number</code>. Widens ints, parses strings.</p>
-<pre><code class="language-bop">float(5)       // 5       (stored as number)
-float("3.14")  // 3.14
-float(true)    // 1
-</code></pre>
-<h3 id="typevalue"><a class="header" href="#typevalue"><code>type(value)</code></a></h3>
-<p>Returns the type name as a string:</p>
-<pre><code class="language-bop">type(42)           // "int"
-type(3.14)         // "number"
-type("hello")      // "string"
-type(true)         // "bool"
-type(none)         // "none"
-type([1, 2])       // "array"
-type({"a": 1})     // "dict"
-type(fn(x){x})     // "fn"
-type(Point{x:0,y:0})   // "struct"    (assuming `struct Point`)
-type(Color::Red)       // "enum"      (assuming `enum Color`)
-</code></pre>
-<h2 id="math"><a class="header" href="#math">Math</a></h2>
-<h3 id="absx"><a class="header" href="#absx"><code>abs(x)</code></a></h3>
-<p>Absolute value. Preserves the numeric type (<code>int</code> stays <code>int</code>; <code>number</code> stays <code>number</code>).</p>
-<pre><code class="language-bop">abs(-5)     // 5
-abs(-2.7)   // 2.7
-</code></pre>
-<p>Integer overflow on <code>abs(i64::MIN)</code> surfaces as a runtime error.</p>
-<h3 id="mina-b--maxa-b"><a class="header" href="#mina-b--maxa-b"><code>min(a, b)</code> / <code>max(a, b)</code></a></h3>
-<p>Pair-wise min / max. Preserves type when both sides match; widens to <code>number</code> on mixed <code>int</code> / <code>number</code>.</p>
-<pre><code class="language-bop">min(3, 7)      // 3
-max(-1, -5)    // -1
-max(1, 2.5)    // 2.5   (widened)
-</code></pre>
-<h3 id="randn"><a class="header" href="#randn"><code>rand(n)</code></a></h3>
-<p>Returns a random integer from <code>0</code> to <code>n - 1</code>, inclusive. <code>n</code> must be a positive integer.</p>
-<pre><code class="language-bop">rand(6)     // 0..=5 (die roll)
-rand(2)     // 0 or 1 (coin flip)
-</code></pre>
-<p>Uses a deterministic PRNG seeded per-session. The same inputs produce the same sequence — handy for tests, surprising for crypto (don’t use it for that).</p>
-<h3 id="sqrtx-sinx-cosx-tanx"><a class="header" href="#sqrtx-sinx-cosx-tanx"><code>sqrt(x)</code>, <code>sin(x)</code>, <code>cos(x)</code>, <code>tan(x)</code></a></h3>
-<p>Standard trigonometric / root functions. Take an <code>int</code> or <code>number</code>, always return <code>number</code>.</p>
-<pre><code class="language-bop">sqrt(9)      // 3
-sqrt(2)      // 1.4142135623730951
-sin(0)       // 0
-cos(0)       // 1
-</code></pre>
-<h3 id="floorx-ceilx-roundx"><a class="header" href="#floorx-ceilx-roundx"><code>floor(x)</code>, <code>ceil(x)</code>, <code>round(x)</code></a></h3>
-<p>Round to an integer. When the rounded result fits in an <code>i64</code>, the return type is <code>int</code>; otherwise it’s a <code>number</code> (so <code>floor(1e30)</code> stays a <code>number</code> rather than overflowing).</p>
-<pre><code class="language-bop">floor(3.7)           // 3    (int)
-ceil(3.2)            // 4    (int)
-round(2.5)           // 3    (ties away from zero)
-type(floor(3.7))     // "int"
-type(floor(1.0e30))  // "number"
-</code></pre>
-<h3 id="powbase-exp-logx-expx"><a class="header" href="#powbase-exp-logx-expx"><code>pow(base, exp)</code>, <code>log(x)</code>, <code>exp(x)</code></a></h3>
-<p>Floating-point power, natural log, and <code>e^x</code>. All return <code>number</code>.</p>
-<pre><code class="language-bop">pow(2, 10)     // 1024
-log(2.718281828459045)   // 1
-exp(1)         // 2.718281828459045
-</code></pre>
-<h2 id="collections"><a class="header" href="#collections">Collections</a></h2>
-<h3 id="lenvalue"><a class="header" href="#lenvalue"><code>len(value)</code></a></h3>
-<p>Returns the length of a string, array, or dict, as an <code>int</code>.</p>
-<pre><code class="language-bop">len("hello")       // 5
-len([1, 2, 3])     // 3
-len({"a": 1})      // 1
-len("")            // 0
-len([])            // 0
-</code></pre>
-<p>Raises a runtime error for numbers, bools, <code>none</code>, and functions.</p>
-<h3 id="rangen--rangestart-end--rangestart-end-step"><a class="header" href="#rangen--rangestart-end--rangestart-end-step"><code>range(n)</code> / <code>range(start, end)</code> / <code>range(start, end, step)</code></a></h3>
+<p>Accepts any number of arguments (including zero). Each argument is converted to its string representation (Display) automatically — you don’t need <code>.to_str()</code> first.</p>
+<h2 id="rangen--rangestart-end--rangestart-end-step"><a class="header" href="#rangen--rangestart-end--rangestart-end-step"><code>range(n)</code> / <code>range(start, end)</code> / <code>range(start, end, step)</code></a></h2>
 <p>Builds an array of <code>int</code> values.</p>
 <pre><code class="language-bop">range(5)           // [0, 1, 2, 3, 4]
 range(2, 6)        // [2, 3, 4, 5]
@@ -1936,8 +1846,13 @@ range(10, 0, -3)   // [10, 7, 4, 1]
 <li>All arguments must be <code>int</code> — floats are rejected.</li>
 <li>Maximum 10,000 elements. Bigger ranges raise a runtime error so loops can’t build gigabyte arrays by accident.</li>
 </ul>
-<h2 id="errors"><a class="header" href="#errors">Errors</a></h2>
-<h3 id="try_callcallable"><a class="header" href="#try_callcallable"><code>try_call(callable)</code></a></h3>
+<h2 id="randn"><a class="header" href="#randn"><code>rand(n)</code></a></h2>
+<p>Returns a random integer from <code>0</code> to <code>n - 1</code>, inclusive. <code>n</code> must be a positive integer.</p>
+<pre><code class="language-bop">rand(6)     // 0..=5 (die roll)
+rand(2)     // 0 or 1 (coin flip)
+</code></pre>
+<p>Uses a deterministic PRNG seeded per-session. The same inputs produce the same sequence — handy for tests, surprising for crypto (don’t use it for that).</p>
+<h2 id="try_callcallable"><a class="header" href="#try_callcallable"><code>try_call(callable)</code></a></h2>
 <p>Runs <code>callable</code> with no arguments and catches any non-fatal runtime error:</p>
 <pre><code class="language-bop">let r = try_call(fn() { return 1 / 0 })
 print(match r {
@@ -1948,6 +1863,163 @@ print(match r {
 </code></pre>
 <p>On success returns <code>Result::Ok(value)</code>; on a non-fatal error returns <code>Result::Err(RuntimeError { message, line })</code>. Fatal errors (step-limit / memory-limit / fn-call-depth) are <em>not</em> caught — they propagate past <code>try_call</code> unchanged so the sandbox invariant holds.</p>
 <p>See <a href="#error-handling">Error Handling</a> for the full story on <code>try</code>, <code>try_call</code>, <code>Result</code>, and <code>RuntimeError</code>.</p>
+<h2 id="everything-else-lives-on-a-value"><a class="header" href="#everything-else-lives-on-a-value">Everything else lives on a value</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Category</th><th>Was</th><th>Now</th></tr>
+</thead>
+<tbody>
+<tr><td>Introspection</td><td><code>type(x)</code>, <code>inspect(x)</code></td><td><code>x.type()</code>, <code>x.inspect()</code></td></tr>
+<tr><td>Conversion</td><td><code>str(x)</code>, <code>int(x)</code>, <code>float(x)</code></td><td><code>x.to_str()</code>, <code>x.to_int()</code>, <code>x.to_float()</code></td></tr>
+<tr><td>Length</td><td><code>len(x)</code></td><td><code>x.len()</code> (arrays, strings, dicts)</td></tr>
+<tr><td>Absolute / min / max</td><td><code>abs(x)</code>, <code>min(a, b)</code>, <code>max(a, b)</code></td><td><code>x.abs()</code>, <code>a.min(b)</code>, <code>a.max(b)</code></td></tr>
+<tr><td>Trig / roots</td><td><code>sqrt(x)</code>, <code>sin(x)</code>, <code>cos(x)</code>, <code>tan(x)</code></td><td><code>x.sqrt()</code>, <code>x.sin()</code>, <code>x.cos()</code>, <code>x.tan()</code></td></tr>
+<tr><td>Rounding</td><td><code>floor(x)</code>, <code>ceil(x)</code>, <code>round(x)</code></td><td><code>x.floor()</code>, <code>x.ceil()</code>, <code>x.round()</code></td></tr>
+<tr><td>Power / log / exp</td><td><code>pow(b, e)</code>, <code>log(x)</code>, <code>exp(x)</code></td><td><code>b.pow(e)</code>, <code>x.log()</code>, <code>x.exp()</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>See <a href="#methods-4">Methods</a> for the full per-type method catalogue.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="methods-4"><a class="header" href="#methods-4">Methods</a></h1>
+<p>Bop dispatches methods with <code>.name(args...)</code>. Every built-in method on primitives, arrays, strings, and dicts is listed here. User-defined methods on structs use the same syntax — see <a href="#structs--enums">Structs &amp; Enums</a> for the <code>fn Type.method(self, ...)</code> form.</p>
+<h2 id="methods-on-every-value"><a class="header" href="#methods-on-every-value">Methods on every value</a></h2>
+<p>Three methods work on any value — introspection + stringification. They’re dispatched before the type-specific tables, so they’re always available:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>x.type()</code></td><td>string</td><td>One of <code>"int"</code>, <code>"number"</code>, <code>"string"</code>, <code>"bool"</code>, <code>"none"</code>, <code>"array"</code>, <code>"dict"</code>, <code>"fn"</code>, <code>"struct"</code>, <code>"enum"</code>, <code>"module"</code></td></tr>
+<tr><td><code>x.to_str()</code></td><td>string</td><td>Display repr — same as what <code>print(x)</code> would emit for a single arg</td></tr>
+<tr><td><code>x.inspect()</code></td><td>string</td><td>Debug repr — strings are wrapped in <code>"..."</code>, nested strings stay quoted inside arrays / dicts</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">print((42).type())                 // "int"
+print("hi".to_str())               // "hi"
+print("hi".inspect())              // "hi"   (quoted)
+print([1, "two"].inspect())        // [1, "two"]
+</code></pre>
+<h3 id="parens-around-numeric-literals"><a class="header" href="#parens-around-numeric-literals">Parens around numeric literals</a></h3>
+<p>Number literals need parens before a method call because <code>.</code> is otherwise a decimal point:</p>
+<pre><code class="language-bop">// print(42.type())   // parse error — `42.t…` looks like a decimal
+print((42).type())     // "int"
+print((-5).abs())      // 5
+</code></pre>
+<p>Identifiers don’t have this problem: <code>x.type()</code>, <code>count.to_str()</code>, etc.</p>
+<h2 id="numeric-methods--int-and-number"><a class="header" href="#numeric-methods--int-and-number">Numeric methods — <code>int</code> and <code>number</code></a></h2>
+<p>All of these work on both <code>int</code> and <code>number</code> receivers. Return type is noted per method; most math operations always widen to <code>number</code>.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>x.abs()</code></td><td>int / number</td><td>Absolute value. Preserves receiver type. <code>(-5).abs()</code> → <code>5</code> (int), <code>(-2.7).abs()</code> → <code>2.7</code> (number). Integer overflow on <code>(i64::MIN).abs()</code> is a runtime error.</td></tr>
+<tr><td><code>x.sqrt()</code></td><td>number</td><td>Square root.</td></tr>
+<tr><td><code>x.sin()</code>, <code>x.cos()</code>, <code>x.tan()</code></td><td>number</td><td>Trig. Angles in radians.</td></tr>
+<tr><td><code>x.exp()</code></td><td>number</td><td><code>e^x</code>.</td></tr>
+<tr><td><code>x.log()</code></td><td>number</td><td>Natural log.</td></tr>
+<tr><td><code>x.pow(e)</code></td><td>number</td><td><code>x</code> raised to <code>e</code>.</td></tr>
+<tr><td><code>x.floor()</code>, <code>x.ceil()</code>, <code>x.round()</code></td><td>int / number</td><td>Round toward <code>-∞</code>, <code>+∞</code>, or nearest (ties away from zero). Returns <code>int</code> when the rounded result fits in <code>i64</code>, <code>number</code> otherwise (so rounding a number that overflows <code>i64</code> stays a <code>number</code> instead of raising). Int receivers pass through unchanged.</td></tr>
+<tr><td><code>a.min(b)</code>, <code>a.max(b)</code></td><td>int / number</td><td>Pair-wise. Preserves type when both sides match; widens to <code>number</code> on mixed int/number.</td></tr>
+<tr><td><code>x.to_int()</code></td><td>int</td><td>Truncates toward zero. <code>(3.7).to_int()</code> → <code>3</code>, <code>(-2.7).to_int()</code> → <code>-2</code>.</td></tr>
+<tr><td><code>x.to_float()</code></td><td>number</td><td>Widens <code>int</code> → <code>number</code>; <code>number</code> passes through.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">print((9).sqrt())                   // 3
+print((0).cos())                    // 1
+print((2).pow(10))                  // 1024
+print((3).min(7))                   // 3
+print((1).max(2.5))                 // 2.5   (widened)
+print((3.7).floor())                // 3     (int)
+print((3.7).floor().type())         // "int"
+</code></pre>
+<h2 id="boolean-methods--bool"><a class="header" href="#boolean-methods--bool">Boolean methods — <code>bool</code></a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>b.to_int()</code></td><td>int</td><td><code>true.to_int()</code> → <code>1</code>, <code>false.to_int()</code> → <code>0</code>.</td></tr>
+<tr><td><code>b.to_float()</code></td><td>number</td><td><code>true.to_float()</code> → <code>1</code> (as number), <code>false.to_float()</code> → <code>0</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Plus the universal <code>type</code> / <code>to_str</code> / <code>inspect</code>.</p>
+<h2 id="string-methods--string"><a class="header" href="#string-methods--string">String methods — <code>string</code></a></h2>
+<p>See <a href="#strings-2">Strings</a> for worked examples.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>s.len()</code></td><td>int</td><td>Number of Unicode code points.</td></tr>
+<tr><td><code>s.contains(sub)</code></td><td>bool</td><td>Whether <code>sub</code> appears anywhere.</td></tr>
+<tr><td><code>s.starts_with(prefix)</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.ends_with(suffix)</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.index_of(sub)</code></td><td>int</td><td>Byte index of first occurrence, or <code>-1</code> if not found.</td></tr>
+<tr><td><code>s.split(sep)</code></td><td>array</td><td>Split into an array of strings on <code>sep</code>.</td></tr>
+<tr><td><code>s.replace(old, new)</code></td><td>string</td><td>Replace every occurrence.</td></tr>
+<tr><td><code>s.upper()</code>, <code>s.lower()</code></td><td>string</td><td>Case conversion.</td></tr>
+<tr><td><code>s.trim()</code></td><td>string</td><td>Strip leading / trailing whitespace.</td></tr>
+<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring by code-point index.</td></tr>
+<tr><td><code>s.to_int()</code></td><td>int</td><td>Parse. <code>"3.7".to_int()</code> parses as float then truncates → <code>3</code>. Raises on junk.</td></tr>
+<tr><td><code>s.to_float()</code></td><td>number</td><td>Parse. Raises on junk.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="array-methods--array"><a class="header" href="#array-methods--array">Array methods — <code>array</code></a></h2>
+<p>See <a href="#arrays-1">Arrays</a> for worked examples.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>arr.len()</code></td><td>int</td><td>Number of elements.</td></tr>
+<tr><td><code>arr.push(v)</code></td><td>none</td><td>Append.</td></tr>
+<tr><td><code>arr.pop()</code></td><td>value</td><td>Remove and return the last element.</td></tr>
+<tr><td><code>arr.has(v)</code></td><td>bool</td><td>Structural equality check.</td></tr>
+<tr><td><code>arr.index_of(v)</code></td><td>int</td><td>Index of first match, or <code>-1</code>.</td></tr>
+<tr><td><code>arr.insert(i, v)</code></td><td>none</td><td>Insert at index, shifting right.</td></tr>
+<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at index, returning the removed value.</td></tr>
+<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>Sub-array.</td></tr>
+<tr><td><code>arr.reverse()</code></td><td>none</td><td>In-place.</td></tr>
+<tr><td><code>arr.sort()</code></td><td>none</td><td>In-place, numeric or lexicographic depending on element types.</td></tr>
+<tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join after stringifying each element.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="dict-methods--dict"><a class="header" href="#dict-methods--dict">Dict methods — <code>dict</code></a></h2>
+<p>See <a href="#dictionaries">Dictionaries</a> for worked examples.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>d.len()</code></td><td>int</td><td>Number of entries.</td></tr>
+<tr><td><code>d.keys()</code></td><td>array</td><td>All keys as strings.</td></tr>
+<tr><td><code>d.values()</code></td><td>array</td><td>All values.</td></tr>
+<tr><td><code>d.has(key)</code></td><td>bool</td><td>Whether <code>key</code> exists.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="struct--enum-methods"><a class="header" href="#struct--enum-methods">Struct / enum methods</a></h2>
+<p>User-declared. See <a href="#structs--enums">Structs &amp; Enums</a>. Method dispatch on a struct tries the universal common methods first, then looks up <code>fn TypeName.method</code> declared in the same module.</p>
+<h2 id="module-methods"><a class="header" href="#module-methods">Module methods</a></h2>
+<p>If you <code>use path as m</code>, <code>m</code> is a <code>Value::Module</code>. <code>m.type()</code> → <code>"module"</code>, <code>m.inspect()</code> → <code>"&lt;module path&gt;"</code>. Otherwise <code>.</code> on a module accesses its exports:</p>
+<pre><code class="language-bop">use std.math as m
+print(m.pi)             // exported constant
+print(m.type())         // "module"   (universal method, not an export)
+</code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="grammar"><a class="header" href="#grammar">Grammar</a></h1>
 <p>An informal grammar for the Bop language, plus the complete list of reserved words.</p>
@@ -1966,22 +2038,14 @@ true false none
 <tr><th>Function</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>range(n)</code> / <code>range(s, e)</code> / <code>range(s, e, step)</code></td><td>array</td><td>Integer range</td></tr>
-<tr><td><code>str(x)</code></td><td>string</td><td>Display-based string conversion</td></tr>
-<tr><td><code>int(x)</code></td><td>int</td><td>Truncate / parse to <code>int</code></td></tr>
-<tr><td><code>float(x)</code></td><td>number</td><td>Widen / parse to <code>number</code></td></tr>
-<tr><td><code>type(x)</code></td><td>string</td><td>One of <code>int</code>, <code>number</code>, <code>string</code>, <code>bool</code>, <code>none</code>, <code>array</code>, <code>dict</code>, <code>fn</code>, <code>struct</code>, <code>enum</code>, <code>module</code></td></tr>
-<tr><td><code>abs(x)</code></td><td>int / number</td><td>Absolute value (preserves type)</td></tr>
-<tr><td><code>min(a, b)</code> / <code>max(a, b)</code></td><td>int / number</td><td>Pair-wise min / max</td></tr>
-<tr><td><code>rand(n)</code></td><td>int</td><td>Pseudo-random <code>0..n</code></td></tr>
-<tr><td><code>len(x)</code></td><td>int</td><td>Length of string / array / dict</td></tr>
 <tr><td><code>print(args...)</code></td><td>none</td><td>Host-captured output</td></tr>
-<tr><td><code>inspect(x)</code></td><td>string</td><td>Debug repr (strings quoted)</td></tr>
+<tr><td><code>range(n)</code> / <code>range(s, e)</code> / <code>range(s, e, step)</code></td><td>array</td><td>Integer range</td></tr>
+<tr><td><code>rand(n)</code></td><td>int</td><td>Pseudo-random <code>0..n</code></td></tr>
 <tr><td><code>try_call(f)</code></td><td>Result</td><td>Run <code>f</code>, return <code>Ok(v)</code> or <code>Err(RuntimeError)</code></td></tr>
-<tr><td><code>sqrt</code>, <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>floor</code>, <code>ceil</code>, <code>round</code>, <code>pow</code>, <code>log</code>, <code>exp</code></td><td>int / number</td><td>Math</td></tr>
 </tbody>
 </table>
 </div>
+<p>All math and conversion operations are <a href="#methods-4">methods on values</a>: <code>x.type()</code>, <code>x.to_str()</code>, <code>x.to_int()</code>, <code>x.to_float()</code>, <code>x.abs()</code>, <code>a.min(b)</code>, <code>x.sqrt()</code>, <code>x.len()</code>, etc.</p>
 <h2 id="grammar-1"><a class="header" href="#grammar-1">Grammar</a></h2>
 <p>Informal EBNF. Whitespace is insignificant <em>except</em> for newlines, which auto-insert semicolons (see below).</p>
 <pre><code>program     = statement*
@@ -2102,6 +2166,547 @@ print("Hello, {name}!")     // works
 // print("Hello, {1 + 2}!")  // error — expressions not allowed
 </code></pre>
 <p>Use <code>\{</code> and <code>\}</code> for literal braces in strings. Other supported escapes: <code>\"</code>, <code>\\</code>, <code>\n</code>, <code>\t</code>, <code>\r</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="standard-library--overview"><a class="header" href="#standard-library--overview">Standard Library — overview</a></h1>
+<p><code>bop-std</code> ships a small set of modules written in Bop itself. They live under the <code>std.*</code> namespace and are resolved by the default host (<code>StandardHost</code> in <code>bop-sys</code>) — any host that defers to <code>StandardHost::resolve_module</code> picks them up for free.</p>
+<p>The stdlib is deliberately thin. Core math operations are <a href="#methods-4">methods on numbers</a> (<code>(-5).abs()</code>, <code>(9).sqrt()</code>, <code>x.floor()</code>) — they don’t need a module. The stdlib covers what’s left: constants, higher-order helpers on arrays, data-structure types, string formatting, JSON, <code>Result</code> combinators, test assertions.</p>
+<h2 id="modules-1"><a class="header" href="#modules-1">Modules</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Module</th><th>What it gives you</th></tr>
+</thead>
+<tbody>
+<tr><td><a href="#stdmath"><code>std.math</code></a></td><td><code>pi</code>, <code>e</code>, <code>tau</code>, <code>clamp</code>, <code>sign</code>, <code>factorial</code>, <code>gcd</code>, <code>lcm</code>, <code>mean</code></td></tr>
+<tr><td><a href="#stditer"><code>std.iter</code></a></td><td><code>map</code>, <code>filter</code>, <code>reduce</code>, <code>take</code>, <code>drop</code>, <code>zip</code>, <code>enumerate</code>, <code>all</code>, <code>any</code>, <code>count</code>, <code>find</code>, <code>find_index</code>, <code>flatten</code>, <code>sum</code>, <code>product</code>, <code>min_array</code>, <code>max_array</code></td></tr>
+<tr><td><a href="#stdcollections"><code>std.collections</code></a></td><td><code>Stack</code>, <code>Queue</code>, <code>Set</code> as value-semantics structs</td></tr>
+<tr><td><a href="#stdstring"><code>std.string</code></a></td><td><code>pad_left</code>, <code>pad_right</code>, <code>center</code>, <code>chars</code>, <code>reverse</code>, <code>is_palindrome</code>, <code>count</code>, <code>join</code></td></tr>
+<tr><td><a href="#stdresult"><code>std.result</code></a></td><td><code>is_ok</code>, <code>is_err</code>, <code>unwrap</code>, <code>expect</code>, <code>unwrap_or</code>, <code>map</code>, <code>map_err</code>, <code>and_then</code> (combinators over the built-in <code>Result</code> type)</td></tr>
+<tr><td><a href="#stdjson"><code>std.json</code></a></td><td><code>parse</code>, <code>stringify</code> (RFC-8259, pure Bop)</td></tr>
+<tr><td><a href="#stdtest"><code>std.test</code></a></td><td><code>assert</code>, <code>assert_eq</code>, <code>assert_near</code>, <code>assert_raises</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="using-the-stdlib"><a class="header" href="#using-the-stdlib">Using the stdlib</a></h2>
+<p><code>std</code> modules work with every <a href="#modules"><code>use</code> form</a>:</p>
+<pre><code class="language-bop">use std.math                   // glob — `pi`, `clamp`, etc. available bare
+use std.iter.{map, filter}     // selective
+use std.result as r            // aliased
+</code></pre>
+<p>The modules are plain Bop source — you can find the implementations in <code>bop/src/modules/*.bop</code> if you want to see how a helper is wired, or copy-paste the source into a host that doesn’t ship <code>bop-std</code>.</p>
+<h2 id="built-ins-that-dont-need-use"><a class="header" href="#built-ins-that-dont-need-use">Built-ins that don’t need <code>use</code></a></h2>
+<p><code>Result</code> and <code>RuntimeError</code> are engine built-ins — you never have to <code>use std.result</code> to write <code>Result::Ok(v)</code> or <code>Result::Err(e)</code>. <a href="#stdresult"><code>std.result</code></a> adds combinators, not the type itself.</p>
+<p>Similarly, <code>print</code>, <code>range</code>, <code>rand</code>, <code>try_call</code> are built-ins, not stdlib — see <a href="#built-in-functions">Built-in Functions</a>.</p>
+<h2 id="hosts-without-the-stdlib"><a class="header" href="#hosts-without-the-stdlib">Hosts without the stdlib</a></h2>
+<p>Embedders who don’t want <code>bop-std</code> on the host side can leave <code>resolve_module</code> unimplemented; any <code>use std.*</code> then fails with “can’t resolve module”. Nothing about the language depends on the stdlib — it’s a convenience, not a runtime prerequisite.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="stdmath"><a class="header" href="#stdmath">std.math</a></h1>
+<p>Numeric constants and helpers that aren’t idiomatic as methods.</p>
+<blockquote>
+<p>The core math operations — <code>abs</code>, <code>sqrt</code>, <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>floor</code>, <code>ceil</code>, <code>round</code>, <code>pow</code>, <code>log</code>, <code>exp</code>, <code>min</code>, <code>max</code> — are <a href="#methods-4">methods on numbers</a>, not stdlib functions. They live in core because they wrap <code>f64::*</code> operations that Bop can’t implement itself.</p>
+</blockquote>
+<h2 id="import"><a class="header" href="#import">Import</a></h2>
+<pre><code class="language-bop">use std.math                           // glob
+use std.math.{pi, clamp}               // selective
+use std.math as m                      // aliased
+</code></pre>
+<h2 id="constants-1"><a class="header" href="#constants-1">Constants</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Name</th><th>Value</th></tr>
+</thead>
+<tbody>
+<tr><td><code>pi</code></td><td><code>3.141592653589793</code></td></tr>
+<tr><td><code>e</code></td><td><code>2.718281828459045</code></td></tr>
+<tr><td><code>tau</code></td><td><code>6.283185307179586</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="functions"><a class="header" href="#functions">Functions</a></h2>
+<h3 id="clampx-lo-hi"><a class="header" href="#clampx-lo-hi"><code>clamp(x, lo, hi)</code></a></h3>
+<p>Clamp <code>x</code> into the range <code>[lo, hi]</code>. Works on any mix of <code>int</code> and <code>number</code>; the return type mirrors the widest input.</p>
+<pre><code class="language-bop">use std.math.{clamp}
+print(clamp(5, 0, 10))     // 5
+print(clamp(-3, 0, 10))    // 0
+print(clamp(42, 0, 10))    // 10
+</code></pre>
+<h3 id="signx"><a class="header" href="#signx"><code>sign(x)</code></a></h3>
+<p>Returns <code>-1</code>, <code>0</code>, or <code>1</code>. Works on both <code>int</code> and <code>number</code>.</p>
+<pre><code class="language-bop">use std.math.{sign}
+print(sign(-7))       // -1
+print(sign(0))        // 0
+print(sign(3.14))     // 1
+</code></pre>
+<h3 id="factorialn"><a class="header" href="#factorialn"><code>factorial(n)</code></a></h3>
+<p><code>n!</code> using iterative multiplication. Raises an integer-overflow error for <code>n ≥ 21</code> (the smallest factorial that doesn’t fit in <code>i64</code>). Negative <code>n</code> returns <code>0</code>.</p>
+<pre><code class="language-bop">use std.math.{factorial}
+print(factorial(5))    // 120
+print(factorial(10))   // 3628800
+</code></pre>
+<h3 id="gcda-b"><a class="header" href="#gcda-b"><code>gcd(a, b)</code></a></h3>
+<p>Greatest common divisor using the Euclidean algorithm. Handles negatives by taking absolute values. <code>gcd(0, 0)</code> returns <code>0</code>.</p>
+<pre><code class="language-bop">use std.math.{gcd}
+print(gcd(12, 18))    // 6
+print(gcd(-15, 25))   // 5
+</code></pre>
+<h3 id="lcma-b"><a class="header" href="#lcma-b"><code>lcm(a, b)</code></a></h3>
+<p>Least common multiple. <code>lcm(0, x)</code> is <code>0</code> (so callers don’t have to special-case).</p>
+<pre><code class="language-bop">use std.math.{lcm}
+print(lcm(4, 6))     // 12
+print(lcm(0, 9))     // 0
+</code></pre>
+<h3 id="meanarr"><a class="header" href="#meanarr"><code>mean(arr)</code></a></h3>
+<p>Arithmetic mean of a numeric array. Raises on an empty array so callers notice rather than silently getting <code>0</code>.</p>
+<pre><code class="language-bop">use std.math.{mean}
+print(mean([1, 2, 3, 4]))     // 2.5
+print(mean([10.0, 20.0]))     // 15
+</code></pre>
+<p>Need the sum or product instead? Use <a href="#sumarr"><code>std.iter.sum</code></a> / <a href="#productarr"><code>std.iter.product</code></a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="stditer"><a class="header" href="#stditer">std.iter</a></h1>
+<p>Functional helpers on arrays. Array-in, array-out — there’s no lazy iterator protocol. If you care about allocation, a hand-written <code>for</code> loop will always beat these.</p>
+<p>Every helper handles empty arrays gracefully and preserves relative order.</p>
+<h2 id="import-1"><a class="header" href="#import-1">Import</a></h2>
+<pre><code class="language-bop">use std.iter                                // glob
+use std.iter.{map, filter, reduce}          // selective
+use std.iter as i                           // aliased
+</code></pre>
+<h2 id="higher-order"><a class="header" href="#higher-order">Higher-order</a></h2>
+<h3 id="maparr-f"><a class="header" href="#maparr-f"><code>map(arr, f)</code></a></h3>
+<p>Apply <code>f</code> to each element; return a new array of results.</p>
+<pre><code class="language-bop">use std.iter.{map}
+print(map([1, 2, 3], fn(x) { return x * 2 }))     // [2, 4, 6]
+</code></pre>
+<h3 id="filterarr-pred"><a class="header" href="#filterarr-pred"><code>filter(arr, pred)</code></a></h3>
+<p>Keep only the elements for which <code>pred(x)</code> is truthy.</p>
+<pre><code class="language-bop">use std.iter.{filter}
+let evens = filter([1, 2, 3, 4, 5], fn(n) { return n % 2 == 0 })
+print(evens)    // [2, 4]
+</code></pre>
+<h3 id="reducearr-initial-combine"><a class="header" href="#reducearr-initial-combine"><code>reduce(arr, initial, combine)</code></a></h3>
+<p>Fold over the array left-to-right with a two-arg combiner.</p>
+<pre><code class="language-bop">use std.iter.{reduce}
+let sum = reduce([1, 2, 3, 4], 0, fn(acc, x) { return acc + x })
+print(sum)    // 10
+</code></pre>
+<h3 id="allarr-pred-anyarr-pred"><a class="header" href="#allarr-pred-anyarr-pred"><code>all(arr, pred)</code>, <code>any(arr, pred)</code></a></h3>
+<p><code>all</code> returns <code>true</code> when every element passes (vacuously true for empty). <code>any</code> returns <code>true</code> when at least one element passes.</p>
+<pre><code class="language-bop">use std.iter.{all, any}
+print(all([2, 4, 6], fn(n) { return n % 2 == 0 }))    // true
+print(any([1, 3, 4], fn(n) { return n % 2 == 0 }))    // true
+</code></pre>
+<h3 id="countarr-pred"><a class="header" href="#countarr-pred"><code>count(arr, pred)</code></a></h3>
+<p>Count elements for which <code>pred(x)</code> is truthy.</p>
+<pre><code class="language-bop">use std.iter.{count}
+print(count([1, 2, 3, 4, 5], fn(n) { return n &gt; 2 }))   // 3
+</code></pre>
+<h3 id="findarr-pred--find_indexarr-pred"><a class="header" href="#findarr-pred--find_indexarr-pred"><code>find(arr, pred)</code> / <code>find_index(arr, pred)</code></a></h3>
+<p><code>find</code> returns the first matching element, or <code>none</code> if no match. <code>find_index</code> returns the 0-based index, or <code>-1</code>.</p>
+<pre><code class="language-bop">use std.iter.{find, find_index}
+print(find([1, 2, 3, 4], fn(n) { return n &gt; 2 }))          // 3
+print(find_index([1, 2, 3, 4], fn(n) { return n &gt; 2 }))    // 2
+</code></pre>
+<h2 id="slicing"><a class="header" href="#slicing">Slicing</a></h2>
+<h3 id="takearr-n"><a class="header" href="#takearr-n"><code>take(arr, n)</code></a></h3>
+<p>First <code>n</code> elements (or the whole array if it’s shorter). Negative <code>n</code> yields an empty array.</p>
+<pre><code class="language-bop">use std.iter.{take}
+print(take([1, 2, 3, 4, 5], 3))    // [1, 2, 3]
+print(take([1, 2], 10))            // [1, 2]
+</code></pre>
+<h3 id="droparr-n"><a class="header" href="#droparr-n"><code>drop(arr, n)</code></a></h3>
+<p>Drop the first <code>n</code> elements. Negative <code>n</code> yields a full copy; <code>n &gt;= arr.len()</code> yields <code>[]</code>.</p>
+<pre><code class="language-bop">use std.iter.{drop}
+print(drop([1, 2, 3, 4, 5], 2))    // [3, 4, 5]
+</code></pre>
+<h2 id="combining"><a class="header" href="#combining">Combining</a></h2>
+<h3 id="zipa-b"><a class="header" href="#zipa-b"><code>zip(a, b)</code></a></h3>
+<p>Pair elements from two arrays. Stops at the shorter array’s length.</p>
+<pre><code class="language-bop">use std.iter.{zip}
+print(zip([1, 2, 3], ["a", "b", "c"]))    // [[1, "a"], [2, "b"], [3, "c"]]
+</code></pre>
+<h3 id="enumeratearr"><a class="header" href="#enumeratearr"><code>enumerate(arr)</code></a></h3>
+<p>Pair each element with its 0-based index.</p>
+<pre><code class="language-bop">use std.iter.{enumerate}
+print(enumerate(["a", "b"]))    // [[0, "a"], [1, "b"]]
+</code></pre>
+<h3 id="flattenarr"><a class="header" href="#flattenarr"><code>flatten(arr)</code></a></h3>
+<p>Flatten an array of arrays one level down.</p>
+<pre><code class="language-bop">use std.iter.{flatten}
+print(flatten([[1, 2], [3, 4], [5]]))    // [1, 2, 3, 4, 5]
+</code></pre>
+<h2 id="reductions"><a class="header" href="#reductions">Reductions</a></h2>
+<h3 id="sumarr"><a class="header" href="#sumarr"><code>sum(arr)</code></a></h3>
+<p>Sum of a numeric array. Empty → <code>0</code>.</p>
+<pre><code class="language-bop">use std.iter.{sum}
+print(sum([1, 2, 3, 4]))     // 10
+print(sum([]))               // 0
+</code></pre>
+<h3 id="productarr"><a class="header" href="#productarr"><code>product(arr)</code></a></h3>
+<p>Product of a numeric array. Empty → <code>1</code> (multiplicative identity, matching NumPy / Python’s <code>math.prod</code>).</p>
+<pre><code class="language-bop">use std.iter.{product}
+print(product([2, 3, 4]))    // 24
+print(product([]))           // 1
+</code></pre>
+<h3 id="min_arrayarr--max_arrayarr"><a class="header" href="#min_arrayarr--max_arrayarr"><code>min_array(arr)</code> / <code>max_array(arr)</code></a></h3>
+<p>Minimum / maximum of a numeric array. Raises on empty input so callers notice.</p>
+<pre><code class="language-bop">use std.iter.{min_array, max_array}
+print(min_array([3, 1, 4, 1, 5]))    // 1
+print(max_array([3, 1, 4, 1, 5]))    // 5
+</code></pre>
+<p>For pairwise min / max use the <code>.min()</code> / <code>.max()</code> <a href="#numeric-methods--int-and-number">numeric methods</a> instead.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="stdcollections"><a class="header" href="#stdcollections">std.collections</a></h1>
+<p><code>Stack</code>, <code>Queue</code>, and <code>Set</code> as value-semantics structs.</p>
+<h2 id="value-semantics"><a class="header" href="#value-semantics">Value semantics</a></h2>
+<p>Bop’s user methods pass <code>self</code> by value, so these collections all return a <strong>fresh instance</strong> on mutation and you rebind:</p>
+<pre><code class="language-bop">let s = stack()
+s = s.push(1)
+s = s.push(2)
+</code></pre>
+<p>The pattern trades a little boilerplate for predictable semantics: <code>let a = b</code> doesn’t alias, and method calls never surprise you by mutating out of band.</p>
+<h2 id="import-2"><a class="header" href="#import-2">Import</a></h2>
+<pre><code class="language-bop">use std.collections                          // glob
+use std.collections.{stack, queue, set}      // selective
+use std.collections as c                     // aliased
+</code></pre>
+<h2 id="stack-lifo"><a class="header" href="#stack-lifo"><code>Stack</code> (LIFO)</a></h2>
+<pre><code class="language-bop">use std.collections.{stack}
+
+let s = stack()
+s = s.push(1)
+s = s.push(2)
+s = s.push(3)
+print(s.top())       // 3
+print(s.size())      // 3
+
+s = s.pop()
+print(s.top())       // 2
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>stack()</code></td><td><code>Stack</code></td><td>Empty constructor</td></tr>
+<tr><td><code>s.is_empty()</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.size()</code></td><td>int</td><td></td></tr>
+<tr><td><code>s.push(v)</code></td><td><code>Stack</code></td><td>New stack with <code>v</code> on top</td></tr>
+<tr><td><code>s.top()</code></td><td>value</td><td>Top element, or <code>none</code> if empty</td></tr>
+<tr><td><code>s.pop()</code></td><td><code>Stack</code></td><td>New stack without the top; popping empty is a no-op</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="queue-fifo"><a class="header" href="#queue-fifo"><code>Queue</code> (FIFO)</a></h2>
+<pre><code class="language-bop">use std.collections.{queue}
+
+let q = queue()
+q = q.enqueue("a")
+q = q.enqueue("b")
+q = q.enqueue("c")
+print(q.front())    // "a"
+
+q = q.dequeue()
+print(q.front())    // "b"
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>queue()</code></td><td><code>Queue</code></td><td>Empty constructor</td></tr>
+<tr><td><code>q.is_empty()</code></td><td>bool</td><td></td></tr>
+<tr><td><code>q.size()</code></td><td>int</td><td></td></tr>
+<tr><td><code>q.enqueue(v)</code></td><td><code>Queue</code></td><td>New queue with <code>v</code> at the back</td></tr>
+<tr><td><code>q.front()</code></td><td>value</td><td>Front element, or <code>none</code> if empty</td></tr>
+<tr><td><code>q.dequeue()</code></td><td><code>Queue</code></td><td>New queue without the front; dequeuing empty is a no-op</td></tr>
+</tbody>
+</table>
+</div>
+<p>Dequeue is O(n) in this naive implementation — good enough for scripting workloads. If you need tighter bounds, write an array-backed ring buffer.</p>
+<h2 id="set-unique-insertion-ordered"><a class="header" href="#set-unique-insertion-ordered"><code>Set</code> (unique, insertion-ordered)</a></h2>
+<pre><code class="language-bop">use std.collections.{set, set_of}
+
+let a = set_of([1, 2, 3])
+let b = set_of([2, 3, 4])
+
+print(a.union(b).values())         // [1, 2, 3, 4]
+print(a.intersect(b).values())     // [2, 3]
+print(a.difference(b).values())    // [1]
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>set()</code></td><td><code>Set</code></td><td>Empty constructor</td></tr>
+<tr><td><code>set_of(arr)</code></td><td><code>Set</code></td><td>From an array (duplicates collapse, first-seen wins)</td></tr>
+<tr><td><code>s.is_empty()</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.size()</code></td><td>int</td><td></td></tr>
+<tr><td><code>s.has(v)</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.add(v)</code></td><td><code>Set</code></td><td>New set with <code>v</code>. Idempotent.</td></tr>
+<tr><td><code>s.remove(v)</code></td><td><code>Set</code></td><td>New set without <code>v</code>. Removing absent is a no-op.</td></tr>
+<tr><td><code>s.values()</code></td><td>array</td><td>Elements in insertion order</td></tr>
+<tr><td><code>s.union(other)</code></td><td><code>Set</code></td><td></td></tr>
+<tr><td><code>s.intersect(other)</code></td><td><code>Set</code></td><td></td></tr>
+<tr><td><code>s.difference(other)</code></td><td><code>Set</code></td><td><code>self</code> minus <code>other</code></td></tr>
+</tbody>
+</table>
+</div>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="stdstring"><a class="header" href="#stdstring">std.string</a></h1>
+<p>Formatting and character-level helpers that don’t fit the method-on-string pattern.</p>
+<blockquote>
+<p>The core string operations — <code>.len()</code>, <code>.trim()</code>, <code>.upper()</code>, <code>.split()</code>, <code>.contains()</code>, <code>.slice()</code>, <code>.replace()</code>, <code>.to_int()</code>, <code>.to_float()</code>, etc. — are <a href="#string-methods--string">methods on strings</a>. This module adds things that are awkward as methods.</p>
+</blockquote>
+<h2 id="import-3"><a class="header" href="#import-3">Import</a></h2>
+<pre><code class="language-bop">use std.string
+use std.string.{pad_left, center}
+use std.string as str
+</code></pre>
+<h2 id="padding"><a class="header" href="#padding">Padding</a></h2>
+<h3 id="pad_lefts-width-ch--pad_rights-width-ch"><a class="header" href="#pad_lefts-width-ch--pad_rights-width-ch"><code>pad_left(s, width, ch)</code> / <code>pad_right(s, width, ch)</code></a></h3>
+<p>Pad <code>s</code> on the left (or right) with <code>ch</code> until it reaches <code>width</code> total characters. Already-long strings are returned unchanged. <code>ch</code> should be a single-character string.</p>
+<pre><code class="language-bop">use std.string.{pad_left, pad_right}
+print(pad_left("42", 5, "0"))      // "00042"
+print(pad_right("hi", 6, "."))     // "hi...."
+</code></pre>
+<h3 id="centers-width-ch"><a class="header" href="#centers-width-ch"><code>center(s, width, ch)</code></a></h3>
+<p>Centre <code>s</code> inside <code>width</code> chars using <code>ch</code> as filler. Odd leftover space goes on the right (matches Python’s <code>str.center</code>).</p>
+<pre><code class="language-bop">use std.string.{center}
+print(center("OK", 6, "-"))     // "--OK--"
+print(center("OK", 7, "-"))     // "--OK---"
+</code></pre>
+<h2 id="character-level"><a class="header" href="#character-level">Character-level</a></h2>
+<h3 id="charss"><a class="header" href="#charss"><code>chars(s)</code></a></h3>
+<p>Split <code>s</code> into an array of single-character strings, preserving order.</p>
+<pre><code class="language-bop">use std.string.{chars}
+print(chars("abc"))    // ["a", "b", "c"]
+</code></pre>
+<h3 id="reverses"><a class="header" href="#reverses"><code>reverse(s)</code></a></h3>
+<p>Reverse the character sequence. Works on ASCII and UTF-8 (iterates by code point).</p>
+<pre><code class="language-bop">use std.string.{reverse}
+print(reverse("hello"))    // "olleh"
+</code></pre>
+<h3 id="is_palindromes"><a class="header" href="#is_palindromes"><code>is_palindrome(s)</code></a></h3>
+<p><code>true</code> when <code>s</code> reads the same forwards and backwards. Case-sensitive — lowercase the input first if you need case-insensitive comparison.</p>
+<pre><code class="language-bop">use std.string.{is_palindrome}
+print(is_palindrome("racecar"))    // true
+print(is_palindrome("Racecar"))    // false
+</code></pre>
+<h2 id="other-helpers"><a class="header" href="#other-helpers">Other helpers</a></h2>
+<h3 id="counts-needle"><a class="header" href="#counts-needle"><code>count(s, needle)</code></a></h3>
+<p>Count non-overlapping occurrences of <code>needle</code> in <code>s</code>. An empty <code>needle</code> returns <code>0</code> (avoids the “infinite matches at every position” ambiguity).</p>
+<pre><code class="language-bop">use std.string.{count}
+print(count("banana", "a"))      // 3
+print(count("aaaa", "aa"))       // 2  (non-overlapping)
+</code></pre>
+<h3 id="joinarr-sep"><a class="header" href="#joinarr-sep"><code>join(arr, sep)</code></a></h3>
+<p>Join an array of strings with <code>sep</code>. This is a thin wrapper around the built-in <code>arr.join(sep)</code> <a href="#array-methods--array">array method</a> — it’s here so users starting from <code>std.string</code> don’t have to look elsewhere.</p>
+<pre><code class="language-bop">use std.string.{join}
+print(join(["a", "b", "c"], "-"))    // "a-b-c"
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="stdresult"><a class="header" href="#stdresult">std.result</a></h1>
+<p>Combinators for the built-in <code>Result</code> type.</p>
+<blockquote>
+<p><code>Result { Ok(value), Err(error) }</code> and <code>RuntimeError { message, line }</code> are <strong>engine built-ins</strong> — you don’t need <code>use std.result</code> to write <code>Result::Ok(v)</code> or match on <code>Result::Err(e)</code>. See <a href="#error-handling">Error Handling</a>. This module only adds the helpers.</p>
+</blockquote>
+<h2 id="import-4"><a class="header" href="#import-4">Import</a></h2>
+<pre><code class="language-bop">use std.result                                  // glob
+use std.result.{is_ok, unwrap_or, map}          // selective
+use std.result as r                             // aliased
+</code></pre>
+<h2 id="predicates"><a class="header" href="#predicates">Predicates</a></h2>
+<h3 id="is_okr--is_errr"><a class="header" href="#is_okr--is_errr"><code>is_ok(r)</code> / <code>is_err(r)</code></a></h3>
+<pre><code class="language-bop">use std.result.{is_ok, is_err}
+print(is_ok(Result::Ok(1)))         // true
+print(is_err(Result::Err("oops"))) // true
+</code></pre>
+<h2 id="unwrapping"><a class="header" href="#unwrapping">Unwrapping</a></h2>
+<h3 id="unwrapr"><a class="header" href="#unwrapr"><code>unwrap(r)</code></a></h3>
+<p>Return the <code>Ok</code> payload; raise a runtime error on <code>Err</code>. Use sparingly — prefer <code>try</code> or pattern matching in production code.</p>
+<pre><code class="language-bop">use std.result.{unwrap}
+print(unwrap(Result::Ok(42)))     // 42
+// unwrap(Result::Err("bad"))     // runtime error
+</code></pre>
+<h3 id="expectr-message"><a class="header" href="#expectr-message"><code>expect(r, message)</code></a></h3>
+<p>Like <code>unwrap</code>, but raises with a caller-supplied message on <code>Err</code>.</p>
+<pre><code class="language-bop">use std.result.{expect}
+print(expect(Result::Ok(42), "couldn't compute"))  // 42
+</code></pre>
+<h3 id="unwrap_orr-default"><a class="header" href="#unwrap_orr-default"><code>unwrap_or(r, default)</code></a></h3>
+<p>Return the <code>Ok</code> payload, or <code>default</code> on <code>Err</code>.</p>
+<pre><code class="language-bop">use std.result.{unwrap_or}
+print(unwrap_or(Result::Ok(10), 0))         // 10
+print(unwrap_or(Result::Err("fail"), 0))    // 0
+</code></pre>
+<h2 id="transforms"><a class="header" href="#transforms">Transforms</a></h2>
+<h3 id="mapr-f"><a class="header" href="#mapr-f"><code>map(r, f)</code></a></h3>
+<p>Apply <code>f</code> to the <code>Ok</code> payload; pass <code>Err</code> through unchanged.</p>
+<pre><code class="language-bop">use std.result.{map}
+print(map(Result::Ok(5), fn(n) { return n * n }))      // Result::Ok(25)
+print(map(Result::Err("x"), fn(n) { return n * n }))   // Result::Err("x")
+</code></pre>
+<h3 id="map_errr-f"><a class="header" href="#map_errr-f"><code>map_err(r, f)</code></a></h3>
+<p>Apply <code>f</code> to the <code>Err</code> payload; pass <code>Ok</code> through unchanged.</p>
+<pre><code class="language-bop">use std.result.{map_err}
+print(map_err(Result::Err("fail"), fn(e) { return e + "!" }))
+// Result::Err("fail!")
+</code></pre>
+<h3 id="and_thenr-f"><a class="header" href="#and_thenr-f"><code>and_then(r, f)</code></a></h3>
+<p>Monadic bind — if <code>r</code> is <code>Ok(v)</code>, run <code>f(v)</code> (which should itself return a <code>Result</code>). If <code>Err</code>, pass it through.</p>
+<pre><code class="language-bop">use std.result.{and_then}
+
+fn halve(x) {
+  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
+  return Result::Err("odd")
+}
+
+print(and_then(and_then(Result::Ok(8), halve), halve))    // Result::Ok(2)
+print(and_then(Result::Ok(7), halve))                      // Result::Err("odd")
+</code></pre>
+<h2 id="when-to-reach-for-each"><a class="header" href="#when-to-reach-for-each">When to reach for each</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Situation</th><th>Tool</th></tr>
+</thead>
+<tbody>
+<tr><td>Have a Result, want the value or propagate</td><td><code>try</code> (operator — <a href="#the-try-operator">Error Handling</a>)</td></tr>
+<tr><td>Have a Result, need a default</td><td><code>unwrap_or</code></td></tr>
+<tr><td>Have a Result, want to apply a pure function to <code>Ok</code></td><td><code>map</code></td></tr>
+<tr><td>Chaining several fallible steps</td><td><code>and_then</code></td></tr>
+<tr><td>Catching a raised runtime error</td><td><code>try_call</code> (built-in — <a href="#try_callf">Errors</a>)</td></tr>
+<tr><td>You know it’s Ok and want to panic if not</td><td><code>unwrap</code> / <code>expect</code></td></tr>
+</tbody>
+</table>
+</div>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="stdjson"><a class="header" href="#stdjson">std.json</a></h1>
+<p>RFC-8259 JSON <code>parse</code> and <code>stringify</code>, implemented in pure Bop.</p>
+<p>Performance is reasonable for scripting workloads (config files, API payloads up to a few MB). A C-backed parser would be faster but would pull <code>bop-std</code> out of its zero-Rust-dep contract.</p>
+<h2 id="import-5"><a class="header" href="#import-5">Import</a></h2>
+<pre><code class="language-bop">use std.json                       // glob
+use std.json.{parse, stringify}    // selective
+use std.json as j                  // aliased
+</code></pre>
+<h2 id="stringifyvalue"><a class="header" href="#stringifyvalue"><code>stringify(value)</code></a></h2>
+<p>Emit <code>value</code> as JSON text. Bop values that have no JSON analogue (<code>fn</code>, <code>struct</code>, <code>enum</code>) raise a runtime error — strip them out before calling.</p>
+<pre><code class="language-bop">use std.json.{stringify}
+
+print(stringify(42))                           // "42"
+print(stringify("hello"))                      // "\"hello\""
+print(stringify([1, 2, 3]))                    // "[1,2,3]"
+print(stringify({"name": "Alice", "age": 30})) // '{"name":"Alice","age":30}'
+print(stringify(true))                         // "true"
+print(stringify(none))                         // "null"
+</code></pre>
+<p>Strings are escaped for the five characters JSON requires (<code>"</code>, <code>\</code>, <code>\n</code>, <code>\r</code>, <code>\t</code>). Other control characters under 0x20 are not currently escaped — fine for the common cases, but a known gap if you’re stringifying raw binary.</p>
+<h2 id="parsetext"><a class="header" href="#parsetext"><code>parse(text)</code></a></h2>
+<p>Parse JSON text into a Bop value. Parse errors raise a runtime error with a position marker.</p>
+<pre><code class="language-bop">use std.json.{parse}
+
+print(parse("42"))                       // 42
+print(parse("\"hello\""))                // "hello"
+print(parse("[1, 2, 3]"))                // [1, 2, 3]
+print(parse("{\"name\": \"Alice\"}"))    // {"name": "Alice"}
+print(parse("null"))                     // none
+</code></pre>
+<h3 id="mapping"><a class="header" href="#mapping">Mapping</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>JSON type</th><th>Bop type</th></tr>
+</thead>
+<tbody>
+<tr><td>number (integer)</td><td><code>int</code></td></tr>
+<tr><td>number (decimal / exponent)</td><td><code>number</code></td></tr>
+<tr><td>string</td><td><code>string</code></td></tr>
+<tr><td>boolean</td><td><code>bool</code></td></tr>
+<tr><td>null</td><td><code>none</code></td></tr>
+<tr><td>array</td><td><code>array</code></td></tr>
+<tr><td>object</td><td><code>dict</code> (keys must be strings, which JSON already requires)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="catching-parse-errors"><a class="header" href="#catching-parse-errors">Catching parse errors</a></h3>
+<p><code>parse</code> raises on malformed input. Wrap in <code>try_call</code> if you want a <code>Result</code>-shaped outcome:</p>
+<pre><code class="language-bop">use std.json.{parse}
+
+let r = try_call(fn() { return parse("\{broken") })
+match r {
+  Result::Ok(v)  =&gt; print("parsed: " + v.to_str()),
+  Result::Err(e) =&gt; print("parse failed: " + e.message),
+}
+// parse failed: ...
+</code></pre>
+<p>(The leading <code>\{</code> escapes the <code>{</code> so Bop doesn’t mistake it for a string-interpolation marker.)</p>
+<h3 id="known-gaps"><a class="header" href="#known-gaps">Known gaps</a></h3>
+<ul>
+<li><code>\b</code> / <code>\f</code> escapes are rejected. Rare in real payloads.</li>
+<li><code>\uXXXX</code> escapes are rejected — they’d need 4-hex parsing plus code-point-to-UTF-8 conversion, which is nontrivial in pure Bop.</li>
+</ul>
+<p>Both raise a clear “unsupported escape” error so you know what happened.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="stdtest"><a class="header" href="#stdtest">std.test</a></h1>
+<p>Minimal assertion toolkit for sanity checks in Bop scripts.</p>
+<p>This isn’t an xUnit clone — just the assertion primitives you’ll reach for when writing quick tests. On failure the program halts with a runtime error; print-based reporting is intentionally out of scope (wrap the assertion in <code>try_call</code> if you need “report and continue”).</p>
+<h2 id="import-6"><a class="header" href="#import-6">Import</a></h2>
+<pre><code class="language-bop">use std.test                                // glob
+use std.test.{assert_eq, assert_near}       // selective
+use std.test as t                           // aliased
+</code></pre>
+<h2 id="assertions"><a class="header" href="#assertions">Assertions</a></h2>
+<h3 id="assertcond-message"><a class="header" href="#assertcond-message"><code>assert(cond, message)</code></a></h3>
+<p>Assert that <code>cond</code> is truthy. On failure, raises a runtime error — <code>message</code> is surfaced in the crash trace.</p>
+<pre><code class="language-bop">use std.test.{assert}
+assert(1 + 1 == 2, "arithmetic still works")
+</code></pre>
+<h3 id="assert_eqactual-expected"><a class="header" href="#assert_eqactual-expected"><code>assert_eq(actual, expected)</code></a></h3>
+<p>Assert two values are structurally equal (same as <code>==</code>). On failure the error includes an <code>assert_eq failed:</code> prefix and the <code>.inspect()</code> of both sides.</p>
+<pre><code class="language-bop">use std.test.{assert_eq}
+assert_eq([1, 2, 3].len(), 3)
+assert_eq("hi".upper(), "HI")
+</code></pre>
+<h3 id="assert_nearactual-expected-tolerance"><a class="header" href="#assert_nearactual-expected-tolerance"><code>assert_near(actual, expected, tolerance)</code></a></h3>
+<p>Assert two floats are within <code>tolerance</code> of each other. Use this instead of <code>assert_eq</code> when comparing <code>number</code> values subject to rounding.</p>
+<pre><code class="language-bop">use std.test.{assert_near}
+assert_near((2).sqrt() * (2).sqrt(), 2, 0.0000001)
+</code></pre>
+<h3 id="assert_raisesbody"><a class="header" href="#assert_raisesbody"><code>assert_raises(body)</code></a></h3>
+<p>Assert that <code>body</code> — a zero-arg closure — raises a runtime error. On success (no raise), the assertion itself fails. Useful for negative tests.</p>
+<pre><code class="language-bop">use std.test.{assert_raises}
+
+assert_raises(fn() {
+  let _ = 1 / 0     // expected to raise "Division by zero"
+})
+
+assert_raises(fn() {
+  "not a number".to_int()
+})
+</code></pre>
+<p>Under the hood, <code>assert_raises</code> uses <code>try_call</code> to observe whether <code>body</code> raised, so the same fatal-vs-non-fatal rules apply — a step-limit exceeded inside <code>body</code> propagates past the assertion instead of being caught.</p>
+<h2 id="putting-it-together"><a class="header" href="#putting-it-together">Putting it together</a></h2>
+<pre><code class="language-bop">use std.test.{assert_eq, assert_raises}
+
+fn normalize(arr) {
+  if arr.len() == 0 { return none[0] }
+  let total = 0
+  for x in arr { total = total + x }
+  let m = total / arr.len()
+  let out = []
+  for x in arr { out.push(x - m) }
+  return out
+}
+
+assert_eq(normalize([1, 2, 3]), [-1, 0, 1])
+assert_raises(fn() { normalize([]) })      // raises on empty
+print("normalize: all checks passed")
+</code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="embedding-bop"><a class="header" href="#embedding-bop">Embedding Bop</a></h1>
 <p>Bop is designed to be embedded in Rust applications. Three ways to run a program are available; every one uses the same <code>BopHost</code> trait as the integration seam for print output, custom functions, module resolution, timeouts, etc.</p>
@@ -2436,7 +3041,7 @@ impl AppHost {
                 fn median(xs) {
                     let sorted = xs
                     sorted.sort()
-                    let mid = int(len(sorted) / 2)
+                    let mid = (sorted.len() / 2).to_int()
                     return sorted[mid]
                 }
             "#),
@@ -2504,7 +3109,7 @@ fn main() {
         }
         let avg = average()
         let mid = median([10, 20, 30, 40, 50])
-        print("Average: " + str(avg) + ", median: " + str(mid))
+        print("Average: " + avg.to_str() + ", median: " + mid.to_str())
     "#;
 
     let mut host = AppHost::new();

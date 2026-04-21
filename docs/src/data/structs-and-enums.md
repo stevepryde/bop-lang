@@ -17,7 +17,7 @@ Create a value with `TypeName { field: value, ... }`:
 let p = Point { x: 3, y: 4 }
 print(p)                  // Point { x: 3, y: 4 }
 print(p.x)                // 3
-print(type(p))            // "struct"
+print(p.type())           // "struct"
 ```
 
 Construction is **strict**: fields you provide must match the declaration exactly (no unknown fields, no duplicates, no missing ones). Extra fields or typos become parse or runtime errors with a "did you mean?" suggestion.
@@ -72,7 +72,7 @@ Variants come in three shapes:
 let a = Shape::Circle(5)
 let b = Shape::Rectangle { w: 4, h: 3 }
 let c = Shape::Empty
-print(type(a))           // "enum"
+print(a.type())          // "enum"
 ```
 
 Variants with a struct payload expose their fields via `.field` just like structs:

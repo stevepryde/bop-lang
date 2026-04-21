@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>Methods - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -177,103 +177,154 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
-}
+                        <h1 id="methods"><a class="header" href="#methods">Methods</a></h1>
+<p>Bop dispatches methods with <code>.name(args...)</code>. Every built-in method on primitives, arrays, strings, and dicts is listed here. User-defined methods on structs use the same syntax — see <a href="../data/structs-and-enums.html">Structs &amp; Enums</a> for the <code>fn Type.method(self, ...)</code> form.</p>
+<h2 id="methods-on-every-value"><a class="header" href="#methods-on-every-value">Methods on every value</a></h2>
+<p>Three methods work on any value — introspection + stringification. They’re dispatched before the type-specific tables, so they’re always available:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>x.type()</code></td><td>string</td><td>One of <code>"int"</code>, <code>"number"</code>, <code>"string"</code>, <code>"bool"</code>, <code>"none"</code>, <code>"array"</code>, <code>"dict"</code>, <code>"fn"</code>, <code>"struct"</code>, <code>"enum"</code>, <code>"module"</code></td></tr>
+<tr><td><code>x.to_str()</code></td><td>string</td><td>Display repr — same as what <code>print(x)</code> would emit for a single arg</td></tr>
+<tr><td><code>x.inspect()</code></td><td>string</td><td>Debug repr — strings are wrapped in <code>"..."</code>, nested strings stay quoted inside arrays / dicts</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">print((42).type())                 // "int"
+print("hi".to_str())               // "hi"
+print("hi".inspect())              // "hi"   (quoted)
+print([1, "two"].inspect())        // [1, "two"]
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
+<h3 id="parens-around-numeric-literals"><a class="header" href="#parens-around-numeric-literals">Parens around numeric literals</a></h3>
+<p>Number literals need parens before a method call because <code>.</code> is otherwise a decimal point:</p>
+<pre><code class="language-bop">// print(42.type())   // parse error — `42.t…` looks like a decimal
+print((42).type())     // "int"
+print((-5).abs())      // 5
 </code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
+<p>Identifiers don’t have this problem: <code>x.type()</code>, <code>count.to_str()</code>, etc.</p>
+<h2 id="numeric-methods--int-and-number"><a class="header" href="#numeric-methods--int-and-number">Numeric methods — <code>int</code> and <code>number</code></a></h2>
+<p>All of these work on both <code>int</code> and <code>number</code> receivers. Return type is noted per method; most math operations always widen to <code>number</code>.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>x.abs()</code></td><td>int / number</td><td>Absolute value. Preserves receiver type. <code>(-5).abs()</code> → <code>5</code> (int), <code>(-2.7).abs()</code> → <code>2.7</code> (number). Integer overflow on <code>(i64::MIN).abs()</code> is a runtime error.</td></tr>
+<tr><td><code>x.sqrt()</code></td><td>number</td><td>Square root.</td></tr>
+<tr><td><code>x.sin()</code>, <code>x.cos()</code>, <code>x.tan()</code></td><td>number</td><td>Trig. Angles in radians.</td></tr>
+<tr><td><code>x.exp()</code></td><td>number</td><td><code>e^x</code>.</td></tr>
+<tr><td><code>x.log()</code></td><td>number</td><td>Natural log.</td></tr>
+<tr><td><code>x.pow(e)</code></td><td>number</td><td><code>x</code> raised to <code>e</code>.</td></tr>
+<tr><td><code>x.floor()</code>, <code>x.ceil()</code>, <code>x.round()</code></td><td>int / number</td><td>Round toward <code>-∞</code>, <code>+∞</code>, or nearest (ties away from zero). Returns <code>int</code> when the rounded result fits in <code>i64</code>, <code>number</code> otherwise (so rounding a number that overflows <code>i64</code> stays a <code>number</code> instead of raising). Int receivers pass through unchanged.</td></tr>
+<tr><td><code>a.min(b)</code>, <code>a.max(b)</code></td><td>int / number</td><td>Pair-wise. Preserves type when both sides match; widens to <code>number</code> on mixed int/number.</td></tr>
+<tr><td><code>x.to_int()</code></td><td>int</td><td>Truncates toward zero. <code>(3.7).to_int()</code> → <code>3</code>, <code>(-2.7).to_int()</code> → <code>-2</code>.</td></tr>
+<tr><td><code>x.to_float()</code></td><td>number</td><td>Widens <code>int</code> → <code>number</code>; <code>number</code> passes through.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">print((9).sqrt())                   // 3
+print((0).cos())                    // 1
+print((2).pow(10))                  // 1024
+print((3).min(7))                   // 3
+print((1).max(2.5))                 // 2.5   (widened)
+print((3.7).floor())                // 3     (int)
+print((3.7).floor().type())         // "int"
 </code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
-  }
-  i += 1
-}
-print("Sum exceeded 100 at i=" + i.to_str())
-</code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
-}
-print("Found " + count.to_str())
-</code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(i.to_str())     // 0, 1, 2, 3, 4
-}
-</code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(i.to_str())     // 2, 3, 4, 5, 6, 7
-}
-</code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
-}
-</code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = scores[name].to_str()
-  print(name + ": " + s)
-}
-</code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
-}
-</code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + row.to_str() + ", " + col.to_str() + ")")
-  }
-}
+<h2 id="boolean-methods--bool"><a class="header" href="#boolean-methods--bool">Boolean methods — <code>bool</code></a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>b.to_int()</code></td><td>int</td><td><code>true.to_int()</code> → <code>1</code>, <code>false.to_int()</code> → <code>0</code>.</td></tr>
+<tr><td><code>b.to_float()</code></td><td>number</td><td><code>true.to_float()</code> → <code>1</code> (as number), <code>false.to_float()</code> → <code>0</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Plus the universal <code>type</code> / <code>to_str</code> / <code>inspect</code>.</p>
+<h2 id="string-methods--string"><a class="header" href="#string-methods--string">String methods — <code>string</code></a></h2>
+<p>See <a href="../data/strings.html">Strings</a> for worked examples.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>s.len()</code></td><td>int</td><td>Number of Unicode code points.</td></tr>
+<tr><td><code>s.contains(sub)</code></td><td>bool</td><td>Whether <code>sub</code> appears anywhere.</td></tr>
+<tr><td><code>s.starts_with(prefix)</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.ends_with(suffix)</code></td><td>bool</td><td></td></tr>
+<tr><td><code>s.index_of(sub)</code></td><td>int</td><td>Byte index of first occurrence, or <code>-1</code> if not found.</td></tr>
+<tr><td><code>s.split(sep)</code></td><td>array</td><td>Split into an array of strings on <code>sep</code>.</td></tr>
+<tr><td><code>s.replace(old, new)</code></td><td>string</td><td>Replace every occurrence.</td></tr>
+<tr><td><code>s.upper()</code>, <code>s.lower()</code></td><td>string</td><td>Case conversion.</td></tr>
+<tr><td><code>s.trim()</code></td><td>string</td><td>Strip leading / trailing whitespace.</td></tr>
+<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring by code-point index.</td></tr>
+<tr><td><code>s.to_int()</code></td><td>int</td><td>Parse. <code>"3.7".to_int()</code> parses as float then truncates → <code>3</code>. Raises on junk.</td></tr>
+<tr><td><code>s.to_float()</code></td><td>number</td><td>Parse. Raises on junk.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="array-methods--array"><a class="header" href="#array-methods--array">Array methods — <code>array</code></a></h2>
+<p>See <a href="../data/arrays.html">Arrays</a> for worked examples.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>arr.len()</code></td><td>int</td><td>Number of elements.</td></tr>
+<tr><td><code>arr.push(v)</code></td><td>none</td><td>Append.</td></tr>
+<tr><td><code>arr.pop()</code></td><td>value</td><td>Remove and return the last element.</td></tr>
+<tr><td><code>arr.has(v)</code></td><td>bool</td><td>Structural equality check.</td></tr>
+<tr><td><code>arr.index_of(v)</code></td><td>int</td><td>Index of first match, or <code>-1</code>.</td></tr>
+<tr><td><code>arr.insert(i, v)</code></td><td>none</td><td>Insert at index, shifting right.</td></tr>
+<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at index, returning the removed value.</td></tr>
+<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>Sub-array.</td></tr>
+<tr><td><code>arr.reverse()</code></td><td>none</td><td>In-place.</td></tr>
+<tr><td><code>arr.sort()</code></td><td>none</td><td>In-place, numeric or lexicographic depending on element types.</td></tr>
+<tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join after stringifying each element.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="dict-methods--dict"><a class="header" href="#dict-methods--dict">Dict methods — <code>dict</code></a></h2>
+<p>See <a href="../data/dictionaries.html">Dictionaries</a> for worked examples.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>d.len()</code></td><td>int</td><td>Number of entries.</td></tr>
+<tr><td><code>d.keys()</code></td><td>array</td><td>All keys as strings.</td></tr>
+<tr><td><code>d.values()</code></td><td>array</td><td>All values.</td></tr>
+<tr><td><code>d.has(key)</code></td><td>bool</td><td>Whether <code>key</code> exists.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="struct--enum-methods"><a class="header" href="#struct--enum-methods">Struct / enum methods</a></h2>
+<p>User-declared. See <a href="../data/structs-and-enums.html">Structs &amp; Enums</a>. Method dispatch on a struct tries the universal common methods first, then looks up <code>fn TypeName.method</code> declared in the same module.</p>
+<h2 id="module-methods"><a class="header" href="#module-methods">Module methods</a></h2>
+<p>If you <code>use path as m</code>, <code>m</code> is a <code>Value::Module</code>. <code>m.type()</code> → <code>"module"</code>, <code>m.inspect()</code> → <code>"&lt;module path&gt;"</code>. Otherwise <code>.</code> on a module accesses its exports:</p>
+<pre><code class="language-bop">use std.math as m
+print(m.pi)             // exported constant
+print(m.type())         // "module"   (universal method, not an export)
 </code></pre>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../reference/builtins.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../reference/grammar.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +334,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../reference/builtins.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../reference/grammar.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

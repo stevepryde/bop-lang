@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="../toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -198,11 +198,11 @@ let count = 5
 print("Hello, {name}! You have {count} items.")
 </code></pre>
 <p>Only variable names are allowed inside <code>{}</code>. For expressions, use a temporary variable:</p>
-<pre><code class="language-bop">let total = str(count * 2)
+<pre><code class="language-bop">let total = (count * 2).to_str()
 print("Double: {total}")
 </code></pre>
 <p>Or use concatenation:</p>
-<pre><code class="language-bop">print("Double: " + str(count * 2))
+<pre><code class="language-bop">print("Double: " + (count * 2).to_str())
 </code></pre>
 <p>To include a literal <code>{</code> or <code>}</code> in a string, escape it with <code>\{</code> and <code>\}</code>:</p>
 <pre><code class="language-bop">print("Use \{name\} for interpolation")
@@ -213,8 +213,8 @@ print("Double: {total}")
 <pre><code class="language-bop">let full = "Hello" + ", " + "world!"
 print(full)    // "Hello, world!"
 </code></pre>
-<p>Numbers must be converted with <code>str()</code> first:</p>
-<pre><code class="language-bop">let msg = "Score: " + str(42)
+<p>Numbers must be converted with <code>.to_str()</code> first:</p>
+<pre><code class="language-bop">let msg = "Score: " + (42).to_str()
 </code></pre>
 <h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
 <div class="table-wrapper">
@@ -223,20 +223,23 @@ print(full)    // "Hello, world!"
 <tr><th>Method</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>s.len()</code></td><td>number</td><td>Number of characters</td></tr>
+<tr><td><code>s.len()</code></td><td>int</td><td>Number of characters</td></tr>
 <tr><td><code>s.contains(sub)</code></td><td>bool</td><td>Whether the string contains <code>sub</code></td></tr>
 <tr><td><code>s.starts_with(prefix)</code></td><td>bool</td><td>Whether it starts with <code>prefix</code></td></tr>
 <tr><td><code>s.ends_with(suffix)</code></td><td>bool</td><td>Whether it ends with <code>suffix</code></td></tr>
-<tr><td><code>s.index_of(sub)</code></td><td>number or none</td><td>Index of first occurrence, or <code>none</code></td></tr>
+<tr><td><code>s.index_of(sub)</code></td><td>int</td><td>Index of first occurrence, or <code>-1</code></td></tr>
 <tr><td><code>s.split(sep)</code></td><td>array</td><td>Split into array of strings on <code>sep</code></td></tr>
 <tr><td><code>s.replace(old, new)</code></td><td>string</td><td>Replace all occurrences</td></tr>
 <tr><td><code>s.upper()</code></td><td>string</td><td>Uppercase copy</td></tr>
 <tr><td><code>s.lower()</code></td><td>string</td><td>Lowercase copy</td></tr>
 <tr><td><code>s.trim()</code></td><td>string</td><td>Copy with leading/trailing whitespace removed</td></tr>
-<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring (both args optional)</td></tr>
+<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring</td></tr>
+<tr><td><code>s.to_int()</code></td><td>int</td><td>Parse. <code>"3.7".to_int()</code> → <code>3</code> (float-then-truncate). Raises on junk.</td></tr>
+<tr><td><code>s.to_float()</code></td><td>number</td><td>Parse. Raises on junk.</td></tr>
 </tbody>
 </table>
 </div>
+<p>Plus the universal <code>s.type()</code>, <code>s.to_str()</code>, <code>s.inspect()</code>.</p>
 <h2 id="practical-examples"><a class="header" href="#practical-examples">Practical examples</a></h2>
 <h3 id="parsing-csv-data"><a class="header" href="#parsing-csv-data">Parsing CSV data</a></h3>
 <pre><code class="language-bop">let input = "Alice,95,A"
@@ -252,7 +255,7 @@ if filename.ends_with(".csv") {
 </code></pre>
 <h3 id="building-a-formatted-string"><a class="header" href="#building-a-formatted-string">Building a formatted string</a></h3>
 <pre><code class="language-bop">let items = ["apple", "banana", "cherry"]
-let count = str(items.len())
+let count = items.len().to_str()
 let list = items.join(", ")
 print("Found {count} items: {list}")
 </code></pre>

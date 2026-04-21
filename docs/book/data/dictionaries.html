@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="../toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -203,13 +203,14 @@ person["email"] = "a@b.com"   // add new entry
 <tr><th>Method</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>d.len()</code></td><td>number</td><td>Number of entries</td></tr>
+<tr><td><code>d.len()</code></td><td>int</td><td>Number of entries</td></tr>
 <tr><td><code>d.keys()</code></td><td>array</td><td>Array of all keys</td></tr>
 <tr><td><code>d.values()</code></td><td>array</td><td>Array of all values</td></tr>
 <tr><td><code>d.has(key)</code></td><td>bool</td><td>Whether the key exists</td></tr>
 </tbody>
 </table>
 </div>
+<p>Plus the universal <code>d.type()</code>, <code>d.to_str()</code>, <code>d.inspect()</code>.</p>
 <h2 id="practical-examples"><a class="header" href="#practical-examples">Practical examples</a></h2>
 <h3 id="counting-occurrences"><a class="header" href="#counting-occurrences">Counting occurrences</a></h3>
 <pre><code class="language-bop">let words = ["apple", "banana", "apple", "cherry", "banana", "apple"]
@@ -223,19 +224,19 @@ for word in words {
 }
 
 for key in counts {
-  print(key + ": " + str(counts[key]))
+  print(key + ": " + counts[key].to_str())
 }
 </code></pre>
 <h3 id="storing-structured-data"><a class="header" href="#storing-structured-data">Storing structured data</a></h3>
 <pre><code class="language-bop">let point = {"x": 10, "y": 20}
-let x = str(point["x"])
-let y = str(point["y"])
+let x = point["x"].to_str()
+let y = point["y"].to_str()
 print("Position: ({x}, {y})")
 </code></pre>
 <h3 id="iterating-over-entries"><a class="header" href="#iterating-over-entries">Iterating over entries</a></h3>
 <pre><code class="language-bop">let config = {"width": 800, "height": 600, "title": "My App"}
 for key in config {
-  let val = str(config[key])
+  let val = config[key].to_str()
   print(key + ": " + val)
 }
 </code></pre>
@@ -243,7 +244,7 @@ for key in config {
 <pre><code class="language-bop">let settings = {"volume": 80}
 
 if settings.has("volume") {
-  let v = str(settings["volume"])
+  let v = settings["volume"].to_str()
   print("Volume is {v}")
 } else {
   print("Using default volume")

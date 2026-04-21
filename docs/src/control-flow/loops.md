@@ -47,7 +47,7 @@ while true {
   }
   i += 1
 }
-print("Sum exceeded 100 at i=" + str(i))
+print("Sum exceeded 100 at i=" + i.to_str())
 ```
 
 ### Counting example
@@ -62,7 +62,7 @@ while n < 50 {
   }
   n += 1
 }
-print("Found " + str(count))
+print("Found " + count.to_str())
 ```
 
 ## for...in
@@ -73,7 +73,7 @@ Iterates over ranges, arrays, or dictionary keys.
 
 ```bop
 for i in range(5) {
-  print(str(i))     // 0, 1, 2, 3, 4
+  print(i.to_str())     // 0, 1, 2, 3, 4
 }
 ```
 
@@ -81,7 +81,7 @@ With a start value:
 
 ```bop
 for i in range(2, 8) {
-  print(str(i))     // 2, 3, 4, 5, 6, 7
+  print(i.to_str())     // 2, 3, 4, 5, 6, 7
 }
 ```
 
@@ -99,7 +99,7 @@ for fruit in fruits {
 ```bop
 let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
 for name in scores {
-  let s = str(scores[name])
+  let s = scores[name].to_str()
   print(name + ": " + s)
 }
 ```
@@ -122,7 +122,7 @@ Loops can be nested. This is useful for working with grids or combinations:
 ```bop
 for row in range(3) {
   for col in range(4) {
-    print("(" + str(row) + ", " + str(col) + ")")
+    print("(" + row.to_str() + ", " + col.to_str() + ")")
   }
 }
 ```

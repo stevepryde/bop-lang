@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="../toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -205,20 +205,21 @@ print(items)    // [99, 20, 30]
 <tr><th>Method</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>arr.len()</code></td><td>number</td><td>Number of elements</td></tr>
+<tr><td><code>arr.len()</code></td><td>int</td><td>Number of elements</td></tr>
 <tr><td><code>arr.push(val)</code></td><td>none</td><td>Append to end</td></tr>
 <tr><td><code>arr.pop()</code></td><td>value</td><td>Remove and return last element</td></tr>
 <tr><td><code>arr.has(val)</code></td><td>bool</td><td>Whether the array contains the value</td></tr>
-<tr><td><code>arr.index_of(val)</code></td><td>number or none</td><td>Index of first occurrence, or <code>none</code></td></tr>
+<tr><td><code>arr.index_of(val)</code></td><td>int</td><td>Index of first occurrence, or <code>-1</code></td></tr>
 <tr><td><code>arr.insert(i, val)</code></td><td>none</td><td>Insert at index, shifting elements right</td></tr>
 <tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at index, shifting elements left</td></tr>
-<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>New sub-array (both args optional)</td></tr>
-<tr><td><code>arr.reverse()</code></td><td>array</td><td>Reverse in place, returns the array</td></tr>
-<tr><td><code>arr.sort()</code></td><td>array</td><td>Sort in place, returns the array</td></tr>
+<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>New sub-array</td></tr>
+<tr><td><code>arr.reverse()</code></td><td>none</td><td>Reverse in place</td></tr>
+<tr><td><code>arr.sort()</code></td><td>none</td><td>Sort in place</td></tr>
 <tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join elements into a string</td></tr>
 </tbody>
 </table>
 </div>
+<p>Plus the universal <code>arr.type()</code>, <code>arr.to_str()</code>, <code>arr.inspect()</code>.</p>
 <h2 id="practical-examples"><a class="header" href="#practical-examples">Practical examples</a></h2>
 <h3 id="building-a-list"><a class="header" href="#building-a-list">Building a list</a></h3>
 <pre><code class="language-bop">let squares = []

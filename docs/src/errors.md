@@ -20,7 +20,7 @@ By convention, `Ok(v)` carries the successful value and `Err(e)` carries whateve
 
 ```bop
 fn parse_positive(s) {
-  let n = int(s)
+  let n = s.to_int()
   if n <= 0 {
     return Result::Err("must be positive, got {n}")
   }
@@ -104,7 +104,7 @@ print(map(Result::Err("x"), fn(n) { return n * n }))  // Result::Err("x")
 
 // and_then — monadic bind (for chaining fallible steps)
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok(int(x / 2)) }
+  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
   return Result::Err("odd")
 }
 print(and_then(and_then(Result::Ok(8), halve), halve))   // Result::Ok(2)

@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-d974ebe2.js"></script>
+        <script src="toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -192,7 +192,7 @@
 </code></pre>
 <p>By convention, <code>Ok(v)</code> carries the successful value and <code>Err(e)</code> carries whatever describes the failure — a string, a struct, anything. Values from fallible operations are the typical shape:</p>
 <pre><code class="language-bop">fn parse_positive(s) {
-  let n = int(s)
+  let n = s.to_int()
   if n &lt;= 0 {
     return Result::Err("must be positive, got {n}")
   }
@@ -257,7 +257,7 @@ print(map(Result::Err("x"), fn(n) { return n * n }))  // Result::Err("x")
 
 // and_then — monadic bind (for chaining fallible steps)
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok(int(x / 2)) }
+  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
   return Result::Err("odd")
 }
 print(and_then(and_then(Result::Ok(8), halve), halve))   // Result::Ok(2)

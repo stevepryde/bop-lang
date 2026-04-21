@@ -35,14 +35,14 @@ print("Hello, {name}! You have {count} items.")
 Only variable names are allowed inside `{}`. For expressions, use a temporary variable:
 
 ```bop
-let total = str(count * 2)
+let total = (count * 2).to_str()
 print("Double: {total}")
 ```
 
 Or use concatenation:
 
 ```bop
-print("Double: " + str(count * 2))
+print("Double: " + (count * 2).to_str())
 ```
 
 To include a literal `{` or `}` in a string, escape it with `\{` and `\}`:
@@ -61,27 +61,31 @@ let full = "Hello" + ", " + "world!"
 print(full)    // "Hello, world!"
 ```
 
-Numbers must be converted with `str()` first:
+Numbers must be converted with `.to_str()` first:
 
 ```bop
-let msg = "Score: " + str(42)
+let msg = "Score: " + (42).to_str()
 ```
 
 ## Methods
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `s.len()` | number | Number of characters |
+| `s.len()` | int | Number of characters |
 | `s.contains(sub)` | bool | Whether the string contains `sub` |
 | `s.starts_with(prefix)` | bool | Whether it starts with `prefix` |
 | `s.ends_with(suffix)` | bool | Whether it ends with `suffix` |
-| `s.index_of(sub)` | number or none | Index of first occurrence, or `none` |
+| `s.index_of(sub)` | int | Index of first occurrence, or `-1` |
 | `s.split(sep)` | array | Split into array of strings on `sep` |
 | `s.replace(old, new)` | string | Replace all occurrences |
 | `s.upper()` | string | Uppercase copy |
 | `s.lower()` | string | Lowercase copy |
 | `s.trim()` | string | Copy with leading/trailing whitespace removed |
-| `s.slice(start, end)` | string | Substring (both args optional) |
+| `s.slice(start, end)` | string | Substring |
+| `s.to_int()` | int | Parse. `"3.7".to_int()` → `3` (float-then-truncate). Raises on junk. |
+| `s.to_float()` | number | Parse. Raises on junk. |
+
+Plus the universal `s.type()`, `s.to_str()`, `s.inspect()`.
 
 ## Practical examples
 
@@ -107,7 +111,7 @@ if filename.ends_with(".csv") {
 
 ```bop
 let items = ["apple", "banana", "cherry"]
-let count = str(items.len())
+let count = items.len().to_str()
 let list = items.join(", ")
 print("Found {count} items: {list}")
 ```

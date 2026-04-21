@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "searchindex-59ed6ef3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-d974ebe2.js"></script>
+        <script src="toc-c7edef4c.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -190,7 +190,7 @@ use path.{a, b} as m        // aliased + selective
 <p>Brings every public export of a module into the current scope as a bare name:</p>
 <pre><code class="language-bop">use std.math
 print(pi)            // constant from std.math
-print(sqrt(9))       // fn from std.math
+print(factorial(5))  // fn from std.math → 120
 </code></pre>
 <p>Names that start with <code>_</code> are considered <strong>private by convention</strong> and glob imports skip them:</p>
 <pre><code class="language-bop">// In module `foo`:
@@ -205,10 +205,10 @@ print(public())      // 42
 <p>Glob is idempotent at the injection site — running <code>use foo</code> twice in the same scope is a no-op (matches Python’s <code>import foo; import foo</code>). When two glob imports would introduce the same name, the first wins and the second emits a runtime warning — explicit selective imports are the way to disambiguate.</p>
 <h2 id="selective-use"><a class="header" href="#selective-use">Selective <code>use</code></a></h2>
 <p>Pick exactly which names you want:</p>
-<pre><code class="language-bop">use std.math.{pi, sqrt}
+<pre><code class="language-bop">use std.math.{pi, factorial}
 print(pi)
-print(sqrt(16))
-// print(sin(0))   // error — not imported
+print(factorial(4))
+// print(clamp(1, 0, 10))   // error — not imported
 </code></pre>
 <p>Selective imports can reach private names explicitly:</p>
 <pre><code class="language-bop">use foo.{_helper}
@@ -219,14 +219,14 @@ print(_helper())     // ok — explicit opt-in
 <p>Binds the whole module as a single value under the alias:</p>
 <pre><code class="language-bop">use std.math as m
 print(m.pi)
-print(m.sqrt(9))
+print(m.factorial(5))
 </code></pre>
-<p><code>m</code> is a <code>Value::Module</code> — <code>type(m)</code> is <code>"module"</code>. You access its exports via the <code>.</code> operator. Methods on aliased modules (<code>m.helper(...)</code>) work the same way they would on a bare imported fn.</p>
+<p><code>m</code> is a <code>Value::Module</code> — <code>m.type()</code> is <code>"module"</code>. You access its exports via the <code>.</code> operator. Methods on aliased modules (<code>m.helper(...)</code>) work the same way they would on a bare imported fn.</p>
 <p>Combine with selective to shrink the alias’s surface:</p>
-<pre><code class="language-bop">use std.math.{pi, sqrt} as m
+<pre><code class="language-bop">use std.math.{pi, factorial} as m
 print(m.pi)
-print(m.sqrt(9))
-// print(m.sin(0))   // error — `sin` wasn't imported
+print(m.factorial(5))
+// print(m.clamp(1, 0, 10))   // error — `clamp` wasn't imported
 </code></pre>
 <h2 id="namespaced-types"><a class="header" href="#namespaced-types">Namespaced types</a></h2>
 <p>User-defined <code>struct</code> and <code>enum</code> types can be constructed and pattern-matched through the alias:</p>

@@ -27,7 +27,19 @@
 
 - [Operators](reference/operators.md)
 - [Built-in Functions](reference/builtins.md)
+- [Methods](reference/methods.md)
 - [Grammar](reference/grammar.md)
+
+# Standard Library
+
+- [Overview](stdlib/index.md)
+- [std.math](stdlib/math.md)
+- [std.iter](stdlib/iter.md)
+- [std.collections](stdlib/collections.md)
+- [std.string](stdlib/string.md)
+- [std.result](stdlib/result.md)
+- [std.json](stdlib/json.md)
+- [std.test](stdlib/test.md)
 
 # Embedding
 
