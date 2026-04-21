@@ -16,7 +16,9 @@ use std::rc::Rc;
 
 use core::cell::RefCell;
 
-use crate::builtins::{self, error, error_fatal_with_hint, error_with_hint};
+use crate::builtins::{
+    self, error, error_at, error_fatal_with_hint, error_with_hint, error_with_hint_at,
+};
 use crate::error::BopError;
 use crate::lexer::StringPart;
 use crate::methods;
@@ -1476,7 +1478,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             let val = self
                                 .get_var(name)
                                 .ok_or_else(|| {
-                                    error(expr.line, crate::error_messages::variable_not_found(name))
+                                    error_at(expr.line, expr.column, crate::error_messages::variable_not_found(name))
                                 })?
                                 .clone();
                             result.push_str(&format!("{}", val));
@@ -1513,8 +1515,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let hint = self
                     .value_candidates_hint(name)
                     .unwrap_or_else(|| "Did you forget to create it with `let`?".to_string());
-                Err(error_with_hint(
+                Err(error_with_hint_at(
                     expr.line,
+                    expr.column,
                     crate::error_messages::variable_not_found(name),
                     hint,
                 ))
@@ -1704,8 +1707,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         let field_names: Vec<&str> =
                             s.fields().iter().map(|(k, _)| k.as_str()).collect();
                         match crate::suggest::did_you_mean(field, field_names) {
-                            Some(hint) => error_with_hint(expr.line, msg, hint),
-                            None => error(expr.line, msg),
+                            Some(hint) => error_with_hint_at(expr.line, expr.column, msg, hint),
+                            None => error_at(expr.line, expr.column, msg),
                         }
                     }),
                     Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
@@ -1826,8 +1829,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             fname,
                             decl_fields.iter().map(|s| s.as_str()),
                         ) {
-                            Some(hint) => error_with_hint(expr.line, msg, hint),
-                            None => error(expr.line, msg),
+                            Some(hint) => error_with_hint_at(expr.line, expr.column, msg, hint),
+                            None => error_at(expr.line, expr.column, msg),
                         };
                         return Err(err);
                     }

@@ -63,6 +63,29 @@ fn ensure_constant_name(name: &str, site: &str, line: u32) -> Result<(), BopErro
 pub struct Expr {
     pub kind: ExprKind,
     pub line: u32,
+    /// 1-indexed column where this expression starts in the
+    /// source. `None` on synthetic nodes that don't correspond
+    /// to a specific source position. Niche-packed into 4 bytes
+    /// so the column field costs nothing beyond a plain `u32`
+    /// — runtime error construction reads it out to render a
+    /// carat under the offending character.
+    pub column: Option<core::num::NonZeroU32>,
+}
+
+impl Expr {
+    /// Build an `Expr` from its kind and a 1-indexed source
+    /// line, leaving `column` unset. Convenience constructor
+    /// for call sites that don't have a token column handy
+    /// (synthetic / desugared nodes, for instance).
+    pub fn line(kind: ExprKind, line: u32) -> Self {
+        Self { kind, line, column: None }
+    }
+
+    /// Build an `Expr` with a full source position. `column`
+    /// is typically `NonZeroU32::new(tok.column)`.
+    pub fn at(kind: ExprKind, line: u32, column: Option<core::num::NonZeroU32>) -> Self {
+        Self { kind, line, column }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +311,24 @@ pub enum UnaryOp {
 pub struct Stmt {
     pub kind: StmtKind,
     pub line: u32,
+    /// 1-indexed column where this statement starts. See
+    /// [`Expr::column`] — same niche-packed shape, same
+    /// purpose (carat rendering on runtime errors).
+    pub column: Option<core::num::NonZeroU32>,
+}
+
+impl Stmt {
+    /// Build a `Stmt` from its kind and a 1-indexed source
+    /// line, leaving `column` unset. See
+    /// [`Expr::line`].
+    pub fn line(kind: StmtKind, line: u32) -> Self {
+        Self { kind, line, column: None }
+    }
+
+    /// Build a `Stmt` with a full source position.
+    pub fn at(kind: StmtKind, line: u32, column: Option<core::num::NonZeroU32>) -> Self {
+        Self { kind, line, column }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -504,6 +545,20 @@ impl Parser {
         self.tokens.get(self.pos).map(|t| t.column).unwrap_or(0)
     }
 
+    /// Grab both the line and the niche-packed column of the
+    /// current token in one shot. Shorthand used at the head
+    /// of parse fns that build an `Expr` / `Stmt` — rather than
+    /// calling `peek_line()` then having to re-fetch column
+    /// later, capture the source position once.
+    fn peek_pos(&self) -> (u32, Option<core::num::NonZeroU32>) {
+        let tok = self.tokens.get(self.pos);
+        let line = tok.map(|t| t.line).unwrap_or(0);
+        let column = tok
+            .map(|t| t.column)
+            .and_then(core::num::NonZeroU32::new);
+        (line, column)
+    }
+
     fn peek_at(&self, offset: usize) -> &Token {
         self.tokens
             .get(self.pos + offset)
@@ -543,7 +598,7 @@ impl Parser {
     }
 
     fn expect(&mut self, expected: &Token) -> Result<u32, BopError> {
-        let line = self.peek_line();
+        let (line, _column) = self.peek_pos();
         if self.peek() == expected {
             self.advance();
             Ok(line)
@@ -560,7 +615,7 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<(String, u32), BopError> {
-        let line = self.peek_line();
+        let (line, _column) = self.peek_pos();
         if let Token::Ident(name) = self.peek().clone() {
             self.advance();
             Ok((name, line))
@@ -627,7 +682,7 @@ impl Parser {
     // ─── Statements ────────────────────────────────────────────────────
 
     fn parse_statement(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         match self.peek() {
             Token::Let => self.parse_let(),
             Token::Const => self.parse_const(),
@@ -645,6 +700,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Break,
                     line,
+                    column,
                 })
             }
             Token::Continue => {
@@ -652,6 +708,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Continue,
                     line,
+                    column,
                 })
             }
             Token::Use => self.parse_use(),
@@ -662,7 +719,7 @@ impl Parser {
     }
 
     fn parse_struct_decl(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume `struct`
         let (name, name_line) = self.expect_ident()?;
         ensure_type_name(&name, "`struct` declaration", name_line)?;
@@ -686,11 +743,12 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::StructDecl { name, fields },
             line,
+                    column,
         })
     }
 
     fn parse_enum_decl(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume `enum`
         let (name, name_line) = self.expect_ident()?;
         ensure_type_name(&name, "`enum` declaration", name_line)?;
@@ -710,6 +768,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::EnumDecl { name, variants },
             line,
+                    column,
         })
     }
 
@@ -763,7 +822,7 @@ impl Parser {
     }
 
     fn parse_use(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume `use`
         let (first, first_line) = self.expect_ident()?;
         ensure_value_name(&first, "module path segment", first_line)?;
@@ -823,11 +882,12 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Use { path, items, alias },
             line,
+                    column,
         })
     }
 
     fn parse_let(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'let'
         let (name, _) = self.expect_ident()?;
         ensure_value_name(&name, "`let` binding", line)?;
@@ -836,6 +896,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Let { name, value, is_const: false },
             line,
+                    column,
         })
     }
 
@@ -846,7 +907,7 @@ impl Parser {
     /// reassignment impossible (the parser rejects any `=` whose
     /// LHS is an all-uppercase identifier).
     fn parse_const(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'const'
         let (name, _) = self.expect_ident()?;
         ensure_constant_name(&name, "`const` declaration", line)?;
@@ -855,11 +916,12 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Let { name, value, is_const: true },
             line,
+                    column,
         })
     }
 
     fn parse_if_stmt(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'if'
         let condition = self.without_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
@@ -888,22 +950,24 @@ impl Parser {
                 else_body,
             },
             line,
+                    column,
         })
     }
 
     fn parse_while(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'while'
         let condition = self.without_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
         Ok(Stmt {
             kind: StmtKind::While { condition, body },
             line,
+                    column,
         })
     }
 
     fn parse_for(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'for'
         let (var, var_line) = self.expect_ident()?;
         ensure_value_name(&var, "`for` loop variable", var_line)?;
@@ -917,22 +981,24 @@ impl Parser {
                 body,
             },
             line,
+                    column,
         })
     }
 
     fn parse_repeat(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'repeat'
         let count = self.without_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
         Ok(Stmt {
             kind: StmtKind::Repeat { count, body },
             line,
+                    column,
         })
     }
 
     fn parse_fn_decl(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'fn'
         let (name, name_line) = self.expect_ident()?;
 
@@ -968,6 +1034,7 @@ impl Parser {
                     body,
                 },
                 line,
+                    column,
             });
         }
 
@@ -991,11 +1058,12 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::FnDecl { name, params, body },
             line,
+                    column,
         })
     }
 
     fn parse_return(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'return'
         let value = if matches!(self.peek(), Token::Semicolon | Token::RBrace | Token::Eof) {
             None
@@ -1005,11 +1073,12 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Return { value },
             line,
+                    column,
         })
     }
 
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         let expr = self.parse_expr()?;
 
         let op = match self.peek() {
@@ -1029,11 +1098,13 @@ impl Parser {
             Ok(Stmt {
                 kind: StmtKind::Assign { target, op, value },
                 line,
+                    column,
             })
         } else {
             Ok(Stmt {
                 kind: StmtKind::ExprStmt(expr),
                 line,
+                    column,
             })
         }
     }
@@ -1047,7 +1118,7 @@ impl Parser {
     fn parse_or(&mut self) -> Result<Expr, BopError> {
         let mut left = self.parse_and()?;
         while matches!(self.peek(), Token::PipePipe) {
-            let line = self.peek_line();
+            let (line, column) = self.peek_pos();
             self.advance();
             let right = self.parse_and()?;
             left = Expr {
@@ -1057,6 +1128,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
+                    column,
             };
         }
         Ok(left)
@@ -1065,7 +1137,7 @@ impl Parser {
     fn parse_and(&mut self) -> Result<Expr, BopError> {
         let mut left = self.parse_equality()?;
         while matches!(self.peek(), Token::AmpAmp) {
-            let line = self.peek_line();
+            let (line, column) = self.peek_pos();
             self.advance();
             let right = self.parse_equality()?;
             left = Expr {
@@ -1075,6 +1147,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
+                    column,
             };
         }
         Ok(left)
@@ -1083,7 +1156,7 @@ impl Parser {
     fn parse_equality(&mut self) -> Result<Expr, BopError> {
         let mut left = self.parse_comparison()?;
         while matches!(self.peek(), Token::EqEq | Token::BangEq) {
-            let line = self.peek_line();
+            let (line, column) = self.peek_pos();
             let op = if matches!(self.peek(), Token::EqEq) {
                 BinOp::Eq
             } else {
@@ -1098,6 +1171,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
+                    column,
             };
         }
         Ok(left)
@@ -1109,7 +1183,7 @@ impl Parser {
             self.peek(),
             Token::Lt | Token::Gt | Token::LtEq | Token::GtEq
         ) {
-            let line = self.peek_line();
+            let (line, column) = self.peek_pos();
             let op = match self.peek() {
                 Token::Lt => BinOp::Lt,
                 Token::Gt => BinOp::Gt,
@@ -1125,6 +1199,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
+                    column,
             };
         }
         Ok(left)
@@ -1133,7 +1208,7 @@ impl Parser {
     fn parse_addition(&mut self) -> Result<Expr, BopError> {
         let mut left = self.parse_multiply()?;
         while matches!(self.peek(), Token::Plus | Token::Minus) {
-            let line = self.peek_line();
+            let (line, column) = self.peek_pos();
             let op = if matches!(self.peek(), Token::Plus) {
                 BinOp::Add
             } else {
@@ -1148,6 +1223,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
+                    column,
             };
         }
         Ok(left)
@@ -1159,7 +1235,7 @@ impl Parser {
             self.peek(),
             Token::Star | Token::Slash | Token::SlashSlash | Token::Percent
         ) {
-            let line = self.peek_line();
+            let (line, column) = self.peek_pos();
             let op = match self.peek() {
                 Token::Star => BinOp::Mul,
                 Token::Slash => BinOp::Div,
@@ -1175,6 +1251,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
+                    column,
             };
         }
         Ok(left)
@@ -1182,7 +1259,7 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<Expr, BopError> {
         self.enter()?;
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         let result = match self.peek() {
             Token::Bang => {
                 self.advance();
@@ -1193,6 +1270,7 @@ impl Parser {
                         expr: Box::new(expr),
                     },
                     line,
+                    column,
                 })
             }
             Token::Minus => {
@@ -1204,6 +1282,7 @@ impl Parser {
                         expr: Box::new(expr),
                     },
                     line,
+                    column,
                 })
             }
             Token::Try => {
@@ -1217,6 +1296,7 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::Try(Box::new(expr)),
                     line,
+                    column,
                 })
             }
             _ => self.parse_postfix(),
@@ -1231,7 +1311,7 @@ impl Parser {
         loop {
             match self.peek() {
                 Token::LParen => {
-                    let line = self.peek_line();
+                    let (line, column) = self.peek_pos();
                     self.advance();
                     let args = self.parse_args()?;
                     self.expect(&Token::RParen)?;
@@ -1241,10 +1321,11 @@ impl Parser {
                             args,
                         },
                         line,
+                    column,
                     };
                 }
                 Token::LBracket => {
-                    let line = self.peek_line();
+                    let (line, column) = self.peek_pos();
                     self.advance();
                     let index = self.parse_expr()?;
                     self.expect(&Token::RBracket)?;
@@ -1254,10 +1335,11 @@ impl Parser {
                             index: Box::new(index),
                         },
                         line,
+                    column,
                     };
                 }
                 Token::Dot => {
-                    let line = self.peek_line();
+                    let (line, column) = self.peek_pos();
                     self.advance();
                     let (name, _) = self.expect_ident()?;
 
@@ -1276,6 +1358,7 @@ impl Parser {
                                         name,
                                         Some(ns_owned),
                                         line,
+                                        expr.column,
                                     )?;
                                     continue;
                                 }
@@ -1285,6 +1368,7 @@ impl Parser {
                                         name,
                                         Some(ns_owned),
                                         line,
+                                        expr.column,
                                     )?;
                                     continue;
                                 }
@@ -1305,6 +1389,7 @@ impl Parser {
                                 args,
                             },
                             line,
+                    column,
                         };
                     } else {
                         // Bare field read: `.name`.
@@ -1314,6 +1399,7 @@ impl Parser {
                                 field: name,
                             },
                             line,
+                    column,
                         };
                     }
                 }
@@ -1337,7 +1423,7 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
 
         match self.peek().clone() {
             Token::Int(n) => {
@@ -1345,6 +1431,7 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::Int(n),
                     line,
+                    column,
                 })
             }
             Token::Number(n) => {
@@ -1352,6 +1439,7 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::Number(n),
                     line,
+                    column,
                 })
             }
             Token::Str(s) => {
@@ -1359,6 +1447,7 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::Str(s),
                     line,
+                    column,
                 })
             }
             Token::StringInterp(parts) => {
@@ -1366,6 +1455,7 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::StringInterp(parts),
                     line,
+                    column,
                 })
             }
             Token::True => {
@@ -1373,6 +1463,7 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::Bool(true),
                     line,
+                    column,
                 })
             }
             Token::False => {
@@ -1380,6 +1471,7 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::Bool(false),
                     line,
+                    column,
                 })
             }
             Token::None => {
@@ -1387,6 +1479,7 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::None,
                     line,
+                    column,
                 })
             }
             Token::Ident(name) => {
@@ -1396,7 +1489,7 @@ impl Parser {
                 // payload shape is determined by what follows
                 // the variant name.
                 if matches!(self.peek(), Token::ColonColon) {
-                    return self.parse_enum_variant_tail(name, None, line);
+                    return self.parse_enum_variant_tail(name, None, line, column);
                 }
                 // Struct literal: `Name { field: value, ... }`.
                 // Parsed only when struct literals are allowed in
@@ -1404,11 +1497,12 @@ impl Parser {
                 // `without_struct_literal`). This keeps `if foo {
                 // body }` / `for x in arr { body }` parseable.
                 if self.allow_struct_literal && matches!(self.peek(), Token::LBrace) {
-                    return self.parse_struct_literal(name, None, line);
+                    return self.parse_struct_literal(name, None, line, column);
                 }
                 Ok(Expr {
                     kind: ExprKind::Ident(name),
                     line,
+                    column,
                 })
             }
             Token::LParen => {
@@ -1436,6 +1530,7 @@ impl Parser {
         type_name: String,
         namespace: Option<String>,
         line: u32,
+        column: Option<core::num::NonZeroU32>,
     ) -> Result<Expr, BopError> {
         self.advance(); // consume `::`
         let (variant, _) = self.expect_ident()?;
@@ -1492,6 +1587,7 @@ impl Parser {
                 payload,
             },
             line,
+                    column,
         })
     }
 
@@ -1500,6 +1596,7 @@ impl Parser {
         type_name: String,
         namespace: Option<String>,
         line: u32,
+        column: Option<core::num::NonZeroU32>,
     ) -> Result<Expr, BopError> {
         self.enter()?;
         self.expect(&Token::LBrace)?;
@@ -1529,11 +1626,12 @@ impl Parser {
                 fields,
             },
             line,
+                    column,
         })
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume [
         let mut elements = Vec::new();
         if !matches!(self.peek(), Token::RBracket) {
@@ -1550,11 +1648,12 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Array(elements),
             line,
+                    column,
         })
     }
 
     fn parse_dict_literal(&mut self) -> Result<Expr, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume {
         let mut entries = Vec::new();
         if !matches!(self.peek(), Token::RBrace) {
@@ -1577,11 +1676,12 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Dict(entries),
             line,
+                    column,
         })
     }
 
     fn expect_string_key(&mut self) -> Result<String, BopError> {
-        let line = self.peek_line();
+        let (line, _column) = self.peek_pos();
         match self.peek().clone() {
             Token::Str(s) => {
                 self.advance();
@@ -1592,7 +1692,7 @@ impl Parser {
     }
 
     fn parse_match_expr(&mut self) -> Result<Expr, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'match'
         // Scrutinee reads without struct-literal parsing — same
         // rule as `if` / `while` / `for`, so `match foo { ... }`
@@ -1617,11 +1717,12 @@ impl Parser {
                 arms,
             },
             line,
+                    column,
         })
     }
 
     fn parse_match_arm(&mut self) -> Result<MatchArm, BopError> {
-        let line = self.peek_line();
+        let (line, _column) = self.peek_pos();
         let pattern = self.parse_pattern()?;
         let guard = if matches!(self.peek(), Token::If) {
             self.advance();
@@ -1658,7 +1759,7 @@ impl Parser {
 
     fn parse_pattern_single(&mut self) -> Result<Pattern, BopError> {
         self.enter()?;
-        let line = self.peek_line();
+        let (line, _column) = self.peek_pos();
         let result = match self.peek().clone() {
             Token::Int(n) => {
                 self.advance();
@@ -1909,7 +2010,7 @@ impl Parser {
     }
 
     fn parse_lambda(&mut self) -> Result<Expr, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'fn'
         self.expect(&Token::LParen)?;
 
@@ -1928,11 +2029,12 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Lambda { params, body },
             line,
+                    column,
         })
     }
 
     fn parse_if_expr(&mut self) -> Result<Expr, BopError> {
-        let line = self.peek_line();
+        let (line, column) = self.peek_pos();
         self.advance(); // consume 'if'
         let condition = self.without_struct_literal(|p| p.parse_expr())?;
         self.expect(&Token::LBrace)?;
@@ -1949,6 +2051,7 @@ impl Parser {
                 else_expr: Box::new(else_expr),
             },
             line,
+                    column,
         })
     }
 }

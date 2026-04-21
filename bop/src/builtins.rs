@@ -457,6 +457,25 @@ pub fn error(line: u32, message: impl Into<String>) -> BopError {
     }
 }
 
+/// Like [`error`] but takes a niche-packed column alongside
+/// the line. Call sites with an `Expr` or `Stmt` in hand
+/// prefer this over `error` so the rendered carat points at
+/// the offending character rather than just the line start.
+pub fn error_at(
+    line: u32,
+    column: Option<core::num::NonZeroU32>,
+    message: impl Into<String>,
+) -> BopError {
+    BopError {
+        line: Some(line),
+        column: column.map(|c| c.get()),
+        message: message.into(),
+        friendly_hint: None,
+        is_fatal: false,
+        is_try_return: false,
+    }
+}
+
 pub fn error_with_hint(
     line: u32,
     message: impl Into<String>,
@@ -465,6 +484,25 @@ pub fn error_with_hint(
     BopError {
         line: Some(line),
         column: None,
+        message: message.into(),
+        friendly_hint: Some(hint.into()),
+        is_fatal: false,
+        is_try_return: false,
+    }
+}
+
+/// Column-aware variant of [`error_with_hint`]. Same hint
+/// payload, plus a `column` slot so the renderer can draw the
+/// carat.
+pub fn error_with_hint_at(
+    line: u32,
+    column: Option<core::num::NonZeroU32>,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> BopError {
+    BopError {
+        line: Some(line),
+        column: column.map(|c| c.get()),
         message: message.into(),
         friendly_hint: Some(hint.into()),
         is_fatal: false,

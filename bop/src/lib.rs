@@ -3523,6 +3523,43 @@ print(label(o.Color::Green))"#,
         assert_eq!(host.output(), "hi bop");
     }
 
+    // ─── column info on runtime errors ───────────────────────────────
+
+    #[test]
+    fn runtime_error_carries_column_for_undefined_ident() {
+        // Parse-time errors already carry column; runtime
+        // errors historically did not. With column now
+        // threaded through every `Expr` / `Stmt` at parse
+        // time and surfaced via `error_at`, a runtime error
+        // on a nested ident carries both line and column.
+        let err = run_err_full("let x = 1\nprint(undefined)");
+        assert_eq!(err.line, Some(2), "line");
+        assert!(
+            err.column.is_some(),
+            "expected runtime error to carry column info, got None"
+        );
+    }
+
+    #[test]
+    fn runtime_error_column_renders_with_carat() {
+        // Smoke-test for the end-to-end UX: a rendered
+        // runtime error shows `--> line:col` and a carat at
+        // the offending column.
+        let src = "let x = 1\nprint(undefined)";
+        let err = run_err_full(src);
+        let rendered = err.render(src);
+        assert!(
+            rendered.contains("--> line 2:"),
+            "rendered should include line+col header, got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("^"),
+            "rendered should draw a carat, got:\n{}",
+            rendered
+        );
+    }
+
     #[test]
     fn resolve_from_map_returns_none_for_unknown_modules() {
         // The closure helper is a pure resolver — no print

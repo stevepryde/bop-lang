@@ -57,6 +57,26 @@ impl BopError {
         }
     }
 
+    /// Create a runtime error at the given line *and* column.
+    /// Callers that have an AST node handy (`expr.line`,
+    /// `expr.column`) should prefer this over
+    /// [`Self::runtime`] so the error renderer can point a
+    /// carat at the offending character.
+    pub fn runtime_at(
+        message: impl Into<String>,
+        line: u32,
+        column: Option<core::num::NonZeroU32>,
+    ) -> Self {
+        Self {
+            line: Some(line),
+            column: column.map(|c| c.get()),
+            message: message.into(),
+            friendly_hint: None,
+            is_fatal: false,
+            is_try_return: false,
+        }
+    }
+
     /// Create a **fatal** runtime error at the given source line.
     /// Used for resource-limit violations (`too many steps`,
     /// `Memory limit exceeded`) — see [`BopError::is_fatal`]
