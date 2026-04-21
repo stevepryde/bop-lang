@@ -219,6 +219,8 @@ print(match r {
 
 User-declared. See [Structs & Enums](../data/structs-and-enums.md). Method dispatch on a struct tries the universal common methods first, then looks up `fn TypeName.method` declared in the same module.
 
+> **Same-module rule**: user-declared methods must live in the module that declares the type. You can't extend a type imported from another module, and you can't add methods to the built-ins (`int`, `string`, `array`, `Result`, `Iter`, …). See [Methods must live in the type's own module](../data/structs-and-enums.md#methods-must-live-in-the-types-own-module) for the rationale and the "use a free function instead" workaround.
+
 ## Module methods
 
 If you `use path as m`, `m` is a `Value::Module`. `m.type()` → `"module"`, `m.inspect()` → `"<module path>"`. Otherwise `.` on a module accesses its exports:

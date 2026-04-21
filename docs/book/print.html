@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-cb35a9ca.js";
+            window.path_to_searchindex_js = "searchindex-a6bf7ab9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-4a0c6a8e.js"></script>
@@ -1194,6 +1194,24 @@ print(Shape::Circle(3).area())                  // 28.27431
 print(Shape::Rectangle { w: 4, h: 3 }.area())   // 12
 </code></pre>
 <p>A user-declared method with the same name as a builtin (<code>len</code>, <code>keys</code>, etc.) <strong>wins</strong> over the builtin for receivers of that type — the precedence matches the walker, VM, and AOT.</p>
+<h3 id="methods-must-live-in-the-types-own-module"><a class="header" href="#methods-must-live-in-the-types-own-module">Methods must live in the type’s own module</a></h3>
+<p>Methods can only be declared on structs and enums you own — that is, types declared in the <em>same module</em> as the method. Concretely:</p>
+<ul>
+<li>You <strong>cannot</strong> extend a type imported from another module with new methods. If <code>paint</code> declares <code>struct Color { ... }</code>, then <code>fn Color.brighten(self)</code> must also live in <code>paint</code>, not in a consumer.</li>
+<li>You <strong>cannot</strong> add methods to the built-in types (<code>int</code>, <code>number</code>, <code>string</code>, <code>bool</code>, <code>array</code>, <code>dict</code>, <code>fn</code>, <code>module</code>, <code>iter</code>) or to the engine-registered types <code>Result</code>, <code>RuntimeError</code>, <code>Iter</code>.</li>
+</ul>
+<p>Declarations that violate this rule parse fine but never dispatch — the method registers against <code>(your_module, TypeName)</code>, while values of that type carry their original home module in their identity, so lookups miss. If you catch yourself wanting to “just add a helper to <code>Array</code>” or “extend <code>Result</code> with a domain combinator,” write a free function that takes the value as an argument instead:</p>
+<pre><code class="language-bop">// Not this (declared in some consumer module):
+//   fn Result.tag(self, label) { ... }   // ghost method — never fires
+// Do this:
+fn tag(r, label) {
+  return match r {
+    Ok(v)  =&gt; "{label}: ok {v}",
+    Err(e) =&gt; "{label}: err {e}",
+  }
+}
+</code></pre>
+<p>This is the same discipline Go enforces: a type’s behaviour lives where the type is declared. It keeps dispatch coherent (no surprising overrides, no load-order dependence) at the cost of the extensions you’d get in Swift / Kotlin / Ruby.</p>
 <h3 id="methods-return-a-new-value"><a class="header" href="#methods-return-a-new-value">Methods return a new value</a></h3>
 <p>Because values are copy-by-value, a method can’t mutate the receiver in place. Return a new instance and reassign:</p>
 <pre><code class="language-bop">fn Point.shift(self, dx, dy) {
@@ -2169,6 +2187,9 @@ print(match r {
 </code></pre>
 <h2 id="struct--enum-methods"><a class="header" href="#struct--enum-methods">Struct / enum methods</a></h2>
 <p>User-declared. See <a href="#structs--enums">Structs &amp; Enums</a>. Method dispatch on a struct tries the universal common methods first, then looks up <code>fn TypeName.method</code> declared in the same module.</p>
+<blockquote>
+<p><strong>Same-module rule</strong>: user-declared methods must live in the module that declares the type. You can’t extend a type imported from another module, and you can’t add methods to the built-ins (<code>int</code>, <code>string</code>, <code>array</code>, <code>Result</code>, <code>Iter</code>, …). See <a href="#methods-must-live-in-the-types-own-module">Methods must live in the type’s own module</a> for the rationale and the “use a free function instead” workaround.</p>
+</blockquote>
 <h2 id="module-methods"><a class="header" href="#module-methods">Module methods</a></h2>
 <p>If you <code>use path as m</code>, <code>m</code> is a <code>Value::Module</code>. <code>m.type()</code> → <code>"module"</code>, <code>m.inspect()</code> → <code>"&lt;module path&gt;"</code>. Otherwise <code>.</code> on a module accesses its exports:</p>
 <pre><code class="language-bop">use std.math as m

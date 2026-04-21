@@ -119,6 +119,29 @@ print(Shape::Rectangle { w: 4, h: 3 }.area())   // 12
 
 A user-declared method with the same name as a builtin (`len`, `keys`, etc.) **wins** over the builtin for receivers of that type — the precedence matches the walker, VM, and AOT.
 
+### Methods must live in the type's own module
+
+Methods can only be declared on structs and enums you own — that is, types declared in the *same module* as the method. Concretely:
+
+- You **cannot** extend a type imported from another module with new methods. If `paint` declares `struct Color { ... }`, then `fn Color.brighten(self)` must also live in `paint`, not in a consumer.
+- You **cannot** add methods to the built-in types (`int`, `number`, `string`, `bool`, `array`, `dict`, `fn`, `module`, `iter`) or to the engine-registered types `Result`, `RuntimeError`, `Iter`.
+
+Declarations that violate this rule parse fine but never dispatch — the method registers against `(your_module, TypeName)`, while values of that type carry their original home module in their identity, so lookups miss. If you catch yourself wanting to "just add a helper to `Array`" or "extend `Result` with a domain combinator," write a free function that takes the value as an argument instead:
+
+```bop
+// Not this (declared in some consumer module):
+//   fn Result.tag(self, label) { ... }   // ghost method — never fires
+// Do this:
+fn tag(r, label) {
+  return match r {
+    Ok(v)  => "{label}: ok {v}",
+    Err(e) => "{label}: err {e}",
+  }
+}
+```
+
+This is the same discipline Go enforces: a type's behaviour lives where the type is declared. It keeps dispatch coherent (no surprising overrides, no load-order dependence) at the cost of the extensions you'd get in Swift / Kotlin / Ruby.
+
 ### Methods return a new value
 
 Because values are copy-by-value, a method can't mutate the receiver in place. Return a new instance and reassign:

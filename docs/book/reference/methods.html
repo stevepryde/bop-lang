@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-cb35a9ca.js";
+            window.path_to_searchindex_js = "../searchindex-a6bf7ab9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-4a0c6a8e.js"></script>
@@ -402,6 +402,9 @@ print(match r {
 </code></pre>
 <h2 id="struct--enum-methods"><a class="header" href="#struct--enum-methods">Struct / enum methods</a></h2>
 <p>User-declared. See <a href="../data/structs-and-enums.html">Structs &amp; Enums</a>. Method dispatch on a struct tries the universal common methods first, then looks up <code>fn TypeName.method</code> declared in the same module.</p>
+<blockquote>
+<p><strong>Same-module rule</strong>: user-declared methods must live in the module that declares the type. You can’t extend a type imported from another module, and you can’t add methods to the built-ins (<code>int</code>, <code>string</code>, <code>array</code>, <code>Result</code>, <code>Iter</code>, …). See <a href="../data/structs-and-enums.html#methods-must-live-in-the-types-own-module">Methods must live in the type’s own module</a> for the rationale and the “use a free function instead” workaround.</p>
+</blockquote>
 <h2 id="module-methods"><a class="header" href="#module-methods">Module methods</a></h2>
 <p>If you <code>use path as m</code>, <code>m</code> is a <code>Value::Module</code>. <code>m.type()</code> → <code>"module"</code>, <code>m.inspect()</code> → <code>"&lt;module path&gt;"</code>. Otherwise <code>.</code> on a module accesses its exports:</p>
 <pre><code class="language-bop">use std.math as m
