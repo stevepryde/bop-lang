@@ -4,6 +4,8 @@ Bop is a small, dynamically-typed programming language built to be **embedded in
 
 If you're here to embed Bop in a host application, jump to [Embedding Bop](embedding.md) and start there. The rest of this book is the language guide and reference.
 
+Bop can be compiled to Rust as well (without the sandbox) if you're not running untrusted code and need more performance. Or, you could just use Rust ;)
+
 ## Quick example
 
 ```bop
@@ -27,7 +29,7 @@ That's a complete Bop program — no imports, no boilerplate, no semicolons. The
   - **AOT Rust transpiler** — emits plain Rust source that links against `bop-lang`'s runtime. Closest to native speed; useful when you want compiled artifacts or you're already shipping a Rust build pipeline.
 
   All three are wire-compatible on `Value` and `BopError`, and the test suite pins them to byte-for-byte output agreement via a three-way differential harness.
-- **`no_std` and wasm.** The core crate compiles unchanged for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade; the rest of the language is already `#![cfg_attr(not(feature = "std"), no_std)]`.
+- **`no_std` and wasm.** The core crate compiles unchanged for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade; the rest of the language is already `#![cfg_attr(no_std)]`.
 - **Friendly errors.** Parse and runtime errors both include the source snippet, a carat under the offending column, and a `hint:` line when the parser or runtime can guess what you meant (`"I don't know what 'pritn' is — did you mean 'print'?"`). Designed to be read by humans *and* by automated callers that need to correct themselves.
 - **Small, stable grammar.** Variables, loops, functions, arrays, dicts, structs, enums, pattern matching, modules, `Result` / `Iter` built-ins — that's close to the whole surface. Everything else (math, JSON, iteration helpers, string utilities, test assertions) lives in the bundled `std.*` modules or as methods on the value types. The shape is deliberately small so it stays consistent across versions.
 

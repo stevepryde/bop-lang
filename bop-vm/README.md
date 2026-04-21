@@ -25,7 +25,7 @@ Net result (release, Apple silicon):
 
 `bop-vm` earns its place in the embedding use case: a Rust application that hands Bop source to its users (or to an AI) at runtime. You can't bring `rustc` to the user's machine for AOT — the VM fills the gap:
 
-- **No dependencies** (default `std` feature)
+- **No dependencies**
 - **no_std-capable** via the `no_std` feature (pulls in `libm` internally for float math)
 - **WASM-compatible** (builds clean for `wasm32-unknown-unknown`; ~90 KB added over the walker-only bundle)
 - **Same trait surface as the walker** — any `BopHost` impl works unchanged

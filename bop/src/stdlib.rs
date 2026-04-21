@@ -11,7 +11,7 @@
 //! core with no bundled modules:
 //!
 //! ```toml
-//! bop-lang = { version = "0.3", default-features = false, features = ["std"] }
+//! bop-lang = { version = "0.3", default-features = false }
 //! ```
 //!
 //! Available modules:

@@ -2,12 +2,12 @@
 
 Ahead-of-time [Bop](https://github.com/stevepryde/bop-lang) → Rust transpiler.
 
-Given Bop source, `bop-compile::transpile` produces a human-readable Rust source file that links against [`bop-lang`](https://crates.io/crates/bop-lang) and [`bop-sys`](https://crates.io/crates/bop-sys) and compiles via `cargo` to a native binary. Runs at hand-written-Rust speed — the fastest of Bop's three engines.
+Given Bop source, `bop-compile::transpile` produces a human-readable Rust source file that links against [`bop-lang`](https://crates.io/crates/bop-lang) and [`bop-sys`](https://crates.io/crates/bop-sys) and compiles via `cargo` to a native binary. The fastest of Bop's three engines.
 
 ## When to reach for the AOT
 
 - **Scripts you'll run repeatedly** — builds once, runs at native speed forever after.
-- **Production workloads** — where even the bytecode VM's 2–3× speedup isn't enough.
+- **Performance-sensitive workloads** — where even the bytecode VM's 2–3× speedup isn't enough.
 - **Deploying a script as a self-contained binary** — `bop compile script.bop` and ship the resulting executable.
 
 For scripts you compile *at the host's runtime*, the bytecode VM in [`bop-vm`](https://crates.io/crates/bop-vm) is the right choice instead — AOT needs `rustc` on the target machine, which embedded hosts typically can't rely on.
@@ -41,7 +41,7 @@ let rust_source = transpile(
 // write rust_source to src/main.rs and run `cargo build`…
 ```
 
-`Options` controls the output shape: standalone program vs. library, module name wrapping, sandbox mode for step/memory enforcement, and the module resolver callback for `import` statements.
+`Options` controls the output shape: standalone program vs. library, module name wrapping, sandbox mode for step/memory enforcement, and the module resolver callback for `use` statements.
 
 ## Selling points
 

@@ -1,6 +1,6 @@
 [package]
 name = "bop-lang"
-description = "A small, dynamically-typed programming language"
+description = "A small, embeddable, dynamically-typed programming language with zero dependencies"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -38,4 +38,5 @@ bop-std = []
 no_std = ["dep:libm"]
 
 [dependencies]
+# Only used for no_std, required for f64 math.
 libm = { version = "0.2", default-features = false, optional = true }

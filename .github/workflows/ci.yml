@@ -1,40 +1,39 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
 
 env:
-  CARGO_TERM_COLOR: always
+    CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test (std)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo test --all
+    test:
+        name: Test (std)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - run: cargo test --all
 
-  check-no-std:
-    name: Check (no-std)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # `--no-default-features` drops `std`; `--features no_std`
-      # pulls in the `libm`-backed math facade so the `f64`
-      # builtins still resolve. See `bop/src/math.rs` for the
-      # feature contract.
-      - run: cargo check -p bop-lang --no-default-features --features no_std
+    check-no-std:
+        name: Check (no-std)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            # `--no-default-features`; `--features no_std`
+            # pulls in the `libm`-backed math facade so the `f64`
+            # builtins still resolve. See `bop/src/math.rs` for the
+            # feature contract.
+            - run: cargo check -p bop-lang --no-default-features --features no_std
 
-  check-wasm:
-    name: Check (wasm)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup target add wasm32-unknown-unknown
-      - run: cargo check -p bop-lang --target wasm32-unknown-unknown
-      # Same no_std feature requirement on wasm when we drop
-      # the default `std` feature.
-      - run: cargo check -p bop-lang --target wasm32-unknown-unknown --no-default-features --features no_std
+    check-wasm:
+        name: Check (wasm)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - run: rustup target add wasm32-unknown-unknown
+            - run: cargo check -p bop-lang --target wasm32-unknown-unknown
+            # Same no_std feature requirement on wasm.
+            - run: cargo check -p bop-lang --target wasm32-unknown-unknown --no-default-features --features no_std

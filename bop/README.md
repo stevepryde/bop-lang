@@ -21,9 +21,9 @@ For a faster runtime (2–3× this crate's tree-walker, same semantics), add [`b
 ## Selling points
 
 - **Embeddable.** One trait (`BopHost`) to implement; everything else is handled by the engine.
-- **Zero Rust deps** with the default `std` feature. Nothing to audit in your supply chain.
+- **Zero Rust deps** Nothing to audit in your supply chain.
 - **`no_std` support** via the `no_std` feature (uses the `libm` crate internally for float math, nothing else).
-- **WASM-compatible.** Builds clean for `wasm32-unknown-unknown` in both std and no_std modes. Use it in browsers, edge workers, or wherever you can run Rust.
+- **WASM-compatible.** Builds clean for `wasm32-unknown-unknown`. Use it in browsers, edge workers, or wherever you can run Rust.
 - **Sandboxed by default.** `BopLimits` caps step count and memory so a runaway user script can't hang or OOM your process.
 
 ## Quick start

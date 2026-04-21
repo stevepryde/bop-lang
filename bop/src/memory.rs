@@ -1,9 +1,9 @@
 //! Memory tracking for Bop script execution.
 //!
-//! With the `std` feature (default), uses thread-local counters so tracking is
+//! By default, uses thread-local counters so tracking is
 //! zero-cost and perfectly isolated between concurrent executions.
 //!
-//! Without `std`, uses global statics. This is safe for single-threaded
+//! With `no_std`, uses global statics. This is safe for single-threaded
 //! environments (e.g., wasm) but is NOT thread-safe.
 //!
 //! Tracking happens at the Value layer: Clone tracks new allocations, Drop tracks

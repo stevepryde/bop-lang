@@ -41,8 +41,7 @@ This is a hard line, not a soft preference.
 
 - Core never reads files, opens sockets, or touches the clock.
 - Core never pulls in a Rust crate outside the workspace (no
-  `serde`, no `regex`, no `indexmap`). `alloc` only; `std` gated
-  behind the existing feature flag.
+  `serde`, no `regex`, no `indexmap`). `alloc` only; 
 - Language features that need I/O (imports, stdlib with OS access)
   are implemented as `BopHost` trait methods, with OS-backed
   default impls living in `bop-sys`.
@@ -1122,15 +1121,13 @@ shipping, but each one hurts maintenance or future work.
     bop-lang` (empty) vs `cargo tree -p bop-lang
     --no-default-features --features no_std` (one line:
     `libm v0.2.16`).
-  - `compile_error!` in `bop::math` if someone disables
-    `std` without enabling `no_std`, pointing at the fix.
+  
 
   End-to-end proof the `no_std` surface works: a
   `wasm32-unknown-unknown` `cdylib` that `#![no_std]`s,
   uses `lol_alloc` for the global allocator, and exposes
   both `bop::run` and `bop_vm::run` to JS builds clean at
-  **355 KB** stripped (walker + VM + libm + allocator). The
-  equivalent `std` build lands at 394 KB — `no_std` is
+  **355 KB** stripped (walker + VM + libm + allocator) — `no_std` is
   slightly smaller because there's no std runtime lib.
   Either is shippable to a browser / edge / embedded
   target.
