@@ -169,6 +169,75 @@ print(Result::Err("x").is_err())"#,
     );
 }
 
+// ─── Ok / Err shorthand ────────────────────────────────────────
+//
+// `Ok(x)` / `Err(e)` are parser-level sugar for
+// `Result::Ok(x)` / `Result::Err(e)`. Both the expression form
+// and the pattern form get the desugar so match arms stay
+// readable and returns stay short.
+
+#[test]
+fn ok_err_expression_sugar_produces_result_variants() {
+    let host = run(
+        r#"print(Ok(42))
+print(Err("boom"))
+print(Ok("nested").is_ok())
+print(Err(123).is_err())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec![
+            "Result::Ok(42)",
+            "Result::Err(\"boom\")",
+            "true",
+            "true",
+        ],
+    );
+}
+
+#[test]
+fn ok_err_pattern_sugar_matches_result_variants() {
+    // Pattern side — `match r { Ok(v) => ..., Err(e) => ... }`
+    // desugars to `Result::Ok(v)` / `Result::Err(e)`.
+    let host = run(
+        r#"fn describe(r) {
+    return match r {
+        Ok(v) => "ok: " + v.to_str(),
+        Err(e) => "err: " + e,
+    }
+}
+print(describe(Ok(5)))
+print(describe(Err("stop")))"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["ok: 5", "err: stop"],
+    );
+}
+
+#[test]
+fn ok_err_shorthand_chains_through_try_call() {
+    // The shorthand plays nicely with `try_call` since the
+    // desugared value is an actual `Result::Err(RuntimeError
+    // { ... })` — but `Err("x")` produces a string payload, so
+    // match arms decide per payload shape.
+    let host = run(
+        r#"fn fail() { return Err("explicit") }
+let r = try_call(fail)
+print(match r {
+    Ok(inner) => match inner {
+        Ok(_)  => "double ok?",
+        Err(e) => "inner err: " + e,
+    },
+    Err(_) => "caught",
+})"#,
+    );
+    // `fail()` returns `Err("explicit")` — a successful return,
+    // so `try_call` wraps it in `Result::Ok(Result::Err(...))`.
+    // Inner match picks it up as `Err(e)`.
+    assert_eq!(host.prints.borrow().clone(), vec!["inner err: explicit"]);
+}
+
 // ─── Iterator protocol ─────────────────────────────────────────
 //
 // `.iter()` on arrays / strings / dicts yields a `Value::Iter`

@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-023d7c23.js";
+            window.path_to_searchindex_js = "../searchindex-49dea4a1.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-4a0c6a8e.js"></script>
@@ -262,8 +262,10 @@ payload     = "(" expr ("," expr)* ")"                          // tuple variant
             | "{" IDENT ":" expr ("," IDENT ":" expr)* "}"      // struct variant
 
 primary     = INT | NUMBER | STRING | "true" | "false" | "none"
-            | IDENT | "(" expr ")" | arrayLit | dictLit
+            | IDENT | resultShorthandExpr | "(" expr ")" | arrayLit | dictLit
             | ifExpr | matchExpr | fnExpr
+
+resultShorthandExpr = ("Ok" | "Err") "(" expr ("," expr)* ")"  // sugar for Result::Ok/Err
 
 arrayLit    = "[" (expr ("," expr)*)? "]"
 dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)*)? "}"
@@ -275,9 +277,11 @@ fnExpr      = "fn" "(" params? ")" block
 pattern     = orPattern
 orPattern   = singlePattern ("|" singlePattern)*
 singlePattern = "_" | IDENT | literal | variantPattern | structPattern | arrayPattern
+              | resultShorthand
 variantPattern = (IDENT ".")? IDENT "::" IDENT
               | (IDENT ".")? IDENT "::" IDENT "(" pattern ("," pattern)* ")"
               | (IDENT ".")? IDENT "::" IDENT "{" IDENT ":" pattern ("," IDENT ":" pattern)* "}"
+resultShorthand = ("Ok" | "Err") "(" pattern ("," pattern)* ")"  // sugar for Result::Ok/Err
 structPattern  = (IDENT ".")? IDENT "{" IDENT ":" pattern ("," IDENT ":" pattern)* "}"
 arrayPattern   = "[" patternList? arrayRest? "]"
 patternList    = pattern ("," pattern)*

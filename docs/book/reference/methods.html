@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-023d7c23.js";
+            window.path_to_searchindex_js = "../searchindex-49dea4a1.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-4a0c6a8e.js"></script>
@@ -311,7 +311,7 @@ print((3.7).floor().type())         // "int"
 </table>
 </div>
 <h2 id="result-methods--result"><a class="header" href="#result-methods--result">Result methods — <code>Result</code></a></h2>
-<p><code>Result</code> is an <a href="../errors.html">engine built-in</a>. All combinators are methods on the built-in type — no import required.</p>
+<p><code>Result</code> is an <a href="../errors.html">engine built-in</a>. All combinators are methods on the built-in type — no import required. <code>Ok(x)</code> and <code>Err(e)</code> are <a href="../errors.html#ok--err-shorthand">parser-level shorthand</a> for <code>Result::Ok(x)</code> / <code>Result::Err(e)</code> in both expression and pattern position.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -329,16 +329,16 @@ print((3.7).floor().type())         // "int"
 </tbody>
 </table>
 </div>
-<pre><code class="language-bop">print(Result::Ok(5).is_ok())                           // true
-print(Result::Err("bad").unwrap_or(0))                 // 0
-print(Result::Ok(5).map(fn(v) { return v * 2 }))       // Result::Ok(10)
-print(Result::Err("x").map(fn(v) { return v * 2 }))    // Result::Err("x")
+<pre><code class="language-bop">print(Ok(5).is_ok())                           // true
+print(Err("bad").unwrap_or(0))                 // 0
+print(Ok(5).map(fn(v) { return v * 2 }))       // Result::Ok(10)
+print(Err("x").map(fn(v) { return v * 2 }))    // Result::Err("x")
 
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
-  return Result::Err("odd")
+  if x % 2 == 0 { return Ok((x / 2).to_int()) }
+  return Err("odd")
 }
-print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+print(Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
 </code></pre>
 <h2 id="iter-methods--iter"><a class="header" href="#iter-methods--iter">Iter methods — <code>iter</code></a></h2>
 <p>An <code>iter</code> is Bop’s lazy iterator. Values you can iterate over — arrays, strings, dicts, built-in iterators, and user-defined containers — all participate in the same protocol:</p>

@@ -52,13 +52,13 @@ Runs `callable` with no arguments and catches any non-fatal runtime error:
 ```bop
 let r = try_call(fn() { return 1 / 0 })
 print(match r {
-  Result::Ok(v) => v,
-  Result::Err(e) => "caught: " + e.message,
+  Ok(v)  => v,
+  Err(e) => "caught: " + e.message,
 })
 // caught: Division by zero
 ```
 
-On success returns `Result::Ok(value)`; on a non-fatal error returns `Result::Err(RuntimeError { message, line })`. Fatal errors (step-limit / memory-limit / fn-call-depth) are *not* caught — they propagate past `try_call` unchanged so the sandbox invariant holds.
+On success returns `Result::Ok(value)`; on a non-fatal error returns `Result::Err(RuntimeError { message, line })`. The `Ok(v)` / `Err(e)` pattern shorthand desugars to `Result::Ok(v)` / `Result::Err(e)` — see [Error Handling](../errors.md#ok--err-shorthand). Fatal errors (step-limit / memory-limit / fn-call-depth) are *not* caught — they propagate past `try_call` unchanged so the sandbox invariant holds.
 
 See [Error Handling](../errors.md) for the full story on `try`, `try_call`, `Result`, and `RuntimeError`.
 
@@ -81,8 +81,8 @@ Non-fatal, so `try_call` catches it:
 ```bop
 let r = try_call(fn() { panic("deliberate") })
 print(match r {
-  Result::Ok(_)  => "ok?",
-  Result::Err(e) => e.message,
+  Ok(_)  => "ok?",
+  Err(e) => e.message,
 })
 // deliberate
 ```

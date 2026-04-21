@@ -22,14 +22,35 @@ By convention, `Ok(v)` carries the successful value and `Err(e)` carries whateve
 fn parse_positive(s) {
   let n = s.to_int()
   if n <= 0 {
-    return Result::Err("must be positive, got {n}")
+    return Err("must be positive, got {n}")
   }
-  return Result::Ok(n)
+  return Ok(n)
 }
 
 print(parse_positive("42"))    // Result::Ok(42)
 print(parse_positive("-3"))    // Result::Err("must be positive, got -3")
 ```
+
+### `Ok` / `Err` shorthand
+
+`Ok(x)` and `Err(e)` are parser-level sugar for `Result::Ok(x)` and `Result::Err(e)`. The rewrite applies in both expression and pattern position, so you can write:
+
+```bop
+fn classify(n) {
+  if n > 0 { return Ok(n) }
+  return Err("non-positive")
+}
+
+print(match classify(5) {
+  Ok(v)  => "ok: {v}",
+  Err(e) => "err: {e}",
+})
+// ok: 5
+```
+
+Bop's case rules already reserve uppercase identifiers for types and variants, so `Ok` and `Err` can't collide with a user fn or variable. The long form (`Result::Ok(v)`, `Result::Err(e)`) still works — pick whichever reads better.
+
+If a different enum happens to have its own `Ok` / `Err` variants, use the qualified `MyEnum::Ok(x)` form for those. The bare sugar always means `Result::Ok` / `Result::Err`.
 
 ## The `try` operator
 
@@ -43,7 +64,7 @@ print(parse_positive("-3"))    // Result::Err("must be positive, got -3")
 fn pipeline(s) {
   let n = try parse_positive(s)        // Err propagates; Ok unwraps to `n`
   let doubled = try double_checked(n)
-  return Result::Ok(doubled)
+  return Ok(doubled)
 }
 
 print(pipeline("21"))    // Result::Ok(42)
@@ -89,24 +110,24 @@ You can construct one explicitly (it's a regular struct), but most of the time y
 Every `Result` value has a small set of always-available methods. No import needed — `Result` is a built-in type and its combinators are engine-level methods.
 
 ```bop
-print(Result::Ok(1).is_ok())                     // true
-print(Result::Err("oops").is_err())              // true
+print(Ok(1).is_ok())                     // true
+print(Err("oops").is_err())              // true
 
 // unwrap_or — default on Err
-print(Result::Ok(10).unwrap_or(0))               // 10
-print(Result::Err("fail").unwrap_or(0))          // 0
+print(Ok(10).unwrap_or(0))               // 10
+print(Err("fail").unwrap_or(0))          // 0
 
 // map — transform the Ok payload, pass Err through
-print(Result::Ok(5).map(fn(n) { return n * n }))      // Result::Ok(25)
-print(Result::Err("x").map(fn(n) { return n * n }))   // Result::Err("x")
+print(Ok(5).map(fn(n) { return n * n }))      // Result::Ok(25)
+print(Err("x").map(fn(n) { return n * n }))   // Result::Err("x")
 
 // and_then — monadic bind (for chaining fallible steps)
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
-  return Result::Err("odd")
+  if x % 2 == 0 { return Ok((x / 2).to_int()) }
+  return Err("odd")
 }
-print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
-print(Result::Ok(7).and_then(halve))                    // Result::Err("odd")
+print(Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+print(Ok(7).and_then(halve))                    // Result::Err("odd")
 ```
 
 Available: `is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `and_then`. See [Methods → Result](reference/methods.md#result-methods--result) for the full reference.

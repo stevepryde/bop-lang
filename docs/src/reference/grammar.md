@@ -89,8 +89,10 @@ payload     = "(" expr ("," expr)* ")"                          // tuple variant
             | "{" IDENT ":" expr ("," IDENT ":" expr)* "}"      // struct variant
 
 primary     = INT | NUMBER | STRING | "true" | "false" | "none"
-            | IDENT | "(" expr ")" | arrayLit | dictLit
+            | IDENT | resultShorthandExpr | "(" expr ")" | arrayLit | dictLit
             | ifExpr | matchExpr | fnExpr
+
+resultShorthandExpr = ("Ok" | "Err") "(" expr ("," expr)* ")"  // sugar for Result::Ok/Err
 
 arrayLit    = "[" (expr ("," expr)*)? "]"
 dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)*)? "}"
@@ -102,9 +104,11 @@ fnExpr      = "fn" "(" params? ")" block
 pattern     = orPattern
 orPattern   = singlePattern ("|" singlePattern)*
 singlePattern = "_" | IDENT | literal | variantPattern | structPattern | arrayPattern
+              | resultShorthand
 variantPattern = (IDENT ".")? IDENT "::" IDENT
               | (IDENT ".")? IDENT "::" IDENT "(" pattern ("," pattern)* ")"
               | (IDENT ".")? IDENT "::" IDENT "{" IDENT ":" pattern ("," IDENT ":" pattern)* "}"
+resultShorthand = ("Ok" | "Err") "(" pattern ("," pattern)* ")"  // sugar for Result::Ok/Err
 structPattern  = (IDENT ".")? IDENT "{" IDENT ":" pattern ("," IDENT ":" pattern)* "}"
 arrayPattern   = "[" patternList? arrayRest? "]"
 patternList    = pattern ("," pattern)*

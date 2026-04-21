@@ -120,7 +120,7 @@ See [Dictionaries](../data/dictionaries.md) for worked examples.
 
 ## Result methods — `Result`
 
-`Result` is an [engine built-in](../errors.md). All combinators are methods on the built-in type — no import required.
+`Result` is an [engine built-in](../errors.md). All combinators are methods on the built-in type — no import required. `Ok(x)` and `Err(e)` are [parser-level shorthand](../errors.md#ok--err-shorthand) for `Result::Ok(x)` / `Result::Err(e)` in both expression and pattern position.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -134,16 +134,16 @@ See [Dictionaries](../data/dictionaries.md) for worked examples.
 | `r.and_then(f)` | Result | `Ok(v)` → `f(v)` (expected to return a Result); `Err(e)` passes through. |
 
 ```bop
-print(Result::Ok(5).is_ok())                           // true
-print(Result::Err("bad").unwrap_or(0))                 // 0
-print(Result::Ok(5).map(fn(v) { return v * 2 }))       // Result::Ok(10)
-print(Result::Err("x").map(fn(v) { return v * 2 }))    // Result::Err("x")
+print(Ok(5).is_ok())                           // true
+print(Err("bad").unwrap_or(0))                 // 0
+print(Ok(5).map(fn(v) { return v * 2 }))       // Result::Ok(10)
+print(Err("x").map(fn(v) { return v * 2 }))    // Result::Err("x")
 
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
-  return Result::Err("odd")
+  if x % 2 == 0 { return Ok((x / 2).to_int()) }
+  return Err("odd")
 }
-print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+print(Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
 ```
 
 ## Iter methods — `iter`

@@ -2082,6 +2082,39 @@ fn error_unknown_function() {
 }
 
 #[test]
+fn ok_err_sugar_matches_result_construction_diff() {
+    // `Ok(x)` / `Err(e)` are parser-level sugar — walker and VM
+    // must see identical AST, so the printed values should be
+    // indistinguishable from `Result::Ok(x)` / `Result::Err(e)`.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"print(Ok(42))
+print(Err("boom"))
+print(Ok(1) == Result::Ok(1))
+print(Err("x") == Result::Err("x"))"#),
+        "true"
+    );
+}
+
+#[test]
+fn ok_err_pattern_sugar_in_match_diff() {
+    // Pattern-side desugar has to produce the same match
+    // behaviour in both engines.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"fn classify(r) {
+    return match r {
+        Ok(v)  => v,
+        Err(_) => -1,
+    }
+}
+print(classify(Ok(5)))
+print(classify(Err("x")))"#),
+        "-1"
+    );
+}
+
+#[test]
 fn iter_protocol_array_yields_each_item_diff() {
     // `.iter()` + `.next()` must produce the same Iter::Next /
     // Iter::Done sequence on both engines.

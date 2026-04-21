@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-023d7c23.js";
+            window.path_to_searchindex_js = "../searchindex-49dea4a1.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-4a0c6a8e.js"></script>
@@ -212,12 +212,12 @@ rand(2)     // 0 or 1 (coin flip)
 <p>Runs <code>callable</code> with no arguments and catches any non-fatal runtime error:</p>
 <pre><code class="language-bop">let r = try_call(fn() { return 1 / 0 })
 print(match r {
-  Result::Ok(v) =&gt; v,
-  Result::Err(e) =&gt; "caught: " + e.message,
+  Ok(v)  =&gt; v,
+  Err(e) =&gt; "caught: " + e.message,
 })
 // caught: Division by zero
 </code></pre>
-<p>On success returns <code>Result::Ok(value)</code>; on a non-fatal error returns <code>Result::Err(RuntimeError { message, line })</code>. Fatal errors (step-limit / memory-limit / fn-call-depth) are <em>not</em> caught — they propagate past <code>try_call</code> unchanged so the sandbox invariant holds.</p>
+<p>On success returns <code>Result::Ok(value)</code>; on a non-fatal error returns <code>Result::Err(RuntimeError { message, line })</code>. The <code>Ok(v)</code> / <code>Err(e)</code> pattern shorthand desugars to <code>Result::Ok(v)</code> / <code>Result::Err(e)</code> — see <a href="../errors.html#ok--err-shorthand">Error Handling</a>. Fatal errors (step-limit / memory-limit / fn-call-depth) are <em>not</em> caught — they propagate past <code>try_call</code> unchanged so the sandbox invariant holds.</p>
 <p>See <a href="../errors.html">Error Handling</a> for the full story on <code>try</code>, <code>try_call</code>, <code>Result</code>, and <code>RuntimeError</code>.</p>
 <h2 id="panicmessage"><a class="header" href="#panicmessage"><code>panic(message)</code></a></h2>
 <p>Raise a non-fatal runtime error carrying <code>message</code>. Useful inside stdlib helpers (<code>unwrap</code>, <code>expect</code>, <code>assert_eq</code>, …) and user code that needs to bail with a readable error from an expression position where a plain <code>return</code> isn’t enough.</p>
@@ -232,8 +232,8 @@ print(take_positive(3))                           // 6
 <p>Non-fatal, so <code>try_call</code> catches it:</p>
 <pre><code class="language-bop">let r = try_call(fn() { panic("deliberate") })
 print(match r {
-  Result::Ok(_)  =&gt; "ok?",
-  Result::Err(e) =&gt; e.message,
+  Ok(_)  =&gt; "ok?",
+  Err(e) =&gt; e.message,
 })
 // deliberate
 </code></pre>

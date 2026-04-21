@@ -1094,6 +1094,30 @@ let r = Result::Ok(8).and_then(halve).and_then(halve)
 print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#,
         &[],
     ),
+    // ─── Ok / Err shorthand ───────────────────────────────────
+    (
+        "ok_err_shorthand_expression",
+        // Parser-level sugar — the resulting `Value` must match
+        // `Result::Ok(...)` / `Result::Err(...)` byte-for-byte
+        // across walker / VM / AOT.
+        r#"print(Ok(1))
+print(Err("x"))
+print(Ok(1) == Result::Ok(1))
+print(Err("x") == Result::Err("x"))"#,
+        &[],
+    ),
+    (
+        "ok_err_shorthand_pattern",
+        r#"fn describe(r) {
+    return match r {
+        Ok(v)  => "ok: " + v.to_str(),
+        Err(e) => "err: " + e,
+    }
+}
+print(describe(Ok(5)))
+print(describe(Err("stop")))"#,
+        &[],
+    ),
     // ─── Iterator protocol ────────────────────────────────────
     (
         "iter_basic_next_sequence",

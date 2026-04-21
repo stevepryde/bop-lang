@@ -1478,6 +1478,19 @@ impl Parser {
             }
             Token::Ident(name) => {
                 self.advance();
+                // Sugar: bare `Ok(args)` / `Err(args)` desugars
+                // to the built-in `Result::Ok(args)` /
+                // `Result::Err(args)`. Bop's case rules already
+                // reserve uppercase idents for type / variant
+                // names, so `Ok` and `Err` can't collide with a
+                // user fn or variable. Users who want the `Ok` /
+                // `Err` variants of a *different* enum have to
+                // name it explicitly (`MyEnum::Ok(...)`).
+                if (name == "Ok" || name == "Err")
+                    && matches!(self.peek(), Token::LParen)
+                {
+                    return self.parse_result_shorthand(name, line, column);
+                }
                 // Enum variant construction: `Type::Variant…`.
                 // Always parse (the `::` is unambiguous); the
                 // payload shape is determined by what follows
@@ -1582,6 +1595,46 @@ impl Parser {
             },
             line,
                     column,
+        })
+    }
+
+    /// `Ok(args)` / `Err(args)` — parser-level sugar for the
+    /// built-in `Result::Ok(args)` / `Result::Err(args)` so user
+    /// code can skip the `Result::` prefix for the two variants
+    /// used overwhelmingly often. The caller already advanced
+    /// past the identifier and verified the lookahead is
+    /// `LParen`; `variant` must be `"Ok"` or `"Err"`.
+    fn parse_result_shorthand(
+        &mut self,
+        variant: String,
+        line: u32,
+        column: Option<core::num::NonZeroU32>,
+    ) -> Result<Expr, BopError> {
+        debug_assert!(variant == "Ok" || variant == "Err");
+        self.enter()?;
+        self.expect(&Token::LParen)?;
+        let mut args: Vec<Expr> = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            args.push(self.parse_expr()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RParen) {
+                    break;
+                }
+                args.push(self.parse_expr()?);
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.leave();
+        Ok(Expr {
+            kind: ExprKind::EnumConstruct {
+                namespace: None,
+                type_name: String::from("Result"),
+                variant,
+                payload: VariantPayload::Tuple(args),
+            },
+            line,
+            column,
         })
     }
 
@@ -1820,6 +1873,15 @@ impl Parser {
             }
             Token::Ident(name) => {
                 self.advance();
+                // Sugar: `Ok(p)` / `Err(p)` as patterns — mirror
+                // the expression-side shortcut. Reduces the
+                // `match r { Result::Ok(v) => ..., Result::Err(e)
+                // => ... }` boilerplate to plain `Ok(v)` / `Err(e)`.
+                if (name == "Ok" || name == "Err")
+                    && matches!(self.peek(), Token::LParen)
+                {
+                    return self.parse_result_shorthand_pattern(name);
+                }
                 // `Type::Variant[...]` path pattern.
                 if matches!(self.peek(), Token::ColonColon) {
                     self.parse_pattern_variant_tail(name, None)
@@ -1948,6 +2010,37 @@ impl Parser {
             type_name,
             variant,
             payload,
+        })
+    }
+
+    /// Pattern-side mirror of [`Self::parse_result_shorthand`]:
+    /// `Ok(p)` / `Err(p)` in a pattern desugar to the built-in
+    /// `Result::Ok(p)` / `Result::Err(p)`. Caller has already
+    /// advanced past the ident and verified `LParen` follows;
+    /// `variant` must be `"Ok"` or `"Err"`.
+    fn parse_result_shorthand_pattern(
+        &mut self,
+        variant: String,
+    ) -> Result<Pattern, BopError> {
+        debug_assert!(variant == "Ok" || variant == "Err");
+        self.expect(&Token::LParen)?;
+        let mut items: Vec<Pattern> = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            items.push(self.parse_pattern()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RParen) {
+                    break;
+                }
+                items.push(self.parse_pattern()?);
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Pattern::EnumVariant {
+            namespace: None,
+            type_name: String::from("Result"),
+            variant,
+            payload: VariantPatternPayload::Tuple(items),
         })
     }
 

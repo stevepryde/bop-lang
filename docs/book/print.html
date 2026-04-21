@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-023d7c23.js";
+            window.path_to_searchindex_js = "searchindex-49dea4a1.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-4a0c6a8e.js"></script>
@@ -1461,14 +1461,29 @@ fn describe(c) {
 <pre><code class="language-bop">fn parse_positive(s) {
   let n = s.to_int()
   if n &lt;= 0 {
-    return Result::Err("must be positive, got {n}")
+    return Err("must be positive, got {n}")
   }
-  return Result::Ok(n)
+  return Ok(n)
 }
 
 print(parse_positive("42"))    // Result::Ok(42)
 print(parse_positive("-3"))    // Result::Err("must be positive, got -3")
 </code></pre>
+<h3 id="ok--err-shorthand"><a class="header" href="#ok--err-shorthand"><code>Ok</code> / <code>Err</code> shorthand</a></h3>
+<p><code>Ok(x)</code> and <code>Err(e)</code> are parser-level sugar for <code>Result::Ok(x)</code> and <code>Result::Err(e)</code>. The rewrite applies in both expression and pattern position, so you can write:</p>
+<pre><code class="language-bop">fn classify(n) {
+  if n &gt; 0 { return Ok(n) }
+  return Err("non-positive")
+}
+
+print(match classify(5) {
+  Ok(v)  =&gt; "ok: {v}",
+  Err(e) =&gt; "err: {e}",
+})
+// ok: 5
+</code></pre>
+<p>Bop’s case rules already reserve uppercase identifiers for types and variants, so <code>Ok</code> and <code>Err</code> can’t collide with a user fn or variable. The long form (<code>Result::Ok(v)</code>, <code>Result::Err(e)</code>) still works — pick whichever reads better.</p>
+<p>If a different enum happens to have its own <code>Ok</code> / <code>Err</code> variants, use the qualified <code>MyEnum::Ok(x)</code> form for those. The bare sugar always means <code>Result::Ok</code> / <code>Result::Err</code>.</p>
 <h2 id="the-try-operator"><a class="header" href="#the-try-operator">The <code>try</code> operator</a></h2>
 <p><code>try expr</code> evaluates <code>expr</code> and:</p>
 <ul>
@@ -1479,7 +1494,7 @@ print(parse_positive("-3"))    // Result::Err("must be positive, got -3")
 <pre><code class="language-bop">fn pipeline(s) {
   let n = try parse_positive(s)        // Err propagates; Ok unwraps to `n`
   let doubled = try double_checked(n)
-  return Result::Ok(doubled)
+  return Ok(doubled)
 }
 
 print(pipeline("21"))    // Result::Ok(42)
@@ -1509,24 +1524,24 @@ print(match r {
 <p>You can construct one explicitly (it’s a regular struct), but most of the time you’ll see them as the payload inside <code>Result::Err(...)</code> returned from <code>try_call</code>.</p>
 <h2 id="combinators--methods-on-result"><a class="header" href="#combinators--methods-on-result">Combinators — methods on <code>Result</code></a></h2>
 <p>Every <code>Result</code> value has a small set of always-available methods. No import needed — <code>Result</code> is a built-in type and its combinators are engine-level methods.</p>
-<pre><code class="language-bop">print(Result::Ok(1).is_ok())                     // true
-print(Result::Err("oops").is_err())              // true
+<pre><code class="language-bop">print(Ok(1).is_ok())                     // true
+print(Err("oops").is_err())              // true
 
 // unwrap_or — default on Err
-print(Result::Ok(10).unwrap_or(0))               // 10
-print(Result::Err("fail").unwrap_or(0))          // 0
+print(Ok(10).unwrap_or(0))               // 10
+print(Err("fail").unwrap_or(0))          // 0
 
 // map — transform the Ok payload, pass Err through
-print(Result::Ok(5).map(fn(n) { return n * n }))      // Result::Ok(25)
-print(Result::Err("x").map(fn(n) { return n * n }))   // Result::Err("x")
+print(Ok(5).map(fn(n) { return n * n }))      // Result::Ok(25)
+print(Err("x").map(fn(n) { return n * n }))   // Result::Err("x")
 
 // and_then — monadic bind (for chaining fallible steps)
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
-  return Result::Err("odd")
+  if x % 2 == 0 { return Ok((x / 2).to_int()) }
+  return Err("odd")
 }
-print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
-print(Result::Ok(7).and_then(halve))                    // Result::Err("odd")
+print(Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+print(Ok(7).and_then(halve))                    // Result::Err("odd")
 </code></pre>
 <p>Available: <code>is_ok</code>, <code>is_err</code>, <code>unwrap</code>, <code>expect</code>, <code>unwrap_or</code>, <code>map</code>, <code>map_err</code>, <code>and_then</code>. See <a href="#result-methods--result">Methods → Result</a> for the full reference.</p>
 <p><code>unwrap()</code> and <code>expect(msg)</code> raise a runtime error on <code>Err</code> — use sparingly, and prefer <code>try</code> or pattern matching in production code.</p>
@@ -1865,12 +1880,12 @@ rand(2)     // 0 or 1 (coin flip)
 <p>Runs <code>callable</code> with no arguments and catches any non-fatal runtime error:</p>
 <pre><code class="language-bop">let r = try_call(fn() { return 1 / 0 })
 print(match r {
-  Result::Ok(v) =&gt; v,
-  Result::Err(e) =&gt; "caught: " + e.message,
+  Ok(v)  =&gt; v,
+  Err(e) =&gt; "caught: " + e.message,
 })
 // caught: Division by zero
 </code></pre>
-<p>On success returns <code>Result::Ok(value)</code>; on a non-fatal error returns <code>Result::Err(RuntimeError { message, line })</code>. Fatal errors (step-limit / memory-limit / fn-call-depth) are <em>not</em> caught — they propagate past <code>try_call</code> unchanged so the sandbox invariant holds.</p>
+<p>On success returns <code>Result::Ok(value)</code>; on a non-fatal error returns <code>Result::Err(RuntimeError { message, line })</code>. The <code>Ok(v)</code> / <code>Err(e)</code> pattern shorthand desugars to <code>Result::Ok(v)</code> / <code>Result::Err(e)</code> — see <a href="#ok--err-shorthand">Error Handling</a>. Fatal errors (step-limit / memory-limit / fn-call-depth) are <em>not</em> caught — they propagate past <code>try_call</code> unchanged so the sandbox invariant holds.</p>
 <p>See <a href="#error-handling">Error Handling</a> for the full story on <code>try</code>, <code>try_call</code>, <code>Result</code>, and <code>RuntimeError</code>.</p>
 <h2 id="panicmessage"><a class="header" href="#panicmessage"><code>panic(message)</code></a></h2>
 <p>Raise a non-fatal runtime error carrying <code>message</code>. Useful inside stdlib helpers (<code>unwrap</code>, <code>expect</code>, <code>assert_eq</code>, …) and user code that needs to bail with a readable error from an expression position where a plain <code>return</code> isn’t enough.</p>
@@ -1885,8 +1900,8 @@ print(take_positive(3))                           // 6
 <p>Non-fatal, so <code>try_call</code> catches it:</p>
 <pre><code class="language-bop">let r = try_call(fn() { panic("deliberate") })
 print(match r {
-  Result::Ok(_)  =&gt; "ok?",
-  Result::Err(e) =&gt; e.message,
+  Ok(_)  =&gt; "ok?",
+  Err(e) =&gt; e.message,
 })
 // deliberate
 </code></pre>
@@ -2044,7 +2059,7 @@ print((3.7).floor().type())         // "int"
 </table>
 </div>
 <h2 id="result-methods--result"><a class="header" href="#result-methods--result">Result methods — <code>Result</code></a></h2>
-<p><code>Result</code> is an <a href="#error-handling">engine built-in</a>. All combinators are methods on the built-in type — no import required.</p>
+<p><code>Result</code> is an <a href="#error-handling">engine built-in</a>. All combinators are methods on the built-in type — no import required. <code>Ok(x)</code> and <code>Err(e)</code> are <a href="#ok--err-shorthand">parser-level shorthand</a> for <code>Result::Ok(x)</code> / <code>Result::Err(e)</code> in both expression and pattern position.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -2062,16 +2077,16 @@ print((3.7).floor().type())         // "int"
 </tbody>
 </table>
 </div>
-<pre><code class="language-bop">print(Result::Ok(5).is_ok())                           // true
-print(Result::Err("bad").unwrap_or(0))                 // 0
-print(Result::Ok(5).map(fn(v) { return v * 2 }))       // Result::Ok(10)
-print(Result::Err("x").map(fn(v) { return v * 2 }))    // Result::Err("x")
+<pre><code class="language-bop">print(Ok(5).is_ok())                           // true
+print(Err("bad").unwrap_or(0))                 // 0
+print(Ok(5).map(fn(v) { return v * 2 }))       // Result::Ok(10)
+print(Err("x").map(fn(v) { return v * 2 }))    // Result::Err("x")
 
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
-  return Result::Err("odd")
+  if x % 2 == 0 { return Ok((x / 2).to_int()) }
+  return Err("odd")
 }
-print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+print(Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
 </code></pre>
 <h2 id="iter-methods--iter"><a class="header" href="#iter-methods--iter">Iter methods — <code>iter</code></a></h2>
 <p>An <code>iter</code> is Bop’s lazy iterator. Values you can iterate over — arrays, strings, dicts, built-in iterators, and user-defined containers — all participate in the same protocol:</p>
@@ -2218,8 +2233,10 @@ payload     = "(" expr ("," expr)* ")"                          // tuple variant
             | "{" IDENT ":" expr ("," IDENT ":" expr)* "}"      // struct variant
 
 primary     = INT | NUMBER | STRING | "true" | "false" | "none"
-            | IDENT | "(" expr ")" | arrayLit | dictLit
+            | IDENT | resultShorthandExpr | "(" expr ")" | arrayLit | dictLit
             | ifExpr | matchExpr | fnExpr
+
+resultShorthandExpr = ("Ok" | "Err") "(" expr ("," expr)* ")"  // sugar for Result::Ok/Err
 
 arrayLit    = "[" (expr ("," expr)*)? "]"
 dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)*)? "}"
@@ -2231,9 +2248,11 @@ fnExpr      = "fn" "(" params? ")" block
 pattern     = orPattern
 orPattern   = singlePattern ("|" singlePattern)*
 singlePattern = "_" | IDENT | literal | variantPattern | structPattern | arrayPattern
+              | resultShorthand
 variantPattern = (IDENT ".")? IDENT "::" IDENT
               | (IDENT ".")? IDENT "::" IDENT "(" pattern ("," pattern)* ")"
               | (IDENT ".")? IDENT "::" IDENT "{" IDENT ":" pattern ("," IDENT ":" pattern)* "}"
+resultShorthand = ("Ok" | "Err") "(" pattern ("," pattern)* ")"  // sugar for Result::Ok/Err
 structPattern  = (IDENT ".")? IDENT "{" IDENT ":" pattern ("," IDENT ":" pattern)* "}"
 arrayPattern   = "[" patternList? arrayRest? "]"
 patternList    = pattern ("," pattern)*

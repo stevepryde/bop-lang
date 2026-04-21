@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-023d7c23.js";
+            window.path_to_searchindex_js = "searchindex-49dea4a1.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-4a0c6a8e.js"></script>
@@ -194,14 +194,29 @@
 <pre><code class="language-bop">fn parse_positive(s) {
   let n = s.to_int()
   if n &lt;= 0 {
-    return Result::Err("must be positive, got {n}")
+    return Err("must be positive, got {n}")
   }
-  return Result::Ok(n)
+  return Ok(n)
 }
 
 print(parse_positive("42"))    // Result::Ok(42)
 print(parse_positive("-3"))    // Result::Err("must be positive, got -3")
 </code></pre>
+<h3 id="ok--err-shorthand"><a class="header" href="#ok--err-shorthand"><code>Ok</code> / <code>Err</code> shorthand</a></h3>
+<p><code>Ok(x)</code> and <code>Err(e)</code> are parser-level sugar for <code>Result::Ok(x)</code> and <code>Result::Err(e)</code>. The rewrite applies in both expression and pattern position, so you can write:</p>
+<pre><code class="language-bop">fn classify(n) {
+  if n &gt; 0 { return Ok(n) }
+  return Err("non-positive")
+}
+
+print(match classify(5) {
+  Ok(v)  =&gt; "ok: {v}",
+  Err(e) =&gt; "err: {e}",
+})
+// ok: 5
+</code></pre>
+<p>Bop’s case rules already reserve uppercase identifiers for types and variants, so <code>Ok</code> and <code>Err</code> can’t collide with a user fn or variable. The long form (<code>Result::Ok(v)</code>, <code>Result::Err(e)</code>) still works — pick whichever reads better.</p>
+<p>If a different enum happens to have its own <code>Ok</code> / <code>Err</code> variants, use the qualified <code>MyEnum::Ok(x)</code> form for those. The bare sugar always means <code>Result::Ok</code> / <code>Result::Err</code>.</p>
 <h2 id="the-try-operator"><a class="header" href="#the-try-operator">The <code>try</code> operator</a></h2>
 <p><code>try expr</code> evaluates <code>expr</code> and:</p>
 <ul>
@@ -212,7 +227,7 @@ print(parse_positive("-3"))    // Result::Err("must be positive, got -3")
 <pre><code class="language-bop">fn pipeline(s) {
   let n = try parse_positive(s)        // Err propagates; Ok unwraps to `n`
   let doubled = try double_checked(n)
-  return Result::Ok(doubled)
+  return Ok(doubled)
 }
 
 print(pipeline("21"))    // Result::Ok(42)
@@ -242,24 +257,24 @@ print(match r {
 <p>You can construct one explicitly (it’s a regular struct), but most of the time you’ll see them as the payload inside <code>Result::Err(...)</code> returned from <code>try_call</code>.</p>
 <h2 id="combinators--methods-on-result"><a class="header" href="#combinators--methods-on-result">Combinators — methods on <code>Result</code></a></h2>
 <p>Every <code>Result</code> value has a small set of always-available methods. No import needed — <code>Result</code> is a built-in type and its combinators are engine-level methods.</p>
-<pre><code class="language-bop">print(Result::Ok(1).is_ok())                     // true
-print(Result::Err("oops").is_err())              // true
+<pre><code class="language-bop">print(Ok(1).is_ok())                     // true
+print(Err("oops").is_err())              // true
 
 // unwrap_or — default on Err
-print(Result::Ok(10).unwrap_or(0))               // 10
-print(Result::Err("fail").unwrap_or(0))          // 0
+print(Ok(10).unwrap_or(0))               // 10
+print(Err("fail").unwrap_or(0))          // 0
 
 // map — transform the Ok payload, pass Err through
-print(Result::Ok(5).map(fn(n) { return n * n }))      // Result::Ok(25)
-print(Result::Err("x").map(fn(n) { return n * n }))   // Result::Err("x")
+print(Ok(5).map(fn(n) { return n * n }))      // Result::Ok(25)
+print(Err("x").map(fn(n) { return n * n }))   // Result::Err("x")
 
 // and_then — monadic bind (for chaining fallible steps)
 fn halve(x) {
-  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
-  return Result::Err("odd")
+  if x % 2 == 0 { return Ok((x / 2).to_int()) }
+  return Err("odd")
 }
-print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
-print(Result::Ok(7).and_then(halve))                    // Result::Err("odd")
+print(Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+print(Ok(7).and_then(halve))                    // Result::Err("odd")
 </code></pre>
 <p>Available: <code>is_ok</code>, <code>is_err</code>, <code>unwrap</code>, <code>expect</code>, <code>unwrap_or</code>, <code>map</code>, <code>map_err</code>, <code>and_then</code>. See <a href="reference/methods.html#result-methods--result">Methods → Result</a> for the full reference.</p>
 <p><code>unwrap()</code> and <code>expect(msg)</code> raise a runtime error on <code>Err</code> — use sparingly, and prefer <code>try</code> or pattern matching in production code.</p>
