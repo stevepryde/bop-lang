@@ -54,6 +54,15 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::DefineLocal(n) => format!("DefineLocal {}", chunk.name(*n)),
         Instr::StoreVar(n) => format!("StoreVar {}", chunk.name(*n)),
 
+        Instr::LoadLocal(s) => format!("LoadLocal @{}", s.0),
+        Instr::StoreLocal(s) => format!("StoreLocal @{}", s.0),
+
+        Instr::AddLocals(a, b) => format!("AddLocals @{}, @{}", a.0, b.0),
+        Instr::LtLocals(a, b) => format!("LtLocals @{}, @{}", a.0, b.0),
+        Instr::IncLocalInt(s, k) => format!("IncLocalInt @{}, {}", s.0, k),
+        Instr::LoadLocalAddInt(s, k) => format!("LoadLocalAddInt @{}, {}", s.0, k),
+        Instr::LtLocalInt(s, k) => format!("LtLocalInt @{}, {}", s.0, k),
+
         Instr::PushScope => "PushScope".to_string(),
         Instr::PopScope => "PopScope".to_string(),
 
@@ -109,11 +118,15 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         } => {
             let name = chunk.name(*method);
             match assign_back_to {
-                Some(var) => format!(
+                Some(crate::chunk::AssignBack::Name(var)) => format!(
                     "CallMethod .{}/{} (back to {})",
                     name,
                     argc,
                     chunk.name(*var)
+                ),
+                Some(crate::chunk::AssignBack::Slot(slot)) => format!(
+                    "CallMethod .{}/{} (back to @{})",
+                    name, argc, slot.0
                 ),
                 None => format!("CallMethod .{}/{}", name, argc),
             }

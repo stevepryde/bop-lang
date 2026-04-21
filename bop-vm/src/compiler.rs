@@ -8,11 +8,101 @@ use bop::error::BopError;
 use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 
 use crate::chunk::{
-    Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx, EnumVariantDef,
-    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx, PatternIdx, StructDef,
-    StructIdx,
+    CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx,
+    EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx,
+    PatternIdx, SlotIdx, StructDef, StructIdx,
 };
 use bop::parser::{MatchArm, Pattern, VariantKind};
+
+// ─── Local slot resolver ───────────────────────────────────────────
+//
+// Tracks the name → slot mapping for the function currently being
+// compiled. Each nested block (if / while / for-in body, match
+// arm, etc.) pushes a fresh scope; exiting a block pops it. Slot
+// indices only ever grow — a popped block's slots stay allocated
+// in `next_slot`, so blocks never reuse slot numbers. That's
+// slightly wasteful on memory (an unused `Value::None` per
+// abandoned slot) but keeps `LoadLocal(i)` a trivial `Vec` read
+// with no per-call setup beyond the one initial resize. `max_slot`
+// records the high-water mark so the VM can pre-size its slot
+// array exactly once at call time.
+
+struct LocalResolver {
+    /// Stack of scopes. Each scope holds the names that `let` /
+    /// `for-in` / parameter introduced at this depth, paired with
+    /// the slot index they claimed. Inner scopes shadow outer ones
+    /// during name lookup (walked `.iter().rev()`).
+    scopes: Vec<Vec<(String, SlotIdx)>>,
+    /// Next slot number to hand out. Increments on every new
+    /// binding and never rolls back.
+    next_slot: u32,
+    /// High-water mark across the whole function body. Becomes
+    /// `FnDef::slot_count`.
+    max_slot: u32,
+}
+
+impl LocalResolver {
+    fn new(params: &[String]) -> Self {
+        let mut scopes: Vec<Vec<(String, SlotIdx)>> = vec![Vec::with_capacity(params.len())];
+        let mut next_slot = 0u32;
+        for p in params {
+            scopes[0].push((p.clone(), SlotIdx(next_slot)));
+            next_slot += 1;
+        }
+        Self {
+            scopes,
+            next_slot,
+            max_slot: next_slot,
+        }
+    }
+
+    /// Allocate a fresh slot for `name` in the innermost scope.
+    /// Returns the slot so the caller can emit a matching
+    /// `StoreLocal(slot)`. If the name is already bound at this
+    /// depth, it shadows — matches Bop's `let x = 1; let x = 2`
+    /// semantics where the second binding wins.
+    fn declare(&mut self, name: &str) -> SlotIdx {
+        let slot = SlotIdx(self.next_slot);
+        self.next_slot += 1;
+        if self.next_slot > self.max_slot {
+            self.max_slot = self.next_slot;
+        }
+        self.scopes
+            .last_mut()
+            .expect("resolver always has a scope")
+            .push((name.to_string(), slot));
+        slot
+    }
+
+    /// Resolve `name` to its slot by walking scopes inner-to-outer.
+    /// Returns `None` if the name isn't a function-level local —
+    /// the caller then falls back to the name-based `LoadVar` /
+    /// `StoreVar` machinery so captures, imports, fn declarations
+    /// and builtins still resolve.
+    fn resolve(&self, name: &str) -> Option<SlotIdx> {
+        for scope in self.scopes.iter().rev() {
+            for (n, slot) in scope.iter().rev() {
+                if n == name {
+                    return Some(*slot);
+                }
+            }
+        }
+        None
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(Vec::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+        // next_slot intentionally unchanged: a slot allocated
+        // inside a now-dead block stays alive in the frame's
+        // vec. Re-using the index would require tracking liveness
+        // across control flow — not worth the complexity for a
+        // few extra `Value::None` slots per function.
+    }
+}
 
 /// Compile a parsed program into a top-level chunk.
 pub fn compile(program: &[Stmt]) -> Result<Chunk, BopError> {
@@ -27,6 +117,20 @@ pub fn compile(program: &[Stmt]) -> Result<Chunk, BopError> {
 struct Compiler {
     chunk: Chunk,
     loops: Vec<LoopCtx>,
+    /// Stack of active resolvers. Empty at module top-level. A
+    /// fn/lambda compile pushes a fresh resolver; nested fn/lambda
+    /// compiles push another on top. The innermost one governs
+    /// slot allocation and name-to-slot lookup; the rest are
+    /// consulted only for capture resolution when an identifier
+    /// inside the innermost body doesn't resolve locally.
+    resolvers: Vec<LocalResolver>,
+    /// Free variables seen by the innermost function body so far
+    /// — names referenced that didn't resolve in the innermost
+    /// resolver. Deduped (first occurrence wins), ordered so each
+    /// name's index is its capture slot in the final `FnDef`.
+    /// `None` at module top-level where there's nothing to
+    /// capture into.
+    free_vars: Option<Vec<String>>,
 }
 
 struct LoopCtx {
@@ -43,6 +147,30 @@ impl Compiler {
         Self {
             chunk: Chunk::new(),
             loops: Vec::new(),
+            resolvers: Vec::new(),
+            free_vars: None,
+        }
+    }
+
+    /// `Some(innermost_resolver)` iff we're inside a function body.
+    fn current_resolver(&self) -> Option<&LocalResolver> {
+        self.resolvers.last()
+    }
+
+    fn current_resolver_mut(&mut self) -> Option<&mut LocalResolver> {
+        self.resolvers.last_mut()
+    }
+
+    /// Record an identifier that didn't resolve to a slot in the
+    /// innermost function's resolver — it's either a capture
+    /// (resolved when the lambda is built) or a reference to
+    /// something reachable only at runtime (named fn, import).
+    /// No-op at module top-level.
+    fn note_free_var(&mut self, name: &str) {
+        if let Some(list) = self.free_vars.as_mut() {
+            if !list.iter().any(|n| n == name) {
+                list.push(name.to_string());
+            }
         }
     }
 
@@ -53,10 +181,169 @@ impl Compiler {
     // ─── Emission helpers ─────────────────────────────────────────
 
     fn emit(&mut self, instr: Instr, line: u32) -> CodeOffset {
+        // Peephole: fuse a short trailing sequence with the
+        // instruction we're about to emit when it matches a
+        // known hot pattern. Rewriting is always at the current
+        // tail, so no jump target can be pointing into the
+        // collapsed range (loop / `&&` / `||` patch sites target
+        // either before the sub-expression or after the
+        // collapse, never inside it).
+        if let Some(folded) = self.try_peephole(&instr) {
+            self.chunk.code.push(folded);
+            self.chunk.lines.push(line);
+            return CodeOffset((self.chunk.code.len() - 1) as u32);
+        }
         let offset = CodeOffset(self.chunk.code.len() as u32);
         self.chunk.code.push(instr);
         self.chunk.lines.push(line);
         offset
+    }
+
+    /// Trailing-sequence peephole. Returns `Some(fused)` if the
+    /// incoming instruction collapses with the last few already
+    /// in `chunk.code`. On a match we pop the matched tail and
+    /// the caller pushes the fused op (keeping all lines /
+    /// offsets consistent).
+    fn try_peephole(&mut self, incoming: &Instr) -> Option<Instr> {
+        let code = &self.chunk.code;
+        match incoming {
+            Instr::Add => {
+                // `LoadLocal a; LoadLocal b; Add` →
+                // `AddLocals(a, b)`
+                if code.len() >= 2 {
+                    if let (Instr::LoadLocal(a), Instr::LoadLocal(b)) =
+                        (code[code.len() - 2], code[code.len() - 1])
+                    {
+                        self.chunk.code.truncate(code.len() - 2);
+                        self.chunk.lines.truncate(self.chunk.lines.len() - 2);
+                        return Some(Instr::AddLocals(a, b));
+                    }
+                    // `LoadLocal s; LoadConst(Int k); Add` →
+                    // `LoadLocalAddInt(s, k)`. The `fib(n - 1)`
+                    // / `array[i + 1]` pattern — one of the
+                    // hottest sites in recursive benchmarks.
+                    if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
+                        (code[code.len() - 2], code[code.len() - 1])
+                    {
+                        if let crate::chunk::Constant::Int(k) =
+                            self.chunk.constants[c.0 as usize]
+                        {
+                            if let Ok(k32) = i32::try_from(k) {
+                                self.chunk.code.truncate(code.len() - 2);
+                                self.chunk
+                                    .lines
+                                    .truncate(self.chunk.lines.len() - 2);
+                                return Some(Instr::LoadLocalAddInt(s, k32));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Instr::Sub => {
+                // `LoadLocal s; LoadConst(Int k); Sub` →
+                // `LoadLocalAddInt(s, -k)`.
+                if code.len() >= 2 {
+                    if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
+                        (code[code.len() - 2], code[code.len() - 1])
+                    {
+                        if let crate::chunk::Constant::Int(k) =
+                            self.chunk.constants[c.0 as usize]
+                        {
+                            if let Some(neg) = k.checked_neg() {
+                                if let Ok(k32) = i32::try_from(neg) {
+                                    self.chunk.code.truncate(code.len() - 2);
+                                    self.chunk
+                                        .lines
+                                        .truncate(self.chunk.lines.len() - 2);
+                                    return Some(Instr::LoadLocalAddInt(s, k32));
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Instr::Lt => {
+                // `LoadLocal a; LoadLocal b; Lt` → `LtLocals(a, b)`
+                if code.len() >= 2 {
+                    if let (Instr::LoadLocal(a), Instr::LoadLocal(b)) =
+                        (code[code.len() - 2], code[code.len() - 1])
+                    {
+                        self.chunk.code.truncate(code.len() - 2);
+                        self.chunk.lines.truncate(self.chunk.lines.len() - 2);
+                        return Some(Instr::LtLocals(a, b));
+                    }
+                    // `LoadLocal s; LoadConst(Int k); Lt` →
+                    // `LtLocalInt(s, k)` — every `n < 2` base
+                    // case in recursion lands here.
+                    if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
+                        (code[code.len() - 2], code[code.len() - 1])
+                    {
+                        if let crate::chunk::Constant::Int(k) =
+                            self.chunk.constants[c.0 as usize]
+                        {
+                            if let Ok(k32) = i32::try_from(k) {
+                                self.chunk.code.truncate(code.len() - 2);
+                                self.chunk
+                                    .lines
+                                    .truncate(self.chunk.lines.len() - 2);
+                                return Some(Instr::LtLocalInt(s, k32));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Instr::StoreLocal(store_slot) => {
+                // `AddLocals(slot, other); StoreLocal(slot)` and
+                // `LoadLocal(slot); LoadConst(k:Int); Add;
+                // StoreLocal(slot)` both collapse to
+                // `IncLocalInt(slot, k)` when the constant is a
+                // small int — the `i = i + k` idiom.
+                //
+                // Pattern A (post-AddLocals fusion): detect
+                // `AddLocals(slot, other) + StoreLocal(slot)`
+                // only when `other` resolves to a constant via
+                // the preceding `LoadLocal` — we don't handle
+                // that here yet; stick with the direct 3-step
+                // match instead.
+                //
+                // Pattern B: `LoadLocal(slot), LoadConst(Int k),
+                // Add, StoreLocal(slot)`. The `Add` has already
+                // been peephole-collapsed to `AddLocals(slot,
+                // load_slot)` when both are locals — but for
+                // `LoadLocal + LoadConst + Add` the peephole
+                // above didn't fire, so the trailing sequence is
+                // still `LoadLocal(slot), LoadConst(k), Add`.
+                if code.len() >= 3 {
+                    let n = code.len();
+                    if let (
+                        Instr::LoadLocal(ls),
+                        Instr::LoadConst(c),
+                        Instr::Add,
+                    ) = (code[n - 3], code[n - 2], code[n - 1])
+                    {
+                        if ls == *store_slot {
+                            if let crate::chunk::Constant::Int(k) = self
+                                .chunk
+                                .constants[c.0 as usize]
+                            {
+                                if let Ok(k32) = i32::try_from(k) {
+                                    self.chunk.code.truncate(n - 3);
+                                    self.chunk
+                                        .lines
+                                        .truncate(self.chunk.lines.len() - 3);
+                                    return Some(Instr::IncLocalInt(*store_slot, k32));
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     fn current_offset(&self) -> CodeOffset {
@@ -147,11 +434,25 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile a block with an enclosing `PushScope` / `PopScope`.
+    /// Compile a block that introduces its own lexical scope.
+    /// Inside a function body the scope lives purely in the
+    /// compiler's `LocalResolver` (slot allocation) — no runtime
+    /// opcode needed. At module top-level we fall back to
+    /// `PushScope` / `PopScope` so the VM's BTreeMap scope stack
+    /// still tracks block-local bindings.
     fn compile_scoped_block(&mut self, stmts: &[Stmt], line: u32) -> Result<(), BopError> {
-        self.emit(Instr::PushScope, line);
+        let fast = self.current_resolver().is_some();
+        if fast {
+            self.current_resolver_mut().unwrap().push_scope();
+        } else {
+            self.emit(Instr::PushScope, line);
+        }
         self.compile_block_no_scope(stmts)?;
-        self.emit(Instr::PopScope, line);
+        if fast {
+            self.current_resolver_mut().unwrap().pop_scope();
+        } else {
+            self.emit(Instr::PopScope, line);
+        }
         Ok(())
     }
 
@@ -160,8 +461,18 @@ impl Compiler {
         match &stmt.kind {
             StmtKind::Let { name, value } => {
                 self.compile_expr(value)?;
-                let n = self.add_name(name);
-                self.emit(Instr::DefineLocal(n), line);
+                if let Some(resolver) = self.current_resolver_mut() {
+                    // Inside a function body: bind to a slot so
+                    // subsequent reads compile to `LoadLocal`.
+                    let slot = resolver.declare(name);
+                    self.emit(Instr::StoreLocal(slot), line);
+                } else {
+                    // Module top-level: stay on the named-scope
+                    // slow path so imports / dynamic injection
+                    // keep working.
+                    let n = self.add_name(name);
+                    self.emit(Instr::DefineLocal(n), line);
+                }
             }
 
             StmtKind::Assign { target, op, value } => {
@@ -229,16 +540,35 @@ impl Compiler {
                 let loop_start = self.current_offset();
                 let exit_jmp =
                     self.emit(Instr::IterNext { target: CodeOffset(0) }, line);
-                self.emit(Instr::PushScope, line);
-                let var_n = self.add_name(var);
-                self.emit(Instr::DefineLocal(var_n), line);
+
+                // Inside a fn body the loop variable gets its own
+                // slot and the body's nested lets get fresh slots
+                // too (unique per iteration in the compiler's
+                // accounting, but the VM reuses the same
+                // underlying slot across iterations since control
+                // flow reaches the same `StoreLocal`).
+                let fast = self.current_resolver().is_some();
+                if fast {
+                    let resolver = self.current_resolver_mut().unwrap();
+                    resolver.push_scope();
+                    let slot = resolver.declare(var);
+                    self.emit(Instr::StoreLocal(slot), line);
+                } else {
+                    self.emit(Instr::PushScope, line);
+                    let var_n = self.add_name(var);
+                    self.emit(Instr::DefineLocal(var_n), line);
+                }
 
                 self.loops.push(LoopCtx {
                     continue_target: loop_start,
                     break_patches: Vec::new(),
                 });
                 self.compile_block_no_scope(body)?;
-                self.emit(Instr::PopScope, line);
+                if fast {
+                    self.current_resolver_mut().unwrap().pop_scope();
+                } else {
+                    self.emit(Instr::PopScope, line);
+                }
                 self.emit(Instr::Jump(loop_start), line);
 
                 let end = self.current_offset();
@@ -404,20 +734,26 @@ impl Compiler {
         value: &Expr,
         line: u32,
     ) -> Result<(), BopError> {
+        // Small helpers: emit a load / store against the same
+        // binding, picking the slot fast path when the resolver
+        // recognises the name and otherwise falling back to the
+        // name-keyed slow path. Keeps each target arm from
+        // re-doing the resolver dance by hand.
         match target {
             AssignTarget::Variable(name) => {
+                let slot = self.current_resolver().and_then(|r| r.resolve(name));
                 let n = self.add_name(name);
                 match op {
                     AssignOp::Eq => {
                         self.compile_expr(value)?;
                     }
                     compound => {
-                        self.emit(Instr::LoadVar(n), line);
+                        self.emit_load_var(slot, n, line);
                         self.compile_expr(value)?;
                         self.emit(binop_for_compound(*compound), line);
                     }
                 }
-                self.emit(Instr::StoreVar(n), line);
+                self.emit_store_var(slot, n, line);
             }
 
             AssignTarget::Index { object, index } => {
@@ -432,17 +768,18 @@ impl Compiler {
                         ));
                     }
                 };
+                let slot = self.current_resolver().and_then(|r| r.resolve(&name));
                 let name_idx = self.add_name(&name);
 
                 match op {
                     AssignOp::Eq => {
-                        self.emit(Instr::LoadVar(name_idx), line);
+                        self.emit_load_var(slot, name_idx, line);
                         self.compile_expr(index)?;
                         self.compile_expr(value)?;
                         self.emit(Instr::SetIndex, line);
                     }
                     compound => {
-                        self.emit(Instr::LoadVar(name_idx), line);
+                        self.emit_load_var(slot, name_idx, line);
                         self.compile_expr(index)?;
                         self.emit(Instr::Dup2, line);
                         self.emit(Instr::GetIndex, line);
@@ -451,12 +788,12 @@ impl Compiler {
                         self.emit(Instr::SetIndex, line);
                     }
                 }
-                self.emit(Instr::StoreVar(name_idx), line);
+                self.emit_store_var(slot, name_idx, line);
             }
             AssignTarget::Field { object, field } => {
                 // Only bare-`Ident` objects are assignable — the
-                // write-back goes through `StoreVar`, matching
-                // the walker / index-assign convention.
+                // write-back goes through the same fast/slow
+                // fork as regular assignment.
                 let name = match &object.kind {
                     ExprKind::Ident(n) => n.clone(),
                     _ => {
@@ -466,16 +803,17 @@ impl Compiler {
                         ));
                     }
                 };
+                let slot = self.current_resolver().and_then(|r| r.resolve(&name));
                 let name_idx = self.add_name(&name);
                 let field_idx = self.add_name(field);
                 match op {
                     AssignOp::Eq => {
-                        self.emit(Instr::LoadVar(name_idx), line);
+                        self.emit_load_var(slot, name_idx, line);
                         self.compile_expr(value)?;
                         self.emit(Instr::FieldSet(field_idx), line);
                     }
                     compound => {
-                        self.emit(Instr::LoadVar(name_idx), line);
+                        self.emit_load_var(slot, name_idx, line);
                         self.emit(Instr::Dup, line);
                         self.emit(Instr::FieldGet(field_idx), line);
                         self.compile_expr(value)?;
@@ -483,10 +821,43 @@ impl Compiler {
                         self.emit(Instr::FieldSet(field_idx), line);
                     }
                 }
-                self.emit(Instr::StoreVar(name_idx), line);
+                self.emit_store_var(slot, name_idx, line);
             }
         }
         Ok(())
+    }
+
+    /// Emit a variable load that picks the slot fast path when
+    /// the caller already resolved it; otherwise falls back to
+    /// the name-based `LoadVar` and notes the name as a free
+    /// variable for the enclosing lambda's capture list.
+    fn emit_load_var(&mut self, slot: Option<SlotIdx>, name: NameIdx, line: u32) {
+        match slot {
+            Some(s) => {
+                self.emit(Instr::LoadLocal(s), line);
+            }
+            None => {
+                let name_str = self.chunk.names[name.0 as usize].clone();
+                self.note_free_var(&name_str);
+                self.emit(Instr::LoadVar(name), line);
+            }
+        };
+    }
+
+    /// Emit a variable store — slot fast path when resolved, name-
+    /// keyed `StoreVar` when the binding's in the BTreeMap scope
+    /// slow path (module top-level, captures, match bindings).
+    fn emit_store_var(&mut self, slot: Option<SlotIdx>, name: NameIdx, line: u32) {
+        match slot {
+            Some(s) => {
+                self.emit(Instr::StoreLocal(s), line);
+            }
+            None => {
+                let name_str = self.chunk.names[name.0 as usize].clone();
+                self.note_free_var(&name_str);
+                self.emit(Instr::StoreVar(name), line);
+            }
+        };
     }
 
     // ─── Expressions ──────────────────────────────────────────────
@@ -520,8 +891,21 @@ impl Compiler {
             }
 
             ExprKind::Ident(name) => {
-                let n = self.add_name(name);
-                self.emit(Instr::LoadVar(n), line);
+                // Slot resolution first — inside a function body
+                // this is the fast path. Falls through to the
+                // name-based `LoadVar` for captures, imports,
+                // named fns, and module-level bindings; the
+                // fallback also records the name as a free
+                // variable so `compile_function` can lift it into
+                // the enclosing function's captures list when
+                // this happens inside a lambda body.
+                if let Some(slot) = self.current_resolver().and_then(|r| r.resolve(name)) {
+                    self.emit(Instr::LoadLocal(slot), line);
+                } else {
+                    self.note_free_var(name);
+                    let n = self.add_name(name);
+                    self.emit(Instr::LoadVar(n), line);
+                }
             }
 
             ExprKind::BinaryOp { left, op, right } => {
@@ -540,23 +924,55 @@ impl Compiler {
             }
 
             ExprKind::Call { callee, args } => {
-                // Ident callees take the name-based fast path so
-                // builtins / host / named-fn dispatch stays O(1).
-                // Anything else (indexed call, nested call result,
-                // if-expr returning a fn, …) evaluates the callee
-                // onto the stack and goes through `CallValue`.
+                // Three cases for bare-ident callees:
+                //  1. The ident resolves to a function-level slot
+                //     — it's a `Value::Fn` parameter or a lambda
+                //     stored in a local. Load it onto the stack
+                //     and go through `CallValue` so the VM
+                //     dispatches on the `Value::Fn` directly.
+                //  2. The ident is some other name (builtin,
+                //     host fn, declared user fn, captured value)
+                //     — the fast `Call { name }` path does the
+                //     dynamic resolution.
+                //  3. Non-ident callee (`funcs[0](x)`,
+                //     `make_adder(5)(3)`) — evaluate the callee
+                //     onto the stack, then `CallValue`.
                 if let ExprKind::Ident(name) = &callee.kind {
-                    for arg in args {
-                        self.compile_expr(arg)?;
+                    if let Some(slot) = self.current_resolver().and_then(|r| r.resolve(name)) {
+                        self.emit(Instr::LoadLocal(slot), line);
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit(
+                            Instr::CallValue {
+                                argc: args.len() as u32,
+                            },
+                            line,
+                        );
+                    } else {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        let name_idx = self.add_name(name);
+                        // `Call { name }` may end up consulting
+                        // captures / scopes at runtime, so a
+                        // bare-ident callee is effectively a free
+                        // variable from the lambda's point of
+                        // view. Record so the enclosing fn
+                        // packages the binding at `MakeLambda`
+                        // time (covers cases like `fn f() { let
+                        // g = fn() { ... }; return fn() { g() }
+                        // }` where the inner lambda calls a
+                        // captured local by name).
+                        self.note_free_var(name);
+                        self.emit(
+                            Instr::Call {
+                                name: name_idx,
+                                argc: args.len() as u32,
+                            },
+                            line,
+                        );
                     }
-                    let name_idx = self.add_name(name);
-                    self.emit(
-                        Instr::Call {
-                            name: name_idx,
-                            argc: args.len() as u32,
-                        },
-                        line,
-                    );
                 } else {
                     self.compile_expr(callee)?;
                     for arg in args {
@@ -576,8 +992,20 @@ impl Compiler {
                 method,
                 args,
             } => {
+                // A bare-ident receiver gets a write-back target
+                // so mutating methods (`arr.push(v)`, etc.) update
+                // the original binding. Slot-resolved locals go
+                // through `AssignBack::Slot` for a direct frame
+                // write; everything else keeps the name-keyed
+                // fallback via `AssignBack::Name`.
                 let assign_back_to = match &object.kind {
-                    ExprKind::Ident(n) => Some(self.add_name(n)),
+                    ExprKind::Ident(n) => {
+                        if let Some(slot) = self.current_resolver().and_then(|r| r.resolve(n)) {
+                            Some(crate::chunk::AssignBack::Slot(slot))
+                        } else {
+                            Some(crate::chunk::AssignBack::Name(self.add_name(n)))
+                        }
+                    }
                     _ => None,
                 };
                 self.compile_expr(object)?;
@@ -894,20 +1322,103 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile a function / lambda body. The body gets its own
+    /// chunk, its own slot-based resolver, and its own free-var
+    /// tracker — all saved/restored on `self` so the parent
+    /// compile state isn't disturbed.
+    ///
+    /// Captures are resolved here: any free variable the body
+    /// referenced becomes a `CaptureSource`. If the enclosing
+    /// function's resolver has the name as a local, the source is
+    /// `ParentSlot`; otherwise it's `ParentScope` (looked up at
+    /// `MakeLambda` time via the enclosing frame's BTreeMap scope
+    /// stack — so module-top-level bindings, captures-of-captures,
+    /// and named fn references all keep working).
     fn compile_function(
         &mut self,
         name: &str,
         params: &[String],
         body: &[Stmt],
     ) -> Result<FnDef, BopError> {
-        let mut fn_compiler = Compiler::new();
-        fn_compiler.compile_block_no_scope(body)?;
-        // Implicit `return none` if control falls off the end.
-        fn_compiler.emit(Instr::ReturnNone, 0);
+        // Save outer compile state so the body's chunk / loops /
+        // free-var list stays isolated.
+        let saved_chunk = core::mem::take(&mut self.chunk);
+        let saved_loops = core::mem::take(&mut self.loops);
+        let saved_free = self.free_vars.take();
+
+        // Enter the new function: push a resolver + start a
+        // fresh free-var collector.
+        self.resolvers.push(LocalResolver::new(params));
+        self.free_vars = Some(Vec::new());
+
+        // Compile the body into the new chunk. Catch errors so we
+        // still restore state on the way out.
+        let result = (|| {
+            self.compile_block_no_scope(body)?;
+            self.emit(Instr::ReturnNone, 0);
+            Ok::<(), BopError>(())
+        })();
+
+        // Snapshot what we need from the function's compile
+        // state before restoring the outer one.
+        let resolver = self.resolvers.pop().expect("resolver pushed above");
+        let free = self.free_vars.take().expect("free-vars set above");
+        let mut chunk = core::mem::replace(&mut self.chunk, saved_chunk);
+        self.loops = saved_loops;
+        self.free_vars = saved_free;
+
+        result?;
+
+        // Resolve each free variable against the enclosing
+        // resolver (if any) to decide whether it's a direct slot
+        // read or a by-name scope read at `MakeLambda` time.
+        //
+        // Two-pass so the enclosing-frame read doesn't fight the
+        // mut-borrow of `note_free_var`.
+        let parent_is_function = !self.resolvers.is_empty();
+        let resolutions: Vec<(String, CaptureSource)> = free
+            .into_iter()
+            .map(|name| {
+                let slot = self
+                    .resolvers
+                    .last()
+                    .and_then(|p| p.resolve(&name));
+                let source = match slot {
+                    Some(slot) => CaptureSource::ParentSlot(slot),
+                    None => CaptureSource::ParentScope(name.clone()),
+                };
+                (name, source)
+            })
+            .collect();
+
+        let mut capture_names: Vec<String> = Vec::with_capacity(resolutions.len());
+        let mut capture_sources: Vec<CaptureSource> = Vec::with_capacity(resolutions.len());
+        for (name, source) in resolutions {
+            // If the enclosing scope is itself a function (so
+            // `ParentScope` means "look at the outer fn's
+            // captures"), make sure the outer fn knows to package
+            // the name too — otherwise a nested lambda's
+            // capture-of-capture would never reach its ultimate
+            // source. Example: `fn f() { let x = 1; return fn() {
+            // return fn() { return x } } }` — the inner lambda's
+            // capture of x propagates outward via this re-note.
+            if parent_is_function
+                && matches!(source, CaptureSource::ParentScope(_))
+            {
+                self.note_free_var(&name);
+            }
+            capture_names.push(name);
+            capture_sources.push(source);
+        }
+
+        chunk.slot_count = resolver.max_slot;
         Ok(FnDef {
             name: name.to_string(),
             params: params.to_vec(),
-            chunk: fn_compiler.finish(),
+            chunk,
+            slot_count: resolver.max_slot,
+            capture_names,
+            capture_sources,
         })
     }
 }

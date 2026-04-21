@@ -271,7 +271,11 @@ print(double(5))"#,
     assert!(d.contains("DefineFn #0 (double)"), "top-level missing fn def:\n{}", d);
     assert!(d.contains("Call double/1"), "call site missing:\n{}", d);
     assert!(d.contains("fn #0 double(x):"), "nested body header missing:\n{}", d);
-    assert!(d.contains("LoadVar x"), "body body missing:\n{}", d);
+    // Param `x` resolves to the function's slot 0 (the compile-
+    // time `LocalResolver` assigns params in declaration order),
+    // so the body reads it via `LoadLocal @0` rather than the
+    // old name-keyed `LoadVar`.
+    assert!(d.contains("LoadLocal @0"), "body body missing:\n{}", d);
     assert!(d.contains("Mul"), "body op missing:\n{}", d);
     assert!(d.contains("Return"), "body return missing:\n{}", d);
 }

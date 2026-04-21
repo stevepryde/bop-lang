@@ -885,7 +885,7 @@ the codebase walkthrough. Linked to the phase that delivered
 | **`std.collections`** (Set / Queue / Stack) | ✅ done | Shipped as struct types with value-semantic methods + `union`/`intersect`/`difference`. |
 | **`std.json`** (parse / stringify) | ✅ done | Pure Bop implementation; parse raises on malformed input and `try_call` surfaces the error. `\b` / `\f` / `\uXXXX` escapes documented as known gaps. |
 | **Match exhaustiveness checking** | ✅ done | `bop::check` + `BopWarning`, phase 9. Imported enums still opaque. |
-| **Performance** | ✅ first pass | VM is now at parity with the walker — 0.98×–1.05× on call-heavy and loop-heavy micro-benchmarks after two rounds of targeted hot-path fixes. See tech-debt notes for the concrete changes. |
+| **Performance** | ✅ meaningfully faster | VM now runs **2.5×–3.1× faster** than the tree-walker on micro-benchmarks (combined: 2.6×; fib(28): 2.5×; 500k-iter loop: 3.1×). Earned via compile-time slot resolution + capture analysis + peephole superinstructions. Makes the VM a genuinely useful tier for embedders: walker for simple/portable cases, VM for "I need speed but can't bring rustc to the target machine," AOT for max speed. |
 | **Documentation** (tutorial, reference, API docs) | ❌ open | No user-facing docs beyond this roadmap and inline `///` comments. |
 | **Packaging** (`bop install`, dependency manifest) | ⏸ deferred | Phase 8 in the plan; explicitly parked for now. `bop-std` bundled-source approach handles stdlib without needing a package manager. |
 
@@ -1025,6 +1025,81 @@ shipping, but each one hurts maintenance or future work.
   `Value::clone` reduction, inline caches, compile-time
   slot resolution, superinstructions — would need a real
   profiler session rather than static reasoning.
+- ~~**VM only at parity with the walker — no reason for embedders to use it.**~~
+  ✅ Third pass landed the structural changes that were
+  hinted at in the previous entry. VM is now 2.5×–3.1× faster
+  than the tree-walker on call-heavy + loop-heavy
+  micro-benchmarks. The point of a bytecode VM is to *beat*
+  the AST walker — otherwise it's just a second
+  implementation of the same semantics. Now it earns its
+  keep, especially in the embedding use case (Rust apps
+  that want to hand scripts to AI / users at runtime
+  without shipping rustc to the target machine).
+
+  What moved the needle:
+  - **Compile-time slot resolution.** `LocalResolver` in
+    the compiler assigns every parameter, `let`, and
+    `for-in` variable a numeric slot index at compile time.
+    Inside a function body, identifier references emit
+    `LoadLocal(slot)` / `StoreLocal(slot)` — direct
+    `Vec<Value>` indexing, no `BTreeMap<String, Value>`
+    lookup, no `String` hashing, no scope-stack walk.
+    Function frames carry a flat `slots: Vec<Value>`
+    alongside (now usually empty) `scopes: Vec<BTreeMap>`.
+    Module top-level keeps the BTreeMap path so `import`
+    can still inject names dynamically.
+  - **Compile-time capture analysis.** Lambda bodies track
+    their free variables during compilation; each one
+    becomes a `CaptureSource::ParentSlot(slot)` or
+    `CaptureSource::ParentScope(name)` on the emitted
+    `FnDef`. `MakeLambda` at runtime reads exactly those
+    sources from the defining frame — no over-capture of
+    out-of-scope slots (would have changed semantics) and
+    no full `BTreeMap` flatten. Nested-lambda
+    capture-of-capture propagates by re-noting the name in
+    the parent's free-var list.
+  - **Slot vec freelist.** ~500 000 `Vec::with_capacity`
+    allocations in `fib(28)` (one per call frame) collapse
+    into a ~64-entry freelist that recycles the backing
+    buffers across calls. `enter_user_fn` / `call_closure`
+    / user-method dispatch / return / unwind all route
+    through `take_slots` / `return_slots`.
+  - **Peephole superinstructions.** The compiler collapses
+    hot trailing sequences into single opcodes at emit
+    time (safe because the rewrite window is always the
+    tail — no jump target can land in it):
+    - `LoadLocal(a) + LoadLocal(b) + Add` → `AddLocals(a, b)`
+    - `LoadLocal(a) + LoadLocal(b) + Lt`  → `LtLocals(a, b)`
+    - `LoadLocal(s) + LoadConst(Int k) + Add` → `LoadLocalAddInt(s, k)`
+      (and `Sub` with negated k goes here too, so `n - 1`
+      is one opcode)
+    - `LoadLocal(s) + LoadConst(Int k) + Lt` → `LtLocalInt(s, k)`
+    - `LoadLocal(s) + LoadConst(Int k) + Add + StoreLocal(s)`
+      → `IncLocalInt(s, k)` — the `i = i + 1` idiom.
+    All five opcodes have an Int→Int fast path in the VM
+    and fall back to generic `ops::add` / `ops::lt` on
+    non-Int operands, so semantics stay identical.
+  - **`AssignBack` enum** on `Instr::CallMethod` lets
+    mutating methods (`arr.push(v)`) write back to either
+    a slot or a named scope binding depending on where the
+    receiver came from. Required once the receiver could
+    be a slot-resolved local; before slots landed, all
+    receivers were name-scoped.
+
+  Benchmarks (release, best-of-5, Apple silicon):
+
+  ```text
+                      walker       VM    speedup
+  fib(28)            180 ms     72 ms    2.5×
+  count(500k)         72 ms     23 ms    3.1×
+  combined (fib 25   70 ms     27 ms    2.6×
+   + 2×100k loops)
+  ```
+
+  All 219 VM differential tests, 338 core walker tests,
+  the three-way corpus, and the compile-roundtrip / stdlib
+  smoke suites stay green. Nothing in the walker or AOT
+  changed — this is purely additive VM work.
 
 ## Deliberately out of scope
 

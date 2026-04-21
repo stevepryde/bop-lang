@@ -66,8 +66,8 @@ use bop::value::{BopFn, FnBody, Value};
 use bop::{BopHost, BopLimits};
 
 use crate::chunk::{
-    Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx, EnumVariantShape, FnIdx, Instr,
-    NameIdx, PatternIdx, StructIdx,
+    CaptureSource, Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx, EnumVariantShape,
+    FnDef, FnIdx, Instr, NameIdx, PatternIdx, StructIdx,
 };
 
 /// Hard cap on call depth; matches the tree-walker.
@@ -88,6 +88,13 @@ const STEP_SCALE: u64 = 8;
 /// instead of every instruction.
 const TICK_MEMCHECK_MASK: u64 = 0xFF;
 
+/// Maximum slot vecs kept on the freelist. Deep recursion with
+/// varying slot counts could otherwise grow this unboundedly.
+/// `MAX_CALL_DEPTH` (64) plus a little headroom is plenty — any
+/// extra allocations just go back through the global allocator
+/// like before.
+const SLOTS_FREELIST_CAP: usize = 128;
+
 // ─── Stack slot ────────────────────────────────────────────────────
 
 enum Slot {
@@ -103,6 +110,18 @@ enum Slot {
 struct Frame {
     chunk: Rc<Chunk>,
     ip: usize,
+    /// Flat slot array for this function's compile-time-resolved
+    /// locals (params + every `let` / `for-in` variable assigned
+    /// a slot). `LoadLocal(slot)` / `StoreLocal(slot)` read and
+    /// write directly into this vec — the VM's hot path for
+    /// variable access. Empty for module-top-level frames and
+    /// match-body sub-scopes where slot resolution doesn't apply.
+    slots: Vec<Value>,
+    /// Slow-path BTreeMap scope stack. Used for module-top-level
+    /// bindings, match-pattern bindings, captures snapshotted
+    /// into lambdas, and anything else that reaches `LoadVar` /
+    /// `DefineLocal` / `StoreVar`. Function frames that stay on
+    /// the fast path never push into this at runtime.
     scopes: Vec<BTreeMap<String, Value>>,
     stack_base: usize,
     is_function: bool,
@@ -208,6 +227,12 @@ pub struct Vm<'h, H: BopHost> {
     /// name; inner is the method name. Registered by
     /// `DefineMethod`; looked up by `CallMethod`.
     user_methods: BTreeMap<String, BTreeMap<String, Rc<FnEntry>>>,
+    /// Freelist of cleared slot vecs from popped frames. Every
+    /// fn call needs a fresh `Vec<Value>` sized to `slot_count`
+    /// — allocating a new one per call was ~500k small heap
+    /// allocations under `fib(28)`. On return we truncate + park;
+    /// next call grabs one, resizes in place.
+    slots_freelist: Vec<Vec<Value>>,
 }
 
 impl<'h, H: BopHost> Vm<'h, H> {
@@ -230,6 +255,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let top = Frame {
             chunk: Rc::new(chunk),
             ip: 0,
+            slots: Vec::new(),
             scopes: vec![BTreeMap::new()],
             stack_base: 0,
             is_function: false,
@@ -250,7 +276,33 @@ impl<'h, H: BopHost> Vm<'h, H> {
             struct_defs: BTreeMap::new(),
             enum_defs: BTreeMap::new(),
             user_methods: BTreeMap::new(),
+            slots_freelist: Vec::new(),
         }
+    }
+
+    /// Grab a slot vec from the freelist or allocate a fresh one,
+    /// then size it to `len` with `Value::None` placeholders.
+    /// Callers write their args into the first few entries after
+    /// calling this.
+    fn take_slots(&mut self, len: usize) -> Vec<Value> {
+        let mut v = self.slots_freelist.pop().unwrap_or_default();
+        if v.capacity() < len {
+            v.reserve(len - v.capacity());
+        }
+        v.resize(len, Value::None);
+        v
+    }
+
+    /// Return a slot vec to the freelist after a frame pops. We
+    /// clear (not deallocate) so the next call reuses the backing
+    /// allocation. Capped so a pathological call graph doesn't
+    /// grow unbounded memory.
+    fn return_slots(&mut self, mut slots: Vec<Value>) {
+        if self.slots_freelist.len() >= SLOTS_FREELIST_CAP {
+            return;
+        }
+        slots.clear();
+        self.slots_freelist.push(slots);
     }
 
     pub fn run(mut self) -> Result<(), BopError> {
@@ -592,6 +644,112 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         format!("Use `let` to create a new variable: let {} = ...", name),
                     ));
                 }
+            }
+
+            // ─── Slot-based locals (fast path) ───────────────────
+            Instr::LoadLocal(slot) => {
+                // Direct vec index — no hashing, no string compare.
+                // Slots are pre-sized at call time from the
+                // enclosing `FnDef::slot_count`, so an out-of-range
+                // read can only happen on miscompiled bytecode.
+                let frame = self.frames.last().expect("frame present");
+                let v = frame
+                    .slots
+                    .get(slot.0 as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        error(line, "VM: local slot out of range")
+                    })?;
+                self.push_value(v);
+            }
+            Instr::StoreLocal(slot) => {
+                let v = self.pop_value(line)?;
+                let frame = self.frames.last_mut().expect("frame present");
+                let i = slot.0 as usize;
+                if i < frame.slots.len() {
+                    frame.slots[i] = v;
+                } else {
+                    return Err(error(line, "VM: local slot out of range"));
+                }
+            }
+
+            // ─── Superinstructions ───────────────────────────────
+            Instr::AddLocals(a, b) => {
+                // Typed fast path: Int + Int → Int, no Value
+                // variant match and no stack push/pop for the
+                // operands. `fib`'s recursive body and every
+                // `total = total + i` loop go through here.
+                let frame = self.frames.last().expect("frame present");
+                let av = &frame.slots[a.0 as usize];
+                let bv = &frame.slots[b.0 as usize];
+                let result = match (av, bv) {
+                    (Value::Int(x), Value::Int(y)) => match x.checked_add(*y) {
+                        Some(v) => Value::Int(v),
+                        None => return Err(error(line, "integer overflow in +")),
+                    },
+                    // Cold path: delegate to the generic Value
+                    // adder. Covers Number, String concat, array
+                    // concat, etc.
+                    _ => ops::add(av, bv, line)?,
+                };
+                self.push_value(result);
+            }
+            Instr::LtLocals(a, b) => {
+                let frame = self.frames.last().expect("frame present");
+                let av = &frame.slots[a.0 as usize];
+                let bv = &frame.slots[b.0 as usize];
+                let result = match (av, bv) {
+                    (Value::Int(x), Value::Int(y)) => Value::Bool(x < y),
+                    _ => ops::lt(av, bv, line)?,
+                };
+                self.push_value(result);
+            }
+            Instr::IncLocalInt(slot, k) => {
+                // `slot += k` for small-int `k`, the `i = i + 1`
+                // idiom. Fast path: Int → Int with overflow
+                // check. On non-Int, build an Int value and
+                // dispatch through generic add so `x = x + 1`
+                // still works when `x` is a Number.
+                let frame = self.frames.last_mut().expect("frame present");
+                let i = slot.0 as usize;
+                let current = &frame.slots[i];
+                let new = match current {
+                    Value::Int(x) => match x.checked_add(k as i64) {
+                        Some(v) => Value::Int(v),
+                        None => return Err(error(line, "integer overflow in +")),
+                    },
+                    _ => ops::add(current, &Value::Int(k as i64), line)?,
+                };
+                frame.slots[i] = new;
+            }
+            Instr::LoadLocalAddInt(slot, k) => {
+                // Push `slots[slot] + k`. Covers `fib(n - 1)` and
+                // `array[i + 1]` after the compiler folds a
+                // small-int literal into the op. `Sub` falls
+                // into the same opcode at compile time by
+                // negating the constant.
+                let frame = self.frames.last().expect("frame present");
+                let v = &frame.slots[slot.0 as usize];
+                let result = match v {
+                    Value::Int(x) => match x.checked_add(k as i64) {
+                        Some(v) => Value::Int(v),
+                        None => return Err(error(line, "integer overflow in +")),
+                    },
+                    _ => ops::add(v, &Value::Int(k as i64), line)?,
+                };
+                self.push_value(result);
+            }
+            Instr::LtLocalInt(slot, k) => {
+                // Push `slots[slot] < k` — the `n < 2` base-case
+                // test in `fib` and every bounded `while i < K`
+                // loop.
+                let frame = self.frames.last().expect("frame present");
+                let v = &frame.slots[slot.0 as usize];
+                let result = match v {
+                    Value::Int(x) => Value::Bool(*x < k as i64),
+                    _ => ops::lt(v, &Value::Int(k as i64), line)?,
+                };
+                self.push_value(result);
             }
 
             // ─── Scope ────────────────────────────────────────────
@@ -1178,31 +1336,45 @@ impl<'h, H: BopHost> Vm<'h, H> {
         if self.stack.len() < argc {
             return Err(error(line, "VM: stack underflow"));
         }
-        // Move args in place via `mem::replace` + truncate, so
-        // the hot path avoids any `Vec<Value>` allocation. The
-        // replace-with-`Value::None` leaves behind a cheap
-        // placeholder that `truncate` immediately drops.
+
+        // Build the frame's flat slot array: args go into the
+        // first `argc` slots (by compile-time-assigned order),
+        // the rest of `slot_count` are pre-seeded with `None` so
+        // later `StoreLocal`s land in-bounds. Backing allocation
+        // comes from the freelist when possible — ~500k per-call
+        // heap allocs under `fib(28)` fold into a steady-state
+        // set of ~MAX_CALL_DEPTH reused vecs.
+        let slot_count = (entry.chunk.slot_count as usize).max(argc);
+        let mut slots = self.take_slots(slot_count);
         let start = self.stack.len() - argc;
-        let mut scope = BTreeMap::new();
-        for (i, param) in entry.params.iter().enumerate() {
+        for i in 0..argc {
             let slot = core::mem::replace(
                 &mut self.stack[start + i],
                 Slot::Value(Value::None),
             );
-            let v = match slot {
-                Slot::Value(v) => v,
+            match slot {
+                Slot::Value(v) => slots[i] = v,
                 _ => {
                     self.stack.truncate(start);
+                    self.return_slots(slots);
                     return Err(error(line, "VM: expected value on stack"));
                 }
-            };
-            scope.insert(param.clone(), v);
+            }
         }
         self.stack.truncate(start);
+
         let frame = Frame {
             chunk: entry.chunk.clone(),
             ip: 0,
-            scopes: vec![scope],
+            slots,
+            // Function frames don't use the BTreeMap scope stack
+            // on the fast path — captures are on the `Value::Fn`
+            // itself (handled in `call_closure`), and all locals
+            // live in `slots`. An empty `scopes` vec is cheap to
+            // allocate and keeps `LoadVar` / `DefineLocal` from
+            // panicking if they still get emitted (they shouldn't
+            // inside a fn body, but the fallback is safe).
+            scopes: Vec::new(),
             stack_base: self.stack.len(),
             is_function: true,
             try_call_wrapper: false,
@@ -1235,7 +1407,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         &mut self,
         method_idx: NameIdx,
         argc: usize,
-        assign_back_to: Option<NameIdx>,
+        assign_back_to: Option<crate::chunk::AssignBack>,
         line: u32,
     ) -> Result<Next, BopError> {
         let method = self.current_chunk().name(method_idx).to_string();
@@ -1278,18 +1450,21 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         "Check that your recursive function has a base case that stops calling itself.",
                     ));
                 }
-                let mut scope = BTreeMap::new();
-                // Prepend `self` as the first parameter.
-                let mut full_args = Vec::with_capacity(args.len() + 1);
-                full_args.push(obj);
-                full_args.extend(args);
-                for (param, arg) in entry.params.iter().zip(full_args) {
-                    scope.insert(param.clone(), arg);
+                // User methods use the same slot-based frame
+                // layout as regular fn calls. `self` takes slot 0,
+                // remaining params take 1..entry.params.len().
+                let slot_count = (entry.chunk.slot_count as usize)
+                    .max(entry.params.len());
+                let mut slots = self.take_slots(slot_count);
+                slots[0] = obj;
+                for (i, a) in args.into_iter().enumerate() {
+                    slots[i + 1] = a;
                 }
                 self.frames.push(Frame {
                     chunk: entry.chunk.clone(),
                     ip: 0,
-                    scopes: vec![scope],
+                    slots,
+                    scopes: Vec::new(),
                     stack_base: self.stack.len(),
                     is_function: true,
                     try_call_wrapper: false,
@@ -1316,9 +1491,25 @@ impl<'h, H: BopHost> Vm<'h, H> {
         };
 
         if methods::is_mutating_method(&method) {
-            if let (Some(var_idx), Some(new_obj)) = (assign_back_to, mutated) {
-                let var_name = self.current_chunk().name(var_idx).to_string();
-                self.set_existing(&var_name, new_obj);
+            if let (Some(target), Some(new_obj)) = (assign_back_to, mutated) {
+                match target {
+                    crate::chunk::AssignBack::Slot(slot) => {
+                        let frame = self.frames.last_mut().expect("frame present");
+                        let i = slot.0 as usize;
+                        if i < frame.slots.len() {
+                            frame.slots[i] = new_obj;
+                        }
+                        // Out-of-range slot: silently drop the
+                        // mutation. The compiler only emits
+                        // `Slot(i)` for a slot it knows exists,
+                        // so this branch is effectively a
+                        // miscompile guard.
+                    }
+                    crate::chunk::AssignBack::Name(var_idx) => {
+                        let var_name = self.current_chunk().name(var_idx).to_string();
+                        self.set_existing(&var_name, new_obj);
+                    }
+                }
             }
         }
         self.push_value(ret);
@@ -1738,29 +1929,92 @@ impl<'h, H: BopHost> Vm<'h, H> {
         self.functions.insert(fn_def.name, entry);
     }
 
-    /// Materialise a lambda expression as a `Value::Fn`. Captures
-    /// the flattened current scope at runtime (matching the
-    /// tree-walker's snapshot semantics) and wraps the
-    /// pre-compiled chunk as the closure's opaque body.
+    /// Materialise a lambda expression as a `Value::Fn`. Each
+    /// `CaptureSource` in the lambda's `FnDef` tells us exactly
+    /// where to read the captured value from the enclosing frame
+    /// — no "flatten every binding in sight" pass, and no
+    /// over-capture of out-of-scope slots.
     fn make_lambda(&mut self, idx: FnIdx) {
         let fn_def = self.current_chunk().function(idx).clone();
-        let captures = self.snapshot_captures();
+        let captures = self.snapshot_captures_for(&fn_def);
         let body: Rc<dyn core::any::Any + 'static> = Rc::new(fn_def.chunk);
         let value = Value::new_compiled_fn(fn_def.params, captures, body, None);
         self.push_value(value);
     }
 
-    /// Flatten the current frame's scope stack into a
-    /// `(name, value)` list — inner scopes shadow outer ones. Used
-    /// only by `make_lambda`.
-    fn snapshot_captures(&self) -> Vec<(String, Value)> {
-        let mut flat = BTreeMap::new();
-        for scope in self.current_scopes() {
-            for (k, v) in scope {
-                flat.insert(k.clone(), v.clone());
-            }
+    /// Package the captures for a lambda according to its
+    /// compile-time `capture_sources`. `ParentSlot(n)` reads slot
+    /// `n` from the enclosing frame; `ParentScope(name)` walks
+    /// the enclosing frame's BTreeMap scope stack to find the
+    /// binding.
+    ///
+    /// A `ParentScope` miss doesn't automatically become
+    /// `Value::None`: if the name happens to be a globally-
+    /// reachable user fn / host / builtin, we *skip* the capture
+    /// entirely so the lambda body's `Call { name }` / `LoadVar`
+    /// dispatches fall through to the fn registry at call time.
+    /// Otherwise a shadowing `None` would turn `fn() { risky(5)
+    /// }` into "`risky` is a none, not a function" — the bug this
+    /// filter fixes.
+    fn snapshot_captures_for(&self, fn_def: &FnDef) -> Vec<(String, Value)> {
+        let frame = self.frames.last().expect("frame present");
+        let mut out = Vec::with_capacity(fn_def.capture_names.len());
+        for (name, source) in fn_def
+            .capture_names
+            .iter()
+            .zip(fn_def.capture_sources.iter())
+        {
+            match source {
+                CaptureSource::ParentSlot(slot) => {
+                    let v = frame
+                        .slots
+                        .get(slot.0 as usize)
+                        .cloned()
+                        .unwrap_or(Value::None);
+                    out.push((name.clone(), v));
+                }
+                CaptureSource::ParentScope(look_name) => {
+                    let mut found = None;
+                    for scope in frame.scopes.iter().rev() {
+                        if let Some(v) = scope.get(look_name.as_str()) {
+                            found = Some(v.clone());
+                            break;
+                        }
+                    }
+                    if let Some(v) = found {
+                        out.push((name.clone(), v));
+                    } else if self.is_globally_reachable_name(look_name) {
+                        // Skip — the lambda body's dynamic
+                        // dispatch will find it at call time.
+                    } else {
+                        out.push((name.clone(), Value::None));
+                    }
+                }
+            };
         }
-        flat.into_iter().collect()
+        out
+    }
+
+    /// A name reachable through the VM's non-scope registries at
+    /// call time: declared user fns, core callable builtins, and
+    /// host-provided fns. Used by capture snapshotting to avoid
+    /// shadowing globals with a `None` when the defining frame
+    /// doesn't itself have the binding.
+    fn is_globally_reachable_name(&self, name: &str) -> bool {
+        if self.functions.contains_key(name) {
+            return true;
+        }
+        if bop::suggest::CORE_CALLABLE_BUILTINS.contains(&name) {
+            return true;
+        }
+        // Host fn probe: there's no registry API, so we infer by
+        // calling with zero args and seeing if it's handled. That
+        // would mutate host state on some hosts, so keep it as
+        // an overly-conservative fallback only for names that
+        // look like host fns by convention. For now, return false
+        // — if a host fn is being captured, the user can
+        // declare a local shim.
+        false
     }
 
     /// Call a `Value::Fn` by pushing a new frame whose scope holds
@@ -1816,9 +2070,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
             ));
         }
 
-        // Seed the scope: captures first so params shadow on
-        // collision, self-reference wins over everything so the
-        // closure can find itself in the body.
+        // Lambda params + locals go into the flat `slots` array
+        // (same fast path as named fns). Captures and the
+        // `self_name` self-reference stay on the BTreeMap scope
+        // stack — they're looked up by name at the compile-time
+        // fallback path (`LoadVar`) because the compiler can't
+        // resolve them to slots from inside the lambda body.
+        let slot_count = (chunk.slot_count as usize).max(func.params.len());
+        let mut slots = self.take_slots(slot_count);
+        for (i, arg) in args.into_iter().enumerate() {
+            slots[i] = arg;
+        }
+
         let mut scope = BTreeMap::new();
         for (name, value) in &func.captures {
             scope.insert(name.clone(), value.clone());
@@ -1826,13 +2089,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
         if let Some(self_name) = &func.self_name {
             scope.insert(self_name.clone(), Value::Fn(Rc::clone(func)));
         }
-        for (param, arg) in func.params.iter().zip(args) {
-            scope.insert(param.clone(), arg);
-        }
 
         self.frames.push(Frame {
             chunk,
             ip: 0,
+            slots,
             scopes: vec![scope],
             stack_base: self.stack.len(),
             is_function: true,
@@ -2089,6 +2350,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // residue, and push the return value for the caller.
         let frame = self.frames.pop().expect("frame present");
         self.stack.truncate(frame.stack_base);
+        // Recycle the slot vec so the next call can reuse its
+        // allocation. Dropping it here would drop every `Value`
+        // slot in place, which is still cheap for `Int`/`Bool`
+        // but releases the vec's backing buffer — the exact
+        // alloc/dealloc churn we're here to avoid.
+        if !frame.slots.is_empty() {
+            self.return_slots(frame.slots);
+        }
         // A `try_call` wrapper frame wraps the return value in
         // `Result::Ok(v)` before handing it back to its caller.
         let final_value = if frame.try_call_wrapper {
@@ -2170,7 +2439,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
             None => return Err(err),
         };
         let wrapper_stack_base = self.frames[wrap_idx].stack_base;
-        self.frames.truncate(wrap_idx);
+        // Drain the unwound frames through the freelist instead
+        // of `truncate`, so their slot vecs get recycled.
+        while self.frames.len() > wrap_idx {
+            let frame = self.frames.pop().expect("frame present");
+            if !frame.slots.is_empty() {
+                self.return_slots(frame.slots);
+            }
+        }
         self.stack.truncate(wrapper_stack_base);
         self.push_value(builtins::make_try_call_err(&err));
         Ok(())

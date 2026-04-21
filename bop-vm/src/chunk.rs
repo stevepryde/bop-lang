@@ -29,14 +29,75 @@ pub enum Instr {
     LoadFalse,
 
     // ─── Variables ────────────────────────────────────────────────
-    /// Push value of the named variable onto the stack.
+    /// Push value of the named variable onto the stack. Slow path —
+    /// walks the current frame's `scopes` BTreeMap stack, then falls
+    /// through to module-level / function-registry lookup. Emitted
+    /// for captures, imports, and anything the compiler's
+    /// `LocalResolver` couldn't pin to a slot.
     LoadVar(NameIdx),
-    /// Pop the top value and define it as a new local in the current scope.
+    /// Pop the top value and define it as a new block-scoped local
+    /// in the current BTreeMap scope. Used for match bindings,
+    /// for-in variables at module top-level, and module-top-level
+    /// `let` statements — everywhere slot resolution isn't active.
     DefineLocal(NameIdx),
-    /// Pop the top value and assign it to an existing variable.
+    /// Pop the top value and assign it to an existing BTreeMap-scoped
+    /// variable (companion to the `LoadVar` / `DefineLocal` slow
+    /// path).
     StoreVar(NameIdx),
 
+    /// Push the value of the local at `slot`. Fast path: a single
+    /// `Vec::get_unchecked` into the current frame's slot array.
+    /// Emitted by the compiler for every identifier reference that
+    /// resolves to a function-level local (parameter, `let`, or
+    /// `for-in` variable).
+    LoadLocal(SlotIdx),
+    /// Pop the top value and assign it to the local at `slot`.
+    /// Used for both `let x = ...` initialisation and `x = ...`
+    /// assignment; the VM treats them identically once slots are
+    /// pre-sized at call time.
+    StoreLocal(SlotIdx),
+
+    // ─── Superinstructions ──────────────────────────────────────
+    //
+    // Fused opcodes that collapse a common 3-4 instruction
+    // sequence into a single dispatch step. The compiler emits
+    // them via peephole detection; the VM handles them with a
+    // direct slot read + typed fast path, falling back to the
+    // equivalent generic opcodes on type mismatch.
+
+    /// Push `frame.slots[a] + frame.slots[b]` without touching
+    /// the value stack for the operands — fuses `LoadLocal(a) +
+    /// LoadLocal(b) + Add`. Fast path specialises on both
+    /// operands being `Int`; the fallback delegates to
+    /// `ops::add` with the slot values by reference.
+    AddLocals(SlotIdx, SlotIdx),
+    /// Push `frame.slots[a] < frame.slots[b]` — fuses
+    /// `LoadLocal(a) + LoadLocal(b) + Lt`. Same
+    /// Int-fast-path / generic-fallback split as `AddLocals`.
+    LtLocals(SlotIdx, SlotIdx),
+    /// `frame.slots[slot] += k` for a small `i32` `k`, fuses
+    /// `LoadLocal(slot) + LoadConst(k) + Add + StoreLocal(slot)`.
+    /// Specialised for `Int` slots — the `i = i + 1` and
+    /// `total = total + small_k` idioms in tight loops. If the
+    /// slot isn't an `Int`, falls back to generic add via the
+    /// runtime's `ops::add`.
+    IncLocalInt(SlotIdx, i32),
+    /// Push `frame.slots[slot] + k` (as `Int`), fuses
+    /// `LoadLocal(slot) + LoadConst(k) + Add`. Covers the
+    /// `fib(n - 1)` / `array[i + 1]` patterns — `Sub` compiles
+    /// as `Add` with a negated const so this one opcode captures
+    /// both. Non-Int fallback delegates to `ops::add`.
+    LoadLocalAddInt(SlotIdx, i32),
+    /// Push `frame.slots[slot] < k` (as `Bool`), fuses
+    /// `LoadLocal(slot) + LoadConst(k:Int) + Lt`. The `n < 2`
+    /// base-case test in recursive functions.
+    LtLocalInt(SlotIdx, i32),
+
     // ─── Scope ────────────────────────────────────────────────────
+    /// Push a fresh BTreeMap onto the current frame's scopes stack.
+    /// Only relevant when the slow-path `LoadVar` / `DefineLocal`
+    /// machinery is in play; compiler omits these around blocks
+    /// whose locals live in slots.
     PushScope,
     PopScope,
 
@@ -107,14 +168,15 @@ pub enum Instr {
     CallValue { argc: u32 },
     /// Method call: `[.., obj, args...]` → `[.., ret]`, and if the
     /// method is mutating and `obj` came from a variable, the VM
-    /// writes the mutated value back. The back-write target is
-    /// captured by the immediately-preceding `LoadVar` iff
-    /// `assign_back_to` carries its name; otherwise there is no
-    /// back-write.
+    /// writes the mutated value back to the original binding. The
+    /// back-write target is the binding that produced `obj` —
+    /// `Slot(idx)` for compile-time-resolved locals, `Name(idx)`
+    /// for the scope-map fallback, or `None` when the receiver is
+    /// a transient (e.g. `[1,2].push(3)` — nothing to update).
     CallMethod {
         method: NameIdx,
         argc: u32,
-        assign_back_to: Option<NameIdx>,
+        assign_back_to: Option<AssignBack>,
     },
 
     // ─── Functions ────────────────────────────────────────────────
@@ -252,6 +314,16 @@ pub struct NameIdx(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FnIdx(pub u32);
 
+/// Slot index inside a function frame's flat `slots: Vec<Value>`
+/// array. Assigned at compile time by the scope resolver so the
+/// dispatch loop can read/write locals via direct `Vec` indexing
+/// instead of name-keyed BTreeMap lookups. Slot numbers are
+/// unique within a function body — blocks don't reuse them, so
+/// `FnDef::slot_count` is the maximum index ever emitted plus
+/// one, which pre-sizes the `slots` vec at call time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SlotIdx(pub u32);
+
 /// Index into a chunk's string-interpolation recipe table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InterpIdx(pub u32);
@@ -281,6 +353,24 @@ pub enum EnumConstructShape {
     Unit,
     Tuple(u32),
     Struct(u32),
+}
+
+/// Target for a mutating-method write-back. A call like
+/// `arr.push(v)` needs the VM to re-bind `arr` to the mutated
+/// array, but *where* that binding lives depends on whether the
+/// receiver was a slot-resolved local or a name-scoped variable
+/// (captures, module top-level, match bindings). The compiler
+/// picks the right form at emit time so the runtime doesn't have
+/// to probe both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AssignBack {
+    /// Write the mutated value back into `slots[slot]` on the
+    /// current frame.
+    Slot(SlotIdx),
+    /// Walk the current frame's BTreeMap scope stack, find the
+    /// first entry named `name`, overwrite it. Matches the
+    /// pre-slot `CallMethod` behaviour.
+    Name(NameIdx),
 }
 
 // ─── Constants and recipes ─────────────────────────────────────────
@@ -319,6 +409,11 @@ pub struct Chunk {
     pub enum_defs: Vec<EnumDef>,
     /// Match patterns referenced by `MatchFail` instructions.
     pub patterns: Vec<bop::parser::Pattern>,
+    /// Slot count for this chunk when it serves as a function /
+    /// lambda body. Zero at the top-level program chunk (where
+    /// bindings live in the BTreeMap scope). The VM uses this
+    /// to pre-size each call frame's `slots` vec exactly once.
+    pub slot_count: u32,
 }
 
 /// Compiled struct type record.
@@ -397,4 +492,38 @@ pub struct FnDef {
     pub name: String,
     pub params: Vec<String>,
     pub chunk: Chunk,
+    /// Total slot count for this function's frame (params + every
+    /// `let` / `for-in` variable assigned a slot by the compiler).
+    /// The VM resizes the frame's `slots` vec to this length
+    /// exactly once at call time, so `LoadLocal` / `StoreLocal`
+    /// can index it without bounds-check surprises.
+    pub slot_count: u32,
+    /// Names this function body references that don't resolve to
+    /// its own locals. Filled in by the compiler for lambdas and
+    /// nested fn bodies; empty for named fn declarations (which
+    /// don't capture — their bodies see only params + the global
+    /// function registry, matching the walker's FnDecl semantics).
+    ///
+    /// Paired with `capture_sources` positionally: `captures[i]`
+    /// tells the VM *where* in the enclosing frame to read
+    /// `capture_names[i]`'s value at `MakeLambda` time.
+    pub capture_names: Vec<String>,
+    pub capture_sources: Vec<CaptureSource>,
+}
+
+/// Where a captured name's value comes from when a lambda is
+/// materialised. Resolved at compile time by walking the enclosing
+/// function's slot table, falling back to the BTreeMap scope stack
+/// for captures-of-captures and module-top-level bindings.
+#[derive(Debug, Clone)]
+pub enum CaptureSource {
+    /// Read `enclosing_frame.slots[SlotIdx]`. Covers the common
+    /// case: a lambda referencing a local of its immediate
+    /// enclosing function.
+    ParentSlot(SlotIdx),
+    /// Look the name up in `enclosing_frame.scopes` (walked inner
+    /// -> outer). Covers nested-lambda captures-of-captures and
+    /// module-top-level references. Carries the name again
+    /// because the runtime needs it for the BTreeMap lookup.
+    ParentScope(String),
 }
