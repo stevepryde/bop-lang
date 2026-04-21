@@ -8,8 +8,8 @@ If you're writing a command-line tool or a desktop / server app that runs Bop sc
 
 ### Import resolution
 
-- `import std.math` / `std.json` / `std.collections` / … → resolved via `bop-lang`'s bundled stdlib (the `bop-std` feature, forwarded by default)
-- `import my_module` / `my.nested.module` → resolved from the filesystem relative to the script
+- `use std.math` / `std.json` / `std.collections` / … → resolved via `bop-lang`'s bundled stdlib (the `bop-std` feature, forwarded by default)
+- `use my_module` / `my.nested.module` → resolved from the filesystem relative to the script
 
 ### Host functions (available to Bop code as `fn_name(...)`)
 
@@ -35,8 +35,8 @@ use bop_sys::StdHost;
 fn main() {
     let mut host = StdHost::new();
     run(r#"
-        import std.math
-        print("pi ≈ {std.math.pi}")
+        use std.math
+        print("pi ≈ {pi}")
         let now = unix_time()
         print("running at {now}")
     "#, &mut host, &BopLimits::standard()).unwrap();
@@ -58,7 +58,7 @@ bop_vm::run(source, &mut host, &BopLimits::standard())?;
 ## Related crates
 
 - [`bop-lang`](https://crates.io/crates/bop-lang) — the language core + `BopHost` trait
-- The Bop stdlib this crate routes `import std.*` to lives inside `bop-lang` behind the `bop-std` feature (forwarded by default from `bop-sys`).
+- The Bop stdlib this crate routes `use std.*` to lives inside `bop-lang` behind the `bop-std` feature (forwarded by default from `bop-sys`).
 - [`bop-vm`](https://crates.io/crates/bop-vm) — faster bytecode runtime, drop-in with the same `StdHost`
 - [`bop-cli`](https://crates.io/crates/bop-cli) — the `bop` binary built on top of `bop-sys`
 

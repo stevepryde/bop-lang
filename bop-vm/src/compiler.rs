@@ -617,9 +617,9 @@ impl Compiler {
                 self.emit(Instr::Jump(target), line);
             }
 
-            StmtKind::Import { path } => {
+            StmtKind::Use { path } => {
                 let n = self.add_name(path);
-                self.emit(Instr::Import(n), line);
+                self.emit(Instr::Use(n), line);
             }
 
             StmtKind::StructDecl { name, fields } => {

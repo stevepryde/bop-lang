@@ -5,7 +5,7 @@ use bop::{BopError, BopHost, Value};
 /// Standard host for running Bop programs in a normal OS process.
 #[derive(Debug, Clone, Default)]
 pub struct StandardHost {
-    /// Root directory used to resolve `import` paths. When `None`
+    /// Root directory used to resolve `use` paths. When `None`
     /// the current working directory at resolve time is used.
     module_root: Option<PathBuf>,
 }
@@ -19,7 +19,7 @@ impl StandardHost {
     }
 
     /// Configure the root directory for module resolution. An
-    /// `import foo.bar` then maps to `<root>/foo/bar.bop`.
+    /// `use foo.bar` then maps to `<root>/foo/bar.bop`.
     pub fn with_module_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.module_root = Some(root.into());
         self
@@ -49,7 +49,7 @@ impl BopHost for StandardHost {
         enabled_function_hint()
     }
 
-    /// Resolve `import foo.bar.baz`:
+    /// Resolve `use foo.bar.baz`:
     ///
     /// 1. **Stdlib first** — when the `bop-std` feature is on
     ///    (default), `std.*` names hit [`bop::stdlib::resolve`],

@@ -2,7 +2,7 @@
 #
 # The core builtins already expose `abs`, `sqrt`, `sin`, `cos`,
 # `tan`, `floor`, `ceil`, `round`, `pow`, `log`, `exp`, `min`,
-# `max` without any import — they live in core because they
+# `max` without any use — they live in core because they
 # wrap `f64::*` operations that the stdlib can't implement
 # itself. This module adds the canonical constants plus a few
 # convenience wrappers built in Bop.

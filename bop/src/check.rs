@@ -17,7 +17,7 @@
 //!   need a different notion of "coverage".
 //! - Only enums declared in the analysed statement list are
 //!   checked. Imported enums are opaque at parse time; we
-//!   don't follow `import` statements here. Users still get
+//!   don't follow `use` statements here. Users still get
 //!   the runtime error if the match under-covers.
 //! - Guards on arms don't count toward coverage. `Variant(x)
 //!   if x > 0` matches a *subset* of the variant, so the arm

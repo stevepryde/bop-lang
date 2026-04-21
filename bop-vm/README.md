@@ -69,7 +69,7 @@ for _ in 0..1000 {
 | feature | default | what it does |
 |---|---|---|
 | `std` | yes | standard runtime, no external deps |
-| `bop-std` | yes | forwards to `bop-lang`'s `bop-std` feature (bundles the Bop stdlib so `import std.math` etc. resolve through any host that calls `bop::stdlib::resolve`) |
+| `bop-std` | yes | forwards to `bop-lang`'s `bop-std` feature (bundles the Bop stdlib so `use std.math` etc. resolve through any host that calls `bop::stdlib::resolve`) |
 | `no_std` | no | forwards to `bop-lang`'s `no_std` feature, which pulls in `libm`. Enable with `default-features = false, features = ["no_std"]` |
 
 ## WASM example

@@ -43,11 +43,11 @@ pub fn compile_file(
         }
     };
 
-    // Build the resolver the transpiler feeds every `import`
+    // Build the resolver the transpiler feeds every `use`
     // through. Mirrors `bop-sys::StdHost::resolve_module`: look
     // in `bop-std` first for canonical stdlib names, then fall
     // back to a filesystem search rooted at the input's parent
-    // directory so `import ./helpers` keeps working.
+    // directory so `use ./helpers` keeps working.
     let input_dir = input_path
         .parent()
         .map(|p| p.to_path_buf())
@@ -129,7 +129,7 @@ fn make_resolver(root: PathBuf) -> ModuleResolver {
         // Filesystem fallback — look for `<name>.bop` relative
         // to the input directory. Dots in the module name are
         // treated as path separators, matching `bop-sys`'s
-        // behaviour (so `import foo.bar` → `root/foo/bar.bop`).
+        // behaviour (so `use foo.bar` → `root/foo/bar.bop`).
         let mut path = root.clone();
         for segment in name.split('.') {
             path.push(segment);

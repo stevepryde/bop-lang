@@ -1139,7 +1139,7 @@ print(match x {
 
 // ─── bop-std stdlib (phase 7) ─────────────────────────────────────
 //
-// Every stdlib import is resolved via `bop::stdlib::resolve` (see the
+// Every stdlib use is resolved via `bop::stdlib::resolve` (see the
 // `RecordHost::resolve_module` fallback), so walker and VM use
 // identical source. These tests confirm the two engines agree on
 // the stdlib's observable behaviour — the type-transfer import
@@ -1149,7 +1149,7 @@ print(match x {
 fn std_result_helpers_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.result
+        say(r#"use std.result
 print(is_ok(Result::Ok(1)))
 print(is_err(Result::Err("boom")))
 print(unwrap_or(Result::Err("x"), 42))"#),
@@ -1161,7 +1161,7 @@ print(unwrap_or(Result::Err("x"), 42))"#),
 fn std_result_map_and_and_then_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.result
+        say(r#"use std.result
 fn halve(x) {
     if x % 2 == 0 { return Result::Ok(x // 2) }
     return Result::Err("odd")
@@ -1178,7 +1178,7 @@ fn std_math_constants_diff() {
     // The full constants spill a lot of digits. We only care
     // that walker and VM print identical strings here — the
     // harness already checks that via `say`.
-    let out = say(r#"import std.math
+    let out = say(r#"use std.math
 print(pi)
 print(e)"#);
     // Both engines should yield the same string for `e`.
@@ -1189,7 +1189,7 @@ print(e)"#);
 fn std_math_clamp_sign_factorial_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.math
+        say(r#"use std.math
 print(clamp(5, 0, 10))
 print(clamp(-3, 0, 10))
 print(sign(-7))
@@ -1202,7 +1202,7 @@ print(factorial(5))"#),
 fn std_math_gcd_lcm_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.math
+        say(r#"use std.math
 print(gcd(12, 18))
 print(lcm(4, 6))"#),
         "12"
@@ -1213,7 +1213,7 @@ print(lcm(4, 6))"#),
 fn std_iter_map_filter_reduce_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.iter
+        say(r#"use std.iter
 let nums = [1, 2, 3, 4, 5]
 let doubled = map(nums, fn(x) { return x * 2 })
 print(doubled)
@@ -1228,7 +1228,7 @@ print(reduce(nums, 0, fn(a, b) { return a + b }))"#),
 fn std_iter_any_all_find_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.iter
+        say(r#"use std.iter
 let is_pos = fn(x) { return x > 0 }
 print(all([1, 2, 3], is_pos))
 print(any([-1, -2, 3], is_pos))
@@ -1241,7 +1241,7 @@ print(find([1, 2, 3], fn(x) { return x > 1 }))"#),
 fn std_iter_take_drop_zip_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.iter
+        say(r#"use std.iter
 print(take([1, 2, 3, 4], 2))
 print(drop([1, 2, 3, 4], 2))
 print(zip([1, 2], ["a", "b"]))"#),
@@ -1253,7 +1253,7 @@ print(zip([1, 2], ["a", "b"]))"#),
 fn std_string_helpers_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.string
+        say(r#"use std.string
 print(pad_left("42", 5, " "))
 print(reverse("hello"))
 print(is_palindrome("racecar"))"#),
@@ -1265,7 +1265,7 @@ print(is_palindrome("racecar"))"#),
 fn std_test_assertions_pass_diff() {
     set_modules(&[]);
     assert_eq!(
-        say(r#"import std.test
+        say(r#"use std.test
 assert(true, "ok")
 assert_eq(1 + 1, 2)
 print("done")"#),
@@ -1287,7 +1287,7 @@ fn core_math_builtins_no_import_diff() {
 
 #[test]
 fn imported_fn_can_call_sibling_fn_diff() {
-    // Regression for the phase-7 import path: an imported fn
+    // Regression for the phase-7 use path: an imported fn
     // whose body references another imported sibling needs to
     // resolve both — walker and VM should agree.
     set_modules(&[(
@@ -1296,7 +1296,7 @@ fn imported_fn_can_call_sibling_fn_diff() {
 fn quadruple(x) { return double(double(x)) }"#,
     )]);
     assert_eq!(
-        say(r#"import helpers
+        say(r#"use helpers
 print(quadruple(3))"#),
         "12"
     );
@@ -1312,7 +1312,7 @@ fn imported_struct_type_usable_in_caller_diff() {
 fn make_point(x, y) { return Point { x: x, y: y } }"#,
     )]);
     assert_eq!(
-        say(r#"import shapes
+        say(r#"use shapes
 let p = make_point(3, 4)
 print(p.x + p.y)
 let q = Point { x: 1, y: 2 }
@@ -1328,7 +1328,7 @@ fn imported_enum_type_usable_in_caller_diff() {
         r#"enum Shape { Circle(r), Rect { w, h } }"#,
     )]);
     assert_eq!(
-        say(r#"import shapes
+        say(r#"use shapes
 let s = Shape::Rect { w: 4, h: 3 }
 print(match s {
     Shape::Circle(r) => r,
@@ -1540,13 +1540,13 @@ print("should never run")"#;
     assert!(vm_msg.contains("too many steps"), "vm msg: {}", vm_msg);
 }
 
-// ─── Modules / import ─────────────────────────────────────────────
+// ─── Modules / use ─────────────────────────────────────────────
 
 #[test]
 fn import_basic_let_binding() {
     set_modules(&[("greet", r#"let hello = "hi""#)]);
     assert_eq!(
-        say(r#"import greet
+        say(r#"use greet
 print(hello)"#),
         "hi"
     );
@@ -1556,7 +1556,7 @@ print(hello)"#),
 fn import_named_fn_callable() {
     set_modules(&[("math", "fn square(n) { return n * n }")]);
     assert_eq!(
-        say(r#"import math
+        say(r#"use math
 print(square(7))"#),
         "49"
     );
@@ -1564,13 +1564,13 @@ print(square(7))"#),
 
 #[test]
 fn import_named_fn_as_value() {
-    // Proves the module's named fn survives import as a
+    // Proves the module's named fn survives use as a
     // first-class `Value::Fn`. Matters because the VM needs to
     // carry VM-compiled chunks in `Value::Fn`, and an imported
     // fn is loaded via a sub-VM.
     set_modules(&[("ops", "fn double(n) { return n * 2 }")]);
     assert_eq!(
-        say(r#"import ops
+        say(r#"use ops
 let f = double
 print(f(21))"#),
         "42"
@@ -1581,7 +1581,7 @@ print(f(21))"#),
 fn import_dotted_path() {
     set_modules(&[("std.math", "let pi = 3")]);
     assert_eq!(
-        say(r#"import std.math
+        say(r#"use std.math
 print(pi)"#),
         "3"
     );
@@ -1590,18 +1590,18 @@ print(pi)"#),
 #[test]
 fn import_missing_module_errors() {
     set_modules(&[]);
-    let msg = run_err("import nope");
+    let msg = run_err("use nope");
     assert!(msg.contains("Module `nope` not found"), "got: {}", msg);
 }
 
 #[test]
 fn import_transitive_modules() {
     set_modules(&[
-        ("a", "import b\nlet doubled_pi = pi + pi"),
+        ("a", "use b\nlet doubled_pi = pi + pi"),
         ("b", "let pi = 3"),
     ]);
     assert_eq!(
-        say(r#"import a
+        say(r#"use a
 print(doubled_pi)"#),
         "6"
     );
@@ -1610,10 +1610,10 @@ print(doubled_pi)"#),
 #[test]
 fn import_circular_detected() {
     set_modules(&[
-        ("a", "import b\nlet x = 1"),
-        ("b", "import a\nlet y = 2"),
+        ("a", "use b\nlet x = 1"),
+        ("b", "use a\nlet y = 2"),
     ]);
-    let msg = run_err("import a");
+    let msg = run_err("use a");
     assert!(msg.contains("Circular import"), "got: {}", msg);
 }
 
@@ -1621,8 +1621,8 @@ fn import_circular_detected() {
 fn import_is_idempotent_at_injection_site() {
     set_modules(&[("m", "let x = 1")]);
     assert_eq!(
-        say(r#"import m
-import m
+        say(r#"use m
+use m
 print(x)"#),
         "1"
     );

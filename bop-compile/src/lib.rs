@@ -45,7 +45,7 @@ use bop::parser::Stmt;
 mod emit;
 
 /// A compile-time module resolver. The AOT runs this eagerly for
-/// every `import` it encounters, threading the entire module graph
+/// every `use` it encounters, threading the entire module graph
 /// into the generated Rust. Same contract as
 /// [`bop::BopHost::resolve_module`]: `None` = not handled,
 /// `Some(Ok(source))` = module source text,
@@ -107,7 +107,7 @@ pub struct Options {
     pub module_name: Option<String>,
     /// Resolver used to inline imported modules into the emitted
     /// Rust at transpile time. Required when the program contains
-    /// any `import` statement; missing (`None`) + an import in
+    /// any `use` statement; missing (`None`) + an import in
     /// source raises a clear "set `module_resolver`" error.
     ///
     /// The resolver is called eagerly for each transitive import

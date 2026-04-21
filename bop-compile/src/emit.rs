@@ -268,7 +268,7 @@ pub(crate) struct ModuleEntry {
     /// Every name reachable from this module's final scope —
     /// its own `let`s and `fn`s plus, transitively, its imports'
     /// effective exports. Matches the walker's injection
-    /// semantics (`import` re-exports by default).
+    /// semantics (`use` re-exports by default).
     pub effective_exports: Vec<String>,
     // Kept during analysis for potential future use (e.g. more
     // precise `let` vs `fn` handling in exports packing), but not
@@ -294,7 +294,7 @@ fn build_module_graph(
         Some(r) => r.clone(),
         None => {
             return Err(BopError::runtime(
-                "bop-compile: `import` requires `Options::module_resolver` to be set so the transpiler can inline the imported modules",
+                "bop-compile: `use` requires `Options::module_resolver` to be set so the transpiler can inline the imported modules",
                 root_imports.first().map(|(_, line)| *line).unwrap_or(0),
             ));
         }
@@ -415,7 +415,7 @@ fn visit_module(
 fn collect_imports_in_stmts(stmts: &[Stmt]) -> Vec<(String, u32)> {
     let mut out = Vec::new();
     for stmt in stmts {
-        if let StmtKind::Import { path } = &stmt.kind {
+        if let StmtKind::Use { path } = &stmt.kind {
             out.push((path.clone(), stmt.line));
         }
     }
@@ -732,7 +732,7 @@ impl Emitter {
             if self.is_local(export) {
                 return Err(BopError::runtime(
                     format!(
-                        "Import of `{}` from `{}` would shadow an existing binding",
+                        "Use of `{}` from `{}` would shadow an existing binding",
                         export, path
                     ),
                     line,
@@ -1273,7 +1273,7 @@ impl Emitter {
             StmtKind::Break => self.line("break;"),
             StmtKind::Continue => self.line("continue;"),
 
-            StmtKind::Import { path } => {
+            StmtKind::Use { path } => {
                 self.emit_import_stmt(path, line)?;
             }
 
@@ -2728,7 +2728,7 @@ fn scan_free_vars_stmt(
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::Import { .. } => {
+        StmtKind::Use { .. } => {
             // Imports inside lambda bodies are already rejected at
             // emit time for the AOT — leave the scan a no-op
             // rather than inventing phantom captures.

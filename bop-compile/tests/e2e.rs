@@ -450,7 +450,7 @@ fn e2e_sandbox_recursion_halts() {
 // ─── Imports (phase 2c) ──────────────────────────────────────────
 
 /// Compare AOT output against a walker run that resolves modules
-/// from the same in-memory table. Used by the import tests —
+/// from the same in-memory table. Used by the use tests —
 /// lets the same map drive both engines so we can assert they
 /// produce identical output.
 fn assert_aot_matches_with_modules(
@@ -534,7 +534,7 @@ fn assert_aot_matches_with_modules(
 fn e2e_import_basic_let() {
     assert_aot_matches_with_modules(
         "import_basic_let",
-        r#"import math
+        r#"use math
 print(pi)"#,
         &[("math", "let pi = 3")],
     );
@@ -545,7 +545,7 @@ print(pi)"#,
 fn e2e_import_named_fn() {
     assert_aot_matches_with_modules(
         "import_named_fn",
-        r#"import math
+        r#"use math
 print(square(7))"#,
         &[("math", "fn square(n) { return n * n }")],
     );
@@ -556,7 +556,7 @@ print(square(7))"#,
 fn e2e_import_dotted_path() {
     assert_aot_matches_with_modules(
         "import_dotted_path",
-        r#"import std.math
+        r#"use std.math
 print(e)"#,
         &[("std.math", "let e = 2")],
     );
@@ -567,10 +567,10 @@ print(e)"#,
 fn e2e_import_transitive() {
     assert_aot_matches_with_modules(
         "import_transitive",
-        r#"import a
+        r#"use a
 print(doubled)"#,
         &[
-            ("a", "import b\nlet doubled = pi + pi"),
+            ("a", "use b\nlet doubled = pi + pi"),
             ("b", "let pi = 3"),
         ],
     );
@@ -579,13 +579,13 @@ print(doubled)"#,
 #[test]
 #[ignore]
 fn e2e_import_idempotent_reload_cache() {
-    // Second import shouldn't re-run the module body. The walker
+    // Second use shouldn't re-run the module body. The walker
     // caches; the AOT caches via the __mod_*__load fn's
     // module_cache check.
     assert_aot_matches_with_modules(
         "import_idempotent",
-        r#"import m
-import m
+        r#"use m
+use m
 print(x)"#,
         &[("m", "let x = 42")],
     );

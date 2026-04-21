@@ -52,9 +52,9 @@ let player = {"name": "Ada", "hp": 100}
 player["hp"] -= 20
 print("{player[\"name\"]} has {player[\"hp\"]} HP")
 
-// Import the stdlib
-import std.math
-print(std.math.pi)
+// Pull in the stdlib
+use std.math
+print(pi)
 ```
 
 ## Quick start — CLI
@@ -127,7 +127,7 @@ bop-vm   = { version = "0.3", default-features = false, features = ["no_std"] }
 
 ## Crates in this workspace
 
-- [`bop-lang`](bop/) — the language core (parser, walker, `BopHost` trait, `Value`). The Bop stdlib (`import std.math`, `std.json`, …) ships inside this crate as bundled Bop source, gated behind the `bop-std` feature (on by default).
+- [`bop-lang`](bop/) — the language core (parser, walker, `BopHost` trait, `Value`). The Bop stdlib (`use std.math`, `std.json`, …) ships inside this crate as bundled Bop source, gated behind the `bop-std` feature (on by default).
 - [`bop-vm`](bop-vm/) — bytecode compiler + VM, 2–3× the walker
 - [`bop-compile`](bop-compile/) — Bop → Rust AOT transpiler
 - [`bop-sys`](bop-sys/) — `StdHost`, the default OS-backed host

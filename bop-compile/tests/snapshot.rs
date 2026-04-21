@@ -513,7 +513,7 @@ fn same_named_struct_same_shape_across_modules_is_ok() {
     // Same shape → idempotent, mirrors the walker's re-import
     // behaviour.
     let out = compile_with_modules(
-        "import geom_a\nimport geom_b",
+        "use geom_a\nuse geom_b",
         &[
             ("geom_a", "struct Point { x, y }"),
             ("geom_b", "struct Point { x, y }"),
@@ -527,7 +527,7 @@ fn same_named_struct_different_shape_across_modules_errors() {
     // `Point` with different fields in two modules → transpile-time
     // error pointing at both sites.
     let err = compile_with_modules(
-        "import geom_a\nimport geom_b",
+        "use geom_a\nuse geom_b",
         &[
             ("geom_a", "struct Point { x, y }"),
             ("geom_b", "struct Point { x, y, z }"),
@@ -547,7 +547,7 @@ fn same_named_struct_different_shape_across_modules_errors() {
 #[test]
 fn same_named_enum_different_variants_across_modules_errors() {
     let err = compile_with_modules(
-        "import a\nimport b",
+        "use a\nuse b",
         &[
             ("a", "enum Tag { Red, Green }"),
             ("b", "enum Tag { Red, Green, Blue }"),
@@ -567,7 +567,7 @@ fn same_named_enum_different_variants_across_modules_errors() {
 #[test]
 fn same_named_enum_same_variants_across_modules_is_ok() {
     let out = compile_with_modules(
-        "import a\nimport b",
+        "use a\nuse b",
         &[
             ("a", "enum Tag { Red, Green }"),
             ("b", "enum Tag { Red, Green }"),
@@ -583,7 +583,7 @@ fn clash_between_root_program_and_module_is_rejected() {
     // shape, AOT errors.
     let err = compile_with_modules(
         r#"struct Point { x, y }
-import geom"#,
+use geom"#,
         &[("geom", "struct Point { x, y, z }")],
     )
     .unwrap_err();

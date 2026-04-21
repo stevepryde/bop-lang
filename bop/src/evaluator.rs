@@ -460,7 +460,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             StmtKind::Break => Ok(Signal::Break),
             StmtKind::Continue => Ok(Signal::Continue),
 
-            StmtKind::Import { path } => {
+            StmtKind::Use { path } => {
                 self.exec_import(path, stmt.line)?;
                 Ok(Signal::None)
             }
@@ -557,7 +557,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 return Err(error(
                     line,
                     format!(
-                        "Import of `{}` from `{}` clashes with an existing struct of the same name",
+                        "Use of `{}` from `{}` clashes with an existing struct of the same name",
                         name, path
                     ),
                 ));
@@ -572,7 +572,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 return Err(error(
                     line,
                     format!(
-                        "Import of `{}` from `{}` clashes with an existing enum of the same name",
+                        "Use of `{}` from `{}` clashes with an existing enum of the same name",
                         name, path
                     ),
                 ));
@@ -595,7 +595,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 return Err(error(
                     line,
                     format!(
-                        "Import of `{}` from `{}` would shadow an existing binding",
+                        "Use of `{}` from `{}` would shadow an existing binding",
                         name, path
                     ),
                 ));
@@ -616,7 +616,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 return Err(error(
                     line,
                     format!(
-                        "Import of `{}` from `{}` would shadow an existing binding",
+                        "Use of `{}` from `{}` would shadow an existing binding",
                         name, path
                     ),
                 ));

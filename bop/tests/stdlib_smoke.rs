@@ -3,7 +3,7 @@
 //! tree-walker with a minimal host that:
 //!
 //! - captures `print` output so tests can assert on it
-//! - routes `import std.*` back through `bop::stdlib::resolve` so
+//! - routes `use std.*` back through `bop::stdlib::resolve` so
 //!   stdlib modules importing each other work the same way
 //!   `StandardHost` handles them.
 //!
@@ -61,7 +61,7 @@ fn run(code: &str) -> BufHost {
 #[test]
 fn result_is_ok_and_is_err() {
     let host = run(
-        r#"import std.result
+        r#"use std.result
 print(is_ok(Result::Ok(1)))
 print(is_err(Result::Err("boom")))
 print(is_ok(Result::Err("x")))"#,
@@ -72,7 +72,7 @@ print(is_ok(Result::Err("x")))"#,
 #[test]
 fn result_unwrap_or_returns_default_on_err() {
     let host = run(
-        r#"import std.result
+        r#"use std.result
 print(unwrap_or(Result::Ok(42), 0))
 print(unwrap_or(Result::Err("boom"), 99))"#,
     );
@@ -82,7 +82,7 @@ print(unwrap_or(Result::Err("boom"), 99))"#,
 #[test]
 fn result_map_applies_only_to_ok() {
     let host = run(
-        r#"import std.result
+        r#"use std.result
 let doubled = map(Result::Ok(5), fn(x) { return x * 2 })
 print(match doubled {
     Result::Ok(v) => v,
@@ -100,7 +100,7 @@ print(match passed {
 #[test]
 fn result_and_then_chains_fallible_steps() {
     let host = run(
-        r#"import std.result
+        r#"use std.result
 fn halve(x) {
     if x % 2 == 0 { return Result::Ok(x // 2) }
     return Result::Err("odd")
@@ -118,7 +118,7 @@ print(match bad { Result::Ok(_) => "ok?", Result::Err(e) => e })"#,
 #[test]
 fn math_constants_have_expected_precision() {
     let host = run(
-        r#"import std.math
+        r#"use std.math
 print(pi)
 print(e)
 print(tau)"#,
@@ -132,7 +132,7 @@ print(tau)"#,
 #[test]
 fn math_clamp_bounds_correctly() {
     let host = run(
-        r#"import std.math
+        r#"use std.math
 print(clamp(5, 0, 10))
 print(clamp(-3, 0, 10))
 print(clamp(20, 0, 10))"#,
@@ -143,7 +143,7 @@ print(clamp(20, 0, 10))"#,
 #[test]
 fn math_sign_handles_zero_and_negatives() {
     let host = run(
-        r#"import std.math
+        r#"use std.math
 print(sign(5))
 print(sign(-3))
 print(sign(0))"#,
@@ -154,7 +154,7 @@ print(sign(0))"#,
 #[test]
 fn math_factorial_and_gcd_and_lcm() {
     let host = run(
-        r#"import std.math
+        r#"use std.math
 print(factorial(5))
 print(gcd(12, 18))
 print(lcm(4, 6))"#,
@@ -165,7 +165,7 @@ print(lcm(4, 6))"#,
 #[test]
 fn math_sum_and_mean() {
     let host = run(
-        r#"import std.math
+        r#"use std.math
 print(sum([1, 2, 3, 4, 5]))
 print(mean([2, 4, 6]))"#,
     );
@@ -177,7 +177,7 @@ print(mean([2, 4, 6]))"#,
 #[test]
 fn iter_map_filter_reduce() {
     let host = run(
-        r#"import std.iter
+        r#"use std.iter
 let nums = [1, 2, 3, 4, 5]
 let doubled = map(nums, fn(x) { return x * 2 })
 print(doubled)
@@ -195,7 +195,7 @@ print(total)"#,
 #[test]
 fn iter_take_and_drop() {
     let host = run(
-        r#"import std.iter
+        r#"use std.iter
 print(take([10, 20, 30, 40], 2))
 print(drop([10, 20, 30, 40], 2))"#,
     );
@@ -207,7 +207,7 @@ print(drop([10, 20, 30, 40], 2))"#,
 #[test]
 fn iter_zip_and_enumerate() {
     let host = run(
-        r#"import std.iter
+        r#"use std.iter
 print(zip([1, 2, 3], ["a", "b", "c"]))
 print(enumerate(["x", "y"]))"#,
     );
@@ -219,7 +219,7 @@ print(enumerate(["x", "y"]))"#,
 #[test]
 fn iter_any_all_count() {
     let host = run(
-        r#"import std.iter
+        r#"use std.iter
 let is_pos = fn(x) { return x > 0 }
 print(all([1, 2, 3], is_pos))
 print(all([1, -2, 3], is_pos))
@@ -235,7 +235,7 @@ print(count([1, 2, 3, 4], fn(x) { return x % 2 == 0 }))"#,
 #[test]
 fn iter_find_and_find_index() {
     let host = run(
-        r#"import std.iter
+        r#"use std.iter
 print(find([1, 2, 3], fn(x) { return x > 1 }))
 print(find_index([1, 2, 3], fn(x) { return x > 1 }))
 print(find([1, 2, 3], fn(x) { return x > 99 }))
@@ -251,7 +251,7 @@ print(find_index([1, 2, 3], fn(x) { return x > 99 }))"#,
 #[test]
 fn iter_flatten_sum_product() {
     let host = run(
-        r#"import std.iter
+        r#"use std.iter
 print(flatten([[1, 2], [3, 4], [5]]))
 print(sum([1, 2, 3, 4]))
 print(product([2, 3, 4]))"#,
@@ -265,7 +265,7 @@ print(product([2, 3, 4]))"#,
 #[test]
 fn iter_min_and_max() {
     let host = run(
-        r#"import std.iter
+        r#"use std.iter
 print(min_array([5, 3, 8, 1, 4]))
 print(max_array([5, 3, 8, 1, 4]))"#,
     );
@@ -279,7 +279,7 @@ print(max_array([5, 3, 8, 1, 4]))"#,
 #[test]
 fn string_pad_left_right_and_center() {
     let host = run(
-        r#"import std.string
+        r#"use std.string
 print(pad_left("42", 5, " "))
 print(pad_right("42", 5, "0"))
 print(center("hi", 6, "-"))"#,
@@ -293,7 +293,7 @@ print(center("hi", 6, "-"))"#,
 #[test]
 fn string_chars_reverse_palindrome() {
     let host = run(
-        r#"import std.string
+        r#"use std.string
 print(chars("abc"))
 print(reverse("hello"))
 print(is_palindrome("racecar"))
@@ -309,7 +309,7 @@ print(is_palindrome("hello"))"#,
 #[test]
 fn string_count_substrings() {
     let host = run(
-        r#"import std.string
+        r#"use std.string
 print(count("banana", "na"))
 print(count("aaaa", "aa"))
 print(count("empty", ""))"#,
@@ -328,7 +328,7 @@ fn test_asserts_pass_silently() {
     // Successful asserts shouldn't produce any output or
     // error out.
     let host = run(
-        r#"import std.test
+        r#"use std.test
 assert(true, "should pass")
 assert_eq(1 + 1, 2)
 assert_near(0.1 + 0.2, 0.3, 0.01)
@@ -341,7 +341,7 @@ print("all good")"#,
 fn test_assert_eq_failure_raises() {
     let mut host = BufHost::new();
     let err = bop::run(
-        r#"import std.test
+        r#"use std.test
 assert_eq(1, 2)"#,
         &mut host,
         &BopLimits::standard(),
@@ -353,14 +353,14 @@ assert_eq(1, 2)"#,
 #[test]
 fn test_assert_raises_catches_expected_failure() {
     let host = run(
-        r#"import std.test
+        r#"use std.test
 assert_raises(fn() { return 1 / 0 })
 print("caught")"#,
     );
     assert_eq!(host.last(), "caught");
 }
 
-// ─── Core math builtins (no import needed) ────────────────────
+// ─── Core math builtins (no use needed) ────────────────────
 
 #[test]
 fn core_math_builtins_available_without_import() {
@@ -397,7 +397,7 @@ print(type(round(3.5)))"#,
 #[test]
 fn collections_stack_push_top_pop() {
     let host = run(
-        r#"import std.collections
+        r#"use std.collections
 let s = stack()
 s = s.push(1)
 s = s.push(2)
@@ -417,7 +417,7 @@ print(s.size())"#,
 #[test]
 fn collections_stack_pop_empty_is_noop() {
     let host = run(
-        r#"import std.collections
+        r#"use std.collections
 let s = stack()
 s = s.pop()
 print(s.is_empty())
@@ -432,7 +432,7 @@ print(s.top())"#,
 #[test]
 fn collections_queue_fifo_order() {
     let host = run(
-        r#"import std.collections
+        r#"use std.collections
 let q = queue()
 q = q.enqueue("a")
 q = q.enqueue("b")
@@ -455,7 +455,7 @@ print(q.is_empty())"#,
 #[test]
 fn collections_set_add_remove_has() {
     let host = run(
-        r#"import std.collections
+        r#"use std.collections
 let s = set()
 s = s.add(1)
 s = s.add(2)
@@ -477,7 +477,7 @@ print(s.size())"#,
 #[test]
 fn collections_set_of_handles_duplicates() {
     let host = run(
-        r#"import std.collections
+        r#"use std.collections
 let s = set_of([1, 2, 1, 3, 2])
 print(s.size())
 print(s.values())"#,
@@ -490,7 +490,7 @@ print(s.values())"#,
 #[test]
 fn collections_set_union_intersect_difference() {
     let host = run(
-        r#"import std.collections
+        r#"use std.collections
 let a = set_of([1, 2, 3])
 let b = set_of([2, 3, 4])
 print(a.union(b).values())
@@ -507,7 +507,7 @@ print(a.difference(b).values())"#,
 #[test]
 fn collections_remove_preserves_order() {
     let host = run(
-        r#"import std.collections
+        r#"use std.collections
 let s = set_of([1, 2, 3, 4, 5])
 s = s.remove(3)
 print(s.values())"#,
@@ -520,7 +520,7 @@ print(s.values())"#,
 #[test]
 fn json_stringify_scalars_and_null() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 print(stringify(none))
 print(stringify(true))
 print(stringify(false))
@@ -542,7 +542,7 @@ fn json_stringify_escapes_special_chars() {
     // Source has a literal newline inside a quoted string in
     // Bop — the `\n` escape is recognised at lex time.
     let host = run(
-        r#"import std.json
+        r#"use std.json
 print(stringify("a\"b"))
 print(stringify("a\\b"))
 print(stringify("a\nb"))
@@ -560,7 +560,7 @@ print(stringify("a\tb"))"#,
 #[test]
 fn json_stringify_array() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 print(stringify([1, 2, 3]))
 print(stringify([]))
 print(stringify(["a", 1, true, none]))"#,
@@ -574,7 +574,7 @@ print(stringify(["a", 1, true, none]))"#,
 #[test]
 fn json_stringify_dict() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 let d = {"name": "bop", "version": 1}
 print(stringify(d))"#,
     );
@@ -588,7 +588,7 @@ print(stringify(d))"#,
 #[test]
 fn json_parse_scalars() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 print(parse("null"))
 print(parse("true"))
 print(parse("false"))
@@ -611,7 +611,7 @@ print(parse("\"hello\""))"#,
 fn json_parse_number_types() {
     // `42` is int; `42.0` / `1e2` are numbers.
     let host = run(
-        r#"import std.json
+        r#"use std.json
 print(type(parse("42")))
 print(type(parse("42.0")))
 print(type(parse("1e2")))
@@ -626,7 +626,7 @@ print(type(parse("-3")))"#,
 #[test]
 fn json_parse_array() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 let arr = parse("[1, 2, 3]")
 print(arr)
 print(arr.len())
@@ -642,7 +642,7 @@ print(empty.len())"#,
 #[test]
 fn json_parse_object_indexes_by_key() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 let o = parse("{\"name\": \"bop\", \"n\": 42}")
 print(o["name"])
 print(o["n"])"#,
@@ -655,7 +655,7 @@ print(o["n"])"#,
 #[test]
 fn json_parse_nested_structures() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 let txt = "{\"users\": [{\"name\": \"a\"}, {\"name\": \"b\"}]}"
 let data = parse(txt)
 print(data["users"].len())
@@ -671,7 +671,7 @@ print(data["users"][1]["name"])"#,
 #[test]
 fn json_parse_handles_whitespace() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 let txt = "  [  1 ,  2 , 3  ]  "
 let arr = parse(txt)
 print(arr)"#,
@@ -682,7 +682,7 @@ print(arr)"#,
 #[test]
 fn json_parse_string_escapes() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 let s = parse("\"a\\\"b\\nc\"")
 print(s)
 print(s.len())"#,
@@ -698,7 +698,7 @@ fn json_parse_roundtrip_via_stringify() {
     // stringify(parse(x)) should produce semantically the
     // same data; whitespace may differ.
     let host = run(
-        r#"import std.json
+        r#"use std.json
 let original = {"name": "bop", "ok": true, "vals": [1, 2, 3]}
 let dumped = stringify(original)
 print(dumped)
@@ -717,8 +717,8 @@ print(roundtrip["vals"])"#,
 #[test]
 fn json_parse_error_raises_and_try_call_catches() {
     let host = run(
-        r#"import std.json
-import std.result
+        r#"use std.json
+use std.result
 let r = try_call(fn() { return parse("[1, 2,") })
 print(match r {
     Result::Ok(_) => "ok?",
@@ -731,7 +731,7 @@ print(match r {
 #[test]
 fn json_parse_empty_input_errors() {
     let host = run(
-        r#"import std.json
+        r#"use std.json
 let r = try_call(fn() { return parse("   ") })
 print(match r {
     Result::Ok(_) => "ok?",
@@ -746,8 +746,8 @@ fn collections_composes_with_std_iter() {
     // Collections + iter helpers interoperate because a Set's
     // .values() / a Queue's items are ordinary arrays.
     let host = run(
-        r#"import std.collections
-import std.iter
+        r#"use std.collections
+use std.iter
 let s = set_of([1, 2, 3, 4, 5])
 let evens = filter(s.values(), fn(x) { return x % 2 == 0 })
 print(evens)"#,

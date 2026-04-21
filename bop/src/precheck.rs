@@ -6,14 +6,16 @@ use crate::error::BopError;
 const RESERVED_KEYWORDS: &[&str] = &[
     // Core language
     "let", "fn", "return", "if", "else", "while", "for", "in", "repeat", "break", "continue",
+    "use", "match", "struct", "enum", "try",
     // Literals
     "true", "false", "none",
     // Future
-    "on", "event", "entity", "spawn", "state", "match", "loop", "class", "self", "import", "from",
-    "as",
-    // Error prevention
-    "try", "catch", "throw", "async", "await", "yield", "const", "var", "pub", "use", "mod",
-    "enum", "struct", "type",
+    "on", "event", "entity", "spawn", "state", "loop", "class", "self", "from", "as",
+    // Common-mistake prevention: keywords in neighbouring languages
+    // that users might reach for — warn if they try to use one as
+    // an identifier so the diagnostic points at the right fix.
+    // `import` lives here now that `use` is the actual Bop keyword.
+    "import", "catch", "throw", "async", "await", "yield", "const", "var", "pub", "mod", "type",
     // Confusion prevention
     "null",
 ];

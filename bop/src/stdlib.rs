@@ -2,7 +2,7 @@
 //!
 //! Each `.bop` file under `src/modules/` is baked into the binary
 //! as an `&'static str` via `include_str!`. When a Bop script
-//! does `import std.math`, the engine asks its `BopHost` to
+//! does `use std.math`, the engine asks its `BopHost` to
 //! resolve the module — embedders route that call to
 //! [`resolve`], which returns the bundled source text.
 //!

@@ -189,7 +189,7 @@ fn min_max(a: &Value, b: &Value, pick_smaller: bool, fname: &str, line: u32) -> 
 // ─── Math builtins ─────────────────────────────────────────────
 //
 // These wrap `f64::*` operations that can't be implemented in
-// Bop itself. They're always available (no `import` needed);
+// Bop itself. They're always available (no `use` needed);
 // `std.math` in the stdlib exposes constants (`pi`, `e`) plus
 // convenience wrappers that call these under the hood.
 

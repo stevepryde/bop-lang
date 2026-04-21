@@ -135,7 +135,7 @@ struct CorpusEntry {
 
 /// Construct an AOT `ModuleResolver` that looks up corpus-local
 /// overrides first, then falls back to `bop::stdlib::resolve` so
-/// `import std.*` works without every test having to redeclare
+/// `use std.*` works without every test having to redeclare
 /// the stdlib. Entries with no imports at all still receive a
 /// resolver — it's never called for them, so the extra
 /// allocation is cheap.
@@ -167,7 +167,7 @@ fn build_driver(programs: &[CorpusEntry]) -> String {
         // Resolver: entry-local modules first, then bop-std
         // stdlib as a fallback. Programs with no imports and no
         // stdlib reach get `None` to avoid building an empty
-        // resolver for every no-import corpus entry.
+        // resolver for every no-use corpus entry.
         let resolver = build_resolver(entry.modules);
         let mod_src = transpile(
             entry.source,
@@ -1015,49 +1015,49 @@ print(match r {
     ),
 ];
 
-/// Programs that exercise the `import` surface. Each entry
+/// Programs that exercise the `use` surface. Each entry
 /// pairs source with a module map the walker, VM, and AOT all
 /// resolve against. AOT's compile-time resolver is seeded from
 /// this same map via `modules_from_map`.
 const IMPORTS_CORPUS: &[(&str, &str, &[(&str, &str)])] = &[
     (
         "import_basic_let",
-        r#"import math
+        r#"use math
 print(pi)"#,
         &[("math", "let pi = 3")],
     ),
     (
         "import_named_fn",
-        r#"import math
+        r#"use math
 print(square(7))"#,
         &[("math", "fn square(n) { return n * n }")],
     ),
     (
         "import_dotted_path",
-        r#"import std.math
+        r#"use std.math
 print(e)"#,
         &[("std.math", "let e = 2")],
     ),
     (
         "import_transitive",
-        r#"import a
+        r#"use a
 print(doubled)"#,
         &[
-            ("a", "import b\nlet doubled = pi + pi"),
+            ("a", "use b\nlet doubled = pi + pi"),
             ("b", "let pi = 3"),
         ],
     ),
     (
         "import_idempotent_cache",
-        r#"import m
-import m
+        r#"use m
+use m
 print(x)"#,
         &[("m", "let x = 42")],
     ),
     // ─── bop-std stdlib (phase 7) ─────────────────────────────
     (
         "std_result_helpers",
-        r#"import std.result
+        r#"use std.result
 print(is_ok(Result::Ok(1)))
 print(is_err(Result::Err("x")))
 print(unwrap_or(Result::Err("x"), 42))"#,
@@ -1065,14 +1065,14 @@ print(unwrap_or(Result::Err("x"), 42))"#,
     ),
     (
         "std_result_map",
-        r#"import std.result
+        r#"use std.result
 let r = map(Result::Ok(5), fn(x) { return x * 2 })
 print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#,
         &[],
     ),
     (
         "std_math_factorial",
-        r#"import std.math
+        r#"use std.math
 print(factorial(5))
 print(gcd(12, 18))
 print(clamp(99, 0, 10))"#,
@@ -1080,7 +1080,7 @@ print(clamp(99, 0, 10))"#,
     ),
     (
         "std_iter_functional_helpers",
-        r#"import std.iter
+        r#"use std.iter
 let nums = [1, 2, 3, 4, 5]
 print(map(nums, fn(x) { return x + 1 }))
 print(filter(nums, fn(x) { return x % 2 == 0 }))
@@ -1089,7 +1089,7 @@ print(reduce(nums, 0, fn(a, b) { return a + b }))"#,
     ),
     (
         "std_string_reverse_and_pad",
-        r#"import std.string
+        r#"use std.string
 print(reverse("hello"))
 print(pad_left("7", 3, "0"))
 print(is_palindrome("racecar"))"#,
@@ -1105,7 +1105,7 @@ print(pow(2, 10))"#,
     ),
     (
         "imported_fn_calls_sibling_fn",
-        r#"import helpers
+        r#"use helpers
 print(quadruple(3))"#,
         &[(
             "helpers",
@@ -1115,7 +1115,7 @@ fn quadruple(x) { return double(double(x)) }"#,
     ),
     (
         "imported_struct_type_in_caller",
-        r#"import shapes
+        r#"use shapes
 let p = Point { x: 3, y: 4 }
 print(p.x + p.y)"#,
         &[(
@@ -1125,7 +1125,7 @@ print(p.x + p.y)"#,
     ),
     (
         "imported_enum_type_in_caller",
-        r#"import shapes
+        r#"use shapes
 let s = Shape::Rect { w: 4, h: 3 }
 print(match s {
     Shape::Circle(r) => r,

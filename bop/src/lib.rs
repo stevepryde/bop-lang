@@ -19,7 +19,7 @@ pub mod builtins;
 pub mod methods;
 pub mod suggest;
 pub mod check;
-/// Bundled Bop standard library (`import std.math`, `std.json`,
+/// Bundled Bop standard library (`use std.math`, `std.json`,
 /// `std.collections`, `std.iter`, `std.string`, `std.result`,
 /// `std.test`). Feature-gated behind `bop-std` (on by default).
 ///
@@ -98,7 +98,7 @@ pub trait BopHost {
         Ok(())
     }
 
-    /// Resolve an `import` target to Bop source.
+    /// Resolve an `use` target to Bop source.
     ///
     /// The core language doesn't know where modules live — a
     /// filesystem embedder reads `.bop` files, a browser embedder
@@ -2386,10 +2386,10 @@ print(n)"#),
         assert!(msg.contains("out of range"), "got: {}", msg);
     }
 
-    // ─── Modules / import ──────────────────────────────────────────
+    // ─── Modules / use ──────────────────────────────────────────
 
     /// Host that resolves modules from an in-memory map keyed by
-    /// the dot-joined import path. Captures prints and tracks how
+    /// the dot-joined use path. Captures prints and tracks how
     /// many times each module was resolved so we can pin the
     /// caching behaviour.
     struct ModuleHost {
@@ -2452,7 +2452,7 @@ print(n)"#),
     fn import_brings_let_binding_into_scope() {
         let mut host = ModuleHost::new(&[("math", "let pi = 3")]);
         run(
-            r#"import math
+            r#"use math
 print(pi)"#,
             &mut host,
             &BopLimits::standard(),
@@ -2469,7 +2469,7 @@ print(pi)"#,
 let pi = 3"#,
         )]);
         run(
-            r#"import math
+            r#"use math
 print(square(5))
 print(pi)"#,
             &mut host,
@@ -2483,7 +2483,7 @@ print(pi)"#,
     fn import_dotted_path_passes_through_to_host() {
         let mut host = ModuleHost::new(&[("std.math", "let e = 2")]);
         run(
-            r#"import std.math
+            r#"use std.math
 print(e)"#,
             &mut host,
             &BopLimits::standard(),
@@ -2497,7 +2497,7 @@ print(e)"#,
     #[test]
     fn import_module_not_found_errors() {
         let mut host = ModuleHost::new(&[]);
-        let err = run("import nope", &mut host, &BopLimits::standard())
+        let err = run("use nope", &mut host, &BopLimits::standard())
             .unwrap_err();
         assert!(
             err.message.contains("Module `nope` not found"),
@@ -2512,8 +2512,8 @@ print(e)"#,
         // only hit the resolver once.
         let mut host = ModuleHost::new(&[("m", "let x = 1")]);
         run(
-            r#"import m
-import m
+            r#"use m
+use m
 print(x)"#,
             &mut host,
             &BopLimits::standard(),
@@ -2526,11 +2526,11 @@ print(x)"#,
     #[test]
     fn import_module_can_import_other_modules() {
         let mut host = ModuleHost::new(&[
-            ("a", "import b\nlet doubled_pi = pi + pi"),
+            ("a", "use b\nlet doubled_pi = pi + pi"),
             ("b", "let pi = 3"),
         ]);
         run(
-            r#"import a
+            r#"use a
 print(doubled_pi)"#,
             &mut host,
             &BopLimits::standard(),
@@ -2542,10 +2542,10 @@ print(doubled_pi)"#,
     #[test]
     fn import_circular_detected() {
         let mut host = ModuleHost::new(&[
-            ("a", "import b\nlet x = 1"),
-            ("b", "import a\nlet y = 2"),
+            ("a", "use b\nlet x = 1"),
+            ("b", "use a\nlet y = 2"),
         ]);
-        let err = run("import a", &mut host, &BopLimits::standard())
+        let err = run("use a", &mut host, &BopLimits::standard())
             .unwrap_err();
         assert!(
             err.message.contains("Circular import"),
@@ -2559,7 +2559,7 @@ print(doubled_pi)"#,
         let mut host = ModuleHost::new(&[("m", "let x = 99")]);
         let err = run(
             r#"let x = 1
-import m"#,
+use m"#,
             &mut host,
             &BopLimits::standard(),
         )
@@ -3109,7 +3109,7 @@ print(u)"#),
         let mut host = ModuleHost::new(&[("m", "fn leak() { return outer }")]);
         let err = run(
             r#"let outer = 42
-import m
+use m
 print(leak())"#,
             &mut host,
             &BopLimits::standard(),

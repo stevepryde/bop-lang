@@ -216,8 +216,9 @@ pub enum Instr {
     // ─── Modules ─────────────────────────────────────────────────
     /// Resolve, parse, compile, and run the module at `name`, then
     /// inject its top-level bindings into the current scope. The
-    /// VM caches by module path so re-imports are cheap.
-    Import(NameIdx),
+    /// VM caches by module path so re-uses are cheap. Emitted by
+    /// the compiler for the `use foo.bar.baz` statement.
+    Use(NameIdx),
 
     // ─── User-defined types ─────────────────────────────────────
     /// Register the struct type at `StructIdx` (declared fields

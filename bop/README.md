@@ -67,7 +67,7 @@ fn main() {
 | feature | default | what it does |
 |---|---|---|
 | `std` | yes | uses `std::f64` math, `std` collections, and full runtime |
-| `bop-std` | yes | bundles the Bop stdlib (`import std.math`, `std.json`, `std.collections`, `std.iter`, `std.string`, `std.result`, `std.test`) as `&'static str` constants reachable via [`bop::stdlib::resolve`] |
+| `bop-std` | yes | bundles the Bop stdlib (`use std.math`, `std.json`, `std.collections`, `std.iter`, `std.string`, `std.result`, `std.test`) as `&'static str` constants reachable via [`bop::stdlib::resolve`] |
 | `no_std` | no | drops the `std` dep, pulls in `libm` for float math. Enable with `default-features = false, features = ["no_std"]` |
 
 A truly minimal build — core language only, no bundled stdlib:

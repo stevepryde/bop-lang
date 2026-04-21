@@ -273,11 +273,11 @@ pub enum StmtKind {
     },
     Break,
     Continue,
-    /// `import foo.bar.baz` — resolves the module named by the
+    /// `use foo.bar.baz` — resolves the module named by the
     /// dot-joined path through `BopHost::resolve_module`, evaluates
     /// its top-level statements in a fresh scope, and injects the
     /// module's `let` / `fn` bindings into the importer's scope.
-    Import {
+    Use {
         path: String,
     },
     /// `struct Point { x, y }` — registers a user-defined struct
@@ -554,7 +554,7 @@ impl Parser {
                     line,
                 })
             }
-            Token::Import => self.parse_import(),
+            Token::Use => self.parse_use(),
             Token::Struct => self.parse_struct_decl(),
             Token::Enum => self.parse_enum_decl(),
             _ => self.parse_expr_or_assign(),
@@ -653,9 +653,9 @@ impl Parser {
         Ok(VariantDecl { name, kind })
     }
 
-    fn parse_import(&mut self) -> Result<Stmt, BopError> {
+    fn parse_use(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
-        self.advance(); // consume `import`
+        self.advance(); // consume `use`
         let (first, _) = self.expect_ident()?;
         let mut path = first;
         while matches!(self.peek(), Token::Dot) {
@@ -665,7 +665,7 @@ impl Parser {
             path.push_str(&seg);
         }
         Ok(Stmt {
-            kind: StmtKind::Import { path },
+            kind: StmtKind::Use { path },
             line,
         })
     }
@@ -1772,7 +1772,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Repeat => "repeat",
         Token::Break => "break",
         Token::Continue => "continue",
-        Token::Import => "import",
+        Token::Use => "use",
         Token::Struct => "struct",
         Token::Enum => "enum",
         Token::Match => "match",
