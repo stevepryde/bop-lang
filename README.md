@@ -126,7 +126,7 @@ impl BopHost for SandboxedHost {
 
 ## WASM / no_std
 
-Bop builds clean for `wasm32-unknown-unknown` in both std and no_std modes. Walker + VM + libm + `lol_alloc` as `#[global_allocator]` ships at ~355 KB stripped.
+Bop builds clean for `wasm32-unknown-unknown`. Walker + VM + libm + `lol_alloc` as `#[global_allocator]` ships at ~355 KB stripped.
 
 ```toml
 [dependencies]
