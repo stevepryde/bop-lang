@@ -8,7 +8,7 @@ Three methods work on any value — introspection + stringification. They're dis
 
 | Method | Returns | Notes |
 |--------|---------|-------|
-| `x.type()` | string | One of `"int"`, `"number"`, `"string"`, `"bool"`, `"none"`, `"array"`, `"dict"`, `"fn"`, `"struct"`, `"enum"`, `"module"` |
+| `x.type()` | string | One of `"int"`, `"number"`, `"string"`, `"bool"`, `"none"`, `"array"`, `"dict"`, `"fn"`, `"struct"`, `"enum"`, `"module"`, `"iter"` |
 | `x.to_str()` | string | Display repr — same as what `print(x)` would emit for a single arg |
 | `x.inspect()` | string | Debug repr — strings are wrapped in `"..."`, nested strings stay quoted inside arrays / dicts |
 
@@ -85,6 +85,7 @@ See [Strings](../data/strings.md) for worked examples.
 | `s.slice(start, end)` | string | Substring by code-point index. |
 | `s.to_int()` | int | Parse. `"3.7".to_int()` parses as float then truncates → `3`. Raises on junk. |
 | `s.to_float()` | number | Parse. Raises on junk. |
+| `s.iter()` | iter | Lazy iterator over Unicode code points. See [Iter methods](#iter-methods--iter). |
 
 ## Array methods — `array`
 
@@ -103,6 +104,7 @@ See [Arrays](../data/arrays.md) for worked examples.
 | `arr.reverse()` | none | In-place. |
 | `arr.sort()` | none | In-place, numeric or lexicographic depending on element types. |
 | `arr.join(sep)` | string | Join after stringifying each element. |
+| `arr.iter()` | iter | Lazy iterator over the elements. See [Iter methods](#iter-methods--iter). |
 
 ## Dict methods — `dict`
 
@@ -114,6 +116,7 @@ See [Dictionaries](../data/dictionaries.md) for worked examples.
 | `d.keys()` | array | All keys as strings. |
 | `d.values()` | array | All values. |
 | `d.has(key)` | bool | Whether `key` exists. |
+| `d.iter()` | iter | Lazy iterator over keys, in declaration order. See [Iter methods](#iter-methods--iter). |
 
 ## Result methods — `Result`
 
@@ -141,6 +144,67 @@ fn halve(x) {
   return Result::Err("odd")
 }
 print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+```
+
+## Iter methods — `iter`
+
+An `iter` is Bop's lazy iterator. Values you can iterate over — arrays, strings, dicts, built-in iterators, and user-defined containers — all participate in the same protocol:
+
+1. `v.iter()` returns an iterator.
+2. `it.next()` advances it, returning `Iter::Next(value)` or `Iter::Done`.
+
+`for x in v` uses this protocol, so anything with a working `.iter()` method works with `for`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `it.next()` | `Iter::Next(v)` / `Iter::Done` | Advance by one. Cloning an iterator shares its cursor (like Python / Rust / JS) — two names pointing at the same iterator advance together. |
+| `it.iter()` | iter | Returns the same iterator. Makes `for x in it` work whether `it` is already an iterator or a fresh iterable. |
+
+```bop
+let it = [10, 20, 30].iter()
+print(it.type())                // "iter"
+print(it.next())                // Iter::Next(10)
+print(it.next())                // Iter::Next(20)
+
+for x in it { print(x) }        // 30  (picks up from the current cursor)
+```
+
+### User-defined iterables
+
+A struct can participate in the iterator protocol by implementing `.iter()` (and, if it's its own iterator, `.next()`):
+
+```bop
+struct Bag { items }
+fn bag_of(arr) { return Bag { items: arr } }
+fn Bag.iter(self) { return self.items.iter() }   // delegate to the backing array
+
+let b = bag_of(["x", "y", "z"])
+for v in b { print(v) }                           // x  y  z
+```
+
+That's the minimal shape. A container that wraps an array and delegates `.iter()` is the 80% case. User types with genuine internal state (like a lazy counter) work the same way — define `fn Counter.iter(self)` to return an iterator (either the backing data's iterator, or `self` if `self` also has `.next()`).
+
+### The `Iter` enum
+
+`.next()` returns one of two variants of the built-in `Iter` enum — always in scope, no `use` required:
+
+```
+enum Iter {
+  Next(value),
+  Done,
+}
+```
+
+Pattern-match directly:
+
+```bop
+let it = [1, 2].iter()
+let r = it.next()
+print(match r {
+  Iter::Next(v) => "got: " + v.to_str(),
+  Iter::Done    => "exhausted",
+})
+// got: 1
 ```
 
 ## Struct / enum methods

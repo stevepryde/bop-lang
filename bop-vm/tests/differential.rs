@@ -2082,6 +2082,67 @@ fn error_unknown_function() {
 }
 
 #[test]
+fn iter_protocol_array_yields_each_item_diff() {
+    // `.iter()` + `.next()` must produce the same Iter::Next /
+    // Iter::Done sequence on both engines.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"let it = [1, 2, 3].iter()
+print(it.next())
+print(it.next())
+print(it.next())
+print(it.next())"#),
+        "Iter::Done"
+    );
+}
+
+#[test]
+fn for_over_iter_value_matches_direct_diff() {
+    // Walker and VM must treat `for x in arr.iter()` and
+    // `for x in arr` identically. Uses a reduce-style running
+    // total so the `say` return captures the full result.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"let total = 0
+for x in [1, 2, 3, 4, 5].iter() { total = total + x }
+print(total)"#),
+        "15"
+    );
+}
+
+#[test]
+fn for_over_user_container_via_iter_diff() {
+    // Bag delegates `.iter()` to the backing array. Walker and
+    // VM both have to see a Bag, call its `.iter()` method, and
+    // iterate the returned Value::Iter transparently.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"struct Bag { items }
+fn bag_of(arr) { return Bag { items: arr } }
+fn Bag.iter(self) { return self.items.iter() }
+
+let b = bag_of([10, 20, 30])
+let sum = 0
+for v in b { sum = sum + v }
+print(sum)"#),
+        "60"
+    );
+}
+
+#[test]
+fn for_on_dict_iterates_keys_diff() {
+    // `for k in dict` used to error — it now materialises the
+    // keys. Both engines must produce the same output.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"let out = ""
+for k in {"a": 1, "b": 2, "c": 3} { out = out + k }
+print(out)"#),
+        "abc"
+    );
+}
+
+#[test]
 fn panic_builtin_raises_with_message() {
     // `panic(msg)` is the stdlib's shared error-signalling
     // primitive; both engines have to surface the message

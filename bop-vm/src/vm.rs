@@ -100,7 +100,14 @@ const SLOTS_FREELIST_CAP: usize = 128;
 enum Slot {
     Value(Value),
     /// Remaining items in reverse order — `pop()` yields the next one.
+    /// Eager fast path for `for x in <array | string | dict>`.
     Iter(Vec<Value>),
+    /// Iterator protocol state: holds a value whose `.next()`
+    /// method returns `Iter::Next(v)` / `Iter::Done`. Produced
+    /// when the for-loop's iterable is a `Value::Iter` or a
+    /// user type; the `IterNext` opcode dispatches `.next()`
+    /// through the regular method path.
+    IterObject(Value),
     /// Remaining iterations for a `repeat` loop.
     Repeat(i64),
 }
@@ -151,6 +158,43 @@ enum FrameWrap {
     /// `r.map_err(f)` landing pad: wrap the clean return in
     /// `Result::Err(v)`. Errors in `f` propagate unchanged.
     ResultErr,
+    /// `MakeIter` landing pad for user-typed iterables: the
+    /// frame ran the user's `.iter()` method; its return value
+    /// should become a `Slot::IterObject` on the caller's
+    /// stack instead of the usual `Slot::Value`.
+    IterStart,
+    /// `IterNext` landing pad for user-typed iterators: the
+    /// frame ran the user's `.next()` method. Inspect the
+    /// return (expected `Iter::Next(x)` / `Iter::Done`) and
+    /// either push `x` (so the subsequent slot store picks it
+    /// up) or pop the iterator and jump to the exit target.
+    IterAdvance(crate::chunk::CodeOffset),
+}
+
+/// Destructured view of a value returned from an iterator's
+/// `.next()` method — either `Iter::Next(v)`, `Iter::Done`, or
+/// anything else (user bug, surfaced as a runtime error).
+enum IterStep {
+    Next(Value),
+    Done,
+    Malformed,
+}
+
+fn unwrap_iter_step(v: &Value) -> IterStep {
+    let e = match v {
+        Value::EnumVariant(e) => e,
+        _ => return IterStep::Malformed,
+    };
+    if e.type_name() != "Iter" {
+        return IterStep::Malformed;
+    }
+    match (e.variant(), e.payload()) {
+        ("Next", bop::value::EnumPayload::Tuple(items)) if items.len() == 1 => {
+            IterStep::Next(items[0].clone())
+        }
+        ("Done", bop::value::EnumPayload::Unit) => IterStep::Done,
+        _ => IterStep::Malformed,
+    }
 }
 
 struct FnEntry {
@@ -226,7 +270,20 @@ fn seed_builtin_types() -> (
         })
         .collect();
     enum_defs.insert((builtin_mp.clone(), String::from("Result")), variants);
-    bindings.insert(String::from("Result"), builtin_mp);
+    bindings.insert(String::from("Result"), builtin_mp.clone());
+    let iter_variants: Vec<(String, EnumVariantShape)> = bop::builtins::builtin_iter_variants()
+        .into_iter()
+        .map(|v| {
+            let shape = match v.kind {
+                VariantKind::Unit => EnumVariantShape::Unit,
+                VariantKind::Tuple(fs) => EnumVariantShape::Tuple(fs),
+                VariantKind::Struct(fs) => EnumVariantShape::Struct(fs),
+            };
+            (v.name, shape)
+        })
+        .collect();
+    enum_defs.insert((builtin_mp.clone(), String::from("Iter")), iter_variants);
+    bindings.insert(String::from("Iter"), builtin_mp);
     (struct_defs, enum_defs, bindings)
 }
 
@@ -1003,34 +1060,118 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // ─── Iteration / repeat ──────────────────────────────
             Instr::MakeIter => {
                 let mut v = self.pop_value(line)?;
-                let mut items: Vec<Value> = match &mut v {
-                    Value::Array(arr) => arr.take(),
-                    Value::Str(s) => s
-                        .chars()
-                        .map(|c| Value::new_str(c.to_string()))
-                        .collect(),
-                    other => {
+                // Fast path: Array / Str / Dict materialise eagerly
+                // into a `Slot::Iter(Vec<_>)`. Every other iterable
+                // goes through the protocol — either wraps a
+                // `Value::Iter` directly, or dispatches the user's
+                // `.iter()` method and lands the result via
+                // `FrameWrap::IterStart`.
+                match &mut v {
+                    Value::Array(arr) => {
+                        let mut items = arr.take();
+                        drop(v);
+                        items.reverse();
+                        self.stack.push(Slot::Iter(items));
+                    }
+                    Value::Str(s) => {
+                        let mut items: Vec<Value> = s
+                            .chars()
+                            .map(|c| Value::new_str(c.to_string()))
+                            .collect();
+                        drop(v);
+                        items.reverse();
+                        self.stack.push(Slot::Iter(items));
+                    }
+                    Value::Dict(d) => {
+                        let mut items: Vec<Value> = d
+                            .iter()
+                            .map(|(k, _)| Value::new_str(k.clone()))
+                            .collect();
+                        drop(v);
+                        items.reverse();
+                        self.stack.push(Slot::Iter(items));
+                    }
+                    Value::Iter(_) => {
+                        // Already an iterator — use as-is.
+                        self.stack.push(Slot::IterObject(v));
+                    }
+                    Value::Struct(_) | Value::EnumVariant(_) => {
+                        // Dispatch user `.iter()`. The result
+                        // lands on the stack as a Slot::IterObject
+                        // via `FrameWrap::IterStart`.
+                        let iterable = v;
+                        self.dispatch_iter_method(
+                            iterable,
+                            "iter",
+                            Vec::new(),
+                            FrameWrap::IterStart,
+                            line,
+                        )?;
+                    }
+                    _ => {
                         return Err(error(
                             line,
-                            bop::error_messages::cant_iterate_over(other.type_name()),
+                            bop::error_messages::cant_iterate_over(v.type_name()),
                         ));
                     }
-                };
-                drop(v);
-                items.reverse(); // so pop() yields items in order
-                self.stack.push(Slot::Iter(items));
+                }
             }
             Instr::IterNext { target } => {
-                let next = match self.stack.last_mut() {
-                    Some(Slot::Iter(items)) => items.pop(),
-                    _ => return Err(error(line, "VM: expected iterator on stack")),
-                };
-                match next {
-                    Some(item) => self.push_value(item),
-                    None => {
-                        self.stack.pop();
-                        self.jump(target);
+                match self.stack.last_mut() {
+                    Some(Slot::Iter(items)) => {
+                        let next = items.pop();
+                        match next {
+                            Some(item) => self.push_value(item),
+                            None => {
+                                self.stack.pop();
+                                self.jump(target);
+                            }
+                        }
                     }
+                    Some(Slot::IterObject(iter_val)) => {
+                        // Synchronous fast-path for the built-in
+                        // iterator: `iter_method::next` runs in
+                        // Rust, no bytecode frame push required.
+                        if matches!(iter_val, Value::Iter(_)) {
+                            let iter_clone = iter_val.clone();
+                            let (result, _) = methods::iter_method(
+                                &iter_clone,
+                                "next",
+                                &[],
+                                line,
+                            )?;
+                            match unwrap_iter_step(&result) {
+                                IterStep::Next(v) => self.push_value(v),
+                                IterStep::Done => {
+                                    self.stack.pop();
+                                    self.jump(target);
+                                }
+                                IterStep::Malformed => {
+                                    return Err(error(
+                                        line,
+                                        format!(
+                                            "`.next()` on a `for` iterator must return `Iter::Next(v)` or `Iter::Done`, got {}",
+                                            result.inspect()
+                                        ),
+                                    ));
+                                }
+                            }
+                        } else {
+                            // User-typed iterator — dispatch
+                            // `.next()` through the normal method
+                            // path. The return value is handled
+                            // in `do_return` under `IterAdvance`.
+                            let iter_clone = iter_val.clone();
+                            self.dispatch_iter_method(
+                                iter_clone,
+                                "next",
+                                Vec::new(),
+                                FrameWrap::IterAdvance(target),
+                                line,
+                            )?;
+                        }
+                    }
+                    _ => return Err(error(line, "VM: expected iterator on stack")),
                 }
             }
             Instr::MakeRepeatCount => {
@@ -1606,6 +1747,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
             Value::Bool(_) => {
                 methods::bool_method(&obj, &method, &args, line)?
+            }
+            Value::Iter(_) => {
+                methods::iter_method(&obj, &method, &args, line)?
             }
             _ => {
                 return Err(error(
@@ -2845,6 +2989,61 @@ impl<'h, H: BopHost> Vm<'h, H> {
         if !frame.slots.is_empty() {
             self.return_slots(frame.slots);
         }
+        // Iterator-protocol landing pads get their own return
+        // handling — they don't just push the value; they
+        // manipulate the caller's stack (and maybe jump) to
+        // continue the for-loop.
+        match frame.wrap {
+            FrameWrap::IterStart => {
+                // User `.iter()` returned `value`. Stash it on
+                // the stack as the iterator object for the
+                // matching `IterNext` instruction to consume.
+                self.stack.push(Slot::IterObject(value));
+                return Ok(Next::Continue);
+            }
+            FrameWrap::IterAdvance(target) => {
+                // User `.next()` returned `value`; dispatch:
+                //   Iter::Next(x) → push x so the following
+                //     StoreLocal/DefineLocal binds the loop var.
+                //     Iterator object stays on the stack under x.
+                //   Iter::Done    → pop the iterator, jump exit.
+                //   malformed     → raise.
+                match unwrap_iter_step(&value) {
+                    IterStep::Next(x) => {
+                        drop(value);
+                        self.push_value(x);
+                        return Ok(Next::Continue);
+                    }
+                    IterStep::Done => {
+                        drop(value);
+                        self.stack.pop();
+                        self.jump(target);
+                        return Ok(Next::Continue);
+                    }
+                    IterStep::Malformed => {
+                        let msg = format!(
+                            "`.next()` on a `for` iterator must return `Iter::Next(v)` or `Iter::Done`, got {}",
+                            value.inspect()
+                        );
+                        // The returning frame no longer has a
+                        // meaningful "current line" — use the
+                        // top frame's instruction line as the
+                        // best approximation. 0 is fine if we're
+                        // returning to the top-level frame.
+                        let caller_line = self
+                            .frames
+                            .last()
+                            .and_then(|f| {
+                                let idx = f.ip.saturating_sub(1);
+                                f.chunk.lines.get(idx).copied()
+                            })
+                            .unwrap_or(0);
+                        return Err(error(caller_line, msg));
+                    }
+                }
+            }
+            _ => {}
+        }
         // Apply the frame-level return wrapper: `try_call` wraps
         // in `Result::Ok`, `r.map` / `r.map_err` wrap the closure
         // result in Ok / Err respectively. Plain frames pass the
@@ -2854,6 +3053,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             FrameWrap::TryCall => builtins::make_try_call_ok(value),
             FrameWrap::ResultOk => methods::make_result_ok(value),
             FrameWrap::ResultErr => methods::make_result_err(value),
+            FrameWrap::IterStart | FrameWrap::IterAdvance(_) => {
+                unreachable!("handled above")
+            }
         };
         if frame.is_function {
             self.push_value(final_value);
@@ -2908,6 +3110,91 @@ impl<'h, H: BopHost> Vm<'h, H> {
             frame.wrap = FrameWrap::TryCall;
         }
         Ok(Next::Continue)
+    }
+
+    /// Dispatch `receiver.method(args)` as a user-method call
+    /// for the iterator protocol. Pushes a bytecode frame with
+    /// `wrap` attached so the return value lands on the caller's
+    /// stack with the right post-processing. Returns a clean
+    /// "iterable doesn't have a .iter() method" error when the
+    /// user type doesn't implement the protocol.
+    fn dispatch_iter_method(
+        &mut self,
+        receiver: Value,
+        method: &str,
+        extra_args: Vec<Value>,
+        wrap: FrameWrap,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let type_key: Option<(String, String)> = match &receiver {
+            Value::Struct(s) => Some((
+                s.module_path().to_string(),
+                s.type_name().to_string(),
+            )),
+            Value::EnumVariant(e) => Some((
+                e.module_path().to_string(),
+                e.type_name().to_string(),
+            )),
+            _ => None,
+        };
+        let key = type_key.ok_or_else(|| {
+            error(
+                line,
+                bop::error_messages::cant_iterate_over(receiver.type_name()),
+            )
+        })?;
+        let entry = self
+            .user_methods
+            .get(&key)
+            .and_then(|m| m.get(method))
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    line,
+                    format!(
+                        "`{}` doesn't have a `.{}()` method — can't iterate",
+                        key.1, method
+                    ),
+                )
+            })?;
+        if entry.params.len() != extra_args.len() + 1 {
+            return Err(error(
+                line,
+                format!(
+                    "`{}.{}` expects {} argument{} (including `self`), but got {}",
+                    key.1,
+                    method,
+                    entry.params.len(),
+                    if entry.params.len() == 1 { "" } else { "s" },
+                    extra_args.len() + 1
+                ),
+            ));
+        }
+        if self.frames.len() >= MAX_CALL_DEPTH {
+            return Err(error_with_hint(
+                line,
+                "Too many nested function calls (possible infinite recursion)",
+                "Check that your recursive function has a base case that stops calling itself.",
+            ));
+        }
+        let slot_count =
+            (entry.chunk.slot_count as usize).max(entry.params.len());
+        let mut slots = self.take_slots(slot_count);
+        slots[0] = receiver;
+        for (i, a) in extra_args.into_iter().enumerate() {
+            slots[i + 1] = a;
+        }
+        self.frames.push(Frame {
+            chunk: entry.chunk.clone(),
+            ip: 0,
+            slots,
+            scopes: Vec::new(),
+            stack_base: self.stack.len(),
+            is_function: true,
+            wrap,
+        });
+        self.type_bindings.push(BTreeMap::new());
+        Ok(())
     }
 
     /// Handle `r.map(f)`, `r.map_err(f)`, `r.and_then(f)` for a

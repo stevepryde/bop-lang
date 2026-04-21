@@ -15,6 +15,7 @@ Bop is dynamically typed — variables can hold any type, and types are checked 
 | `"struct"` | User-defined struct instance | `Point { x: 3, y: 4 }` |
 | `"enum"` | User-defined enum variant | `Color::Red` |
 | `"module"` | Aliased module namespace | result of `use foo as m` |
+| `"iter"` | Lazy iterator | `[1, 2, 3].iter()`, `"abc".iter()` |
 
 ```bop
 let x = 42

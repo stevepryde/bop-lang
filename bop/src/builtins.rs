@@ -51,6 +51,48 @@ pub fn builtin_runtime_error_fields() -> Vec<String> {
     alloc_import::vec![String::from("message"), String::from("line")]
 }
 
+/// The canonical `Iter { Next(value), Done }` enum shape —
+/// lazy iterators' return type from `.next()`. Seeded into every
+/// engine's type registry alongside `Result` so user code can
+/// pattern-match `Iter::Next(v) | Iter::Done` without importing
+/// anything.
+pub fn builtin_iter_variants() -> Vec<VariantDecl> {
+    alloc_import::vec![
+        VariantDecl {
+            name: String::from("Next"),
+            kind: VariantKind::Tuple(alloc_import::vec![String::from("value")]),
+        },
+        VariantDecl {
+            name: String::from("Done"),
+            kind: VariantKind::Unit,
+        },
+    ]
+}
+
+/// Build `Iter::Next(value)` with the builtin module path so the
+/// caller's pattern against `Iter::Next(v)` fires regardless of
+/// which module the iterator's `.next()` was declared in.
+pub fn make_iter_next(value: Value) -> Value {
+    let mut items: Vec<Value> = Vec::with_capacity(1);
+    items.push(value);
+    Value::new_enum_tuple(
+        String::from(crate::value::BUILTIN_MODULE_PATH),
+        String::from("Iter"),
+        String::from("Next"),
+        items,
+    )
+}
+
+/// Build the `Iter::Done` sentinel. Carries the builtin module
+/// path for the same matching reason as [`make_iter_next`].
+pub fn make_iter_done() -> Value {
+    Value::new_enum_unit(
+        String::from(crate::value::BUILTIN_MODULE_PATH),
+        String::from("Iter"),
+        String::from("Done"),
+    )
+}
+
 // Small alias so this file compiles both under std and no_std. The
 // parser module already uses `alloc::vec!` under no_std, so the
 // engines follow the same convention here. Nothing clever — just a

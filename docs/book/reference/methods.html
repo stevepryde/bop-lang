@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-7add6b7f.js";
+            window.path_to_searchindex_js = "../searchindex-023d7c23.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-4a0c6a8e.js"></script>
@@ -187,7 +187,7 @@
 <tr><th>Method</th><th>Returns</th><th>Notes</th></tr>
 </thead>
 <tbody>
-<tr><td><code>x.type()</code></td><td>string</td><td>One of <code>"int"</code>, <code>"number"</code>, <code>"string"</code>, <code>"bool"</code>, <code>"none"</code>, <code>"array"</code>, <code>"dict"</code>, <code>"fn"</code>, <code>"struct"</code>, <code>"enum"</code>, <code>"module"</code></td></tr>
+<tr><td><code>x.type()</code></td><td>string</td><td>One of <code>"int"</code>, <code>"number"</code>, <code>"string"</code>, <code>"bool"</code>, <code>"none"</code>, <code>"array"</code>, <code>"dict"</code>, <code>"fn"</code>, <code>"struct"</code>, <code>"enum"</code>, <code>"module"</code>, <code>"iter"</code></td></tr>
 <tr><td><code>x.to_str()</code></td><td>string</td><td>Display repr — same as what <code>print(x)</code> would emit for a single arg</td></tr>
 <tr><td><code>x.inspect()</code></td><td>string</td><td>Debug repr — strings are wrapped in <code>"..."</code>, nested strings stay quoted inside arrays / dicts</td></tr>
 </tbody>
@@ -267,6 +267,7 @@ print((3.7).floor().type())         // "int"
 <tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring by code-point index.</td></tr>
 <tr><td><code>s.to_int()</code></td><td>int</td><td>Parse. <code>"3.7".to_int()</code> parses as float then truncates → <code>3</code>. Raises on junk.</td></tr>
 <tr><td><code>s.to_float()</code></td><td>number</td><td>Parse. Raises on junk.</td></tr>
+<tr><td><code>s.iter()</code></td><td>iter</td><td>Lazy iterator over Unicode code points. See <a href="#iter-methods--iter">Iter methods</a>.</td></tr>
 </tbody>
 </table>
 </div>
@@ -289,6 +290,7 @@ print((3.7).floor().type())         // "int"
 <tr><td><code>arr.reverse()</code></td><td>none</td><td>In-place.</td></tr>
 <tr><td><code>arr.sort()</code></td><td>none</td><td>In-place, numeric or lexicographic depending on element types.</td></tr>
 <tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join after stringifying each element.</td></tr>
+<tr><td><code>arr.iter()</code></td><td>iter</td><td>Lazy iterator over the elements. See <a href="#iter-methods--iter">Iter methods</a>.</td></tr>
 </tbody>
 </table>
 </div>
@@ -304,6 +306,7 @@ print((3.7).floor().type())         // "int"
 <tr><td><code>d.keys()</code></td><td>array</td><td>All keys as strings.</td></tr>
 <tr><td><code>d.values()</code></td><td>array</td><td>All values.</td></tr>
 <tr><td><code>d.has(key)</code></td><td>bool</td><td>Whether <code>key</code> exists.</td></tr>
+<tr><td><code>d.iter()</code></td><td>iter</td><td>Lazy iterator over keys, in declaration order. See <a href="#iter-methods--iter">Iter methods</a>.</td></tr>
 </tbody>
 </table>
 </div>
@@ -336,6 +339,57 @@ fn halve(x) {
   return Result::Err("odd")
 }
 print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+</code></pre>
+<h2 id="iter-methods--iter"><a class="header" href="#iter-methods--iter">Iter methods — <code>iter</code></a></h2>
+<p>An <code>iter</code> is Bop’s lazy iterator. Values you can iterate over — arrays, strings, dicts, built-in iterators, and user-defined containers — all participate in the same protocol:</p>
+<ol>
+<li><code>v.iter()</code> returns an iterator.</li>
+<li><code>it.next()</code> advances it, returning <code>Iter::Next(value)</code> or <code>Iter::Done</code>.</li>
+</ol>
+<p><code>for x in v</code> uses this protocol, so anything with a working <code>.iter()</code> method works with <code>for</code>.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Returns</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>it.next()</code></td><td><code>Iter::Next(v)</code> / <code>Iter::Done</code></td><td>Advance by one. Cloning an iterator shares its cursor (like Python / Rust / JS) — two names pointing at the same iterator advance together.</td></tr>
+<tr><td><code>it.iter()</code></td><td>iter</td><td>Returns the same iterator. Makes <code>for x in it</code> work whether <code>it</code> is already an iterator or a fresh iterable.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">let it = [10, 20, 30].iter()
+print(it.type())                // "iter"
+print(it.next())                // Iter::Next(10)
+print(it.next())                // Iter::Next(20)
+
+for x in it { print(x) }        // 30  (picks up from the current cursor)
+</code></pre>
+<h3 id="user-defined-iterables"><a class="header" href="#user-defined-iterables">User-defined iterables</a></h3>
+<p>A struct can participate in the iterator protocol by implementing <code>.iter()</code> (and, if it’s its own iterator, <code>.next()</code>):</p>
+<pre><code class="language-bop">struct Bag { items }
+fn bag_of(arr) { return Bag { items: arr } }
+fn Bag.iter(self) { return self.items.iter() }   // delegate to the backing array
+
+let b = bag_of(["x", "y", "z"])
+for v in b { print(v) }                           // x  y  z
+</code></pre>
+<p>That’s the minimal shape. A container that wraps an array and delegates <code>.iter()</code> is the 80% case. User types with genuine internal state (like a lazy counter) work the same way — define <code>fn Counter.iter(self)</code> to return an iterator (either the backing data’s iterator, or <code>self</code> if <code>self</code> also has <code>.next()</code>).</p>
+<h3 id="the-iter-enum"><a class="header" href="#the-iter-enum">The <code>Iter</code> enum</a></h3>
+<p><code>.next()</code> returns one of two variants of the built-in <code>Iter</code> enum — always in scope, no <code>use</code> required:</p>
+<pre><code>enum Iter {
+  Next(value),
+  Done,
+}
+</code></pre>
+<p>Pattern-match directly:</p>
+<pre><code class="language-bop">let it = [1, 2].iter()
+let r = it.next()
+print(match r {
+  Iter::Next(v) =&gt; "got: " + v.to_str(),
+  Iter::Done    =&gt; "exhausted",
+})
+// got: 1
 </code></pre>
 <h2 id="struct--enum-methods"><a class="header" href="#struct--enum-methods">Struct / enum methods</a></h2>
 <p>User-declared. See <a href="../data/structs-and-enums.html">Structs &amp; Enums</a>. Method dispatch on a struct tries the universal common methods first, then looks up <code>fn TypeName.method</code> declared in the same module.</p>
@@ -381,22 +435,6 @@ print(m.type())         // "module"   (universal method, not an export)
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

@@ -104,6 +104,21 @@ for name in scores {
 }
 ```
 
+### Iterators and user-defined containers
+
+`for x in v` works on anything that participates in the [iterator protocol](../reference/methods.md#iter-methods--iter): arrays, strings, dicts, explicit iterators (`arr.iter()`), and user types that implement `.iter()`:
+
+```bop
+struct Bag { items }
+fn bag_of(arr) { return Bag { items: arr } }
+fn Bag.iter(self) { return self.items.iter() }
+
+let b = bag_of([10, 20, 30])
+for v in b { print(v) }         // 10  20  30
+```
+
+That's the structural-typing story: no trait declaration, no ceremony — if `v.iter()` returns something iterable, `for x in v` just works.
+
 ### Strings
 
 You can iterate over the characters of a string:

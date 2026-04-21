@@ -116,6 +116,14 @@ pub fn array_method(
                 .join(sep);
             Ok((Value::new_str(result), None))
         }
+        "iter" => {
+            crate::builtins::expect_args("iter", args, 0, line)?;
+            // Snapshot the items — subsequent mutation of the
+            // source array must not poke the iterator. Cheap
+            // because every inner Value::Clone is either a
+            // primitive copy or an Rc bump.
+            Ok((Value::new_array_iter(arr.to_vec()), None))
+        }
         _ => Err(error(line, format!("Array doesn't have a .{}() method", method))),
     }
 }
@@ -246,6 +254,11 @@ pub fn string_method(
             })?;
             Ok((Value::Number(n), None))
         }
+        "iter" => {
+            crate::builtins::expect_args("iter", args, 0, line)?;
+            let chars: Vec<char> = s.chars().collect();
+            Ok((Value::new_string_iter(chars), None))
+        }
         _ => Err(error(line, format!("String doesn't have a .{}() method", method))),
     }
 }
@@ -278,6 +291,13 @@ pub fn dict_method(
                 _ => return Err(error(line, ".has() needs a string key")),
             };
             Ok((Value::Bool(entries.iter().any(|(k, _)| k == key)), None))
+        }
+        "iter" => {
+            crate::builtins::expect_args("iter", args, 0, line)?;
+            // Matches `for k in dict` semantics: iterate keys
+            // in declaration order.
+            let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
+            Ok((Value::new_dict_iter(keys), None))
         }
         _ => Err(error(line, format!("Dict doesn't have a .{}() method", method))),
     }
@@ -691,4 +711,54 @@ fn alloc_vec_of(value: Value) -> Vec<Value> {
     let mut v = Vec::with_capacity(1);
     v.push(value);
     v
+}
+
+// ─── Iterator methods ──────────────────────────────────────────
+//
+// `Value::Iter` receivers get two methods:
+//  - `.next()` advances the cursor and returns
+//    `Iter::Next(value)` or `Iter::Done` — the shape the `for`
+//    loop (and user code) pattern-matches on.
+//  - `.iter()` returns the receiver itself. Makes iterators
+//    idempotently iterable, matching Python's iterator protocol
+//    (an iterator's `__iter__` returns `self`), so `for x in
+//    arr.iter()` works without a special case.
+//
+// User-defined iterators are just ordinary struct values with
+// their own `.next()` method — they don't go through this
+// dispatcher. The `for` loop treats them uniformly via the
+// protocol: call `.iter()` to get an iterator, call `.next()`
+// until `Iter::Done`.
+
+pub fn iter_method(
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    line: u32,
+) -> Result<(Value, Option<Value>), BopError> {
+    use crate::builtins::{expect_args, make_iter_done, make_iter_next};
+    let cell = match receiver {
+        Value::Iter(cell) => cell,
+        _ => unreachable!("iter_method called on non-iterator receiver"),
+    };
+    match method {
+        "next" => {
+            expect_args("next", args, 0, line)?;
+            let mut inner = cell.borrow_mut();
+            match inner.next() {
+                Some(v) => Ok((make_iter_next(v), None)),
+                None => Ok((make_iter_done(), None)),
+            }
+        }
+        "iter" => {
+            expect_args("iter", args, 0, line)?;
+            // Iterators are their own iterator — clone the Rc
+            // so callers share the cursor.
+            Ok((receiver.clone(), None))
+        }
+        _ => Err(error(
+            line,
+            crate::error_messages::no_such_method("iter", method),
+        )),
+    }
 }

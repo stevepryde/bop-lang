@@ -1094,6 +1094,53 @@ let r = Result::Ok(8).and_then(halve).and_then(halve)
 print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#,
         &[],
     ),
+    // ─── Iterator protocol ────────────────────────────────────
+    (
+        "iter_basic_next_sequence",
+        r#"let it = [10, 20, 30].iter()
+print(it.next())
+print(it.next())
+print(it.next())
+print(it.next())"#,
+        &[],
+    ),
+    (
+        "iter_for_over_value_iter",
+        r#"let total = 0
+for x in [1, 2, 3, 4, 5].iter() { total = total + x }
+print(total)"#,
+        &[],
+    ),
+    (
+        "iter_for_over_user_container",
+        // User wrapper delegates `.iter()` to a backing array —
+        // exercises the full protocol path in every engine.
+        r#"struct Bag { items }
+fn bag_of(arr) { return Bag { items: arr } }
+fn Bag.iter(self) { return self.items.iter() }
+
+let b = bag_of([10, 20, 30])
+let sum = 0
+for v in b { sum = sum + v }
+print(sum)"#,
+        &[],
+    ),
+    (
+        "iter_for_on_dict_yields_keys",
+        r#"let out = ""
+for k in {"a": 1, "b": 2, "c": 3} { out = out + k }
+print(out)"#,
+        &[],
+    ),
+    (
+        "iter_string_yields_code_points",
+        r#"let it = "bop".iter()
+print(it.next())
+print(it.next())
+print(it.next())
+print(it.next())"#,
+        &[],
+    ),
     // ─── bop-std stdlib (phase 7) ─────────────────────────────
     (
         "std_math_factorial",

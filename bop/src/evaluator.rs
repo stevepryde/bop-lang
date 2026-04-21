@@ -500,19 +500,87 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 iterable,
                 body,
             } => {
-                let mut val = self.eval_expr(iterable)?;
-                let items = match &mut val {
-                    Value::Array(arr) => arr.take(),
-                    Value::Str(s) => s.chars().map(|c| Value::new_str(c.to_string())).collect(),
+                let val = self.eval_expr(iterable)?;
+                // Fast path for the three built-in iterables:
+                // materialise up-front and loop over the Vec
+                // directly, skipping the method-dispatch cost of
+                // the iterator protocol. Semantically identical
+                // to `for x in v.iter()` for these types.
+                if matches!(
+                    &val,
+                    Value::Array(_) | Value::Str(_) | Value::Dict(_)
+                ) {
+                    let mut val = val;
+                    let items: Vec<Value> = match &mut val {
+                        Value::Array(arr) => arr.take(),
+                        Value::Str(s) => s
+                            .chars()
+                            .map(|c| Value::new_str(c.to_string()))
+                            .collect(),
+                        Value::Dict(d) => d
+                            .iter()
+                            .map(|(k, _)| Value::new_str(k.clone()))
+                            .collect(),
+                        _ => unreachable!(),
+                    };
+                    for item in items {
+                        self.tick(stmt.line)?;
+                        self.push_scope();
+                        self.define(var.clone(), item);
+                        let sig = self.exec_block(body)?;
+                        self.pop_scope();
+                        match sig {
+                            Signal::Break => break,
+                            Signal::Continue => continue,
+                            Signal::Return(v) => return Ok(Signal::Return(v)),
+                            Signal::None => {}
+                        }
+                    }
+                    return Ok(Signal::None);
+                }
+                // Protocol path: anything else must either be an
+                // iterator already (Value::Iter, or a user value
+                // with a `.next()` method that returns
+                // `Iter::Next/Done`) or an iterable — a value
+                // whose `.iter()` method returns an iterator.
+                // Primitives and callables that don't fit get a
+                // clean "can't iterate over X" error instead of
+                // a raw "no such method" surface from the
+                // dispatcher below.
+                let iterator = match &val {
+                    Value::Iter(_) | Value::Struct(_) | Value::EnumVariant(_) => {
+                        // Ask the value for an iterator. User
+                        // structs typically implement `iter` to
+                        // return either a built-in iterator or
+                        // themselves.
+                        self.call_method_full(&val, "iter", Vec::new(), stmt.line)?
+                    }
                     other => {
                         return Err(error(
                             stmt.line,
-                            crate::error_messages::cant_iterate_over(other.type_name()),
+                            crate::error_messages::cant_iterate_over(
+                                other.type_name(),
+                            ),
                         ));
                     }
                 };
-                for item in items {
+                loop {
                     self.tick(stmt.line)?;
+                    let next_val =
+                        self.call_method_full(&iterator, "next", Vec::new(), stmt.line)?;
+                    let item = match unwrap_iter_result(&next_val) {
+                        Some(IterStep::Next(v)) => v,
+                        Some(IterStep::Done) => break,
+                        None => {
+                            return Err(error(
+                                stmt.line,
+                                format!(
+                                    "`.next()` on a `for` iterator must return `Iter::Next(v)` or `Iter::Done`, got {}",
+                                    next_val.inspect()
+                                ),
+                            ));
+                        }
+                    };
                     self.push_scope();
                     self.define(var.clone(), item);
                     let sig = self.exec_block(body)?;
@@ -2339,6 +2407,69 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
     // ─── Methods ───────────────────────────────────────────────────
 
+    /// Full method dispatch: user methods win, then common,
+    /// then type-specific (via [`Self::call_method`]). This is
+    /// what call sites outside the `MethodCall` arm (for-loop
+    /// iterator protocol, future trait-like uses) want — the
+    /// normal `MethodCall` path inlines the same logic.
+    fn call_method_full(
+        &mut self,
+        obj: &Value,
+        method: &str,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Value, BopError> {
+        // User-method dispatch first — matches MethodCall's
+        // priority so `fn MyType.iter(self)` wins over any
+        // built-in method of the same name.
+        let type_key: Option<(String, String)> = match obj {
+            Value::Struct(s) => Some((
+                s.module_path().to_string(),
+                s.type_name().to_string(),
+            )),
+            Value::EnumVariant(e) => Some((
+                e.module_path().to_string(),
+                e.type_name().to_string(),
+            )),
+            _ => None,
+        };
+        if let Some(key) = type_key {
+            let user = self
+                .methods
+                .get(&key)
+                .and_then(|ms| ms.get(method))
+                .cloned();
+            if let Some(m) = user {
+                if m.params.len() != args.len() + 1 {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{}.{}` expects {} argument{} (including `self`), but got {}",
+                            key.1,
+                            method,
+                            m.params.len(),
+                            if m.params.len() == 1 { "" } else { "s" },
+                            args.len() + 1
+                        ),
+                    ));
+                }
+                let mut full_args = Vec::with_capacity(args.len() + 1);
+                full_args.push(obj.clone());
+                full_args.extend(args);
+                let bop_fn = Rc::new(BopFn {
+                    params: m.params,
+                    captures: Vec::new(),
+                    body: FnBody::Ast(m.body),
+                    self_name: None,
+                });
+                return self.call_bop_fn(&bop_fn, full_args, line);
+            }
+        }
+        // Fall through to the built-in dispatch.
+        let (ret, _mutated) = self.call_method(obj, method, &args, line)?;
+        Ok(ret)
+    }
+
     fn call_method(
         &self,
         obj: &Value,
@@ -2371,6 +2502,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 methods::numeric_method(obj, method, args, line)
             }
             Value::Bool(_) => methods::bool_method(obj, method, args, line),
+            Value::Iter(_) => methods::iter_method(obj, method, args, line),
             _ => Err(error(
                 line,
                 crate::error_messages::no_such_method(obj.type_name(), method),
@@ -2453,6 +2585,35 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 // — `eval_match` does this by only consuming them after the match
 // + guard both succeed.
 
+/// Destructured view of an `Iter::Next(v) | Iter::Done` result.
+/// Returned by [`unwrap_iter_result`] so the for-loop can bind
+/// the payload cleanly without repeating the pattern-match.
+enum IterStep {
+    Next(Value),
+    Done,
+}
+
+/// Inspect a value returned from an iterator's `.next()` method.
+/// Returns `Some(step)` when the value is a well-formed
+/// `Iter::Next(v)` / `Iter::Done` (built-in or not), or `None`
+/// when it doesn't match so the caller can raise a clear error.
+fn unwrap_iter_result(v: &Value) -> Option<IterStep> {
+    let e = match v {
+        Value::EnumVariant(e) => e,
+        _ => return None,
+    };
+    if e.type_name() != "Iter" {
+        return None;
+    }
+    match (e.variant(), e.payload()) {
+        ("Next", crate::value::EnumPayload::Tuple(items)) if items.len() == 1 => {
+            Some(IterStep::Next(items[0].clone()))
+        }
+        ("Done", crate::value::EnumPayload::Unit) => Some(IterStep::Done),
+        _ => None,
+    }
+}
+
 /// Seed a fresh evaluator's type tables with the engine-wide
 /// builtin types (`Result`, `RuntimeError`). The shapes come from
 /// `crate::builtins` so walker / VM / AOT can never drift out of
@@ -2489,6 +2650,14 @@ fn seed_builtin_types() -> (
     );
     type_bindings.insert(
         String::from("Result"),
+        String::from(BUILTIN_MODULE_PATH),
+    );
+    enum_defs.insert(
+        (String::from(BUILTIN_MODULE_PATH), String::from("Iter")),
+        crate::builtins::builtin_iter_variants(),
+    );
+    type_bindings.insert(
+        String::from("Iter"),
         String::from(BUILTIN_MODULE_PATH),
     );
     (struct_defs, enum_defs, type_bindings)

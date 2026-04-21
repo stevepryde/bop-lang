@@ -169,6 +169,146 @@ print(Result::Err("x").is_err())"#,
     );
 }
 
+// ─── Iterator protocol ─────────────────────────────────────────
+//
+// `.iter()` on arrays / strings / dicts yields a `Value::Iter`
+// whose `.next()` returns `Iter::Next(v)` / `Iter::Done`. User
+// types that implement `.iter()` participate in the same
+// protocol so `for x in my_container` works out of the box.
+
+#[test]
+fn iter_array_next_returns_iter_next_until_done() {
+    let host = run(
+        r#"let it = [10, 20, 30].iter()
+print(it.type())
+print(it.next())
+print(it.next())
+print(it.next())
+print(it.next())
+print(it.next())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec![
+            "iter",
+            "Iter::Next(10)",
+            "Iter::Next(20)",
+            "Iter::Next(30)",
+            "Iter::Done",
+            "Iter::Done",
+        ],
+    );
+}
+
+#[test]
+fn iter_string_yields_code_points() {
+    // Strings iterate by Unicode code point — each yielded item
+    // is a 1-char string, matching `for c in s` semantics.
+    let host = run(
+        r#"let it = "ab".iter()
+print(it.next())
+print(it.next())
+print(it.next())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["Iter::Next(\"a\")", "Iter::Next(\"b\")", "Iter::Done"],
+    );
+}
+
+#[test]
+fn iter_dict_yields_keys_in_declaration_order() {
+    let host = run(
+        r#"let it = {"a": 1, "b": 2}.iter()
+print(it.next())
+print(it.next())
+print(it.next())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["Iter::Next(\"a\")", "Iter::Next(\"b\")", "Iter::Done"],
+    );
+}
+
+#[test]
+fn iter_is_its_own_iterator() {
+    // `iterator.iter()` returns the same iterator — matches the
+    // Python / Rust convention so `for x in arr.iter()` doesn't
+    // need a special case in the for-loop dispatcher.
+    let host = run(
+        r#"let a = [1, 2].iter()
+let b = a.iter()
+print(a.next())
+print(b.next())
+print(a.next())"#,
+    );
+    // `b` shares state with `a` — cloning `Value::Iter` bumps an
+    // Rc, it doesn't fork the cursor.
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["Iter::Next(1)", "Iter::Next(2)", "Iter::Done"],
+    );
+}
+
+#[test]
+fn for_in_works_on_value_iter() {
+    // `for x in arr.iter()` uses the protocol path, not the
+    // eager one. Must produce the same output as `for x in arr`.
+    let host = run(
+        r#"for x in [1, 2, 3].iter() { print(x) }"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["1", "2", "3"],
+    );
+}
+
+#[test]
+fn for_in_supports_user_container_via_iter_method() {
+    // A user container that delegates `.iter()` to a backing
+    // array is the motivating use case for the protocol:
+    // structural typing without a trait system. `for v in b`
+    // calls `Bag.iter(b)` → backing array iterator → loops.
+    let host = run(
+        r#"struct Bag { items }
+fn bag_of(arr) { return Bag { items: arr } }
+fn Bag.iter(self) { return self.items.iter() }
+
+let b = bag_of(["x", "y", "z"])
+for v in b { print(v) }"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["x", "y", "z"],
+    );
+}
+
+#[test]
+fn for_in_on_dict_iterates_keys() {
+    // Dict for-loops now materialise the keys up front; the
+    // eager fast path stays equivalent to `for k in d.iter()`.
+    let host = run(
+        r#"for k in {"alpha": 1, "beta": 2} { print(k) }"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["alpha", "beta"],
+    );
+}
+
+#[test]
+fn for_in_on_primitive_raises_cant_iterate_error() {
+    let mut host = BufHost::new();
+    let err = bop::run("for x in 42 { print(x) }", &mut host, &BopLimits::standard())
+        .expect_err("expected for-loop over int to fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Can't iterate over int"),
+        "got: {}",
+        msg
+    );
+}
+
 // ─── panic builtin ─────────────────────────────────────────────
 
 #[test]

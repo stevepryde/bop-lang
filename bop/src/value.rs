@@ -7,10 +7,12 @@
 //! this module cannot access the private inner fields.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, format, rc::Rc, string::{String, ToString}, vec::Vec};
+use alloc::{boxed::Box, format, rc::Rc, string::{String, ToString}, vec, vec::Vec};
 
 #[cfg(feature = "std")]
 use std::rc::Rc;
+
+use core::cell::RefCell;
 
 use crate::memory::{bop_alloc, bop_dealloc};
 use crate::parser::Stmt;
@@ -174,6 +176,92 @@ pub enum Value {
     /// `m.Type { ... }` / `m.Type::Variant(...)` forms so those
     /// namespaced constructors find the right declared type.
     Module(Rc<BopModule>),
+    /// Lazy iterator. Cloning shares state (like `Value::Fn`) —
+    /// `let b = a; a.next(); b.next()` advances the same
+    /// underlying position, matching iterator semantics in
+    /// Python / Rust / JS. See [`BopIter`] for the built-in
+    /// variants; user-defined iterators are ordinary struct
+    /// values that happen to implement `.next()`.
+    Iter(Rc<RefCell<BopIter>>),
+}
+
+/// Built-in lazy iterator shapes. Each one holds a snapshot of
+/// the source sequence plus a cursor; advancing via [`Self::next`]
+/// yields items until exhausted. A user-defined iterator doesn't
+/// need to live here — it's just a struct with a `.next()`
+/// method, dispatched through the ordinary method path.
+#[derive(Debug)]
+pub enum BopIter {
+    /// Over a cloned-off array snapshot. Subsequent mutation of
+    /// the original array doesn't affect the iterator — matches
+    /// how most scripting languages present iteration.
+    Array { items: Vec<Value>, pos: usize },
+    /// Over a string's Unicode code points, one item per code
+    /// point. Each yielded value is a single-char string.
+    String { chars: Vec<char>, pos: usize },
+    /// Over a dict's keys, in declaration order. Same shape
+    /// `for k in dict` uses when the receiver is a plain dict.
+    Dict { keys: Vec<String>, pos: usize },
+}
+
+impl BopIter {
+    /// Advance by one and return the next item, or `None` when
+    /// the iterator is exhausted. Caller wraps the result in
+    /// `Iter::Next(v)` / `Iter::Done` for user code.
+    pub fn next(&mut self) -> Option<Value> {
+        match self {
+            BopIter::Array { items, pos } => {
+                if *pos < items.len() {
+                    let v = items[*pos].clone();
+                    *pos += 1;
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            BopIter::String { chars, pos } => {
+                if *pos < chars.len() {
+                    let v = Value::new_str(chars[*pos].to_string());
+                    *pos += 1;
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            BopIter::Dict { keys, pos } => {
+                if *pos < keys.len() {
+                    let v = Value::new_str(keys[*pos].clone());
+                    *pos += 1;
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Drop for BopIter {
+    fn drop(&mut self) {
+        // Release the buffer tracked at construction time. The
+        // inner Values (for Array) free themselves through their
+        // own Drop; strings inside Dict keys do the same via
+        // `key_bytes` accounting below.
+        match self {
+            BopIter::Array { items, .. } => {
+                bop_dealloc(items.capacity() * core::mem::size_of::<Value>());
+            }
+            BopIter::String { chars, .. } => {
+                bop_dealloc(chars.capacity() * core::mem::size_of::<char>());
+            }
+            BopIter::Dict { keys, .. } => {
+                let key_bytes: usize = keys.iter().map(|k| k.capacity()).sum();
+                bop_dealloc(
+                    keys.capacity() * core::mem::size_of::<String>() + key_bytes,
+                );
+            }
+        }
+    }
 }
 
 /// Exported surface of a module, as presented through an aliased
@@ -244,6 +332,30 @@ impl Value {
             type_name,
             fields,
         }))
+    }
+
+    /// Build a built-in iterator that yields each item of
+    /// `items` in order. Cloning the returned `Value::Iter`
+    /// shares the iteration cursor, so `let b = a; a.next()`
+    /// advances `b` too.
+    pub fn new_array_iter(items: Vec<Value>) -> Self {
+        bop_alloc(items.capacity() * core::mem::size_of::<Value>());
+        Value::Iter(Rc::new(RefCell::new(BopIter::Array { items, pos: 0 })))
+    }
+
+    /// Build a built-in iterator over a string's Unicode code
+    /// points.
+    pub fn new_string_iter(chars: Vec<char>) -> Self {
+        bop_alloc(chars.capacity() * core::mem::size_of::<char>());
+        Value::Iter(Rc::new(RefCell::new(BopIter::String { chars, pos: 0 })))
+    }
+
+    /// Build a built-in iterator over a dict's keys (declaration
+    /// order).
+    pub fn new_dict_iter(keys: Vec<String>) -> Self {
+        let key_bytes: usize = keys.iter().map(|k| k.capacity()).sum();
+        bop_alloc(keys.capacity() * core::mem::size_of::<String>() + key_bytes);
+        Value::Iter(Rc::new(RefCell::new(BopIter::Dict { keys, pos: 0 })))
     }
 
     pub fn new_enum_unit(module_path: String, type_name: String, variant: String) -> Self {
@@ -393,6 +505,13 @@ impl Clone for Value {
             // fns. The `bindings` and `types` vectors track their
             // own memory when the `BopModule` is first built.
             Value::Module(m) => Value::Module(Rc::clone(m)),
+            // Iterators are reference-counted and intentionally
+            // share their cursor — cloning `a = b` doesn't fork
+            // the iteration state, matching iterator semantics
+            // in Python / Rust / JS. The buffer was tracked once
+            // by the constructor and is dealloc'd by BopIter's
+            // Drop when the last clone goes away.
+            Value::Iter(it) => Value::Iter(Rc::clone(it)),
             Value::EnumVariant(e) => {
                 let mp = e.module_path.clone();
                 let tn = e.type_name.clone();
@@ -527,6 +646,27 @@ impl core::fmt::Display for Value {
                 None => write!(f, "<fn>"),
             },
             Value::Module(m) => write!(f, "<module {}>", m.path),
+            Value::Iter(it) => {
+                // Peek at the inner state for a useful Display —
+                // callers see `<iter array 0/3>` rather than a
+                // bare `<iter>`. If the RefCell is already
+                // borrowed (nested Display during a panic
+                // backtrace, say), fall back to the bare form.
+                match it.try_borrow() {
+                    Ok(inner) => match &*inner {
+                        BopIter::Array { items, pos } => {
+                            write!(f, "<iter array {}/{}>", pos, items.len())
+                        }
+                        BopIter::String { chars, pos } => {
+                            write!(f, "<iter string {}/{}>", pos, chars.len())
+                        }
+                        BopIter::Dict { keys, pos } => {
+                            write!(f, "<iter dict {}/{}>", pos, keys.len())
+                        }
+                    },
+                    Err(_) => write!(f, "<iter>"),
+                }
+            }
             Value::Struct(s) => {
                 write!(f, "{} {{", s.type_name)?;
                 for (i, (k, v)) in s.fields.iter().enumerate() {
@@ -603,6 +743,7 @@ impl Value {
             Value::Struct(_) => "struct",
             Value::EnumVariant(_) => "enum",
             Value::Module(_) => "module",
+            Value::Iter(_) => "iter",
         }
     }
 
@@ -641,6 +782,10 @@ impl Value {
             // A module is always a concrete thing — matches
             // fn's behaviour.
             Value::Module(_) => true,
+            // Iterators are always truthy, even when exhausted.
+            // Callers check `Iter::Done` via `.next()`, not via
+            // truthiness — matches how fns / modules behave.
+            Value::Iter(_) => true,
         }
     }
 }

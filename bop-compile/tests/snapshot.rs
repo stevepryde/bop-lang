@@ -134,9 +134,16 @@ fn repeat_parses_count_and_iterates() {
 }
 
 #[test]
-fn for_in_materialises_iterable() {
+fn for_in_uses_iter_protocol_helpers() {
+    // The AOT now emits calls to `__bop_iter_start` /
+    // `__bop_iter_step` so for-loops transparently handle
+    // Array/Str/Dict (fast path), Value::Iter, and user types
+    // with an `.iter()` method through one uniform loop body.
     let out = compile("for x in [1, 2, 3] { print(x) }");
-    contains_all(&out, &["__bop_iter_items(", "for x in "]);
+    contains_all(
+        &out,
+        &["__bop_iter_start(", "__bop_iter_step(", "loop"],
+    );
 }
 
 #[test]
@@ -385,17 +392,12 @@ fn sandbox_emits_tick_at_repeat_and_for() {
     );
 
     let forin = norm(&compile_sandbox("for x in [1, 2] { let y = x }"));
-    // The iter-items tmp number depends on how many temporaries
-    // the array literal introduced; just check that `for x in
-    // <something> { __bop_tick(...)` appears somewhere.
-    let forin_matches = forin.split("for x in ").any(|tail| {
-        tail.split_once(' ')
-            .map(|(_ident, rest)| rest.trim_start().starts_with("{ __bop_tick(ctx,"))
-            .unwrap_or(false)
-    });
+    // The for-in body starts with `loop { __bop_tick(ctx,` now
+    // that the emitter uses the iter-protocol helpers
+    // (`__bop_iter_start` / `__bop_iter_step`).
     assert!(
-        forin_matches,
-        "expected tick at top of for-in iteration:\n{}",
+        forin.contains("loop { __bop_tick(ctx,"),
+        "expected tick at top of for-in iteration body:\n{}",
         forin
     );
 }

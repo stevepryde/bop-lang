@@ -154,6 +154,21 @@ fn collect_type_registry(
             line: 0,
         },
     );
+    let iter_variants: HashMap<String, VariantKind> = bop::builtins::builtin_iter_variants()
+        .into_iter()
+        .map(|v| (v.name, v.kind))
+        .collect();
+    reg.enums.insert(
+        (builtin_mp.clone(), String::from("Iter")),
+        iter_variants,
+    );
+    enum_origins.insert(
+        (builtin_mp.clone(), String::from("Iter")),
+        DeclOrigin {
+            path: "<builtin>".to_string(),
+            line: 0,
+        },
+    );
 
     // Root program contributes under `<root>`.
     collect_types_from_stmts(
@@ -718,6 +733,10 @@ impl Emitter {
         );
         builtin_frame.insert(
             String::from("RuntimeError"),
+            String::from(bop::value::BUILTIN_MODULE_PATH),
+        );
+        builtin_frame.insert(
+            String::from("Iter"),
             String::from(bop::value::BUILTIN_MODULE_PATH),
         );
         Self {
@@ -1781,21 +1800,34 @@ impl Emitter {
                 iterable,
                 body,
             } => {
+                // Bind the iterable into a tmp before calling
+                // `__bop_iter_start`, otherwise expressions like
+                // `range(5)` — which take `&mut ctx.rand_state`
+                // internally — would collide with the helper's
+                // own `&mut Ctx` borrow.
                 let iter_src = self.expr_src(iterable)?;
-                let items_tmp = self.fresh_tmp();
+                let iter_tmp = self.fresh_tmp();
                 self.line(&format!(
-                    "let {}: ::std::vec::Vec<::bop::value::Value> = __bop_iter_items({}, {})?;",
-                    items_tmp, iter_src, line
+                    "let {}: ::bop::value::Value = {};",
+                    iter_tmp, iter_src
+                ));
+                let state_tmp = self.fresh_tmp();
+                // `__bop_iter_start` chooses between the eager
+                // fast path (Array/Str/Dict) and the protocol
+                // (Value::Iter or user type with `.iter()`). The
+                // corresponding `__bop_iter_step` advances
+                // whichever shape got picked, so the emitted
+                // loop body stays uniform.
+                self.line(&format!(
+                    "let mut {}: __BopIterState = __bop_iter_start(ctx, {}, {})?;",
+                    state_tmp, iter_tmp, line
                 ));
                 let ident = rust_ident(var);
-                self.open_block(&format!("for {} in {}", ident, items_tmp));
+                self.open_block("loop");
                 self.emit_tick(line);
-                // Mirror the tree-walker: the loop variable is a
-                // fresh binding in each iteration. Re-bind as mut so
-                // the body can reassign it.
                 self.line(&format!(
-                    "let mut {}: ::bop::value::Value = {};",
-                    ident, ident
+                    "let mut {}: ::bop::value::Value = match __bop_iter_step(ctx, &mut {}, {})? {{ Some(__v) => __v, None => break, }};",
+                    ident, state_tmp, line
                 ));
                 self.push_scope();
                 self.bind_local(var);
@@ -4376,6 +4408,9 @@ fn __bop_call_method(
         ::bop::value::Value::Bool(_) => {
             ::bop::methods::bool_method(obj, method, args, line)
         }
+        ::bop::value::Value::Iter(_) => {
+            ::bop::methods::iter_method(obj, method, args, line)
+        }
         ::bop::value::Value::Module(m) => {
             let binding = m
                 .bindings
@@ -4408,23 +4443,137 @@ fn __bop_format_print(args: &[::bop::value::Value]) -> String {
         .join(" ")
 }
 
-/// Materialise an iterable into a Vec of items (mirrors the
-/// tree-walker's handling of `for x in ...`).
-#[inline]
-fn __bop_iter_items(
+/// Runtime state for a `for x in v` loop. Fast path for the
+/// three built-in iterables (eager materialisation into a Vec
+/// with a cursor); protocol path for `Value::Iter` or user
+/// types with an `.iter()` method (carries the iterator value
+/// and calls `.next()` on each step).
+enum __BopIterState {
+    Eager {
+        items: ::std::vec::Vec<::bop::value::Value>,
+        pos: usize,
+    },
+    Protocol(::bop::value::Value),
+}
+
+/// Build the iterator state for a `for x in v` loop. Matches
+/// the walker/VM rule: Array/Str/Dict take the fast path,
+/// `Value::Iter` is used as-is, Struct/Enum go through their
+/// `.iter()` method, everything else surfaces the "can't
+/// iterate over X" error.
+fn __bop_iter_start(
+    ctx: &mut Ctx<'_>,
     mut v: ::bop::value::Value,
     line: u32,
-) -> Result<::std::vec::Vec<::bop::value::Value>, ::bop::error::BopError> {
+) -> Result<__BopIterState, ::bop::error::BopError> {
     match &mut v {
-        ::bop::value::Value::Array(arr) => Ok(arr.take()),
-        ::bop::value::Value::Str(s) => Ok(s
-            .chars()
-            .map(|c| ::bop::value::Value::new_str(c.to_string()))
-            .collect()),
+        ::bop::value::Value::Array(arr) => Ok(__BopIterState::Eager {
+            items: arr.take(),
+            pos: 0,
+        }),
+        ::bop::value::Value::Str(s) => Ok(__BopIterState::Eager {
+            items: s
+                .chars()
+                .map(|c| ::bop::value::Value::new_str(c.to_string()))
+                .collect(),
+            pos: 0,
+        }),
+        ::bop::value::Value::Dict(d) => Ok(__BopIterState::Eager {
+            items: d
+                .iter()
+                .map(|(k, _)| ::bop::value::Value::new_str(k.clone()))
+                .collect(),
+            pos: 0,
+        }),
+        ::bop::value::Value::Iter(_) => Ok(__BopIterState::Protocol(v)),
+        ::bop::value::Value::Struct(_) | ::bop::value::Value::EnumVariant(_) => {
+            // Dispatch `.iter()` through the full method
+            // resolution — user-declared methods (`fn
+            // Bag.iter(self) { ... }`) must win before we fall
+            // back to the built-in `__bop_call_method`.
+            let iter_val = match __bop_try_user_method(
+                ctx, &v, "iter", &[], line,
+            )? {
+                Some(iter_val) => iter_val,
+                None => {
+                    let (iter_val, _) =
+                        __bop_call_method(ctx, &v, "iter", &[], line)?;
+                    iter_val
+                }
+            };
+            Ok(__BopIterState::Protocol(iter_val))
+        }
         _ => Err(::bop::error::BopError::runtime(
             ::bop::error_messages::cant_iterate_over(v.type_name()),
             line,
         )),
+    }
+}
+
+/// Advance the iterator by one, returning the next value or
+/// `None` on exhaustion. Protocol-path advancement calls the
+/// iterator's `.next()` method and pattern-matches the
+/// resulting `Iter::Next(v)` / `Iter::Done` shape.
+fn __bop_iter_step(
+    ctx: &mut Ctx<'_>,
+    state: &mut __BopIterState,
+    line: u32,
+) -> Result<Option<::bop::value::Value>, ::bop::error::BopError> {
+    match state {
+        __BopIterState::Eager { items, pos } => {
+            if *pos < items.len() {
+                // `items` was already taken from the source
+                // array / string / dict, so the clone is of an
+                // independent Vec — no aliasing.
+                let v = items[*pos].clone();
+                *pos += 1;
+                Ok(Some(v))
+            } else {
+                Ok(None)
+            }
+        }
+        __BopIterState::Protocol(iter_val) => {
+            // Same user-first dispatch: a Bag that returns
+            // `self` from `.iter()` plus a user `.next()` must
+            // hit the user method, not the built-in iter table.
+            let step = match __bop_try_user_method(
+                ctx, iter_val, "next", &[], line,
+            )? {
+                Some(v) => v,
+                None => {
+                    let (v, _) =
+                        __bop_call_method(ctx, iter_val, "next", &[], line)?;
+                    v
+                }
+            };
+            match &step {
+                ::bop::value::Value::EnumVariant(e)
+                    if e.type_name() == "Iter" =>
+                {
+                    match (e.variant(), e.payload()) {
+                        (
+                            "Next",
+                            ::bop::value::EnumPayload::Tuple(items),
+                        ) if items.len() == 1 => Ok(Some(items[0].clone())),
+                        ("Done", ::bop::value::EnumPayload::Unit) => Ok(None),
+                        _ => Err(::bop::error::BopError::runtime(
+                            format!(
+                                "`.next()` on a `for` iterator must return `Iter::Next(v)` or `Iter::Done`, got {}",
+                                step.inspect()
+                            ),
+                            line,
+                        )),
+                    }
+                }
+                _ => Err(::bop::error::BopError::runtime(
+                    format!(
+                        "`.next()` on a `for` iterator must return `Iter::Next(v)` or `Iter::Done`, got {}",
+                        step.inspect()
+                    ),
+                    line,
+                )),
+            }
+        }
     }
 }
 
