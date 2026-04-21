@@ -213,7 +213,7 @@ pub fn int_div(left: &Value, right: &Value, line: u32) -> Result<Value, BopError
                     "You can't divide by 0.",
                 ));
             }
-            let q = (a / b).trunc();
+            let q = crate::math::trunc(a / b);
             if !q.is_finite() || q < i64::MIN as f64 || q > i64::MAX as f64 {
                 return Err(int_overflow("//", line));
             }

@@ -20,6 +20,11 @@ bop = { version = "0.2.0", path = "../bop", package = "bop-lang", default-featur
 [features]
 default = ["std"]
 std = ["bop/std"]
+# Forwards to bop-lang's `libm` feature. Only needed when you
+# disable `std` (no_std builds like bare-metal / freestanding
+# wasm); std users can ignore this flag entirely and won't
+# pull libm into their dep graph.
+libm = ["bop/libm"]
 
 [dev-dependencies]
 bop-std = { path = "../bop-std" }

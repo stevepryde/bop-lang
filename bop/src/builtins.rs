@@ -198,28 +198,28 @@ fn min_max(a: &Value, b: &Value, pick_smaller: bool, fname: &str, line: u32) -> 
 pub fn builtin_sqrt(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("sqrt", args, 1, line)?;
     let x = expect_number("sqrt", &args[0], line)?;
-    Ok(Value::Number(x.sqrt()))
+    Ok(Value::Number(crate::math::sqrt(x)))
 }
 
 /// `sin(x)` — sine of `x` in radians.
 pub fn builtin_sin(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("sin", args, 1, line)?;
     let x = expect_number("sin", &args[0], line)?;
-    Ok(Value::Number(x.sin()))
+    Ok(Value::Number(crate::math::sin(x)))
 }
 
 /// `cos(x)` — cosine of `x` in radians.
 pub fn builtin_cos(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("cos", args, 1, line)?;
     let x = expect_number("cos", &args[0], line)?;
-    Ok(Value::Number(x.cos()))
+    Ok(Value::Number(crate::math::cos(x)))
 }
 
 /// `tan(x)` — tangent of `x` in radians.
 pub fn builtin_tan(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("tan", args, 1, line)?;
     let x = expect_number("tan", &args[0], line)?;
-    Ok(Value::Number(x.tan()))
+    Ok(Value::Number(crate::math::tan(x)))
 }
 
 /// `floor(x)` — largest integer ≤ `x`. Returns `Int` when the
@@ -229,7 +229,7 @@ pub fn builtin_floor(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("floor", args, 1, line)?;
     match &args[0] {
         Value::Int(n) => Ok(Value::Int(*n)),
-        Value::Number(n) => Ok(finite_to_int_or_number(n.floor())),
+        Value::Number(n) => Ok(finite_to_int_or_number(crate::math::floor(*n))),
         other => Err(error(
             line,
             format!("`floor` expects a number, but got {}", other.type_name()),
@@ -243,7 +243,7 @@ pub fn builtin_ceil(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("ceil", args, 1, line)?;
     match &args[0] {
         Value::Int(n) => Ok(Value::Int(*n)),
-        Value::Number(n) => Ok(finite_to_int_or_number(n.ceil())),
+        Value::Number(n) => Ok(finite_to_int_or_number(crate::math::ceil(*n))),
         other => Err(error(
             line,
             format!("`ceil` expects a number, but got {}", other.type_name()),
@@ -257,7 +257,7 @@ pub fn builtin_round(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("round", args, 1, line)?;
     match &args[0] {
         Value::Int(n) => Ok(Value::Int(*n)),
-        Value::Number(n) => Ok(finite_to_int_or_number(n.round())),
+        Value::Number(n) => Ok(finite_to_int_or_number(crate::math::round(*n))),
         other => Err(error(
             line,
             format!("`round` expects a number, but got {}", other.type_name()),
@@ -272,21 +272,21 @@ pub fn builtin_pow(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("pow", args, 2, line)?;
     let base = expect_number("pow", &args[0], line)?;
     let exp = expect_number("pow", &args[1], line)?;
-    Ok(Value::Number(base.powf(exp)))
+    Ok(Value::Number(crate::math::powf(base, exp)))
 }
 
 /// `log(x)` — natural log (ln). Matches `f64::ln`.
 pub fn builtin_log(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("log", args, 1, line)?;
     let x = expect_number("log", &args[0], line)?;
-    Ok(Value::Number(x.ln()))
+    Ok(Value::Number(crate::math::ln(x)))
 }
 
 /// `exp(x)` — e^x.
 pub fn builtin_exp(args: &[Value], line: u32) -> Result<Value, BopError> {
     expect_args("exp", args, 1, line)?;
     let x = expect_number("exp", &args[0], line)?;
-    Ok(Value::Number(x.exp()))
+    Ok(Value::Number(crate::math::exp(x)))
 }
 
 /// Convert a finite `f64` that's already integer-valued into a

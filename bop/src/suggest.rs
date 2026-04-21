@@ -9,7 +9,7 @@
 //! which is plenty for scope sizes we ever see in a Bop program.
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 
 /// Every core builtin callable by name, in a single canonical
 /// list. Each engine (walker / VM / AOT) feeds this into

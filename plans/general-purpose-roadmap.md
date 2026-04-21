@@ -1100,6 +1100,38 @@ shipping, but each one hurts maintenance or future work.
   the three-way corpus, and the compile-roundtrip / stdlib
   smoke suites stay green. Nothing in the walker or AOT
   changed — this is purely additive VM work.
+- ~~**`no_std` builds broken in `bop-lang`.**~~ ✅ Fixed. The
+  `no_std` path had drifted: 27 compile errors from missing
+  `alloc::{format, string::ToString, vec}` imports in
+  `check.rs` / `suggest.rs` / `error.rs` / `parser.rs` /
+  `lib.rs`, plus every `f64` math method (`sqrt`, `sin`,
+  `cos`, `tan`, `floor`, `ceil`, `round`, `trunc`, `powf`,
+  `ln`, `exp`) — all of those live in `std::f64`, not
+  `core::f64`. Fixes:
+  - New `bop::math` module wraps each `f64` method with a
+    one-liner that dispatches to the native method under
+    `std` and to `libm` under `no_std + libm`. Every
+    builtin call site goes through the wrapper so the rest
+    of the code stays `#[cfg]`-free.
+  - New `libm` feature (opt-in, forwarded from `bop-vm`)
+    pulls in the tiny pure-Rust `libm` crate. Gated as an
+    `optional = true` dep so std users never see it in
+    their dep graph — verified via `cargo tree -p
+    bop-lang` (empty) vs `cargo tree -p bop-lang
+    --no-default-features --features libm` (one line:
+    `libm v0.2.16`).
+  - `compile_error!` in `bop::math` if someone disables
+    `std` without enabling `libm`, pointing at the fix.
+
+  End-to-end proof the `no_std` surface works: a
+  `wasm32-unknown-unknown` `cdylib` that `#![no_std]`s,
+  uses `lol_alloc` for the global allocator, and exposes
+  both `bop::run` and `bop_vm::run` to JS builds clean at
+  **355 KB** stripped (walker + VM + libm + allocator). The
+  equivalent `std` build lands at 394 KB — `no_std` is
+  slightly smaller because there's no std runtime lib.
+  Either is shippable to a browser / edge / embedded
+  target.
 
 ## Deliberately out of scope
 

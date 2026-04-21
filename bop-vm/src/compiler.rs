@@ -2,7 +2,7 @@
 //! set overview.
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::{String, ToString}, vec::Vec};
+use alloc::{string::{String, ToString}, vec, vec::Vec};
 
 use bop::error::BopError;
 use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};

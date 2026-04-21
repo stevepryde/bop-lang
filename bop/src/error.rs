@@ -1,7 +1,7 @@
 //! Error type for the Bop interpreter.
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc::{format, string::String};
 
 #[derive(Debug, Clone)]
 pub struct BopError {

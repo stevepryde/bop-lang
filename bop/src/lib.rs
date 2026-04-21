@@ -4,13 +4,14 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 pub mod error;
 pub mod error_messages;
 pub mod value;
 pub mod lexer;
 pub mod parser;
+pub mod math;
 pub mod memory;
 pub mod ops;
 pub mod precheck;

@@ -17,3 +17,15 @@ name = "bop"
 [features]
 default = ["std"]
 std = []
+# Opt-in for no_std builds that want floating-point math
+# (sqrt / sin / cos / …). Those `f64` methods live in `std`,
+# so without them bop-lang can't offer the math builtins. The
+# flag pulls in the tiny, pure-Rust `libm` crate; std users
+# never see libm in their dep graph (optional = true). A
+# no_std build that disables `std` *must* enable `libm` — the
+# math module emits a `compile_error!` otherwise, pointing at
+# the fix.
+libm = ["dep:libm"]
+
+[dependencies]
+libm = { version = "0.2", default-features = false, optional = true }

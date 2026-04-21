@@ -24,7 +24,7 @@
 //!   no longer fully covers `Variant`.
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 
 use crate::error::BopWarning;
 use crate::parser::{
