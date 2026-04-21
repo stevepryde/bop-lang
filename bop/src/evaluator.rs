@@ -2668,3 +2668,266 @@ fn match_struct_fields(
     }
     true
 }
+
+// ─── REPL session ──────────────────────────────────────────────────
+//
+// `Evaluator` itself is a one-shot: `Evaluator::new(host, limits)` +
+// `eval.run(stmts)` + drop. That's the right shape for running a
+// complete program from top to bottom. REPL workloads need the
+// opposite: fresh *input* evaluated against *accumulated* state.
+//
+// `ReplSession` owns every Evaluator field that should survive
+// across inputs — scopes, functions, user types, method tables,
+// import caches, module aliases, rng state. The ephemeral
+// per-run fields (host, step counter, call depth, the try-
+// return sentinel slot, transient warnings) stay on the
+// temporary `Evaluator` that the session spins up for each
+// `eval` call.
+//
+// The session model also handles REPL-specific niceties:
+//
+//   - Bare expression statements at the end of an input yield
+//     their value back to the caller, so the REPL can echo it.
+//     `let x = 5` returns None; `x + 1` returns Some(Value).
+//   - Scope depth is normalised back to the root on each
+//     `eval` — if an earlier input errored mid-block, we
+//     don't leave half-pushed scopes lying around for the next
+//     input to trip over.
+
+/// Persistent state for an interactive REPL session. Build
+/// once with [`Self::new`], then call [`Self::eval`] for each
+/// fresh line / block the user types. State carried across
+/// calls: every `let` / `const` / `fn` / `struct` / `enum` /
+/// method declaration, every `use`'d module's bindings and
+/// aliases, the global rng seed, and the import cache.
+///
+/// A `ReplSession` is not a sandboxing boundary — embedders
+/// that want a fresh identity between inputs should construct
+/// a new session. Resource limits (steps, memory) are supplied
+/// per `eval` call since they reset each time.
+pub struct ReplSession {
+    scopes: Vec<BTreeMap<String, Value>>,
+    functions: BTreeMap<String, FnDef>,
+    current_module: String,
+    struct_defs: BTreeMap<(String, String), Vec<String>>,
+    enum_defs: BTreeMap<(String, String), Vec<VariantDecl>>,
+    methods: BTreeMap<(String, String), BTreeMap<String, FnDef>>,
+    type_bindings: Vec<BTreeMap<String, String>>,
+    module_aliases: BTreeMap<String, Rc<crate::value::BopModule>>,
+    imports: ImportCache,
+    imported_here: alloc_import::collections::BTreeSet<String>,
+    rand_state: u64,
+}
+
+impl Default for ReplSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReplSession {
+    /// Build a fresh session. Type tables are pre-seeded with
+    /// the engine builtins (`Result`, `RuntimeError`) so
+    /// `Result::Ok(...)` resolves without an explicit `use`.
+    pub fn new() -> Self {
+        let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
+        Self {
+            scopes: vec![BTreeMap::new()],
+            functions: BTreeMap::new(),
+            current_module: String::from(crate::value::ROOT_MODULE_PATH),
+            struct_defs,
+            enum_defs,
+            methods: BTreeMap::new(),
+            type_bindings: vec![builtin_bindings],
+            module_aliases: BTreeMap::new(),
+            imports: Rc::new(RefCell::new(
+                alloc_import::collections::BTreeMap::new(),
+            )),
+            imported_here: alloc_import::collections::BTreeSet::new(),
+            rand_state: 0,
+        }
+    }
+
+    /// Look up a binding by name. Convenience for tests and
+    /// embedders that want to peek at the session's state
+    /// between `eval` calls — e.g. checking that `let x = 5`
+    /// actually stuck.
+    pub fn get(&self, name: &str) -> Option<Value> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(v) = scope.get(name) {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
+
+    /// Every currently-bound name in the root scope, sorted.
+    /// Handy for REPL introspection commands (`:vars`) and
+    /// for tab-completers that want to stay honest about
+    /// what's actually in scope rather than guessing from
+    /// observed tokens.
+    pub fn binding_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .scopes
+            .first()
+            .map(|s| s.keys().cloned().collect())
+            .unwrap_or_default();
+        for name in self.functions.keys() {
+            names.push(name.clone());
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Parse `source` and run its statements against this
+    /// session's accumulated state.
+    ///
+    /// If the last statement is a bare expression
+    /// (`ExprStmt`), the session evaluates it and returns its
+    /// value as `Ok(Some(v))` so the REPL can echo the
+    /// result. Every other shape — `let x = ...`, `fn foo`,
+    /// `struct`, `use`, loops — returns `Ok(None)`.
+    ///
+    /// Partial failure semantics: if an earlier statement
+    /// errors, the session's state reflects whatever ran
+    /// before the failure. That matches what a user would
+    /// expect from an interactive prompt.
+    pub fn eval<H: BopHost>(
+        &mut self,
+        source: &str,
+        host: &mut H,
+        limits: &BopLimits,
+    ) -> Result<Option<Value>, BopError> {
+        let stmts = crate::parse(source)?;
+        self.run_stmts(&stmts, host, limits)
+    }
+
+    /// Like [`Self::eval`] but takes an already-parsed AST.
+    /// Useful when the caller has already run a
+    /// `parse_with_warnings` pass and wants to surface
+    /// warnings before executing.
+    pub fn run_stmts<H: BopHost>(
+        &mut self,
+        stmts: &[Stmt],
+        host: &mut H,
+        limits: &BopLimits,
+    ) -> Result<Option<Value>, BopError> {
+        // If the last stmt is a bare expression we strip it
+        // off, run the rest, and then evaluate it as an
+        // expression so we can return its value. Anything
+        // else runs as a normal statement block.
+        let (tail_expr, body) = match stmts.last().map(|s| &s.kind) {
+            Some(StmtKind::ExprStmt(_)) => {
+                let (last, rest) = stmts.split_last().unwrap();
+                let expr = match &last.kind {
+                    StmtKind::ExprStmt(e) => e.clone(),
+                    _ => unreachable!(),
+                };
+                (Some(expr), rest)
+            }
+            _ => (None, stmts),
+        };
+
+        // Spin up a temporary Evaluator around the session's
+        // state. We hand off each field by `mem::take` /
+        // `clone` of the Rc so the Evaluator owns working
+        // copies; at the end we unconditionally write the
+        // (possibly-mutated) state back so partial failures
+        // still persist whatever changes happened before the
+        // error.
+        let mut eval = self.take_evaluator(host, limits.clone());
+        let result: Result<Option<Value>, BopError> = (|| {
+            let sig = eval.exec_block(body)?;
+            match sig {
+                Signal::Break => return Err(error(0, "break used outside of a loop")),
+                Signal::Continue => {
+                    return Err(error(0, "continue used outside of a loop"));
+                }
+                _ => {}
+            }
+            match tail_expr {
+                Some(expr) => Ok(Some(eval.eval_expr(&expr)?)),
+                None => Ok(None),
+            }
+        })();
+        // Surface any warnings accumulated on this run
+        // (currently: glob-import shadowing). Stderr delivery
+        // matches `Evaluator::run`; embedders that want
+        // structured access can call `eval` via a custom host
+        // and take warnings out through that path.
+        #[cfg(feature = "std")]
+        {
+            for w in &eval.runtime_warnings {
+                eprintln!("warning: {}", w.message);
+            }
+        }
+        self.put_evaluator(eval);
+        result
+    }
+
+    /// Internal: move the session's state into a fresh
+    /// Evaluator. `host` and `limits` are the ephemeral
+    /// per-run bits.
+    fn take_evaluator<'h, H: BopHost>(
+        &mut self,
+        host: &'h mut H,
+        limits: BopLimits,
+    ) -> Evaluator<'h, H> {
+        Evaluator {
+            scopes: core::mem::take(&mut self.scopes),
+            functions: core::mem::take(&mut self.functions),
+            current_module: core::mem::take(&mut self.current_module),
+            struct_defs: core::mem::take(&mut self.struct_defs),
+            enum_defs: core::mem::take(&mut self.enum_defs),
+            methods: core::mem::take(&mut self.methods),
+            type_bindings: core::mem::take(&mut self.type_bindings),
+            module_aliases: core::mem::take(&mut self.module_aliases),
+            imports: Rc::clone(&self.imports),
+            imported_here: core::mem::take(&mut self.imported_here),
+            rand_state: self.rand_state,
+            host,
+            steps: 0,
+            call_depth: 0,
+            limits,
+            pending_try_return: None,
+            runtime_warnings: Vec::new(),
+        }
+    }
+
+    /// Internal: move the Evaluator's state back into the
+    /// session. Also normalises scope depth back to the root
+    /// so a mid-block error doesn't leave leftover pushed
+    /// scopes hanging around for the next input.
+    fn put_evaluator<'h, H: BopHost>(&mut self, eval: Evaluator<'h, H>) {
+        let mut scopes = eval.scopes;
+        if scopes.len() > 1 {
+            scopes.truncate(1);
+        }
+        if scopes.is_empty() {
+            scopes.push(BTreeMap::new());
+        }
+        let mut type_bindings = eval.type_bindings;
+        if type_bindings.len() > 1 {
+            type_bindings.truncate(1);
+        }
+        if type_bindings.is_empty() {
+            // Re-seed so builtins stay visible.
+            let (_, _, builtins) = seed_builtin_types();
+            type_bindings.push(builtins);
+        }
+        self.scopes = scopes;
+        self.functions = eval.functions;
+        self.current_module = eval.current_module;
+        self.struct_defs = eval.struct_defs;
+        self.enum_defs = eval.enum_defs;
+        self.methods = eval.methods;
+        self.type_bindings = type_bindings;
+        self.module_aliases = eval.module_aliases;
+        self.imported_here = eval.imported_here;
+        self.rand_state = eval.rand_state;
+        // `imports` is shared via `Rc` — nothing to do; the
+        // cache the Evaluator wrote into is the same one the
+        // session holds.
+    }
+}

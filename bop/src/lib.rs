@@ -56,6 +56,14 @@ pub use evaluator::resolve_type_in;
 /// Type alias for the resolver closure `pattern_matches` expects.
 pub use evaluator::TypeResolveFn;
 
+/// Persistent state for an interactive REPL session. Unlike
+/// the one-shot [`run`] / [`Evaluator::run`] pair, a
+/// `ReplSession` carries its scopes, fns, user types, method
+/// tables, and import cache across calls, so
+/// `session.eval("let x = 5")` followed by
+/// `session.eval("print(x)")` sees the same `x`.
+pub use evaluator::ReplSession;
+
 // ─── BopLimits ─────────────────────────────────────────────────────────────
 
 /// Resource limits enforced during execution.
@@ -3596,5 +3604,184 @@ print(label(o.Color::Green))"#,
         let resolver = crate::host::resolve_from_map([("m", "let x = 1")]);
         assert!(resolver("m").is_some());
         assert!(resolver("other").is_none());
+    }
+
+    // ─── ReplSession ─────────────────────────────────────────────────
+
+    fn repl_eval(
+        session: &mut ReplSession,
+        src: &str,
+        host: &mut TestHost,
+    ) -> Result<Option<Value>, BopError> {
+        session.eval(src, host, &test_limits())
+    }
+
+    #[test]
+    fn session_let_binding_survives_between_evals() {
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        repl_eval(&mut session, "let x = 5", &mut host).unwrap();
+        repl_eval(&mut session, "print(x)", &mut host).unwrap();
+        assert_eq!(host.last_print(), "5");
+    }
+
+    #[test]
+    fn session_mutated_let_reflects_in_next_eval() {
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        repl_eval(&mut session, "let counter = 0", &mut host).unwrap();
+        repl_eval(&mut session, "counter = counter + 1", &mut host).unwrap();
+        repl_eval(&mut session, "counter = counter + 1", &mut host).unwrap();
+        repl_eval(&mut session, "print(counter)", &mut host).unwrap();
+        assert_eq!(host.last_print(), "2");
+    }
+
+    #[test]
+    fn session_fn_declared_on_one_eval_callable_next() {
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        repl_eval(
+            &mut session,
+            "fn double(x) { return x + x }",
+            &mut host,
+        )
+        .unwrap();
+        repl_eval(&mut session, "print(double(21))", &mut host).unwrap();
+        assert_eq!(host.last_print(), "42");
+    }
+
+    #[test]
+    fn session_struct_and_method_survive() {
+        // The stickier path: user types live in
+        // (module_path, type_name) registries and their
+        // methods in a separate table. Both need to carry
+        // across inputs.
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        repl_eval(
+            &mut session,
+            "struct Point { x, y }\nfn Point.sum(self) { return self.x + self.y }",
+            &mut host,
+        )
+        .unwrap();
+        repl_eval(
+            &mut session,
+            "let p = Point { x: 3, y: 4 }\nprint(p.sum())",
+            &mut host,
+        )
+        .unwrap();
+        assert_eq!(host.last_print(), "7");
+    }
+
+    #[test]
+    fn session_bare_expression_returns_value() {
+        // The REPL's "echo the last expression" affordance:
+        // `let` returns None, a bare expression returns
+        // Some(Value). Drives the REPL echo behaviour.
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        assert!(repl_eval(&mut session, "let x = 5", &mut host)
+            .unwrap()
+            .is_none());
+        let v = repl_eval(&mut session, "x + 1", &mut host).unwrap();
+        match v {
+            Some(Value::Int(n)) => assert_eq!(n, 6),
+            other => panic!("expected Int(6), got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn session_errors_preserve_earlier_effects() {
+        // Partial-execution semantics: if a later stmt
+        // errors, earlier bindings still stick. Matches what
+        // a user expects from an interactive prompt.
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        let err = repl_eval(
+            &mut session,
+            "let kept = 1\nlet bad = undefined\nlet skipped = 3",
+            &mut host,
+        );
+        assert!(err.is_err(), "expected runtime error");
+        // `kept` made it; `skipped` did not.
+        assert!(session.get("kept").is_some());
+        assert!(session.get("skipped").is_none());
+    }
+
+    #[test]
+    fn session_normalises_scope_depth_after_block_error() {
+        // A runtime error inside a nested block
+        // (`if true { <error> }`) used to leave extra
+        // scopes pushed. The session's writeback truncates
+        // back to the root so the next `eval` starts clean.
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        let _ = repl_eval(
+            &mut session,
+            "if true {\n    let y = undefined\n}",
+            &mut host,
+        );
+        // Next eval must not error on "scopes mysteriously
+        // pre-pushed" — a plain let should work.
+        repl_eval(&mut session, "let after = 7", &mut host).unwrap();
+        let v = repl_eval(&mut session, "after", &mut host).unwrap();
+        match v {
+            Some(Value::Int(n)) => assert_eq!(n, 7),
+            other => panic!("expected Int(7), got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn session_binding_names_surfaces_lets_and_fns() {
+        // `binding_names()` gives a REPL `:vars`-style
+        // introspection hook. Covers both `let`-scope
+        // bindings and `fn` declarations.
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        repl_eval(&mut session, "let alpha = 1", &mut host).unwrap();
+        repl_eval(&mut session, "fn beta() { return 2 }", &mut host).unwrap();
+        let names = session.binding_names();
+        assert!(names.contains(&"alpha".to_string()));
+        assert!(names.contains(&"beta".to_string()));
+    }
+
+    #[test]
+    fn session_use_carries_imports_across_evals() {
+        // Custom host for this test because we need to
+        // resolve a module. TestHost doesn't implement
+        // `resolve_module` at the stdlib level, so we wire
+        // a tiny one up inline.
+        struct ModHost {
+            prints: std::cell::RefCell<Vec<String>>,
+        }
+        impl BopHost for ModHost {
+            fn call(
+                &mut self,
+                _: &str,
+                _: &[Value],
+                _: u32,
+            ) -> Option<Result<Value, BopError>> {
+                None
+            }
+            fn on_print(&mut self, message: &str) {
+                self.prints.borrow_mut().push(message.to_string());
+            }
+            fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+                match name {
+                    "m" => Some(Ok("fn greet() { return \"hi\" }".to_string())),
+                    _ => None,
+                }
+            }
+        }
+        let mut host = ModHost {
+            prints: std::cell::RefCell::new(Vec::new()),
+        };
+        let mut session = ReplSession::new();
+        session.eval("use m", &mut host, &test_limits()).unwrap();
+        session
+            .eval("print(greet())", &mut host, &test_limits())
+            .unwrap();
+        let prints = host.prints.borrow();
+        assert_eq!(prints.last().map(|s| s.as_str()), Some("hi"));
     }
 }
