@@ -3,6 +3,59 @@ use alloc::{boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
 
 use crate::error::BopError;
 use crate::lexer::{SpannedToken, StringPart, Token};
+use crate::naming;
+
+// ─── Naming helpers ─────────────────────────────────────────────────────
+//
+// Enforce the shape rules defined in `bop::naming` at every
+// identifier-introducing site. Each `ensure_*_name` returns a
+// parse error whose `message` says what the site expects and
+// whose `friendly_hint` offers a concrete rename — cheap to
+// generate, and makes errors read like the compiler wants to
+// help rather than just complain.
+
+fn ident_shape_error(site: &str, expected: &str, actual: &str, line: u32) -> BopError {
+    let actual_label = naming::kind_label(naming::classify(actual));
+    let message = format!(
+        "{} `{}` looks like a {}, but a {} name is required here",
+        site, actual, actual_label, expected
+    );
+    let mut err = BopError::runtime(message, line);
+    err.friendly_hint = Some(naming::hint_for(expected, actual));
+    err
+}
+
+/// Require a lowercase-first (or leading-underscore) identifier
+/// at a `let` / `fn` / param / field / method / alias /
+/// match-binding / `for-in` / `use` alias site.
+fn ensure_value_name(name: &str, site: &str, line: u32) -> Result<(), BopError> {
+    if naming::is_value_name(name) {
+        Ok(())
+    } else {
+        Err(ident_shape_error(site, "value", name, line))
+    }
+}
+
+/// Require an uppercase-first identifier at a `struct` / `enum` /
+/// variant site. Both PascalCase and ALL_CAPS are accepted —
+/// `struct Entity {}`, `enum Dir { N, E, S, W }`, and
+/// `struct HTTP {}` all pass.
+fn ensure_type_name(name: &str, site: &str, line: u32) -> Result<(), BopError> {
+    if naming::is_type_name(name) {
+        Ok(())
+    } else {
+        Err(ident_shape_error(site, "type", name, line))
+    }
+}
+
+/// Require an all-uppercase identifier at a `const` site.
+fn ensure_constant_name(name: &str, site: &str, line: u32) -> Result<(), BopError> {
+    if naming::is_constant_name(name) {
+        Ok(())
+    } else {
+        Err(ident_shape_error(site, "constant", name, line))
+    }
+}
 
 // ─── AST ───────────────────────────────────────────────────────────────────
 
@@ -224,9 +277,16 @@ pub struct Stmt {
 
 #[derive(Debug, Clone)]
 pub enum StmtKind {
+    /// `let NAME = expr` (value binding, mutable) and `const NAME
+    /// = expr` (constant binding, immutable). The `is_const` flag
+    /// flips enforcement at use/assign sites: reassigning a
+    /// constant is a compile-time error (the parser refuses any
+    /// assignment whose LHS is an all-uppercase identifier — see
+    /// [`parse_assign`]).
     Let {
         name: String,
         value: Expr,
+        is_const: bool,
     },
     Assign {
         target: AssignTarget,
@@ -531,6 +591,7 @@ impl Parser {
         let line = self.peek_line();
         match self.peek() {
             Token::Let => self.parse_let(),
+            Token::Const => self.parse_const(),
             Token::If => self.parse_if_stmt(),
             Token::While => self.parse_while(),
             Token::For => self.parse_for(),
@@ -564,18 +625,21 @@ impl Parser {
     fn parse_struct_decl(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
         self.advance(); // consume `struct`
-        let (name, _) = self.expect_ident()?;
+        let (name, name_line) = self.expect_ident()?;
+        ensure_type_name(&name, "`struct` declaration", name_line)?;
         self.expect(&Token::LBrace)?;
         let mut fields = Vec::new();
         if !matches!(self.peek(), Token::RBrace) {
-            let (f, _) = self.expect_ident()?;
+            let (f, f_line) = self.expect_ident()?;
+            ensure_value_name(&f, "struct field", f_line)?;
             fields.push(f);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
                 if matches!(self.peek(), Token::RBrace) {
                     break; // trailing comma
                 }
-                let (f, _) = self.expect_ident()?;
+                let (f, f_line) = self.expect_ident()?;
+                ensure_value_name(&f, "struct field", f_line)?;
                 fields.push(f);
             }
         }
@@ -589,7 +653,8 @@ impl Parser {
     fn parse_enum_decl(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
         self.advance(); // consume `enum`
-        let (name, _) = self.expect_ident()?;
+        let (name, name_line) = self.expect_ident()?;
+        ensure_type_name(&name, "`enum` declaration", name_line)?;
         self.expect(&Token::LBrace)?;
         let mut variants: Vec<VariantDecl> = Vec::new();
         if !matches!(self.peek(), Token::RBrace) {
@@ -610,20 +675,23 @@ impl Parser {
     }
 
     fn parse_variant_decl(&mut self) -> Result<VariantDecl, BopError> {
-        let (name, _) = self.expect_ident()?;
+        let (name, name_line) = self.expect_ident()?;
+        ensure_type_name(&name, "enum variant", name_line)?;
         let kind = match self.peek() {
             Token::LParen => {
                 self.advance();
                 let mut fields: Vec<String> = Vec::new();
                 if !matches!(self.peek(), Token::RParen) {
-                    let (f, _) = self.expect_ident()?;
+                    let (f, f_line) = self.expect_ident()?;
+                    ensure_value_name(&f, "variant payload field", f_line)?;
                     fields.push(f);
                     while matches!(self.peek(), Token::Comma) {
                         self.advance();
                         if matches!(self.peek(), Token::RParen) {
                             break;
                         }
-                        let (f, _) = self.expect_ident()?;
+                        let (f, f_line) = self.expect_ident()?;
+                        ensure_value_name(&f, "variant payload field", f_line)?;
                         fields.push(f);
                     }
                 }
@@ -634,14 +702,16 @@ impl Parser {
                 self.advance();
                 let mut fields: Vec<String> = Vec::new();
                 if !matches!(self.peek(), Token::RBrace) {
-                    let (f, _) = self.expect_ident()?;
+                    let (f, f_line) = self.expect_ident()?;
+                    ensure_value_name(&f, "variant payload field", f_line)?;
                     fields.push(f);
                     while matches!(self.peek(), Token::Comma) {
                         self.advance();
                         if matches!(self.peek(), Token::RBrace) {
                             break;
                         }
-                        let (f, _) = self.expect_ident()?;
+                        let (f, f_line) = self.expect_ident()?;
+                        ensure_value_name(&f, "variant payload field", f_line)?;
                         fields.push(f);
                     }
                 }
@@ -656,11 +726,13 @@ impl Parser {
     fn parse_use(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
         self.advance(); // consume `use`
-        let (first, _) = self.expect_ident()?;
+        let (first, first_line) = self.expect_ident()?;
+        ensure_value_name(&first, "module path segment", first_line)?;
         let mut path = first;
         while matches!(self.peek(), Token::Dot) {
             self.advance();
-            let (seg, _) = self.expect_ident()?;
+            let (seg, seg_line) = self.expect_ident()?;
+            ensure_value_name(&seg, "module path segment", seg_line)?;
             path.push('.');
             path.push_str(&seg);
         }
@@ -674,10 +746,30 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // consume 'let'
         let (name, _) = self.expect_ident()?;
+        ensure_value_name(&name, "`let` binding", line)?;
         self.expect(&Token::Eq)?;
         let value = self.parse_expr()?;
         Ok(Stmt {
-            kind: StmtKind::Let { name, value },
+            kind: StmtKind::Let { name, value, is_const: false },
+            line,
+        })
+    }
+
+    /// `const NAME = expr` — immutable binding, SCREAMING_SNAKE_CASE
+    /// name enforced. Shares the `StmtKind::Let` variant with a
+    /// `is_const: true` flag — the runtime treats constants as
+    /// let bindings that were parsed in a way that makes
+    /// reassignment impossible (the parser rejects any `=` whose
+    /// LHS is an all-uppercase identifier).
+    fn parse_const(&mut self) -> Result<Stmt, BopError> {
+        let line = self.peek_line();
+        self.advance(); // consume 'const'
+        let (name, _) = self.expect_ident()?;
+        ensure_constant_name(&name, "`const` declaration", line)?;
+        self.expect(&Token::Eq)?;
+        let value = self.parse_expr()?;
+        Ok(Stmt {
+            kind: StmtKind::Let { name, value, is_const: true },
             line,
         })
     }
@@ -729,7 +821,8 @@ impl Parser {
     fn parse_for(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
         self.advance(); // consume 'for'
-        let (var, _) = self.expect_ident()?;
+        let (var, var_line) = self.expect_ident()?;
+        ensure_value_name(&var, "`for` loop variable", var_line)?;
         self.expect(&Token::In)?;
         let iterable = self.without_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
@@ -757,23 +850,27 @@ impl Parser {
     fn parse_fn_decl(&mut self) -> Result<Stmt, BopError> {
         let line = self.peek_line();
         self.advance(); // consume 'fn'
-        let (name, _) = self.expect_ident()?;
+        let (name, name_line) = self.expect_ident()?;
 
         // Method declaration: `fn Type.method(...)`. The leading
         // ident is the receiver's type; the post-dot ident is the
         // method's name. Everything else matches a regular fn
         // decl.
         if matches!(self.peek(), Token::Dot) {
+            ensure_type_name(&name, "method receiver", name_line)?;
             self.advance();
-            let (method_name, _) = self.expect_ident()?;
+            let (method_name, method_line) = self.expect_ident()?;
+            ensure_value_name(&method_name, "method name", method_line)?;
             self.expect(&Token::LParen)?;
             let mut params = Vec::new();
             if !matches!(self.peek(), Token::RParen) {
-                let (p, _) = self.expect_ident()?;
+                let (p, p_line) = self.expect_ident()?;
+                ensure_value_name(&p, "method parameter", p_line)?;
                 params.push(p);
                 while matches!(self.peek(), Token::Comma) {
                     self.advance();
-                    let (p, _) = self.expect_ident()?;
+                    let (p, p_line) = self.expect_ident()?;
+                    ensure_value_name(&p, "method parameter", p_line)?;
                     params.push(p);
                 }
             }
@@ -790,15 +887,18 @@ impl Parser {
             });
         }
 
+        ensure_value_name(&name, "`fn` declaration", name_line)?;
         self.expect(&Token::LParen)?;
 
         let mut params = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
-            let (p, _) = self.expect_ident()?;
+            let (p, p_line) = self.expect_ident()?;
+            ensure_value_name(&p, "function parameter", p_line)?;
             params.push(p);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
-                let (p, _) = self.expect_ident()?;
+                let (p, p_line) = self.expect_ident()?;
+                ensure_value_name(&p, "function parameter", p_line)?;
                 params.push(p);
             }
         }
@@ -1730,7 +1830,27 @@ pub fn count_instructions(stmts: &[Stmt]) -> u32 {
 
 fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError> {
     match expr.kind {
-        ExprKind::Ident(name) => Ok(AssignTarget::Variable(name)),
+        ExprKind::Ident(name) => {
+            // All-caps LHS → reassigning a constant. Refused at
+            // parse time without needing scope tracking: the
+            // parser already forbids `let` / `fn` bindings with
+            // an all-caps shape, so any all-caps identifier in
+            // the source must have come from a `const` declaration
+            // (or is undeclared, in which case we give the user
+            // the right kind of diagnostic anyway).
+            if naming::is_constant_name(&name) {
+                let mut err = BopError::runtime(
+                    format!("can't reassign `{}` — it's a constant", name),
+                    line,
+                );
+                err.friendly_hint = Some(
+                    "constants are immutable. Use `let` if you want a mutable binding."
+                        .to_string(),
+                );
+                return Err(err);
+            }
+            Ok(AssignTarget::Variable(name))
+        }
         ExprKind::Index { object, index } => Ok(AssignTarget::Index {
             object: *object,
             index: *index,
@@ -1762,6 +1882,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::None => "none",
         Token::Ident(_) => "a name",
         Token::Let => "let",
+        Token::Const => "const",
         Token::Fn => "fn",
         Token::Return => "return",
         Token::If => "if",

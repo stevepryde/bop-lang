@@ -13,6 +13,7 @@ pub mod lexer;
 pub mod parser;
 pub mod math;
 pub mod memory;
+pub mod naming;
 pub mod ops;
 pub mod precheck;
 pub mod builtins;
@@ -3119,6 +3120,114 @@ print(leak())"#,
             err.message.contains("outer"),
             "expected 'outer' not-found error, got: {}",
             err.message
+        );
+    }
+
+    // ─── Const declarations + case conventions ─────────────────────
+    //
+    // The parser enforces three naming buckets — values are
+    // lowercase-first, types start uppercase, constants are
+    // all-uppercase. These tests cover the new `const` keyword
+    // and each of the rule-violation error paths.
+
+    #[test]
+    fn const_declares_an_immutable_binding() {
+        assert_eq!(say("const PI = 3\nprint(PI)"), "3");
+    }
+
+    #[test]
+    fn const_can_reference_another_const() {
+        assert_eq!(
+            say("const PI = 3\nconst DIAMETER = PI * 2\nprint(DIAMETER)"),
+            "6"
+        );
+    }
+
+    #[test]
+    fn const_reassignment_is_refused_at_parse_time() {
+        let err = run_err("const PI = 3\nPI = 4");
+        assert!(
+            err.contains("can't reassign") && err.contains("constant"),
+            "expected const-reassignment error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn let_name_must_start_lowercase() {
+        let err = run_err("let Foo = 1");
+        assert!(err.to_lowercase().contains("value"), "got: {err}");
+    }
+
+    #[test]
+    fn let_with_all_caps_suggests_const() {
+        let err = run_err("let MAX = 1");
+        assert!(
+            err.contains("const"),
+            "expected hint to suggest `const`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn struct_name_must_start_uppercase() {
+        let err = run_err("struct entity { id }");
+        assert!(err.to_lowercase().contains("type"), "got: {err}");
+    }
+
+    #[test]
+    fn enum_variants_start_uppercase() {
+        let err = run_err("enum Event { spawn, damage }");
+        assert!(err.to_lowercase().contains("type"), "got: {err}");
+    }
+
+    #[test]
+    fn enum_with_all_caps_variants_is_allowed() {
+        // `enum Dir { N, E, S, W }` — short-acronym variants are
+        // type-shape and pass the type-name check.
+        assert_eq!(
+            say("enum Dir { N, E, S, W }\nlet d = Dir::E\nprint(\"ok\")"),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn fn_name_must_start_lowercase() {
+        let err = run_err("fn Greet() { return 1 }");
+        assert!(err.to_lowercase().contains("value"), "got: {err}");
+    }
+
+    #[test]
+    fn fn_params_must_start_lowercase() {
+        let err = run_err("fn greet(Name) { return Name }");
+        assert!(err.to_lowercase().contains("value"), "got: {err}");
+    }
+
+    #[test]
+    fn for_loop_var_must_start_lowercase() {
+        let err = run_err("for I in range(3) { print(I) }");
+        assert!(err.to_lowercase().contains("value"), "got: {err}");
+    }
+
+    #[test]
+    fn const_name_must_be_all_caps() {
+        let err = run_err("const Pi = 3");
+        assert!(
+            err.to_lowercase().contains("constant"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn underscore_prefix_is_allowed_for_all_buckets() {
+        // Private-by-convention — classification is unchanged.
+        assert_eq!(
+            say(r#"
+                let _hidden = 1
+                const _DEBUG = true
+                struct _Internal { _counter }
+                let s = _Internal { _counter: _hidden }
+                print(s._counter)
+            "#),
+            "1"
         );
     }
 }

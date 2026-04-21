@@ -27,6 +27,7 @@ pub enum Token {
     // Identifiers & Keywords
     Ident(String),
     Let,
+    Const,
     Fn,
     Return,
     If,
@@ -673,6 +674,7 @@ impl Lexer {
         }
         match s.as_str() {
             "let" => Token::Let,
+            "const" => Token::Const,
             "fn" => Token::Fn,
             "return" => Token::Return,
             "if" => Token::If,

@@ -1167,7 +1167,7 @@ impl Emitter {
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), BopError> {
         let line = stmt.line;
         match &stmt.kind {
-            StmtKind::Let { name, value } => {
+            StmtKind::Let { name, value, is_const: _ } => {
                 let rhs = self.expr_src(value)?;
                 let ident = rust_ident(name);
                 self.line(&format!("let mut {}: ::bop::value::Value = {};", ident, rhs));
@@ -2645,7 +2645,7 @@ fn scan_free_vars_stmt(
     fn_info: &FnInfo,
 ) {
     match &stmt.kind {
-        StmtKind::Let { name, value } => {
+        StmtKind::Let { name, value, is_const: _ } => {
             scan_free_vars_expr(value, known, free, outer_scopes, fn_info);
             known.insert(name.clone());
         }

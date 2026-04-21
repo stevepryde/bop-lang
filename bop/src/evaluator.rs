@@ -301,7 +301,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         self.tick(stmt.line)?;
 
         match &stmt.kind {
-            StmtKind::Let { name, value } => {
+            StmtKind::Let { name, value, is_const: _ } => {
                 let val = self.eval_expr(value)?;
                 self.define(name.clone(), val);
                 Ok(Signal::None)

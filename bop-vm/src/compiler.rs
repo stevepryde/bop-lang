@@ -459,7 +459,7 @@ impl Compiler {
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), BopError> {
         let line = stmt.line;
         match &stmt.kind {
-            StmtKind::Let { name, value } => {
+            StmtKind::Let { name, value, is_const: _ } => {
                 self.compile_expr(value)?;
                 if let Some(resolver) = self.current_resolver_mut() {
                     // Inside a function body: bind to a slot so
