@@ -49,16 +49,21 @@ struct ModuleBindings {
     /// (for nested call resolution) and as a scope binding
     /// (so the fn is also usable as a first-class value).
     fn_decls: Vec<(String, FnDef)>,
-    /// Struct type declarations the module introduces. Copied
-    /// into the importing evaluator's `struct_defs` so
-    /// `MyStruct { ... }` construction in the caller resolves.
-    struct_defs: Vec<(String, Vec<String>)>,
-    /// Enum type declarations the module introduces. Same role
-    /// as `struct_defs` but for sum types.
-    enum_defs: Vec<(String, Vec<crate::parser::VariantDecl>)>,
-    /// User methods the module declared. `(type_name, method_name,
-    /// fn_def)` — applied to the caller's `methods` table.
-    methods: Vec<(String, String, FnDef)>,
+    /// Struct type declarations the module introduces, already
+    /// qualified with their full identity `(module_path,
+    /// type_name)`. The importer copies these into its own
+    /// `struct_defs` without rewriting keys, so type identity
+    /// stays pinned to the declaring module across the import
+    /// boundary.
+    struct_defs: Vec<((String, String), Vec<String>)>,
+    /// Enum type declarations, qualified the same way as
+    /// `struct_defs` above.
+    enum_defs: Vec<((String, String), Vec<crate::parser::VariantDecl>)>,
+    /// User methods the module declared, keyed by the *full
+    /// type identity* of the receiver. `((module_path,
+    /// type_name), method_name, fn_def)` — the importer merges
+    /// these directly into its own `methods` table.
+    methods: Vec<((String, String), String, FnDef)>,
 }
 
 type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
@@ -92,19 +97,55 @@ struct FnDef {
 pub struct Evaluator<'h, H: BopHost> {
     scopes: Vec<BTreeMap<String, Value>>,
     functions: BTreeMap<String, FnDef>,
-    /// User-defined struct types in this run. Keyed by the
-    /// declared type name; value is the declared field list in
-    /// declaration order.
-    struct_defs: BTreeMap<String, Vec<String>>,
-    /// User-defined enum types. Key is the enum name; value is
-    /// the full variant list so construction sites can validate
-    /// shapes.
-    enum_defs: BTreeMap<String, Vec<VariantDecl>>,
-    /// User-defined methods. Outer key is the receiver type name
-    /// (e.g. `"Point"`); inner key is the method name; value is
-    /// the fn body. Methods receive the receiver as their first
-    /// parameter (conventionally `self`).
-    methods: BTreeMap<String, BTreeMap<String, FnDef>>,
+    /// Module this evaluator is running. Used to tag newly
+    /// declared types with the module they live in, so two
+    /// modules that declare `struct Color { ... }` produce
+    /// distinct types rather than colliding by name. `<root>`
+    /// for the top-level program, the dot-joined module path
+    /// for a sub-evaluator loading a `use`'d module.
+    current_module: String,
+    /// User-defined struct types, keyed by their full identity
+    /// `(module_path, type_name)` — the same pair the runtime
+    /// values carry. Two modules declaring the same struct name
+    /// coexist at different keys with independently-validated
+    /// field lists.
+    struct_defs: BTreeMap<(String, String), Vec<String>>,
+    /// User-defined enum types, same `(module_path, type_name)`
+    /// keying scheme as [`Self::struct_defs`].
+    enum_defs: BTreeMap<(String, String), Vec<VariantDecl>>,
+    /// User-defined methods. Outer key is the *full type
+    /// identity* `(module_path, type_name)`; inner key is the
+    /// method name. Methods receive the receiver as their first
+    /// parameter (conventionally `self`). Dispatch looks up the
+    /// receiver's own `(module_path, type_name)` so a method
+    /// declared for `paint.Color` isn't accidentally called on
+    /// `other.Color`.
+    methods: BTreeMap<(String, String), BTreeMap<String, FnDef>>,
+    /// Per-scope bare-name → module_path bindings for types
+    /// *and* module aliases. Parallels `scopes`: a declared
+    /// type or an aliased `use` binds `name → module_path` in
+    /// the current scope. Bare-name lookup (`Color::Red`,
+    /// `m.Color::Red`) walks this stack inside-out. `<builtin>`
+    /// types (`Result`, `RuntimeError`) are seeded into scope
+    /// 0 at evaluator construction so they're visible
+    /// everywhere.
+    ///
+    /// Unlike `scopes`, this stack is *preserved* across
+    /// function calls — type identity follows lexical scoping
+    /// at the module level, so a `fn` declared inside the root
+    /// program can still match patterns against types + aliases
+    /// that were visible at its declaration site. Function
+    /// bodies push a fresh frame on entry so any locally-
+    /// declared types are discarded on return; module-scope
+    /// entries below stay put.
+    type_bindings: Vec<BTreeMap<String, String>>,
+    /// Module-level aliases `m → Rc<BopModule>`, populated by
+    /// aliased `use` statements. Separate from `scopes` so
+    /// aliases remain reachable from inside function bodies
+    /// (where `self.scopes` is fresh per call). Field access /
+    /// method dispatch on `m.foo` falls back to this map when
+    /// `m` isn't a local binding.
+    module_aliases: BTreeMap<String, Rc<crate::value::BopModule>>,
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
@@ -137,13 +178,16 @@ pub struct Evaluator<'h, H: BopHost> {
 impl<'h, H: BopHost> Evaluator<'h, H> {
     pub fn new(host: &'h mut H, limits: BopLimits) -> Self {
         crate::memory::bop_memory_init(limits.max_memory);
-        let (struct_defs, enum_defs) = seed_builtin_types();
+        let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
+            current_module: String::from(crate::value::ROOT_MODULE_PATH),
             struct_defs,
             enum_defs,
             methods: BTreeMap::new(),
+            type_bindings: vec![builtin_bindings],
+            module_aliases: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -159,19 +203,25 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     /// Build a sub-evaluator for loading a module — inherits the
     /// parent's import cache, memory ceiling, and step budget, but
     /// runs with a fresh scope stack so module code can't see the
-    /// importer's locals.
+    /// importer's locals. `module_path` is the dot-joined name the
+    /// module is being loaded under; types it declares tag their
+    /// runtime values with this path.
     fn new_for_module(
         host: &'h mut H,
         limits: BopLimits,
         imports: ImportCache,
+        module_path: String,
     ) -> Self {
-        let (struct_defs, enum_defs) = seed_builtin_types();
+        let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
+            current_module: module_path,
             struct_defs,
             enum_defs,
             methods: BTreeMap::new(),
+            type_bindings: vec![builtin_bindings],
+            module_aliases: BTreeMap::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -237,10 +287,43 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
     fn push_scope(&mut self) {
         self.scopes.push(BTreeMap::new());
+        // Type bindings parallel the value scopes — same push /
+        // pop rhythm keeps `use`-injected type names stack-scoped.
+        self.type_bindings.push(BTreeMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.type_bindings.pop();
+    }
+
+    /// Resolve a type reference to the module it was declared
+    /// in. `namespace` is the explicit qualifier (from
+    /// `m.Color::Red`) or `None` for bare names. For bare names
+    /// the scope stack is walked inside-out; for namespaced
+    /// references the alias is resolved via
+    /// `validate_namespaced_type` and its backing module path
+    /// returned. Returns `None` when no matching type is visible.
+    fn resolve_type_ref(&self, namespace: Option<&str>, type_name: &str) -> Option<String> {
+        resolve_type_in(
+            &self.scopes,
+            &self.type_bindings,
+            &self.module_aliases,
+            namespace,
+            type_name,
+        )
+    }
+
+    /// Record a type declaration in the current module.
+    /// Registers `(current_module, name)` in the appropriate
+    /// table and binds the bare name in the current scope so
+    /// subsequent references resolve to *this* module's version.
+    /// Same-shape redeclarations in the same module are a no-op;
+    /// different-shape ones error.
+    fn bind_local_type(&mut self, name: &str) {
+        if let Some(top) = self.type_bindings.last_mut() {
+            top.insert(name.to_string(), self.current_module.clone());
+        }
     }
 
     fn define(&mut self, name: String, value: Value) {
@@ -459,8 +542,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 params,
                 body,
             } => {
+                // Methods belong to a *specific* type identity —
+                // `fn Color.area(self)` inside module `paint`
+                // registers under `(paint, Color)` and doesn't
+                // leak to `other.Color`. If the named type isn't
+                // declared in this module, that's an error at
+                // parse/emit consistency — fall back to the
+                // current module as the owner.
+                let type_key = (self.current_module.clone(), type_name.clone());
                 self.methods
-                    .entry(type_name.clone())
+                    .entry(type_key)
                     .or_default()
                     .insert(
                         method_name.clone(),
@@ -506,14 +597,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                 }
-                if let Some(existing) = self.struct_defs.get(name) {
-                    // Same-shape redeclaration is allowed — that's
-                    // the rule `use` already uses for idempotent
-                    // re-imports, and it lets engine-wide builtins
-                    // (`RuntimeError`) coexist with a user program
-                    // that happens to redeclare them with the same
-                    // fields (e.g. a legacy `use std.result`).
+                // Type identity is `(current_module, name)` —
+                // two different modules declaring the same name
+                // coexist because their keys differ. A redecl
+                // *in the same module* is a no-op when the shape
+                // matches (mirrors the same-module idempotency
+                // rule for re-imports) and a clash otherwise.
+                let key = (self.current_module.clone(), name.clone());
+                if let Some(existing) = self.struct_defs.get(&key) {
                     if existing == fields {
+                        self.bind_local_type(name);
                         return Ok(Signal::None);
                     }
                     return Err(error(
@@ -521,17 +614,19 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         format!("Struct `{}` is already declared", name),
                     ));
                 }
-                self.struct_defs.insert(name.clone(), fields.clone());
+                self.struct_defs.insert(key, fields.clone());
+                self.bind_local_type(name);
                 Ok(Signal::None)
             }
 
             StmtKind::EnumDecl { name, variants } => {
-                if let Some(existing) = self.enum_defs.get(name) {
+                let key = (self.current_module.clone(), name.clone());
+                if let Some(existing) = self.enum_defs.get(&key) {
                     // Same rule as `StructDecl` above — a
-                    // same-shape redeclaration of a builtin (or
-                    // of a type a module already brought in) is a
+                    // same-module same-shape redeclaration is a
                     // no-op, anything else is a clash.
                     if variants_equivalent(existing, variants) {
+                        self.bind_local_type(name);
                         return Ok(Signal::None);
                     }
                     return Err(error(
@@ -567,7 +662,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         }
                     }
                 }
-                self.enum_defs.insert(name.clone(), variants.clone());
+                self.enum_defs.insert(key, variants.clone());
+                self.bind_local_type(name);
                 Ok(Signal::None)
             }
 
@@ -624,40 +720,45 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
         let bindings = self.load_module(path, line)?;
 
-        // Types (struct / enum / method) always register globally
-        // regardless of form.
-        for (name, fields) in &bindings.struct_defs {
-            if let Some(existing) = self.struct_defs.get(name) {
+        // Types always register under their *full identity*
+        // `(module_path, type_name)`. That means two modules
+        // declaring `struct Color { ... }` with different fields
+        // coexist at different registry keys — no clash. Same-
+        // identity reinsertion is a no-op; same key + different
+        // shape would mean the same module got loaded twice with
+        // a different source, which we treat as a hard error.
+        for (key, fields) in &bindings.struct_defs {
+            if let Some(existing) = self.struct_defs.get(key) {
                 if existing == fields {
                     continue;
                 }
                 return Err(error(
                     line,
                     format!(
-                        "Use of `{}` from `{}` clashes with an existing struct of the same name",
-                        name, path
+                        "Type `{}` from `{}` reloaded with different fields",
+                        key.1, key.0
                     ),
                 ));
             }
-            self.struct_defs.insert(name.clone(), fields.clone());
+            self.struct_defs.insert(key.clone(), fields.clone());
         }
-        for (name, variants) in &bindings.enum_defs {
-            if let Some(existing) = self.enum_defs.get(name) {
+        for (key, variants) in &bindings.enum_defs {
+            if let Some(existing) = self.enum_defs.get(key) {
                 if variants_equivalent(existing, variants) {
                     continue;
                 }
                 return Err(error(
                     line,
                     format!(
-                        "Use of `{}` from `{}` clashes with an existing enum of the same name",
-                        name, path
+                        "Type `{}` from `{}` reloaded with different variants",
+                        key.1, key.0
                     ),
                 ));
             }
-            self.enum_defs.insert(name.clone(), variants.clone());
+            self.enum_defs.insert(key.clone(), variants.clone());
         }
-        for (type_name, method_name, fn_def) in &bindings.methods {
-            let slot = self.methods.entry(type_name.clone()).or_default();
+        for (type_key, method_name, fn_def) in &bindings.methods {
+            let slot = self.methods.entry(type_key.clone()).or_default();
             slot.insert(method_name.clone(), fn_def.clone());
         }
 
@@ -695,11 +796,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     && !bindings
                         .struct_defs
                         .iter()
-                        .any(|(k, _)| k == wanted)
+                        .any(|((_, n), _)| n == wanted)
                     && !bindings
                         .enum_defs
                         .iter()
-                        .any(|(k, _)| k == wanted)
+                        .any(|((_, n), _)| n == wanted)
                 {
                     return Err(error(
                         line,
@@ -715,6 +816,28 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             exports.retain(|(k, _)| listed.contains(k));
             fn_entries.retain(|(k, _)| listed.contains(k));
         }
+
+        // Figure out which of the module's types the caller
+        // should see *by bare name*. The selective form picks
+        // exactly the listed names; the glob form takes
+        // everything public; the aliased form never binds bare
+        // names (the alias is the only way in).
+        let module_type_names: Vec<String> = bindings
+            .struct_defs
+            .iter()
+            .map(|((_, n), _)| n.clone())
+            .chain(bindings.enum_defs.iter().map(|((_, n), _)| n.clone()))
+            .collect();
+        let exposed_types: Vec<String> = match items {
+            Some(list) => module_type_names
+                .into_iter()
+                .filter(|n| list.iter().any(|i| i == n))
+                .collect(),
+            None => module_type_names
+                .into_iter()
+                .filter(|n| !crate::naming::is_private(n))
+                .collect(),
+        };
 
         if let Some(alias_name) = alias {
             // Aliased form: build a `Value::Module` and bind it
@@ -750,21 +873,31 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     self.functions.insert(name, fn_def);
                 }
             }
-            let type_names: Vec<String> = bindings
-                .struct_defs
-                .iter()
-                .map(|(n, _)| n.clone())
-                .chain(bindings.enum_defs.iter().map(|(n, _)| n.clone()))
-                .filter(|n| {
-                    items.map(|list| list.iter().any(|i| i == n)).unwrap_or(true)
-                })
-                .collect();
-            let module_value = Value::Module(Rc::new(crate::value::BopModule {
+            let module_rc = Rc::new(crate::value::BopModule {
                 path: path.to_string(),
                 bindings: exports,
-                types: type_names,
-            }));
-            self.define(alias_name.to_string(), module_value);
+                types: exposed_types,
+            });
+            // Bind the alias three ways:
+            //   1. as a Value::Module in the current value
+            //      scope (for `m.helper(x)` style calls that
+            //      happen directly at the callsite);
+            //   2. in `module_aliases` so it survives the
+            //      fresh-scope reset at function boundaries and
+            //      stays reachable for field access inside fns;
+            //   3. in `type_bindings` so patterns + construction
+            //      can resolve `m.Type` inside function bodies
+            //      without needing the Value::Module in value
+            //      scope.
+            self.define(
+                alias_name.to_string(),
+                Value::Module(Rc::clone(&module_rc)),
+            );
+            self.module_aliases
+                .insert(alias_name.to_string(), Rc::clone(&module_rc));
+            if let Some(scope) = self.type_bindings.last_mut() {
+                scope.insert(alias_name.to_string(), path.to_string());
+            }
         } else {
             // Glob / selective without alias — flat injection.
             // Privacy: glob-only drops `_`-prefixed names.
@@ -814,6 +947,26 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 }
                 self.define(name, value);
             }
+            // Bind the bare type names in the current scope's
+            // type_bindings so subsequent `Color::Red` /
+            // `Color { ... }` resolves to the module the name
+            // came from. Shadowing here is silent (same as
+            // values): first definition wins. Types without an
+            // explicit bare binding remain reachable through
+            // the alias form only.
+            for tn in &exposed_types {
+                let already_bound = self
+                    .type_bindings
+                    .last()
+                    .map(|s| s.contains_key(tn))
+                    .unwrap_or(false);
+                if already_bound {
+                    continue;
+                }
+                if let Some(scope) = self.type_bindings.last_mut() {
+                    scope.insert(tn.clone(), path.to_string());
+                }
+            }
         }
 
         if is_plain_glob {
@@ -857,7 +1010,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             .borrow_mut()
             .insert(path.to_string(), ImportSlot::Loading);
 
-        let result = self.evaluate_module(&source, line);
+        let result = self.evaluate_module(path, &source, line);
 
         match result {
             Ok(bindings) => {
@@ -878,8 +1031,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     /// Parse and walk a module source in a fresh scope, returning
     /// its top-level bindings as a `ModuleBindings`. Reuses the
     /// parent evaluator's host, limits, and import cache.
+    /// `module_path` is the dot-joined name the importer used —
+    /// the sub-evaluator tags its own declared types with this
+    /// path so runtime values keep a stable identity across the
+    /// import boundary.
     fn evaluate_module(
         &mut self,
+        module_path: &str,
         source: &str,
         line: u32,
     ) -> Result<ModuleBindings, BopError> {
@@ -887,7 +1045,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let stmts = crate::parse(source)?;
         let imports = Rc::clone(&self.imports);
         let limits = self.limits.clone();
-        let mut sub = Evaluator::new_for_module(self.host, limits, imports);
+        let mut sub = Evaluator::new_for_module(
+            self.host,
+            limits,
+            imports,
+            module_path.to_string(),
+        );
         // Run the module body to top — errors propagate as-is.
         match sub.exec_block(&stmts)? {
             Signal::Return(_) | Signal::None => {}
@@ -910,17 +1073,26 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         }
         let fn_decls: Vec<(String, FnDef)> =
             sub.functions.into_iter().collect();
-        // Type decls and methods transfer too so an importer can
-        // construct / pattern-match on the module's types
-        // without re-declaring them.
-        let struct_defs: Vec<(String, Vec<String>)> =
-            sub.struct_defs.into_iter().collect();
-        let enum_defs: Vec<(String, Vec<crate::parser::VariantDecl>)> =
-            sub.enum_defs.into_iter().collect();
-        let mut methods: Vec<(String, String, FnDef)> = Vec::new();
-        for (type_name, by_method) in sub.methods {
+        // Type decls and methods transfer with their full
+        // identity. Engine builtins (`<builtin>` module path)
+        // are seeded into every evaluator anyway, so we filter
+        // those out here to avoid duplicating them in the
+        // importer's merge step.
+        let builtin_mp = crate::value::BUILTIN_MODULE_PATH;
+        let struct_defs: Vec<((String, String), Vec<String>)> = sub
+            .struct_defs
+            .into_iter()
+            .filter(|((mp, _), _)| mp != builtin_mp)
+            .collect();
+        let enum_defs: Vec<((String, String), Vec<crate::parser::VariantDecl>)> = sub
+            .enum_defs
+            .into_iter()
+            .filter(|((mp, _), _)| mp != builtin_mp)
+            .collect();
+        let mut methods: Vec<((String, String), String, FnDef)> = Vec::new();
+        for (type_key, by_method) in sub.methods {
             for (method_name, fn_def) in by_method {
-                methods.push((type_name.clone(), method_name, fn_def));
+                methods.push((type_key.clone(), method_name, fn_def));
             }
         }
         Ok(ModuleBindings {
@@ -945,33 +1117,53 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         type_name: &str,
         line: u32,
     ) -> Result<(), BopError> {
-        let v = self.get_var(ns).ok_or_else(|| {
-            error(line, format!("`{}` isn't a module alias in scope", ns))
-        })?;
-        let module = match v {
-            Value::Module(m) => m,
-            _ => {
+        // Prefer the local value scope so a shadowing binding
+        // (`let p = 3` after `use paint as p`) is caught — but
+        // fall back to the evaluator-level alias map so
+        // namespaced references inside function bodies still
+        // resolve.
+        if let Some(v) = self.get_var(ns) {
+            let module = match v {
+                Value::Module(m) => m,
+                _ => {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{}` is a {}, not a module alias — can't reach `{}` through it",
+                            ns,
+                            v.type_name(),
+                            type_name
+                        ),
+                    ));
+                }
+            };
+            if !module.types.iter().any(|t| t == type_name) {
                 return Err(error(
                     line,
                     format!(
-                        "`{}` is a {}, not a module alias — can't reach `{}` through it",
-                        ns,
-                        v.type_name(),
-                        type_name
+                        "`{}` isn't a type exported from `{}`",
+                        type_name, module.path
                     ),
                 ));
             }
-        };
-        if !module.types.iter().any(|t| t == type_name) {
-            return Err(error(
-                line,
-                format!(
-                    "`{}` isn't a type exported from `{}`",
-                    type_name, module.path
-                ),
-            ));
+            return Ok(());
         }
-        Ok(())
+        if let Some(module) = self.module_aliases.get(ns) {
+            if !module.types.iter().any(|t| t == type_name) {
+                return Err(error(
+                    line,
+                    format!(
+                        "`{}` isn't a type exported from `{}`",
+                        type_name, module.path
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+        Err(error(
+            line,
+            format!("`{}` isn't a module alias in scope", ns),
+        ))
     }
 
     fn eval_enum_construct(
@@ -982,10 +1174,28 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         payload: &VariantPayload,
         line: u32,
     ) -> Result<Value, BopError> {
-        if let Some(ns) = namespace {
-            self.validate_namespaced_type(ns, type_name, line)?;
-        }
-        let variants = self.enum_defs.get(type_name).ok_or_else(|| {
+        // Resolve the type reference to its full
+        // `(module_path, type_name)` identity before validating
+        // the variant shape. `namespace` means the source wrote
+        // `ns.Type::Variant(...)`; bare means we look the name up
+        // in the current scope's type bindings.
+        let module_path = match namespace {
+            Some(ns) => {
+                self.validate_namespaced_type(ns, type_name, line)?;
+                // validate_namespaced_type guaranteed the alias
+                // is a Module and the type is in its exports —
+                // pick up the module path for the full identity.
+                self.resolve_type_ref(Some(ns), type_name)
+                    .unwrap_or_else(|| self.current_module.clone())
+            }
+            None => self
+                .resolve_type_ref(None, type_name)
+                .ok_or_else(|| {
+                    error(line, crate::error_messages::enum_not_declared(type_name))
+                })?,
+        };
+        let key = (module_path.clone(), type_name.to_string());
+        let variants = self.enum_defs.get(&key).ok_or_else(|| {
             error(line, crate::error_messages::enum_not_declared(type_name))
         })?
         .clone();
@@ -1001,6 +1211,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
         match (&decl.kind, payload) {
             (VariantKind::Unit, VariantPayload::Unit) => Ok(Value::new_enum_unit(
+                module_path,
                 type_name.to_string(),
                 variant.to_string(),
             )),
@@ -1023,6 +1234,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     items.push(self.eval_expr(arg)?);
                 }
                 Ok(Value::new_enum_tuple(
+                    module_path,
                     type_name.to_string(),
                     variant.to_string(),
                     items,
@@ -1068,6 +1280,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 }
                 Ok(Value::new_enum_struct(
+                    module_path,
                     type_name.to_string(),
                     variant.to_string(),
                     values,
@@ -1408,13 +1621,22 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
                 // User-defined method dispatch comes first — any
                 // user method registered against the receiver's
-                // type wins over built-in methods of the same
-                // name. Enums dispatch on the enum's type, not
-                // the variant's, so all variants of `Shape` share
-                // `fn Shape.area(self)`.
-                let type_key = match &obj_val {
-                    Value::Struct(s) => Some(s.type_name().to_string()),
-                    Value::EnumVariant(e) => Some(e.type_name().to_string()),
+                // *full* type identity `(module_path, type_name)`
+                // wins over built-in methods of the same name.
+                // Enums dispatch on the enum's type, not the
+                // variant's, so all variants of `paint.Shape`
+                // share `fn Shape.area(self)` from the paint
+                // module. A method declared for `paint.Shape`
+                // deliberately does not fire on `other.Shape`.
+                let type_key: Option<(String, String)> = match &obj_val {
+                    Value::Struct(s) => Some((
+                        s.module_path().to_string(),
+                        s.type_name().to_string(),
+                    )),
+                    Value::EnumVariant(e) => Some((
+                        e.module_path().to_string(),
+                        e.type_name().to_string(),
+                    )),
                     _ => None,
                 };
                 if let Some(key) = type_key {
@@ -1429,7 +1651,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                                 expr.line,
                                 format!(
                                     "`{}.{}` expects {} argument{} (including `self`), but got {}",
-                                    key,
+                                    key.1,
                                     method,
                                     m.params.len(),
                                     if m.params.len() == 1 { "" } else { "s" },
@@ -1554,10 +1776,23 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 type_name,
                 fields,
             } => {
-                if let Some(ns) = namespace {
-                    self.validate_namespaced_type(ns, type_name, expr.line)?;
-                }
-                let decl_fields = self.struct_defs.get(type_name).ok_or_else(|| {
+                let module_path = match namespace {
+                    Some(ns) => {
+                        self.validate_namespaced_type(ns, type_name, expr.line)?;
+                        self.resolve_type_ref(Some(ns), type_name)
+                            .unwrap_or_else(|| self.current_module.clone())
+                    }
+                    None => self
+                        .resolve_type_ref(None, type_name)
+                        .ok_or_else(|| {
+                            error(
+                                expr.line,
+                                crate::error_messages::struct_not_declared(type_name),
+                            )
+                        })?,
+                };
+                let key = (module_path.clone(), type_name.clone());
+                let decl_fields = self.struct_defs.get(&key).ok_or_else(|| {
                     error(
                         expr.line,
                         crate::error_messages::struct_not_declared(type_name),
@@ -1612,7 +1847,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         }
                     }
                 }
-                Ok(Value::new_struct(type_name.clone(), values))
+                Ok(Value::new_struct(module_path, type_name.clone(), values))
             }
 
             ExprKind::Array(elements) => {
@@ -1724,7 +1959,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let value = self.eval_expr(scrutinee)?;
         for arm in arms {
             let mut bindings: Vec<(String, Value)> = Vec::new();
-            if !pattern_matches(&arm.pattern, &value, &mut bindings) {
+            // Resolve patterns' type references through the
+            // walker's current scope. Capturing the three scope
+            // tables as immutable slices / refs keeps the
+            // closure free of the mutable-self borrow we need
+            // right after for `push_scope` + binding injection.
+            let scopes = &self.scopes;
+            let type_bindings = &self.type_bindings;
+            let module_aliases = &self.module_aliases;
+            let resolver = |ns: Option<&str>, tn: &str| -> Option<String> {
+                resolve_type_in(scopes, type_bindings, module_aliases, ns, tn)
+            };
+            if !pattern_matches(&arm.pattern, &value, &mut bindings, &resolver) {
                 continue;
             }
             // Pattern matched — open a fresh scope, bind every
@@ -1875,8 +2121,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // locals leak in. Captures and parameters seed the new
         // scope; self-reference via `self_name` lets recursive
         // lambdas see themselves.
+        //
+        // `type_bindings` is NOT reset — types and module
+        // aliases declared at module scope need to be visible
+        // inside nested fn bodies for construction + pattern
+        // matching to work. We push a fresh frame so any
+        // type decl inside the fn body still ends up scoped to
+        // that fn and vanishes on return.
         self.call_depth += 1;
         let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
+        self.type_bindings.push(BTreeMap::new());
 
         // Captures go in first so parameters shadow them on
         // collision (matches the lexical snapshot semantics).
@@ -1895,6 +2149,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
         let result = self.exec_block(body);
         self.scopes = saved_scopes;
+        self.type_bindings.pop();
         self.call_depth -= 1;
 
         // `try` unwinds as a sentinel `BopError`; the call
@@ -2097,21 +2352,41 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 /// builtin types (`Result`, `RuntimeError`). The shapes come from
 /// `crate::builtins` so walker / VM / AOT can never drift out of
 /// sync — they all read the same source.
+///
+/// Returns:
+/// - struct_defs keyed by `(module_path, type_name)` with the
+///   builtin registered under `<builtin>`;
+/// - enum_defs keyed the same way;
+/// - a bare-name → module_path map seeded with entries for every
+///   builtin, so the program's outermost scope can resolve
+///   bare `Result::Ok(...)` and `RuntimeError { ... }` without
+///   an explicit `use`.
 fn seed_builtin_types() -> (
-    BTreeMap<String, Vec<String>>,
-    BTreeMap<String, Vec<VariantDecl>>,
+    BTreeMap<(String, String), Vec<String>>,
+    BTreeMap<(String, String), Vec<VariantDecl>>,
+    BTreeMap<String, String>,
 ) {
-    let mut struct_defs: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut enum_defs: BTreeMap<String, Vec<VariantDecl>> = BTreeMap::new();
+    use crate::value::BUILTIN_MODULE_PATH;
+    let mut struct_defs: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut enum_defs: BTreeMap<(String, String), Vec<VariantDecl>> = BTreeMap::new();
+    let mut type_bindings: BTreeMap<String, String> = BTreeMap::new();
     struct_defs.insert(
-        String::from("RuntimeError"),
+        (String::from(BUILTIN_MODULE_PATH), String::from("RuntimeError")),
         crate::builtins::builtin_runtime_error_fields(),
     );
+    type_bindings.insert(
+        String::from("RuntimeError"),
+        String::from(BUILTIN_MODULE_PATH),
+    );
     enum_defs.insert(
-        String::from("Result"),
+        (String::from(BUILTIN_MODULE_PATH), String::from("Result")),
         crate::builtins::builtin_result_variants(),
     );
-    (struct_defs, enum_defs)
+    type_bindings.insert(
+        String::from("Result"),
+        String::from(BUILTIN_MODULE_PATH),
+    );
+    (struct_defs, enum_defs, type_bindings)
 }
 
 /// True when two enum declarations describe the same runtime
@@ -2150,18 +2425,84 @@ fn variants_equivalent(a: &[VariantDecl], b: &[VariantDecl]) -> bool {
     true
 }
 
+/// Walk a pair of scope stacks to resolve a source-level type
+/// reference — the same logic as
+/// [`Evaluator::resolve_type_ref`], but free-standing so the
+/// pattern matcher can be called with a borrow of the
+/// evaluator's tables without needing the evaluator itself.
+/// Returns `None` if the name isn't in scope.
+///
+/// `module_aliases` is the persistent map of aliased `use`
+/// modules so namespaced references (`m.Color`) resolve even
+/// inside function bodies, where `scopes` no longer contains
+/// `m` (the function call stack is reset per-call).
+pub fn resolve_type_in(
+    value_scopes: &[BTreeMap<String, Value>],
+    type_scopes: &[BTreeMap<String, String>],
+    module_aliases: &BTreeMap<String, Rc<crate::value::BopModule>>,
+    namespace: Option<&str>,
+    type_name: &str,
+) -> Option<String> {
+    if let Some(ns) = namespace {
+        // First: look the alias up in value scopes (catches
+        // locally-bound modules, if any). Then fall back to
+        // the evaluator-level alias map so function bodies can
+        // reach module-level aliases even when their own value
+        // scope is empty.
+        for scope in value_scopes.iter().rev() {
+            if let Some(Value::Module(m)) = scope.get(ns) {
+                if m.types.iter().any(|t| t == type_name) {
+                    return Some(m.path.clone());
+                }
+                return None;
+            }
+        }
+        if let Some(m) = module_aliases.get(ns) {
+            if m.types.iter().any(|t| t == type_name) {
+                return Some(m.path.clone());
+            }
+        }
+        return None;
+    }
+    for scope in type_scopes.iter().rev() {
+        if let Some(mp) = scope.get(type_name) {
+            return Some(mp.clone());
+        }
+    }
+    None
+}
+
+/// Resolver that turns a source-level type reference — optional
+/// namespace plus bare name (`m.Color` vs plain `Color`) — into
+/// the declaring module's path. Pattern matching threads this
+/// through so a pattern like `Color::Red` only matches values
+/// whose module identity agrees with the current scope's binding
+/// of `Color`.
+///
+/// Returning `None` means "no type with this name is visible in
+/// the calling scope" — the matcher treats that as a mismatch
+/// rather than a fallback, to avoid silently matching a
+/// same-named type from a different module.
+pub type TypeResolveFn<'a> = &'a dyn Fn(Option<&str>, &str) -> Option<String>;
+
 /// Attempt to match `pattern` against `value`. On success, appends
 /// any captured `(name, Value)` bindings to `bindings` and returns
 /// `true`; on failure, returns `false` and leaves `bindings` in an
 /// undefined state — it's the caller's responsibility to discard it.
 ///
-/// Exported so other engines (the bytecode VM, AOT transpiler) can
-/// run the exact same structural matcher as the tree-walker without
-/// re-implementing the rules.
+/// `resolver` is consulted whenever a pattern names a user type
+/// (`Pattern::Struct` or `Pattern::EnumVariant`) so the matcher
+/// can compare the value's full identity `(module_path,
+/// type_name)` against the source-level reference.
+///
+/// Exported so other engines (the bytecode VM, AOT transpiler)
+/// can run the exact same structural matcher as the tree-walker
+/// without re-implementing the rules.
 pub fn pattern_matches(
     pattern: &Pattern,
     value: &Value,
     bindings: &mut Vec<(String, Value)>,
+    resolver: TypeResolveFn<'_>,
 ) -> bool {
     match pattern {
         Pattern::Wildcard => true,
@@ -2183,7 +2524,7 @@ pub fn pattern_matches(
             _ => false,
         },
         Pattern::EnumVariant {
-            namespace: _,
+            namespace,
             type_name,
             variant,
             payload,
@@ -2192,7 +2533,17 @@ pub fn pattern_matches(
                 Value::EnumVariant(e) => e,
                 _ => return false,
             };
-            if ev.type_name() != type_name.as_str() || ev.variant() != variant.as_str() {
+            // Full identity check: resolve the pattern's type
+            // reference to a module path, then compare against
+            // the value's own module path.
+            let expected_mp = match resolver(namespace.as_deref(), type_name) {
+                Some(mp) => mp,
+                None => return false,
+            };
+            if ev.module_path() != expected_mp.as_str()
+                || ev.type_name() != type_name.as_str()
+                || ev.variant() != variant.as_str()
+            {
                 return false;
             }
             match (payload, ev.payload()) {
@@ -2205,7 +2556,7 @@ pub fn pattern_matches(
                         return false;
                     }
                     for (p, v) in pats.iter().zip(items.iter()) {
-                        if !pattern_matches(p, v, bindings) {
+                        if !pattern_matches(p, v, bindings, resolver) {
                             return false;
                         }
                     }
@@ -2215,13 +2566,13 @@ pub fn pattern_matches(
                     VariantPatternPayload::Struct { fields, rest },
                     crate::value::EnumPayload::Struct(entries),
                 ) => {
-                    match_struct_fields(fields, *rest, entries, bindings)
+                    match_struct_fields(fields, *rest, entries, bindings, resolver)
                 }
                 _ => false,
             }
         }
         Pattern::Struct {
-            namespace: _,
+            namespace,
             type_name,
             fields,
             rest,
@@ -2230,10 +2581,16 @@ pub fn pattern_matches(
                 Value::Struct(s) => s,
                 _ => return false,
             };
-            if st.type_name() != type_name.as_str() {
+            let expected_mp = match resolver(namespace.as_deref(), type_name) {
+                Some(mp) => mp,
+                None => return false,
+            };
+            if st.module_path() != expected_mp.as_str()
+                || st.type_name() != type_name.as_str()
+            {
                 return false;
             }
-            match_struct_fields(fields, *rest, st.fields(), bindings)
+            match_struct_fields(fields, *rest, st.fields(), bindings, resolver)
         }
         Pattern::Array { elements, rest } => {
             let items = match value {
@@ -2246,7 +2603,7 @@ pub fn pattern_matches(
                         return false;
                     }
                     for (p, v) in elements.iter().zip(items.iter()) {
-                        if !pattern_matches(p, v, bindings) {
+                        if !pattern_matches(p, v, bindings, resolver) {
                             return false;
                         }
                     }
@@ -2257,7 +2614,7 @@ pub fn pattern_matches(
                         return false;
                     }
                     for (i, p) in elements.iter().enumerate() {
-                        if !pattern_matches(p, &items[i], bindings) {
+                        if !pattern_matches(p, &items[i], bindings, resolver) {
                             return false;
                         }
                     }
@@ -2273,7 +2630,7 @@ pub fn pattern_matches(
         Pattern::Or(alts) => {
             for alt in alts {
                 let mut attempt: Vec<(String, Value)> = Vec::new();
-                if pattern_matches(alt, value, &mut attempt) {
+                if pattern_matches(alt, value, &mut attempt, resolver) {
                     bindings.extend(attempt);
                     return true;
                 }
@@ -2288,6 +2645,7 @@ fn match_struct_fields(
     rest: bool,
     entries: &[(String, Value)],
     bindings: &mut Vec<(String, Value)>,
+    resolver: TypeResolveFn<'_>,
 ) -> bool {
     // Every declared field-pattern must find its value in the
     // struct. `rest` just relaxes the requirement that *every*
@@ -2301,7 +2659,7 @@ fn match_struct_fields(
             Some((_, v)) => v,
             None => return false,
         };
-        if !pattern_matches(pat, value, bindings) {
+        if !pattern_matches(pat, value, bindings, resolver) {
             return false;
         }
     }

@@ -28,24 +28,47 @@ pub struct BopArray(Vec<Value>);
 #[derive(Debug)]
 pub struct BopDict(Vec<(String, Value)>);
 
-/// A user-defined struct value. Carries the declared type name
-/// plus its fields in declaration order so iteration (and
-/// deterministic `Display`) stays stable.
+/// A user-defined struct value. Carries the module it was
+/// declared in plus the bare type name, so two modules that
+/// happen to declare `struct Color { ... }` independently
+/// produce distinct values even when they share a name. The
+/// module path is `<root>` for the top-level program and
+/// `<builtin>` for engine-registered builtins like
+/// `RuntimeError`; for user modules it's the dot-joined `use`
+/// path (`"std.math"`, `"game.entity"`, …). Fields are stored
+/// in declaration order so iteration and `Display` stay stable.
 #[derive(Debug)]
 pub struct BopStruct {
+    module_path: String,
     type_name: String,
     fields: Vec<(String, Value)>,
 }
 
 /// A user-defined enum variant value — the concrete data side of
-/// Bop's sum types. Carries the enum's type name, the selected
-/// variant's name, and the variant's payload (if any).
+/// Bop's sum types. Like [`BopStruct`], it's identified by the
+/// `(module_path, type_name)` pair, plus the selected variant's
+/// name and payload. Two enums declared in different modules with
+/// the same type name and even the same variants still compare
+/// as distinct types.
 #[derive(Debug)]
 pub struct BopEnumVariant {
+    module_path: String,
     type_name: String,
     variant: String,
     payload: EnumPayload,
 }
+
+/// Module path used for engine-registered builtins (`Result`,
+/// `RuntimeError`). Surfaces wherever a struct / enum value
+/// needs to carry its declaring module; the engines all agree
+/// on this literal so patterns + equality line up across
+/// walker / VM / AOT.
+pub const BUILTIN_MODULE_PATH: &str = "<builtin>";
+
+/// Module path used for types declared directly in the program
+/// root (not in any imported module). Same literal across every
+/// engine.
+pub const ROOT_MODULE_PATH: &str = "<root>";
 
 /// Runtime payload attached to a `BopEnumVariant`. Mirrors the
 /// three variant shapes the parser recognises
@@ -196,35 +219,57 @@ impl Value {
         Value::Dict(BopDict(entries))
     }
 
-    /// Build a user-defined struct value. Tracks the type name
-    /// capacity plus the field buffer — same accounting shape as
-    /// a dict, with an extra string for the type tag.
-    pub fn new_struct(type_name: String, fields: Vec<(String, Value)>) -> Self {
+    /// Build a user-defined struct value. `module_path` is the
+    /// module in which the type was declared (`<root>` at the
+    /// top level, `<builtin>` for engine-registered shapes like
+    /// `RuntimeError`, or the dot-joined `use` path for user
+    /// modules). Two structs are only the same type when both
+    /// the module path *and* the type name match — so a
+    /// `struct Color { ... }` declared in two separate modules
+    /// produces genuinely distinct values.
+    pub fn new_struct(
+        module_path: String,
+        type_name: String,
+        fields: Vec<(String, Value)>,
+    ) -> Self {
         let key_bytes: usize = fields.iter().map(|(k, _)| k.capacity()).sum();
         bop_alloc(
-            type_name.capacity()
+            module_path.capacity()
+                + type_name.capacity()
                 + fields.capacity() * core::mem::size_of::<(String, Value)>()
                 + key_bytes,
         );
-        Value::Struct(Box::new(BopStruct { type_name, fields }))
+        Value::Struct(Box::new(BopStruct {
+            module_path,
+            type_name,
+            fields,
+        }))
     }
 
-    pub fn new_enum_unit(type_name: String, variant: String) -> Self {
-        bop_alloc(type_name.capacity() + variant.capacity());
+    pub fn new_enum_unit(module_path: String, type_name: String, variant: String) -> Self {
+        bop_alloc(module_path.capacity() + type_name.capacity() + variant.capacity());
         Value::EnumVariant(Box::new(BopEnumVariant {
+            module_path,
             type_name,
             variant,
             payload: EnumPayload::Unit,
         }))
     }
 
-    pub fn new_enum_tuple(type_name: String, variant: String, items: Vec<Value>) -> Self {
+    pub fn new_enum_tuple(
+        module_path: String,
+        type_name: String,
+        variant: String,
+        items: Vec<Value>,
+    ) -> Self {
         bop_alloc(
-            type_name.capacity()
+            module_path.capacity()
+                + type_name.capacity()
                 + variant.capacity()
                 + items.capacity() * core::mem::size_of::<Value>(),
         );
         Value::EnumVariant(Box::new(BopEnumVariant {
+            module_path,
             type_name,
             variant,
             payload: EnumPayload::Tuple(items),
@@ -232,18 +277,21 @@ impl Value {
     }
 
     pub fn new_enum_struct(
+        module_path: String,
         type_name: String,
         variant: String,
         fields: Vec<(String, Value)>,
     ) -> Self {
         let key_bytes: usize = fields.iter().map(|(k, _)| k.capacity()).sum();
         bop_alloc(
-            type_name.capacity()
+            module_path.capacity()
+                + type_name.capacity()
                 + variant.capacity()
                 + fields.capacity() * core::mem::size_of::<(String, Value)>()
                 + key_bytes,
         );
         Value::EnumVariant(Box::new(BopEnumVariant {
+            module_path,
             type_name,
             variant,
             payload: EnumPayload::Struct(fields),
@@ -317,17 +365,20 @@ impl Clone for Value {
                 Value::Dict(BopDict(cloned))
             }
             Value::Struct(s) => {
+                let cloned_mp = s.module_path.clone();
                 let cloned_tn = s.type_name.clone();
                 let cloned_fields = s.fields.clone();
                 let key_bytes: usize =
                     cloned_fields.iter().map(|(k, _)| k.capacity()).sum();
                 bop_alloc(
-                    cloned_tn.capacity()
+                    cloned_mp.capacity()
+                        + cloned_tn.capacity()
                         + cloned_fields.capacity()
                             * core::mem::size_of::<(String, Value)>()
                         + key_bytes,
                 );
                 Value::Struct(Box::new(BopStruct {
+                    module_path: cloned_mp,
                     type_name: cloned_tn,
                     fields: cloned_fields,
                 }))
@@ -343,19 +394,19 @@ impl Clone for Value {
             // own memory when the `BopModule` is first built.
             Value::Module(m) => Value::Module(Rc::clone(m)),
             Value::EnumVariant(e) => {
+                let mp = e.module_path.clone();
                 let tn = e.type_name.clone();
                 let vn = e.variant.clone();
+                let base = mp.capacity() + tn.capacity() + vn.capacity();
                 let payload = match &e.payload {
                     EnumPayload::Unit => {
-                        bop_alloc(tn.capacity() + vn.capacity());
+                        bop_alloc(base);
                         EnumPayload::Unit
                     }
                     EnumPayload::Tuple(items) => {
                         let cloned = items.clone();
                         bop_alloc(
-                            tn.capacity()
-                                + vn.capacity()
-                                + cloned.capacity() * core::mem::size_of::<Value>(),
+                            base + cloned.capacity() * core::mem::size_of::<Value>(),
                         );
                         EnumPayload::Tuple(cloned)
                     }
@@ -364,8 +415,7 @@ impl Clone for Value {
                         let key_bytes: usize =
                             cloned.iter().map(|(k, _)| k.capacity()).sum();
                         bop_alloc(
-                            tn.capacity()
-                                + vn.capacity()
+                            base
                                 + cloned.capacity()
                                     * core::mem::size_of::<(String, Value)>()
                                 + key_bytes,
@@ -374,6 +424,7 @@ impl Clone for Value {
                     }
                 };
                 Value::EnumVariant(Box::new(BopEnumVariant {
+                    module_path: mp,
                     type_name: tn,
                     variant: vn,
                     payload,
@@ -399,14 +450,17 @@ impl Drop for Value {
             Value::Struct(s) => {
                 let key_bytes: usize = s.fields.iter().map(|(k, _)| k.capacity()).sum();
                 bop_dealloc(
-                    s.type_name.capacity()
+                    s.module_path.capacity()
+                        + s.type_name.capacity()
                         + s.fields.capacity()
                             * core::mem::size_of::<(String, Value)>()
                         + key_bytes,
                 );
             }
             Value::EnumVariant(e) => {
-                let base = e.type_name.capacity() + e.variant.capacity();
+                let base = e.module_path.capacity()
+                    + e.type_name.capacity()
+                    + e.variant.capacity();
                 match &e.payload {
                     EnumPayload::Unit => bop_dealloc(base),
                     EnumPayload::Tuple(items) => bop_dealloc(
@@ -643,6 +697,13 @@ impl BopStruct {
         &self.type_name
     }
 
+    /// Module this struct type was declared in. Forms one half
+    /// of the type's identity — the other half is the bare
+    /// [`Self::type_name`].
+    pub fn module_path(&self) -> &str {
+        &self.module_path
+    }
+
     pub fn fields(&self) -> &[(String, Value)] {
         &self.fields
     }
@@ -669,6 +730,12 @@ impl BopStruct {
 impl BopEnumVariant {
     pub fn type_name(&self) -> &str {
         &self.type_name
+    }
+
+    /// Module this enum type was declared in. Paired with
+    /// [`Self::type_name`] to form the type's identity.
+    pub fn module_path(&self) -> &str {
+        &self.module_path
     }
 
     pub fn variant(&self) -> &str {
@@ -744,21 +811,26 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         // to the same `BopFn` compare equal; structurally identical
         // closures constructed independently do not.
         (Value::Fn(a), Value::Fn(b)) => Rc::ptr_eq(a, b),
-        // Structural equality for user structs: same type name
-        // AND every field equal in declaration order (fields are
-        // stored in a Vec so order is stable).
+        // Structural equality for user structs: full type
+        // identity (module_path + type_name) AND every field
+        // equal in declaration order. Two structs with the same
+        // name declared in different modules deliberately compare
+        // as *not equal* — they're distinct types.
         (Value::Struct(a), Value::Struct(b)) => {
-            a.type_name == b.type_name
+            a.module_path == b.module_path
+                && a.type_name == b.type_name
                 && a.fields.len() == b.fields.len()
                 && a.fields
                     .iter()
                     .zip(b.fields.iter())
                     .all(|((ka, va), (kb, vb))| ka == kb && values_equal(va, vb))
         }
-        // Enum variants: same enum type, same variant name, same
-        // payload shape + structural equality on payload items.
+        // Enum variants: same full type identity (module_path +
+        // type_name), same variant name, same payload shape +
+        // structural equality on payload items.
         (Value::EnumVariant(a), Value::EnumVariant(b)) => {
-            a.type_name == b.type_name
+            a.module_path == b.module_path
+                && a.type_name == b.type_name
                 && a.variant == b.variant
                 && match (&a.payload, &b.payload) {
                     (EnumPayload::Unit, EnumPayload::Unit) => true,

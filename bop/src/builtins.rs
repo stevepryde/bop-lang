@@ -522,11 +522,15 @@ pub fn error_fatal(line: u32, message: impl Into<String>) -> BopError {
 // [`BopError::is_fatal`] for why.
 
 /// Build the `Result::Ok(value)` variant `try_call` returns on a
-/// successful call.
+/// successful call. `Result` is an engine builtin, so the value
+/// carries `<builtin>` as its module path — any program that
+/// matches it via `Result::Ok(v)` resolves `Result` to the same
+/// builtin in its own type-binding scope.
 pub fn make_try_call_ok(value: Value) -> Value {
     let mut items: Vec<Value> = Vec::with_capacity(1);
     items.push(value);
     Value::new_enum_tuple(
+        String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Ok"),
         items,
@@ -535,6 +539,8 @@ pub fn make_try_call_ok(value: Value) -> Value {
 
 /// Build the `Result::Err(RuntimeError { message, line })`
 /// variant `try_call` returns on a caught non-fatal error.
+/// `RuntimeError` is also a builtin — same `<builtin>` module
+/// path as `Result`.
 pub fn make_try_call_err(err: &BopError) -> Value {
     let message = Value::new_str(err.message.clone());
     // Line numbers are integers — use Int now that phase 6
@@ -543,10 +549,15 @@ pub fn make_try_call_err(err: &BopError) -> Value {
     let mut fields: Vec<(String, Value)> = Vec::with_capacity(2);
     fields.push((String::from("message"), message));
     fields.push((String::from("line"), line));
-    let rt_err = Value::new_struct(String::from("RuntimeError"), fields);
+    let rt_err = Value::new_struct(
+        String::from(crate::value::BUILTIN_MODULE_PATH),
+        String::from("RuntimeError"),
+        fields,
+    );
     let mut items: Vec<Value> = Vec::with_capacity(1);
     items.push(rt_err);
     Value::new_enum_tuple(
+        String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Err"),
         items,

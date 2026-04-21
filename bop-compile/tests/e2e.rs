@@ -656,6 +656,58 @@ print(p.x + p.y)"#,
 
 #[test]
 #[ignore]
+fn e2e_two_modules_same_type_name_distinct_identity() {
+    // Phase 2b — two modules both declare `enum Color { ... }`
+    // with different variants. Under module-qualified types
+    // they coexist as distinct runtime types. Equality never
+    // fires across module boundaries even when both values are
+    // named `Color::Red`.
+    assert_aot_matches_with_modules(
+        "two_modules_same_type_name",
+        r#"use paint as p
+use other as o
+let a = p.Color::Red
+let b = o.Color::Red
+print(a == b)
+print(a == a)
+print(a)
+print(b)"#,
+        &[
+            ("paint", "enum Color { Red, Blue }"),
+            ("other", "enum Color { Red, Green, Yellow }"),
+        ],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_namespaced_pattern_picks_correct_module() {
+    // Patterns embed the resolved module path in the emitter's
+    // per-site resolver closure; `p.Color::Red` only matches
+    // values tagged with the paint module.
+    assert_aot_matches_with_modules(
+        "namespaced_pattern_picks_correct_module",
+        r#"use paint as p
+use other as o
+fn label(c) {
+    return match c {
+        p.Color::Red => "paint-red",
+        o.Color::Red => "other-red",
+        _ => "none",
+    }
+}
+print(label(p.Color::Red))
+print(label(o.Color::Red))
+print(label(p.Color::Blue))"#,
+        &[
+            ("paint", "enum Color { Red, Blue }"),
+            ("other", "enum Color { Red, Green }"),
+        ],
+    );
+}
+
+#[test]
+#[ignore]
 fn e2e_use_namespaced_enum_construct() {
     // `n.Color::Red` and `n.Result::Ok(v)` via alias.
     assert_aot_matches_with_modules(

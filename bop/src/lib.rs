@@ -45,6 +45,17 @@ pub use value::Value;
 /// same structural rules without re-implementing them.
 pub use evaluator::pattern_matches;
 
+/// Shared scope walker for resolving source-level type
+/// references to the declaring module. Re-exported because VM
+/// and AOT both need to build per-frame type resolvers when
+/// calling [`pattern_matches`] — the identity comparison lives
+/// on the matcher side, but the scope lookup is identical
+/// across engines.
+pub use evaluator::resolve_type_in;
+
+/// Type alias for the resolver closure `pattern_matches` expects.
+pub use evaluator::TypeResolveFn;
+
 // ─── BopLimits ─────────────────────────────────────────────────────────────
 
 /// Resource limits enforced during execution.
@@ -1963,24 +1974,20 @@ print(match top() {
     }
 
     #[test]
-    fn result_cant_be_redeclared_with_unit_ok_variant() {
-        // `Result` is a builtin type now, so a redeclaration with
-        // a different shape (Unit `Ok` vs the canonical tuple
-        // `Ok(value)`) is rejected at decl time. Previously the
-        // walker would let this through and then `try` would
-        // gracefully handle the unit-Ok case; now the engine
-        // enforces the canonical shape up-front.
-        let msg = run_err(
-            r#"enum Result { Ok, Err(e) }
+    fn user_result_with_unit_ok_coexists_with_builtin() {
+        // Module-scoped types: the program's own `enum Result
+        // { Ok, Err(e) }` lives under `<root>.Result`, distinct
+        // from the `<builtin>.Result` that `try_call` returns.
+        // `try Result::Ok` resolves to the user's root-level
+        // Result and unwraps the Unit-Ok variant to `none`.
+        assert_eq!(
+            say(r#"enum Result { Ok, Err(e) }
 fn doit() {
-    return try Result::Ok
+    let v = try Result::Ok
+    return type(v)
 }
-doit()"#,
-        );
-        assert!(
-            msg.contains("already declared"),
-            "got: {}",
-            msg
+print(doit())"#),
+            "none"
         );
     }
 
@@ -2026,22 +2033,23 @@ doit()"#,
     }
 
     #[test]
-    fn result_cant_be_redeclared_with_wrong_ok_arity() {
-        // Same rule as the Unit-Ok test: the builtin Result
-        // enum is `Ok(value), Err(error)` — trying to redeclare
-        // it with a two-field `Ok(a, b)` tuple is a clash, not
-        // a silently-different Result. `try`'s old "Ok must carry
-        // exactly one" check is now unreachable because the
-        // engine won't let the program get that far.
+    fn try_ok_tuple_wrong_arity_errors() {
+        // Module-scoped types: the program's own two-field
+        // `Ok(a, b)` is a valid enum declaration (lives under
+        // `<root>.Result`), but `try` still enforces the
+        // "Ok must carry exactly one value" rule it uses to
+        // unwrap successful results. The check fires at the
+        // `try` site, not at the type declaration.
         let msg = run_err(
             r#"enum Result { Ok(a, b), Err(e) }
 fn doit() {
-    return try Result::Ok(1, 2)
+    let v = try Result::Ok(1, 2)
+    return v
 }
 doit()"#,
         );
         assert!(
-            msg.contains("already declared"),
+            msg.contains("Ok variant must carry exactly one"),
             "got: {}",
             msg
         );
@@ -3429,6 +3437,73 @@ print(leak())"#,
     }
 
     // ─── host helpers ────────────────────────────────────────────────
+
+    // ─── module-qualified type identity ──────────────────────────────
+
+    #[test]
+    fn two_modules_can_declare_same_type_name_with_different_shapes() {
+        // Phase 2b — module-qualified types. Two modules each
+        // declare `enum Color { ... }` with *different* variant
+        // sets; both are usable through aliases, and values
+        // constructed from one never compare equal to values
+        // from the other even when the variant names match.
+        let mut host = crate::host::StringModuleHost::new([
+            ("paint", "enum Color { Red, Blue }"),
+            ("other", "enum Color { Red, Green, Yellow }"),
+        ]);
+        run(
+            r#"use paint as p
+use other as o
+let a = p.Color::Red
+let b = o.Color::Red
+print(a == b)
+print(a == a)
+print(a)
+print(b)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        // a and b are both `Color::Red` but from *different*
+        // modules, so `==` is false. `a == a` is true (same
+        // identity). Display keeps the bare type name in both
+        // cases so surface rendering stays readable even when
+        // the underlying identities differ.
+        assert_eq!(host.output(), "false\ntrue\nColor::Red\nColor::Red");
+    }
+
+    #[test]
+    fn namespaced_pattern_matches_only_same_module_value() {
+        // Patterns resolve their type reference through the
+        // alias, so `p.Color::Red` *only* matches a value
+        // declared in the `paint` module — not the lookalike
+        // value from `other`.
+        let mut host = crate::host::StringModuleHost::new([
+            ("paint", "enum Color { Red, Blue }"),
+            ("other", "enum Color { Red, Green, Yellow }"),
+        ]);
+        run(
+            r#"use paint as p
+use other as o
+fn label(c) {
+    return match c {
+        p.Color::Red => "paint red",
+        o.Color::Red => "other red",
+        _ => "other",
+    }
+}
+print(label(p.Color::Red))
+print(label(o.Color::Red))
+print(label(o.Color::Green))"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(
+            host.output(),
+            "paint red\nother red\nother"
+        );
+    }
 
     #[test]
     fn string_module_host_runs_use_end_to_end() {

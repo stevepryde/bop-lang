@@ -70,15 +70,20 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
 // engines consistent.
 
 pub(crate) struct TypeRegistry {
-    /// Struct name → ordered field list.
-    pub structs: HashMap<String, Vec<String>>,
-    /// Enum name → variant name → payload shape.
-    pub enums: HashMap<String, HashMap<String, VariantKind>>,
-    /// All user methods, keyed by (type_name, method_name). Holds
-    /// the Bop parameter list (including the explicit `self`) and
-    /// the body. Module prefix is stored too so the emitted Rust
-    /// fn name can be reconstructed uniquely.
-    pub methods: HashMap<(String, String), MethodEntry>,
+    /// Struct types keyed by full identity `(module_path,
+    /// type_name)`. Two modules that declare a struct with the
+    /// same name coexist at distinct keys — no forced merge, no
+    /// clash unless the same module genuinely declares it twice.
+    pub structs: HashMap<(String, String), Vec<String>>,
+    /// Enum types, same `(module_path, type_name)` keying.
+    /// Variants are stored as bare-name → payload shape.
+    pub enums: HashMap<(String, String), HashMap<String, VariantKind>>,
+    /// User methods, keyed by the *full receiver-type identity*
+    /// `(module_path, type_name, method_name)`. A method
+    /// declared for `paint.Color` doesn't fire on
+    /// `other.Color`; dispatch threads the receiver's own
+    /// module path into the lookup.
+    pub methods: HashMap<(String, String, String), MethodEntry>,
 }
 
 #[derive(Clone)]
@@ -112,21 +117,23 @@ fn collect_type_registry(
         methods: HashMap::new(),
     };
     // Parallel "where was this first declared?" tables so
-    // clash diagnostics can name both sites.
-    let mut struct_origins: HashMap<String, DeclOrigin> = HashMap::new();
-    let mut enum_origins: HashMap<String, DeclOrigin> = HashMap::new();
+    // clash diagnostics can name both sites. Keyed by full
+    // identity.
+    let mut struct_origins: HashMap<(String, String), DeclOrigin> = HashMap::new();
+    let mut enum_origins: HashMap<(String, String), DeclOrigin> = HashMap::new();
 
-    // Engine-wide builtins (`Result`, `RuntimeError`) go into the
-    // registry before any user source is inspected, so a user
-    // program that also declares them (e.g. importing the legacy
-    // `std.result` module that used to own these types) hits the
-    // same same-shape-redeclare rule as any other double-decl.
+    // Engine-wide builtins (`Result`, `RuntimeError`) go into
+    // the registry before any user source is inspected, keyed
+    // under `<builtin>` so a user-declared `enum Result { ... }`
+    // at the program root lives under `<root>.Result` instead
+    // and the two coexist without clashing.
+    let builtin_mp = bop::value::BUILTIN_MODULE_PATH.to_string();
     reg.structs.insert(
-        String::from("RuntimeError"),
+        (builtin_mp.clone(), String::from("RuntimeError")),
         bop::builtins::builtin_runtime_error_fields(),
     );
     struct_origins.insert(
-        String::from("RuntimeError"),
+        (builtin_mp.clone(), String::from("RuntimeError")),
         DeclOrigin {
             path: "<builtin>".to_string(),
             line: 0,
@@ -136,20 +143,23 @@ fn collect_type_registry(
         .into_iter()
         .map(|v| (v.name, v.kind))
         .collect();
-    reg.enums.insert(String::from("Result"), result_variants);
+    reg.enums.insert(
+        (builtin_mp.clone(), String::from("Result")),
+        result_variants,
+    );
     enum_origins.insert(
-        String::from("Result"),
+        (builtin_mp.clone(), String::from("Result")),
         DeclOrigin {
             path: "<builtin>".to_string(),
             line: 0,
         },
     );
 
-    // Root program contributes with an empty prefix.
+    // Root program contributes under `<root>`.
     collect_types_from_stmts(
         root,
         "",
-        "<root>",
+        bop::value::ROOT_MODULE_PATH,
         &mut reg,
         &mut struct_origins,
         &mut enum_origins,
@@ -157,7 +167,8 @@ fn collect_type_registry(
     // Then every module's AST. Module prefix matches the emitter's
     // slug scheme (dots → underscores, trailing `__`). The `name`
     // string (pre-slug) is what shows up in error messages so users
-    // can find the file they wrote.
+    // can find the file they wrote, and is also the runtime
+    // module path for type identity.
     for name in &modules.order {
         if let Some(entry) = modules.modules.get(name) {
             let prefix = format!("{}__", module_slug(name));
@@ -216,21 +227,25 @@ fn collect_types_from_stmts(
     prefix: &str,
     module_path: &str,
     reg: &mut TypeRegistry,
-    struct_origins: &mut HashMap<String, DeclOrigin>,
-    enum_origins: &mut HashMap<String, DeclOrigin>,
+    struct_origins: &mut HashMap<(String, String), DeclOrigin>,
+    enum_origins: &mut HashMap<(String, String), DeclOrigin>,
 ) -> Result<(), BopError> {
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::StructDecl { name, fields } => {
-                if let Some(existing) = reg.structs.get(name) {
-                    // Same shape is fine — mirrors the walker's
-                    // idempotent-on-match rule for re-imports of
-                    // the same module via different paths.
+                // Identity is `(module_path, name)` — two
+                // modules declaring the same bare name now live
+                // at distinct keys. Same-identity re-insertion
+                // is a no-op on matching shape, an error on
+                // mismatch (would mean the same module got
+                // loaded twice with different source).
+                let key = (module_path.to_string(), name.clone());
+                if let Some(existing) = reg.structs.get(&key) {
                     if existing == fields {
                         continue;
                     }
                     let origin = struct_origins
-                        .get(name)
+                        .get(&key)
                         .cloned()
                         .unwrap_or(DeclOrigin {
                             path: "<unknown>".to_string(),
@@ -244,9 +259,9 @@ fn collect_types_from_stmts(
                         stmt.line,
                     ));
                 }
-                reg.structs.insert(name.clone(), fields.clone());
+                reg.structs.insert(key.clone(), fields.clone());
                 struct_origins.insert(
-                    name.clone(),
+                    key,
                     DeclOrigin {
                         path: module_path.to_string(),
                         line: stmt.line,
@@ -258,12 +273,13 @@ fn collect_types_from_stmts(
                 for v in variants {
                     v_map.insert(v.name.clone(), v.kind.clone());
                 }
-                if let Some(existing) = reg.enums.get(name) {
+                let key = (module_path.to_string(), name.clone());
+                if let Some(existing) = reg.enums.get(&key) {
                     if enum_variants_equivalent(existing, &v_map) {
                         continue;
                     }
                     let origin = enum_origins
-                        .get(name)
+                        .get(&key)
                         .cloned()
                         .unwrap_or(DeclOrigin {
                             path: "<unknown>".to_string(),
@@ -277,9 +293,9 @@ fn collect_types_from_stmts(
                         stmt.line,
                     ));
                 }
-                reg.enums.insert(name.clone(), v_map);
+                reg.enums.insert(key.clone(), v_map);
                 enum_origins.insert(
-                    name.clone(),
+                    key,
                     DeclOrigin {
                         path: module_path.to_string(),
                         line: stmt.line,
@@ -292,12 +308,18 @@ fn collect_types_from_stmts(
                 params,
                 body,
             } => {
-                // Methods stay last-wins to match the walker,
-                // which uses `slot.insert` in its import path
-                // without a shape check. A conflicting method
-                // overwrite here is the same behaviour.
+                // Methods attach to the *full* receiver-type
+                // identity. `fn Color.area(self)` inside paint
+                // registers under `(paint, Color, area)` and
+                // doesn't leak to other modules' same-named
+                // types. Last-write-wins on same key to match
+                // walker's insert-without-shape-check rule.
                 reg.methods.insert(
-                    (type_name.clone(), method_name.clone()),
+                    (
+                        module_path.to_string(),
+                        type_name.clone(),
+                        method_name.clone(),
+                    ),
                     MethodEntry {
                         params: params.clone(),
                         body: body.clone(),
@@ -631,6 +653,27 @@ struct Emitter {
     /// prefix (e.g. `"foo__bar__"`) is applied to every user fn
     /// name so modules can't collide on function identifiers.
     module_prefix: String,
+    /// Source-level path of the module whose body we're currently
+    /// emitting. `<root>` while emitting the top-level program,
+    /// the dot-joined `use` path while inside `emit_one_module`.
+    /// Mirrors the walker / VM `current_module`: newly declared
+    /// types tag their runtime values with this string, so two
+    /// modules declaring the same name produce distinct
+    /// identities.
+    current_module: String,
+    /// Per-scope map of bare type names → module path. Populated
+    /// at emit time whenever a type is declared (→ current
+    /// module) or brought into scope by a `use` statement
+    /// (→ the imported module's path). Bare-name construction
+    /// (`Color::Red`) and pattern matching resolve through this
+    /// stack to produce the correct module path literal in the
+    /// emitted Rust.
+    type_bindings: Vec<HashMap<String, String>>,
+    /// Module-alias map: `alias → module_path`. Populated at
+    /// emit time by aliased `use` statements; consulted when
+    /// a namespaced reference (`m.Color`) needs to be resolved
+    /// to a module path for construction or pattern matching.
+    module_aliases: HashMap<String, String>,
     /// Paths already imported at the current scope. Re-importing
     /// the same path in the same scope is a no-op — matches the
     /// walker's `imported_here` guard.
@@ -663,6 +706,20 @@ impl Emitter {
         modules: ModuleGraph,
         types: TypeRegistry,
     ) -> Self {
+        // Seed the outermost type_bindings frame with the
+        // engine-wide builtins so bare `Result::Ok(...)` and
+        // `RuntimeError { ... }` resolve to `<builtin>` without
+        // an explicit `use`. Same invariant the walker / VM
+        // set up at construction time.
+        let mut builtin_frame: HashMap<String, String> = HashMap::new();
+        builtin_frame.insert(
+            String::from("Result"),
+            String::from(bop::value::BUILTIN_MODULE_PATH),
+        );
+        builtin_frame.insert(
+            String::from("RuntimeError"),
+            String::from(bop::value::BUILTIN_MODULE_PATH),
+        );
         Self {
             out: String::new(),
             indent: 0,
@@ -672,6 +729,9 @@ impl Emitter {
             types,
             tmp_counter: 0,
             module_prefix: String::new(),
+            current_module: String::from(bop::value::ROOT_MODULE_PATH),
+            type_bindings: vec![builtin_frame],
+            module_aliases: HashMap::new(),
             imported_in_scope: HashSet::new(),
             scope_stack: Vec::new(),
             in_top_level: false,
@@ -680,10 +740,123 @@ impl Emitter {
 
     fn push_scope(&mut self) {
         self.scope_stack.push(HashSet::new());
+        self.type_bindings.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scope_stack.pop();
+        if self.type_bindings.len() > 1 {
+            self.type_bindings.pop();
+        }
+    }
+
+    /// Resolve a source-level type reference to its declaring
+    /// module path, using the emitter's per-scope type_bindings
+    /// + module_aliases state. Returns `None` if the name isn't
+    /// in scope — callers treat that as a type-not-declared
+    /// error at emit time.
+    fn resolve_type_module(
+        &self,
+        namespace: Option<&str>,
+        type_name: &str,
+    ) -> Option<String> {
+        if let Some(ns) = namespace {
+            if let Some(mp) = self.module_aliases.get(ns) {
+                // Verify the alias actually exports this type.
+                if self.types.structs.contains_key(&(mp.clone(), type_name.to_string()))
+                    || self.types.enums.contains_key(&(mp.clone(), type_name.to_string()))
+                {
+                    return Some(mp.clone());
+                }
+                return None;
+            }
+            return None;
+        }
+        for frame in self.type_bindings.iter().rev() {
+            if let Some(mp) = frame.get(type_name) {
+                return Some(mp.clone());
+            }
+        }
+        None
+    }
+
+    /// Bind a bare type name in the current scope to the
+    /// module that declared it. Called from StructDecl /
+    /// EnumDecl emission and from the type-import arm of `use`
+    /// statement handling.
+    fn bind_type(&mut self, name: &str, module_path: &str) {
+        if let Some(frame) = self.type_bindings.last_mut() {
+            frame.insert(name.to_string(), module_path.to_string());
+        }
+    }
+
+    /// Emit Rust source for a `__resolver` closure that turns
+    /// `(namespace, type_name)` pairs into the declaring
+    /// module's path, baked from the emitter's current
+    /// `type_bindings` + `module_aliases` state. Inlined at
+    /// every `pattern_matches` call site so the matcher can
+    /// compare the value's full identity against what the
+    /// source-level reference resolves to *at that point in
+    /// the program*.
+    fn emit_resolver_closure_src(&self) -> String {
+        let mut bare_arms = String::new();
+        // Flatten bare-name bindings inside-out so the
+        // innermost shadow wins. A HashSet tracks which names
+        // we've already emitted an arm for.
+        let mut seen: HashSet<String> = HashSet::new();
+        for frame in self.type_bindings.iter().rev() {
+            let mut keys: Vec<&String> = frame.keys().collect();
+            keys.sort();
+            for name in keys {
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                let mp = frame.get(name).unwrap();
+                bare_arms.push_str(&format!(
+                    "                        (::std::option::Option::None, {tn}) => ::std::option::Option::Some({mp}.to_string()),\n",
+                    tn = rust_string_literal(name),
+                    mp = rust_string_literal(mp),
+                ));
+            }
+        }
+        // Module aliases: emit one arm per (alias, type_name in
+        // module). Cross-reference the TypeRegistry to enumerate
+        // the types each alias's module actually exports.
+        let mut alias_arms = String::new();
+        let mut aliases: Vec<(&String, &String)> = self.module_aliases.iter().collect();
+        aliases.sort();
+        for (alias, mp) in aliases {
+            let mut exported: Vec<String> = Vec::new();
+            for (key, _) in &self.types.structs {
+                if &key.0 == mp {
+                    exported.push(key.1.clone());
+                }
+            }
+            for (key, _) in &self.types.enums {
+                if &key.0 == mp {
+                    exported.push(key.1.clone());
+                }
+            }
+            exported.sort();
+            exported.dedup();
+            for tn in exported {
+                alias_arms.push_str(&format!(
+                    "                        (::std::option::Option::Some({alias_lit}), {tn}) => ::std::option::Option::Some({mp}.to_string()),\n",
+                    alias_lit = rust_string_literal(alias),
+                    tn = rust_string_literal(&tn),
+                    mp = rust_string_literal(mp),
+                ));
+            }
+        }
+        format!(
+            "            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
+             \x20                   match (__ns, __tn) {{\n\
+             {bare}{alias}                        _ => ::std::option::Option::None,\n\
+             \x20                   }}\n\
+             \x20           }};\n",
+            bare = bare_arms,
+            alias = alias_arms,
+        )
     }
 
     fn bind_local(&mut self, name: &str) {
@@ -708,6 +881,85 @@ impl Emitter {
         self.out
     }
 
+    /// Pre-pass over a statement list to populate
+    /// `type_bindings` + `module_aliases` from every top-level
+    /// `use` statement *before* any fn body is emitted. The
+    /// AOT lifts fn decls out of source order, so a naïve walk
+    /// would try to emit `fn label(c) { match c { p.Color::Red
+    /// => ... } }` before seeing `use paint as p` and the
+    /// pattern resolver would come up empty.
+    fn seed_uses(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            if let StmtKind::Use { path, items, alias } = &stmt.kind {
+                match (items, alias) {
+                    (_, Some(a)) => {
+                        self.module_aliases.insert(a.clone(), path.clone());
+                    }
+                    (Some(list), None) => {
+                        // Selective imports introduce each listed
+                        // type by bare name.
+                        for name in list {
+                            if self.is_type_in_module(path, name) {
+                                self.bind_type(name, path);
+                            }
+                        }
+                    }
+                    (None, None) => {
+                        // Glob: bring every public type across
+                        // by bare name. Collect into a temp to
+                        // avoid holding an immutable borrow of
+                        // `self.types` across the `bind_type`
+                        // mutation.
+                        let mut glob_types: Vec<String> = Vec::new();
+                        for (mp, tn) in self.types.structs.keys() {
+                            if mp == path && !tn.starts_with('_') {
+                                glob_types.push(tn.clone());
+                            }
+                        }
+                        for (mp, tn) in self.types.enums.keys() {
+                            if mp == path && !tn.starts_with('_') {
+                                glob_types.push(tn.clone());
+                            }
+                        }
+                        for tn in glob_types {
+                            self.bind_type(&tn, path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn is_type_in_module(&self, module_path: &str, type_name: &str) -> bool {
+        let key = (module_path.to_string(), type_name.to_string());
+        self.types.structs.contains_key(&key)
+            || self.types.enums.contains_key(&key)
+    }
+
+    /// Pre-seed the current `type_bindings` frame with every
+    /// type registered at `module_path`. Called before methods
+    /// and top-level fns get emitted so their bodies can
+    /// resolve bare `MyType { ... }` even though the AST walk
+    /// hasn't reached the `struct MyType` decl yet.
+    fn seed_types_for_module(&mut self, module_path: &str) {
+        let mut names: Vec<String> = Vec::new();
+        for (mp, tn) in self.types.structs.keys() {
+            if mp == module_path {
+                names.push(tn.clone());
+            }
+        }
+        for (mp, tn) in self.types.enums.keys() {
+            if mp == module_path {
+                names.push(tn.clone());
+            }
+        }
+        names.sort();
+        names.dedup();
+        for n in names {
+            self.bind_type(&n, module_path);
+        }
+    }
+
     fn emit_program(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
         let module_name = self.opts.module_name.clone();
         if let Some(ref name) = module_name {
@@ -715,6 +967,14 @@ impl Emitter {
         }
         self.emit_header();
         self.emit_runtime_preamble();
+        // Seed the outermost type_bindings frame with the
+        // root program's declared types so methods + top-level
+        // fns (emitted ahead of the main AST walk) can resolve
+        // bare type names in their bodies. Same pre-pass for
+        // `use` statements so aliases + selective-type imports
+        // are visible to the fn bodies we're about to emit.
+        self.seed_types_for_module(bop::value::ROOT_MODULE_PATH);
+        self.seed_uses(stmts);
         // Imported modules emit first (topo-ordered — leaves
         // first) so their fns, exports, and load fns exist by
         // the time the root program's code references them.
@@ -769,12 +1029,44 @@ impl Emitter {
         // emit with the module slug, and replace `fn_info` with
         // the module's own fns so `is_local` / Ident / Call
         // resolution inside the module body behave correctly.
+        // `current_module` also switches to the module's
+        // source-level path so types declared in this module's
+        // body tag their values correctly.
         let saved_prefix = std::mem::replace(
             &mut self.module_prefix,
             format!("{}__", module_slug(name)),
         );
         let saved_fn_info =
             std::mem::replace(&mut self.fn_info, collect_fn_info(&entry.ast));
+        let saved_module = std::mem::replace(
+            &mut self.current_module,
+            name.to_string(),
+        );
+        // Fresh type_bindings frame for this module's body —
+        // bare names declared here shouldn't leak back to the
+        // caller / other modules. Seeded with the builtins the
+        // emitter was already carrying so `Result` / `RuntimeError`
+        // stay visible.
+        let mut module_frame: HashMap<String, String> = HashMap::new();
+        module_frame.insert(
+            String::from("Result"),
+            String::from(bop::value::BUILTIN_MODULE_PATH),
+        );
+        module_frame.insert(
+            String::from("RuntimeError"),
+            String::from(bop::value::BUILTIN_MODULE_PATH),
+        );
+        let saved_bindings =
+            std::mem::replace(&mut self.type_bindings, vec![module_frame]);
+        let saved_aliases =
+            std::mem::take(&mut self.module_aliases);
+        // Seed this module's types too — see
+        // `seed_types_for_module` for why this matters. Methods
+        // inside the module need to resolve bare type names
+        // before the AST walker gets to the decls. Same treatment
+        // for the module's own `use` statements.
+        self.seed_types_for_module(name);
+        self.seed_uses(&entry.ast);
 
         self.emit_top_level_fn_decls(&entry.ast)?;
         self.emit_fn_value_wrappers();
@@ -783,6 +1075,9 @@ impl Emitter {
 
         self.fn_info = saved_fn_info;
         self.module_prefix = saved_prefix;
+        self.current_module = saved_module;
+        self.type_bindings = saved_bindings;
+        self.module_aliases = saved_aliases;
         Ok(())
     }
 
@@ -950,11 +1245,21 @@ impl Emitter {
                     types = types_src,
                 ));
                 self.bind_local(alias_name);
+                // Track the alias for compile-time resolution
+                // of namespaced references (`m.Color`). Emit-
+                // time resolution is sufficient here because
+                // the AOT bakes module_path literals directly
+                // into construction + match sites.
+                self.module_aliases
+                    .insert(alias_name.to_string(), path.to_string());
             }
             None => {
                 // Non-aliased: inject each binding as a local.
-                // Types are globally registered in the AOT, so
-                // they don't need a Rust local.
+                // Types don't need a Rust local (they're
+                // compile-time metadata in the AOT), but they
+                // do need a `type_bindings` entry so
+                // construction + pattern sites can resolve
+                // the bare name to the right module path.
                 for name in &expose_bindings {
                     if self.is_local(name) {
                         if items.is_some() {
@@ -982,6 +1287,10 @@ impl Emitter {
                         tmp = tmp
                     ));
                     self.bind_local(name);
+                }
+                for tn in &expose_types {
+                    let mp = path.to_string();
+                    self.bind_type(tn, &mp);
                 }
                 if items.is_none() {
                     self.imported_in_scope.insert(path.to_string());
@@ -1196,14 +1505,14 @@ impl Emitter {
     /// collide.
     fn emit_user_methods(&mut self) -> Result<(), BopError> {
         // Sort for deterministic output.
-        let mut entries: Vec<((String, String), MethodEntry)> = self
+        let mut entries: Vec<((String, String, String), MethodEntry)> = self
             .types
             .methods
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for ((type_name, method_name), entry) in &entries {
+        for ((_module_path, type_name, method_name), entry) in &entries {
             let saved_prefix = std::mem::replace(
                 &mut self.module_prefix,
                 format!("{}method_{}__", entry.module_prefix, type_name),
@@ -1236,28 +1545,28 @@ impl Emitter {
             "    ctx: &mut Ctx<'_>,\n    obj: &::bop::value::Value,\n    method: &str,\n    args: &[::bop::value::Value],\n    line: u32,\n) -> Result<::std::option::Option<::bop::value::Value>, ::bop::error::BopError> {\n",
         );
         self.out.push_str(
-            "    let type_name: ::std::option::Option<&str> = match obj {\n",
+            "    let type_key: ::std::option::Option<(&str, &str)> = match obj {\n",
         );
         self.out.push_str(
-            "        ::bop::value::Value::Struct(s) => Some(s.type_name()),\n",
+            "        ::bop::value::Value::Struct(s) => Some((s.module_path(), s.type_name())),\n",
         );
         self.out.push_str(
-            "        ::bop::value::Value::EnumVariant(e) => Some(e.type_name()),\n",
+            "        ::bop::value::Value::EnumVariant(e) => Some((e.module_path(), e.type_name())),\n",
         );
         self.out.push_str("        _ => None,\n    };\n");
         self.out.push_str(
-            "    let type_name = match type_name { Some(t) => t, None => return Ok(None) };\n",
+            "    let (type_mp, type_name) = match type_key { Some(k) => k, None => return Ok(None) };\n",
         );
-        self.out.push_str("    match (type_name, method) {\n");
+        self.out.push_str("    match (type_mp, type_name, method) {\n");
 
-        let mut entries: Vec<((String, String), MethodEntry)> = self
+        let mut entries: Vec<((String, String, String), MethodEntry)> = self
             .types
             .methods
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for ((type_name, method_name), entry) in &entries {
+        for ((module_path, type_name, method_name), entry) in &entries {
             let fn_name = format!(
                 "bop_fn_{}method_{}__{}",
                 entry.module_prefix, type_name, method_name
@@ -1278,7 +1587,8 @@ impl Emitter {
                 .join("");
             writeln!(
                 self.out,
-                "        ({type_lit}, {method_lit}) => {{ {arity_check} Ok(Some({fn_name}(ctx, obj.clone(){args_pass})?)) }}",
+                "        ({mp_lit}, {type_lit}, {method_lit}) => {{ {arity_check} Ok(Some({fn_name}(ctx, obj.clone(){args_pass})?)) }}",
+                mp_lit = rust_string_literal(module_path),
                 type_lit = rust_string_literal(type_name),
                 method_lit = rust_string_literal(method_name),
                 arity_check = arity_check,
@@ -1519,13 +1829,23 @@ impl Emitter {
                 self.emit_use_stmt(path, items, alias, line)?;
             }
 
-            StmtKind::StructDecl { .. }
-            | StmtKind::EnumDecl { .. }
-            | StmtKind::MethodDecl { .. } => {
+            StmtKind::StructDecl { name, .. }
+            | StmtKind::EnumDecl { name, .. } => {
                 // Type declarations are compile-time only in the
                 // AOT. The pre-pass collected them into
-                // `self.types`; nothing to emit at the decl
-                // site.
+                // `self.types` keyed by full identity; here we
+                // just record the bare name → module path
+                // mapping in the current scope so bare
+                // construction / pattern sites further down
+                // resolve correctly.
+                let mp = self.current_module.clone();
+                self.bind_type(name, &mp);
+                let _ = line;
+            }
+            StmtKind::MethodDecl { .. } => {
+                // Methods are compile-time only too — the
+                // pre-pass registered them by full receiver
+                // identity. Nothing to emit at the decl site.
                 let _ = line;
             }
 
@@ -2046,8 +2366,14 @@ impl Emitter {
                 pat_src
             ));
             src.push_str("            let mut __bindings: ::std::vec::Vec<(::std::string::String, ::bop::value::Value)> = ::std::vec::Vec::new();\n");
+            // Emit a per-site resolver closure that encodes the
+            // emit-time view of type_bindings + module_aliases.
+            // Patterns reaching this point use the same lexical
+            // scope we're in *right now*, so statically baking
+            // the mapping is both correct and efficient.
+            src.push_str(&self.emit_resolver_closure_src());
             src.push_str(&format!(
-                "            if ::bop::pattern_matches(&__pat, &{}, &mut __bindings) {{\n",
+                "            if ::bop::pattern_matches(&__pat, &{}, &mut __bindings, &__resolver) {{\n",
                 sc_name
             ));
 
@@ -2393,17 +2719,32 @@ impl Emitter {
         fields: &[(String, Expr)],
         line: u32,
     ) -> Result<String, BopError> {
-        let decl = self.types.structs.get(type_name).cloned().ok_or_else(|| {
+        // Resolve the source-level type reference to its full
+        // identity `(module_path, type_name)`. This is what
+        // drives both the compile-time shape lookup *and* the
+        // module_path literal emitted into the Value::new_struct
+        // call, so two modules declaring `Color` with different
+        // fields end up producing distinct runtime types.
+        let module_path = self
+            .resolve_type_module(namespace, type_name)
+            .ok_or_else(|| {
+                BopError::runtime(
+                    bop::error_messages::struct_not_declared(type_name),
+                    line,
+                )
+            })?;
+        let key = (module_path.clone(), type_name.to_string());
+        let decl = self.types.structs.get(&key).cloned().ok_or_else(|| {
             BopError::runtime(
                 bop::error_messages::struct_not_declared(type_name),
                 line,
             )
         })?;
-        // Namespaced path (`m.Entity { ... }`) — validate at
-        // runtime that `m` is a Module actually exporting this
-        // type. Types are registered globally in the AOT, so the
-        // actual construction doesn't change; this is purely a
-        // correctness check matching walker + VM behaviour.
+        // Namespaced path (`m.Entity { ... }`) — still validate
+        // at runtime that `m` is in fact a Module exporting the
+        // type, so a shadowed-value surface error (`let m = 3`
+        // after `use foo as m`) surfaces with a clear runtime
+        // message instead of compiling fine but panicking.
         let ns_check = match namespace {
             Some(ns) => format!(
                 "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
@@ -2470,9 +2811,10 @@ impl Emitter {
             })
             .collect();
         Ok(format!(
-            "{{ {ns_check}{lets}::bop::value::Value::new_struct({tn}.to_string(), vec![{fields}]) }}",
+            "{{ {ns_check}{lets}::bop::value::Value::new_struct({mp}.to_string(), {tn}.to_string(), vec![{fields}]) }}",
             ns_check = ns_check,
             lets = lets,
+            mp = rust_string_literal(&module_path),
             tn = rust_string_literal(type_name),
             fields = ordered.join(", ")
         ))
@@ -2486,10 +2828,23 @@ impl Emitter {
         payload: &VariantPayload,
         line: u32,
     ) -> Result<String, BopError> {
+        // Resolve the source-level reference to its declaring
+        // module so the resulting `Value::EnumVariant` is tagged
+        // with the right identity. Two modules declaring the
+        // same enum shape produce distinct values.
+        let module_path = self
+            .resolve_type_module(namespace, type_name)
+            .ok_or_else(|| {
+                BopError::runtime(
+                    bop::error_messages::enum_not_declared(type_name),
+                    line,
+                )
+            })?;
+        let key = (module_path.clone(), type_name.to_string());
         let variants = self
             .types
             .enums
-            .get(type_name)
+            .get(&key)
             .cloned()
             .ok_or_else(|| {
                 BopError::runtime(
@@ -2527,10 +2882,12 @@ impl Emitter {
             ),
             None => String::new(),
         };
+        let mp_lit = rust_string_literal(&module_path);
         match (&declared, payload) {
             (VariantKind::Unit, VariantPayload::Unit) => Ok(format!(
-                "{{ {ns_check}::bop::value::Value::new_enum_unit({tn}.to_string(), {vn}.to_string()) }}",
+                "{{ {ns_check}::bop::value::Value::new_enum_unit({mp}.to_string(), {tn}.to_string(), {vn}.to_string()) }}",
                 ns_check = ns_check,
+                mp = mp_lit,
                 tn = tn_lit,
                 vn = vn_lit
             )),
@@ -2557,9 +2914,10 @@ impl Emitter {
                     names.push(tmp);
                 }
                 Ok(format!(
-                    "{{ {ns_check}{lets}::bop::value::Value::new_enum_tuple({tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    "{{ {ns_check}{lets}::bop::value::Value::new_enum_tuple({mp}.to_string(), {tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
                     ns_check = ns_check,
                     lets = lets,
+                    mp = mp_lit,
                     tn = tn_lit,
                     vn = vn_lit,
                     items = names.join(", ")
@@ -2618,9 +2976,10 @@ impl Emitter {
                     })
                     .collect();
                 Ok(format!(
-                    "{{ {ns_check}{lets}::bop::value::Value::new_enum_struct({tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    "{{ {ns_check}{lets}::bop::value::Value::new_enum_struct({mp}.to_string(), {tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
                     ns_check = ns_check,
                     lets = lets,
+                    mp = mp_lit,
                     tn = tn_lit,
                     vn = vn_lit,
                     items = ordered.join(", ")

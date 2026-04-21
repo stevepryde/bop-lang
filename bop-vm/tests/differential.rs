@@ -971,19 +971,21 @@ print(match top() {
 }
 
 #[test]
-fn result_cant_be_redeclared_with_unit_ok_diff() {
-    // Same rule the walker enforces: `Result` is a builtin enum,
-    // so a redeclaration with a different variant shape (Unit
-    // `Ok` vs the canonical `Ok(value)`) is now rejected at
-    // declaration time. Used to be a silent runtime quirk.
-    let msg = run_err(
-        r#"enum Result { Ok, Err(e) }
+fn user_result_with_unit_ok_coexists_with_builtin_diff() {
+    // Module-scoped types (phase 2b): the program's
+    // `enum Result { Ok, Err(e) }` lives under `<root>.Result`,
+    // distinct from the builtin `<builtin>.Result`. `try`
+    // unwraps the user's unit `Ok` variant into `none` — same
+    // behaviour the walker now exhibits.
+    assert_eq!(
+        say(r#"enum Result { Ok, Err(e) }
 fn doit() {
-    return try Result::Ok
+    let v = try Result::Ok
+    return type(v)
 }
-doit()"#,
+print(doit())"#),
+        "none"
     );
-    assert!(msg.contains("already declared"), "got: {}", msg);
 }
 
 #[test]
@@ -1628,6 +1630,54 @@ fn import_is_idempotent_at_injection_site() {
 use m
 print(x)"#),
         "1"
+    );
+}
+
+// ─── Module-qualified type identity (phase 2b) ──────────────────
+
+#[test]
+fn two_modules_same_name_different_shapes_diff() {
+    // Core promise of phase 2b: two independently-declared
+    // `Color` types coexist with distinct runtime identity,
+    // even under the same bare name. Walker and VM must
+    // agree.
+    set_modules(&[
+        ("paint", "enum Color { Red, Blue }"),
+        ("other", "enum Color { Red, Green, Yellow }"),
+    ]);
+    assert_eq!(
+        say(r#"use paint as p
+use other as o
+let a = p.Color::Red
+let b = o.Color::Red
+print(a == b)
+print(a == a)"#),
+        "true"
+    );
+}
+
+#[test]
+fn namespaced_pattern_discriminates_between_modules_diff() {
+    // Patterns resolve through the alias: `p.Color::Red`
+    // matches only values tagged with the paint module.
+    set_modules(&[
+        ("paint", "enum Color { Red, Blue }"),
+        ("other", "enum Color { Red, Green }"),
+    ]);
+    assert_eq!(
+        say(r#"use paint as p
+use other as o
+fn label(c) {
+    return match c {
+        p.Color::Red => "paint-red",
+        o.Color::Red => "other-red",
+        _ => "none",
+    }
+}
+print(label(p.Color::Red))
+print(label(o.Color::Red))
+print(label(p.Color::Blue))"#),
+        "none"
     );
 }
 

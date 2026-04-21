@@ -523,44 +523,43 @@ fn same_named_struct_same_shape_across_modules_is_ok() {
 }
 
 #[test]
-fn same_named_struct_different_shape_across_modules_errors() {
-    // `Point` with different fields in two modules → transpile-time
-    // error pointing at both sites.
-    let err = compile_with_modules(
-        "use geom_a\nuse geom_b",
+fn same_named_struct_different_shape_across_modules_coexist() {
+    // Phase 2b — module-qualified types. Two modules may
+    // independently declare `Point` with different fields; the
+    // AOT transpiles fine because the resulting types live at
+    // distinct identities `(geom_a, Point)` and `(geom_b, Point)`.
+    let src = compile_with_modules(
+        "use geom_a as a\nuse geom_b as b",
         &[
             ("geom_a", "struct Point { x, y }"),
             ("geom_b", "struct Point { x, y, z }"),
         ],
     )
-    .unwrap_err();
+    .expect("phase 2b should accept same-name, different-shape types");
+    // The two module paths show up in the generated Rust as
+    // string literals for the type identities.
     assert!(
-        err.message.contains("struct `Point`")
-            && err.message.contains("different fields")
-            && err.message.contains("geom_a")
-            && err.message.contains("geom_b"),
-        "got: {}",
-        err.message,
+        src.contains("\"geom_a\"") && src.contains("\"geom_b\""),
+        "expected both module paths to surface as identity literals",
     );
 }
 
 #[test]
-fn same_named_enum_different_variants_across_modules_errors() {
-    let err = compile_with_modules(
-        "use a\nuse b",
+fn same_named_enum_different_variants_across_modules_coexist() {
+    // Phase 2b — enum shapes follow the same identity rule as
+    // structs. Two `Tag` enums with different variants coexist
+    // at `(a, Tag)` and `(b, Tag)`; the AOT happily transpiles.
+    let src = compile_with_modules(
+        "use a as pa\nuse b as pb",
         &[
             ("a", "enum Tag { Red, Green }"),
             ("b", "enum Tag { Red, Green, Blue }"),
         ],
     )
-    .unwrap_err();
+    .expect("phase 2b should accept same-name, different-variant enums");
     assert!(
-        err.message.contains("enum `Tag`")
-            && err.message.contains("different variants")
-            && err.message.contains("a")
-            && err.message.contains("b"),
-        "got: {}",
-        err.message,
+        src.contains("\"a\"") && src.contains("\"b\""),
+        "expected both module paths to surface as identity literals",
     );
 }
 
@@ -577,20 +576,23 @@ fn same_named_enum_same_variants_across_modules_is_ok() {
 }
 
 #[test]
-fn clash_between_root_program_and_module_is_rejected() {
-    // Symmetric to module-vs-module: if the root program and a
-    // module both declare a type with the same name but different
-    // shape, AOT errors.
-    let err = compile_with_modules(
+fn root_program_and_module_can_declare_same_name_type() {
+    // Phase 2b — the root program's `Point` lives at
+    // `(<root>, Point)`; the imported module's version lives
+    // at `(geom, Point)`. Both constructions compile without
+    // clashing, and the emitted Rust carries each identity as
+    // a string literal inside its `Value::new_struct` call.
+    let src = compile_with_modules(
         r#"struct Point { x, y }
-use geom"#,
+use geom as g
+let a = Point { x: 1, y: 2 }
+let b = g.Point { x: 1, y: 2, z: 3 }"#,
         &[("geom", "struct Point { x, y, z }")],
     )
-    .unwrap_err();
+    .expect("phase 2b should accept same-name types across root and module");
     assert!(
-        err.message.contains("struct `Point`")
-            && err.message.contains("<root>"),
-        "expected message to name <root>, got: {}",
-        err.message,
+        src.contains("\"<root>\"") && src.contains("\"geom\""),
+        "expected both identities to surface as literals, got:\n{}",
+        src,
     );
 }
