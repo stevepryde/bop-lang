@@ -29,7 +29,7 @@ fn is_err(r) {
 fn unwrap(r) {
     return match r {
         Result::Ok(v) => v,
-        Result::Err(e) => panic("unwrap on Err: " + inspect(e)),
+        Result::Err(e) => panic("unwrap on Err: " + e.inspect()),
     }
 }
 

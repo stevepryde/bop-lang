@@ -62,21 +62,19 @@ fn lcm(a, b) {
     let g = gcd(a, b)
     // Integer division keeps the result exact when both inputs
     // are ints.
-    return (int(a / g)) * b
-}
-
-// Sum of an array of numbers. Empty array returns 0.
-fn sum(arr) {
-    let total = 0
-    for x in arr { total = total + x }
-    return total
+    return ((a / g).to_int()) * b
 }
 
 // Arithmetic mean. Raises on an empty array so callers notice.
+// `std.math.sum` used to live here; it was a duplicate of
+// `std.iter.sum`, so mean now inlines the reduction instead of
+// depending on either.
 fn mean(arr) {
-    let n = len(arr)
+    let n = arr.len()
     if n == 0 {
         return none[0]
     }
-    return sum(arr) / n
+    let total = 0
+    for x in arr { total = total + x }
+    return total / n
 }

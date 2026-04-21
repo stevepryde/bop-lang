@@ -2573,33 +2573,6 @@ impl Emitter {
                 build_arg_array(&arg_names),
                 line
             ),
-            "str"
-            | "int"
-            | "float"
-            | "type"
-            | "abs"
-            | "min"
-            | "max"
-            | "len"
-            | "inspect"
-            | "sqrt"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "floor"
-            | "ceil"
-            | "round"
-            | "pow"
-            | "log"
-            | "exp" => {
-                let fn_name = format!("builtin_{}", name);
-                format!(
-                    "::bop::builtins::{}(&{}, {})?",
-                    fn_name,
-                    build_arg_array(&arg_names),
-                    line
-                )
-            }
             "try_call" => {
                 // `try_call(f)` takes a single callable and
                 // dispatches through the preamble's
@@ -4278,10 +4251,23 @@ fn __bop_call_method(
     args: &[::bop::value::Value],
     line: u32,
 ) -> Result<(::bop::value::Value, Option<::bop::value::Value>), ::bop::error::BopError> {
+    // `type` / `to_str` / `inspect` work on every value —
+    // check them first so walker / VM / AOT agree on the
+    // common method surface without duplicating entries per
+    // type-specific dispatcher.
+    if let Some(result) = ::bop::methods::common_method(obj, method, args, line)? {
+        return Ok(result);
+    }
     match obj {
         ::bop::value::Value::Array(arr) => ::bop::methods::array_method(arr, method, args, line),
         ::bop::value::Value::Str(s) => ::bop::methods::string_method(s.as_str(), method, args, line),
         ::bop::value::Value::Dict(d) => ::bop::methods::dict_method(d, method, args, line),
+        ::bop::value::Value::Int(_) | ::bop::value::Value::Number(_) => {
+            ::bop::methods::numeric_method(obj, method, args, line)
+        }
+        ::bop::value::Value::Bool(_) => {
+            ::bop::methods::bool_method(obj, method, args, line)
+        }
         ::bop::value::Value::Module(m) => {
             let binding = m
                 .bindings

@@ -102,7 +102,7 @@ fn result_and_then_chains_fallible_steps() {
     let host = run(
         r#"use std.result
 fn halve(x) {
-    if x % 2 == 0 { return Result::Ok(int(x / 2)) }
+    if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
     return Result::Err("odd")
 }
 let r = and_then(and_then(Result::Ok(8), halve), halve)
@@ -163,13 +163,16 @@ print(lcm(4, 6))"#,
 }
 
 #[test]
-fn math_sum_and_mean() {
+fn math_mean_empty_check() {
+    // `mean` lives in `std.math`. `sum` used to live here
+    // too; it was a duplicate of `std.iter.sum`, so it moved
+    // out and `mean` now inlines its own running total.
     let host = run(
         r#"use std.math
-print(sum([1, 2, 3, 4, 5]))
-print(mean([2, 4, 6]))"#,
+print(mean([2, 4, 6]))
+print(mean([10, 20, 30, 40, 50]))"#,
     );
-    assert_eq!(host.prints.borrow().clone(), vec!["15", "4"]);
+    assert_eq!(host.prints.borrow().clone(), vec!["4", "30"]);
 }
 
 // ─── std.iter ──────────────────────────────────────────────────
@@ -365,11 +368,11 @@ print("caught")"#,
 #[test]
 fn core_math_builtins_available_without_import() {
     let host = run(
-        r#"print(sqrt(16))
-print(floor(3.7))
-print(ceil(3.2))
-print(round(3.5))
-print(pow(2, 10))"#,
+        r#"print(16.sqrt())
+print(3.7.floor())
+print(3.2.ceil())
+print(3.5.round())
+print(2.pow(10))"#,
     );
     let prints = host.prints.borrow();
     assert_eq!(prints[0], "4");
@@ -382,9 +385,9 @@ print(pow(2, 10))"#,
 #[test]
 fn core_math_floor_ceil_round_return_int_when_possible() {
     let host = run(
-        r#"print(type(floor(3.7)))
-print(type(ceil(3.2)))
-print(type(round(3.5)))"#,
+        r#"print(3.7.floor().type())
+print(3.2.ceil().type())
+print(3.5.round().type())"#,
     );
     assert_eq!(
         host.prints.borrow().clone(),
@@ -612,10 +615,10 @@ fn json_parse_number_types() {
     // `42` is int; `42.0` / `1e2` are numbers.
     let host = run(
         r#"use std.json
-print(type(parse("42")))
-print(type(parse("42.0")))
-print(type(parse("1e2")))
-print(type(parse("-3")))"#,
+print(parse("42").type())
+print(parse("42.0").type())
+print(parse("1e2").type())
+print(parse("-3").type())"#,
     );
     assert_eq!(
         host.prints.borrow().clone(),

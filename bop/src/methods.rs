@@ -221,6 +221,31 @@ pub fn string_method(
             let result: String = chars[start..end].iter().collect();
             Ok((Value::new_str(result), None))
         }
+        "to_int" => {
+            if !args.is_empty() {
+                return Err(error(line, ".to_int() takes no arguments"));
+            }
+            // Integer-first parse so `"42".to_int()` stays an
+            // `Int`. Fall back to float-then-truncate for
+            // decimal-shaped strings, matching the old
+            // `"3.7".to_int()` behaviour.
+            if let Ok(n) = s.parse::<i64>() {
+                return Ok((Value::Int(n), None));
+            }
+            let n: f64 = s.parse().map_err(|_| {
+                error(line, format!("Can't convert \"{}\" to a number", s))
+            })?;
+            Ok((Value::Int(n as i64), None))
+        }
+        "to_float" => {
+            if !args.is_empty() {
+                return Err(error(line, ".to_float() takes no arguments"));
+            }
+            let n: f64 = s.parse().map_err(|_| {
+                error(line, format!("Can't convert \"{}\" to a number", s))
+            })?;
+            Ok((Value::Number(n), None))
+        }
         _ => Err(error(line, format!("String doesn't have a .{}() method", method))),
     }
 }
@@ -255,6 +280,246 @@ pub fn dict_method(
             Ok((Value::Bool(entries.iter().any(|(k, _)| k == key)), None))
         }
         _ => Err(error(line, format!("Dict doesn't have a .{}() method", method))),
+    }
+}
+
+/// Methods every value understands: introspection + stringification.
+/// Dispatched from `call_method` *before* the type-specific method
+/// tables so `x.type()`, `x.to_str()`, and `x.inspect()` work
+/// uniformly across every `Value` shape.
+///
+/// Returns `Ok(Some(result))` when the method name matched,
+/// `Ok(None)` when it didn't (so the caller falls through to
+/// the type-specific dispatcher). `Err` on arg-count mismatches.
+pub fn common_method(
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    line: u32,
+) -> Result<Option<(Value, Option<Value>)>, BopError> {
+    match method {
+        "type" => {
+            crate::builtins::expect_args("type", args, 0, line)?;
+            Ok(Some((
+                Value::new_str(receiver.type_name().to_string()),
+                None,
+            )))
+        }
+        "to_str" => {
+            crate::builtins::expect_args("to_str", args, 0, line)?;
+            Ok(Some((
+                Value::new_str(format!("{}", receiver)),
+                None,
+            )))
+        }
+        "inspect" => {
+            crate::builtins::expect_args("inspect", args, 0, line)?;
+            Ok(Some((Value::new_str(receiver.inspect()), None)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Method dispatch for `Int` and `Number` receivers. Covers the
+/// math operations that used to be global builtins (`abs`,
+/// `sqrt`, `sin`, …) plus numeric coercions (`to_int`,
+/// `to_float`). Returns `Err` on argument errors or unknown
+/// method names — no fall-through.
+pub fn numeric_method(
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    line: u32,
+) -> Result<(Value, Option<Value>), BopError> {
+    use crate::builtins::{expect_args, finite_to_int_or_number};
+    match method {
+        // Preserves type: Int stays Int, Number stays Number.
+        "abs" => {
+            expect_args("abs", args, 0, line)?;
+            match receiver {
+                Value::Int(n) => n
+                    .checked_abs()
+                    .map(Value::Int)
+                    .map(|v| (v, None))
+                    .ok_or_else(|| error(line, "Integer overflow in `.abs()`")),
+                Value::Number(n) => Ok((Value::Number(n.abs()), None)),
+                _ => unreachable!("numeric_method called on non-numeric receiver"),
+            }
+        }
+        // Square / trig / exp / log: always return `Number`.
+        "sqrt" => unary_number(receiver, args, line, "sqrt", crate::math::sqrt),
+        "sin" => unary_number(receiver, args, line, "sin", crate::math::sin),
+        "cos" => unary_number(receiver, args, line, "cos", crate::math::cos),
+        "tan" => unary_number(receiver, args, line, "tan", crate::math::tan),
+        "exp" => unary_number(receiver, args, line, "exp", crate::math::exp),
+        "log" => unary_number(receiver, args, line, "log", crate::math::ln),
+        // Round-to-integer: return Int when the result fits i64,
+        // Number otherwise.
+        "floor" => unary_round(receiver, args, line, "floor", crate::math::floor),
+        "ceil" => unary_round(receiver, args, line, "ceil", crate::math::ceil),
+        "round" => unary_round(receiver, args, line, "round", crate::math::round),
+        "pow" => {
+            expect_args("pow", args, 1, line)?;
+            let base = to_f64_or_error(receiver, "pow", line)?;
+            let exp = to_f64_or_error(&args[0], "pow", line)?;
+            Ok((Value::Number(crate::math::powf(base, exp)), None))
+        }
+        // Binary pick-min / pick-max. Preserves type when both
+        // sides match; widens to Number on mixed operands —
+        // same rule the old `a.min(b)` / `a.max(b)` builtins
+        // used.
+        "min" => pair_pick(receiver, args, line, "min", true),
+        "max" => pair_pick(receiver, args, line, "max", false),
+        // Explicit numeric coercion. `int` ↔ `int` is a no-op,
+        // `number` → `int` truncates toward zero.
+        "to_int" => {
+            expect_args("to_int", args, 0, line)?;
+            match receiver {
+                Value::Int(n) => Ok((Value::Int(*n), None)),
+                Value::Number(n) => Ok((Value::Int(*n as i64), None)),
+                _ => unreachable!(),
+            }
+        }
+        "to_float" => {
+            expect_args("to_float", args, 0, line)?;
+            match receiver {
+                Value::Int(n) => Ok((Value::Number(*n as f64), None)),
+                Value::Number(n) => Ok((Value::Number(*n), None)),
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            let _ = finite_to_int_or_number;
+            Err(error(
+                line,
+                crate::error_messages::no_such_method(receiver.type_name(), method),
+            ))
+        }
+    }
+}
+
+/// Method dispatch for `Bool`. Only the numeric coercions
+/// (`true.to_int()` → `1`, etc.); `type` / `to_str` / `inspect`
+/// go through `common_method` before this is called.
+pub fn bool_method(
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    line: u32,
+) -> Result<(Value, Option<Value>), BopError> {
+    use crate::builtins::expect_args;
+    let b = match receiver {
+        Value::Bool(b) => *b,
+        _ => unreachable!("bool_method called on non-bool receiver"),
+    };
+    match method {
+        "to_int" => {
+            expect_args("to_int", args, 0, line)?;
+            Ok((Value::Int(if b { 1 } else { 0 }), None))
+        }
+        "to_float" => {
+            expect_args("to_float", args, 0, line)?;
+            Ok((Value::Number(if b { 1.0 } else { 0.0 }), None))
+        }
+        _ => Err(error(
+            line,
+            crate::error_messages::no_such_method("bool", method),
+        )),
+    }
+}
+
+// ─── numeric_method helpers ────────────────────────────────────
+
+/// Coerce an `Int` / `Number` receiver to `f64`. Anything else
+/// is a programmer error — `numeric_method` only reaches this
+/// helper for numeric receivers.
+fn to_f64_or_error(v: &Value, method: &str, line: u32) -> Result<f64, BopError> {
+    match v {
+        Value::Int(n) => Ok(*n as f64),
+        Value::Number(n) => Ok(*n),
+        other => Err(error(
+            line,
+            format!(
+                "`.{}` expects a number, got {}",
+                method,
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+/// Shared implementation for trig / exp / log — zero-arg
+/// methods that always return a `Number`.
+fn unary_number(
+    receiver: &Value,
+    args: &[Value],
+    line: u32,
+    method: &str,
+    op: fn(f64) -> f64,
+) -> Result<(Value, Option<Value>), BopError> {
+    crate::builtins::expect_args(method, args, 0, line)?;
+    let x = to_f64_or_error(receiver, method, line)?;
+    Ok((Value::Number(op(x)), None))
+}
+
+/// Shared implementation for `floor` / `ceil` / `round`. Return
+/// type mirrors the stdlib: `Int` when the rounded value fits
+/// in `i64`, `Number` otherwise.
+fn unary_round(
+    receiver: &Value,
+    args: &[Value],
+    line: u32,
+    method: &str,
+    op: fn(f64) -> f64,
+) -> Result<(Value, Option<Value>), BopError> {
+    use crate::builtins::{expect_args, finite_to_int_or_number};
+    expect_args(method, args, 0, line)?;
+    match receiver {
+        Value::Int(n) => Ok((Value::Int(*n), None)),
+        Value::Number(n) => Ok((finite_to_int_or_number(op(*n)), None)),
+        _ => unreachable!("unary_round called on non-numeric receiver"),
+    }
+}
+
+/// `.min(other)` / `.max(other)` — preserves numeric type
+/// when both operands match, widens to Number on mixed shape.
+fn pair_pick(
+    receiver: &Value,
+    args: &[Value],
+    line: u32,
+    method: &str,
+    pick_smaller: bool,
+) -> Result<(Value, Option<Value>), BopError> {
+    use crate::builtins::expect_args;
+    expect_args(method, args, 1, line)?;
+    match (receiver, &args[0]) {
+        (Value::Int(a), Value::Int(b)) => {
+            let pick = if pick_smaller { (*a).min(*b) } else { (*a).max(*b) };
+            Ok((Value::Int(pick), None))
+        }
+        (Value::Number(a), Value::Number(b)) => {
+            let pick = if pick_smaller { a.min(*b) } else { a.max(*b) };
+            Ok((Value::Number(pick), None))
+        }
+        (Value::Int(a), Value::Number(b)) => {
+            let af = *a as f64;
+            let pick = if pick_smaller { af.min(*b) } else { af.max(*b) };
+            Ok((Value::Number(pick), None))
+        }
+        (Value::Number(a), Value::Int(b)) => {
+            let bf = *b as f64;
+            let pick = if pick_smaller { a.min(bf) } else { a.max(bf) };
+            Ok((Value::Number(pick), None))
+        }
+        (_, other) => Err(error(
+            line,
+            format!(
+                "`.{}({})` expects a number, got {}",
+                method,
+                other.type_name(),
+                other.type_name()
+            ),
+        )),
     }
 }
 

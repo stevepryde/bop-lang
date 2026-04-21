@@ -702,7 +702,7 @@ mod tests {
         // Symmetric: typing `none` at the prompt used to echo
         // "none". With the suppression, nothing goes to
         // stdout. Trade-off: users who really want to see
-        // `none` can ask for `type(none)` or inspect it.
+        // `none` can ask for `none.type()` or inspect it.
         let (_prints, stdout, _) = drive(&["none"]);
         assert!(stdout.is_empty());
     }

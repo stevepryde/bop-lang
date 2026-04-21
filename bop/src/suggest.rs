@@ -21,29 +21,22 @@ use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 /// owned.
 pub const CORE_CALLABLE_BUILTINS: &[&str] = &[
     "range",
-    "str",
-    "int",
-    "float",
-    "type",
-    "abs",
-    "min",
-    "max",
     "rand",
-    "len",
-    "inspect",
     "print",
     "try_call",
-    // Math (phase 6 / 7) — wrap f64::* operations.
-    "sqrt",
-    "sin",
-    "cos",
-    "tan",
-    "floor",
-    "ceil",
-    "round",
-    "pow",
-    "log",
-    "exp",
+];
+
+/// Methods every numeric receiver exposes. Produced as
+/// candidates when a user writes `(some_int).xyz(...)` and the
+/// name doesn't match — the "did you mean?" hint surfaces the
+/// whole numeric surface in one shot.
+pub const NUMERIC_METHODS: &[&str] = &[
+    "abs", "sqrt", "sin", "cos", "tan",
+    "floor", "ceil", "round", "exp", "log",
+    "pow", "min", "max",
+    "to_int", "to_float",
+    // Shared methods every value supports:
+    "type", "to_str", "inspect",
 ];
 
 /// Find the closest match to `target` in `candidates`. Returns

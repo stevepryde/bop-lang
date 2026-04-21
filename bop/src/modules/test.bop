@@ -23,7 +23,7 @@ fn assert(cond, message) {
 // in the crash log.
 fn assert_eq(actual, expected) {
     if actual != expected {
-        let detail = "assert_eq failed: " + inspect(actual) + " != " + inspect(expected)
+        let detail = "assert_eq failed: " + actual.inspect() + " != " + expected.inspect()
         let _ = none[detail]
     }
 }
@@ -35,7 +35,7 @@ fn assert_near(actual, expected, tolerance) {
     let diff = actual - expected
     if diff < 0 { diff = -diff }
     if diff > tolerance {
-        let detail = "assert_near failed: " + inspect(actual) + " not within " + inspect(tolerance) + " of " + inspect(expected)
+        let detail = "assert_near failed: " + actual.inspect() + " not within " + tolerance.inspect() + " of " + expected.inspect()
         let _ = none[detail]
     }
 }

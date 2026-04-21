@@ -1608,7 +1608,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 // receiver — `m` is a `Value::Module` whose
                 // `foo` export is a callable value. Look it up,
                 // then treat the result as a regular value call.
+                //
+                // The common methods (`type`, `to_str`,
+                // `inspect`) still win over export lookup, so
+                // `m.type()` returns `"module"` instead of
+                // complaining that `type` isn't exported.
                 if let Value::Module(m) = &obj_val {
+                    if let Some(result) =
+                        methods::common_method(&obj_val, method, &eval_args, expr.line)?
+                    {
+                        return Ok(result.0);
+                    }
                     if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == method) {
                         let callee = v.clone();
                         return self.call_value(callee, eval_args, expr.line, Some(method));
@@ -2241,29 +2251,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         args: Vec<Value>,
         line: u32,
     ) -> Result<Value, BopError> {
-        // 1. Standard library builtins
+        // 1. Global builtins. The short list: anything variadic
+        // (`print`), a collection constructor (`range`), session-
+        // stateful (`rand`), or inherently takes a callable
+        // (`try_call`). Every other global builtin that used to
+        // live here is now a method on the receiver's type —
+        // see `methods::common_method` and `methods::numeric_method`.
         match name {
             "range" => return builtins::builtin_range(&args, line, &mut self.rand_state),
-            "str" => return builtins::builtin_str(&args, line),
-            "int" => return builtins::builtin_int(&args, line),
-            "float" => return builtins::builtin_float(&args, line),
-            "type" => return builtins::builtin_type(&args, line),
-            "abs" => return builtins::builtin_abs(&args, line),
-            "min" => return builtins::builtin_min(&args, line),
-            "max" => return builtins::builtin_max(&args, line),
             "rand" => return builtins::builtin_rand(&args, line, &mut self.rand_state),
-            "len" => return builtins::builtin_len(&args, line),
-            "sqrt" => return builtins::builtin_sqrt(&args, line),
-            "sin" => return builtins::builtin_sin(&args, line),
-            "cos" => return builtins::builtin_cos(&args, line),
-            "tan" => return builtins::builtin_tan(&args, line),
-            "floor" => return builtins::builtin_floor(&args, line),
-            "ceil" => return builtins::builtin_ceil(&args, line),
-            "round" => return builtins::builtin_round(&args, line),
-            "pow" => return builtins::builtin_pow(&args, line),
-            "log" => return builtins::builtin_log(&args, line),
-            "exp" => return builtins::builtin_exp(&args, line),
-            "inspect" => return builtins::builtin_inspect(&args, line),
             "print" => {
                 let message = args
                     .iter()
@@ -2330,10 +2326,21 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         args: &[Value],
         line: u32,
     ) -> Result<(Value, Option<Value>), BopError> {
+        // `type` / `to_str` / `inspect` work on every value.
+        // Try the shared dispatcher first so we don't have to
+        // duplicate those three names across every type-
+        // specific method table.
+        if let Some(result) = methods::common_method(obj, method, args, line)? {
+            return Ok(result);
+        }
         match obj {
             Value::Array(arr) => methods::array_method(arr, method, args, line),
             Value::Str(s) => methods::string_method(s, method, args, line),
             Value::Dict(entries) => methods::dict_method(entries, method, args, line),
+            Value::Int(_) | Value::Number(_) => {
+                methods::numeric_method(obj, method, args, line)
+            }
+            Value::Bool(_) => methods::bool_method(obj, method, args, line),
             _ => Err(error(
                 line,
                 crate::error_messages::no_such_method(obj.type_name(), method),

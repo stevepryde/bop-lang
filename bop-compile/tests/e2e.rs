@@ -344,7 +344,7 @@ for i in range(1, 16) {
     } else if i % 5 == 0 {
         result.push("Buzz")
     } else {
-        result.push(str(i))
+        result.push(i.to_str())
     }
 }
 print(result.join(", "))"#,
@@ -894,13 +894,13 @@ fn e2e_iife() {
 fn e2e_builtins_str_int_type() {
     assert_aot_matches(
         "builtins",
-        r#"print(str(42))
-print(int(3.7))
-print(type("hi"))
-print(type(42))
-print(abs(-7))
-print(min(3, 7))
-print(max(3, 7))
-print(len([1, 2, 3]))"#,
+        r#"print(42.to_str())
+print(3.7.to_int())
+print("hi".type())
+print(42.type())
+print((-7).abs())
+print(3.min(7))
+print(3.max(7))
+print([1, 2, 3].len())"#,
     );
 }

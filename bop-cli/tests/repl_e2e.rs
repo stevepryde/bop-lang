@@ -219,7 +219,7 @@ print(Point { x: 3, y: 4 }.sum())
 fn use_statement_imports_stay_live_across_lines() {
     // Uses the bundled std.math module — bop-cli's StdHost
     // resolves it through bop-std.
-    let src = "use std.math\nprint(sqrt(9))\n";
+    let src = "use std.math\nprint(9.sqrt())\n";
     let (stdout, stderr, code) = run_repl(src);
     assert_eq!(code, 0, "stderr: {}", stderr);
     assert_eq!(stdout.trim_end(), "3");

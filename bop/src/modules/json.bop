@@ -14,7 +14,7 @@
 //     let r = try_call(fn() { return parse(text) })
 //     match r {
 //         Result::Ok(v)  => ...,
-//         Result::Err(e) => log("parse failed: " + e.message),
+//         Result::Err(e) => ("parse failed: " + e.message).log(),
 //     }
 
 // ─── Stringify ────────────────────────────────────────────────
@@ -23,11 +23,11 @@
 // analogue (fns, structs, enum variants) raise a runtime
 // error — caller is expected to strip them out first.
 fn stringify(value) {
-    let t = type(value)
+    let t = value.type()
     if t == "none" { return "null" }
     if t == "bool" { return bool_to_json(value) }
-    if t == "int" { return str(value) }
-    if t == "number" { return str(value) }
+    if t == "int" { return value.to_str() }
+    if t == "number" { return value.to_str() }
     if t == "string" { return escape_string(value) }
     if t == "array" { return array_to_json(value) }
     if t == "dict" { return dict_to_json(value) }
@@ -273,9 +273,9 @@ fn parse_number(text, pos) {
     // Int or float? If we saw a dot or exponent, it's a float;
     // otherwise int. Matches JSON's numeric subtyping.
     if has_dot || has_exp {
-        return [pos, float(slice)]
+        return [pos, slice.to_float()]
     }
-    return [pos, int(slice)]
+    return [pos, slice.to_int()]
 }
 
 fn parse_literal(text, pos, lit, value) {
@@ -297,6 +297,6 @@ fn is_digit(c) {
 // `none` — the engine error carries `detail` in the crash
 // trace so `try_call` can surface it.
 fn panic_json(message, pos) {
-    let detail = "json: " + message + " at position " + str(pos)
+    let detail = "json: " + message + " at position " + pos.to_str()
     let _ = none[detail]
 }

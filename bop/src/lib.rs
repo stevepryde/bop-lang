@@ -530,7 +530,7 @@ print(out)"#),
     fn fn_implicit_return_none() {
         assert_eq!(
             say(r#"fn noop() { let x = 1 }
-print(type(noop()))"#),
+print(noop().type())"#),
             "none"
         );
     }
@@ -672,8 +672,8 @@ print(countdown(3))"#),
 
     #[test]
     fn type_of_fn_is_fn() {
-        assert_eq!(say("fn f() { }\nprint(type(f))"), "fn");
-        assert_eq!(say("let g = fn() { }\nprint(type(g))"), "fn");
+        assert_eq!(say("fn f() { }\nprint(f.type())"), "fn");
+        assert_eq!(say("let g = fn() { }\nprint(g.type())"), "fn");
     }
 
     #[test]
@@ -912,45 +912,45 @@ print(d.len())"#),
 
     #[test]
     fn builtin_str() {
-        assert_eq!(say(r#"print(str(42))"#), "42");
-        assert_eq!(say(r#"print(str(true))"#), "true");
+        assert_eq!(say(r#"print(42.to_str())"#), "42");
+        assert_eq!(say(r#"print(true.to_str())"#), "true");
     }
 
     #[test]
     fn builtin_int() {
-        assert_eq!(say("print(int(3.7))"), "3");
-        assert_eq!(say("print(int(-2.9))"), "-2");
+        assert_eq!(say("print(3.7.to_int())"), "3");
+        assert_eq!(say("print((-2.9).to_int())"), "-2");
     }
 
     #[test]
     fn builtin_type() {
         // Phase 6 split numeric types: `42` is an int, `42.0`
         // is a number.
-        assert_eq!(say("print(type(42))"), "int");
-        assert_eq!(say("print(type(42.0))"), "number");
-        assert_eq!(say(r#"print(type("hi"))"#), "string");
-        assert_eq!(say("print(type(true))"), "bool");
-        assert_eq!(say("print(type(none))"), "none");
-        assert_eq!(say("print(type([]))"), "array");
+        assert_eq!(say("print(42.type())"), "int");
+        assert_eq!(say("print(42.0.type())"), "number");
+        assert_eq!(say(r#"print("hi".type())"#), "string");
+        assert_eq!(say("print(true.type())"), "bool");
+        assert_eq!(say("print(none.type())"), "none");
+        assert_eq!(say("print([].type())"), "array");
     }
 
     #[test]
     fn builtin_abs_min_max() {
-        assert_eq!(say("print(abs(-5))"), "5");
-        assert_eq!(say("print(min(3, 7))"), "3");
-        assert_eq!(say("print(max(3, 7))"), "7");
+        assert_eq!(say("print((-5).abs())"), "5");
+        assert_eq!(say("print(3.min(7))"), "3");
+        assert_eq!(say("print(3.max(7))"), "7");
     }
 
     #[test]
     fn builtin_len() {
-        assert_eq!(say(r#"print(len("hello"))"#), "5");
-        assert_eq!(say("print(len([1, 2, 3]))"), "3");
+        assert_eq!(say(r#"print("hello".len())"#), "5");
+        assert_eq!(say("print([1, 2, 3].len())"), "3");
     }
 
     #[test]
     fn builtin_inspect() {
-        assert_eq!(say(r#"print(inspect("hi"))"#), r#""hi""#);
-        assert_eq!(say("print(inspect(42))"), "42");
+        assert_eq!(say(r#"print("hi".inspect())"#), r#""hi""#);
+        assert_eq!(say("print(42.inspect())"), "42");
     }
 
     #[test]
@@ -1238,7 +1238,7 @@ print(lenght)"#;
         // `//` is the line-comment marker. There's no
         // integer-division operator — `/` always returns a
         // `Number`, and users who want an integer cast through
-        // `int(a / b)` — which frees `//` for comments.
+        // `(a / b).to_int()` — which frees `//` for comments.
         assert_eq!(
             say(r#"// this is a comment
 let x = 42 // inline comment
@@ -1337,7 +1337,7 @@ for i in range(1, 16) {
     } else if i % 5 == 0 {
         result.push("Buzz")
     } else {
-        result.push(str(i))
+        result.push(i.to_str())
     }
 }
 print(result.join(", "))"#),
@@ -1599,7 +1599,7 @@ let parts = s.split("a")"#,
         let msg = run_err_with_limits(
             r#"let d = {}
 repeat 400 {
-    d[str(d.len())] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    d[d.len().to_str()] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 let x = 1"#,
             tight_limits(),
@@ -2020,7 +2020,7 @@ print(match top() {
             say(r#"enum Result { Ok, Err(e) }
 fn doit() {
     let v = try Result::Ok
-    return type(v)
+    return v.type()
 }
 print(doit())"#),
             "none"
@@ -2297,21 +2297,21 @@ print(match r {
 
     #[test]
     fn int_literal_produces_int_value() {
-        assert_eq!(say("print(type(42))"), "int");
-        assert_eq!(say("print(type(-3))"), "int");
-        assert_eq!(say("print(type(0))"), "int");
+        assert_eq!(say("print(42.type())"), "int");
+        assert_eq!(say("print((-3).type())"), "int");
+        assert_eq!(say("print(0.type())"), "int");
     }
 
     #[test]
     fn float_literal_produces_number_value() {
-        assert_eq!(say("print(type(42.0))"), "number");
-        assert_eq!(say("print(type(3.14))"), "number");
-        assert_eq!(say("print(type(-0.5))"), "number");
+        assert_eq!(say("print(42.0.type())"), "number");
+        assert_eq!(say("print(3.14.type())"), "number");
+        assert_eq!(say("print((-0.5).type())"), "number");
     }
 
     #[test]
     fn int_int_arithmetic_stays_int() {
-        assert_eq!(say("print(type(1 + 2))"), "int");
+        assert_eq!(say("print((1 + 2).type())"), "int");
         assert_eq!(say("print(1 + 2)"), "3");
         assert_eq!(say("print(10 - 4)"), "6");
         assert_eq!(say("print(3 * 4)"), "12");
@@ -2323,29 +2323,29 @@ print(match r {
         // `/` always produces a `Number`, even for `Int / Int`.
         // Sidesteps the "1 / 2 == 0" surprise every C-family
         // language inflicts on beginners.
-        assert_eq!(say("print(type(10 / 3))"), "number");
+        assert_eq!(say("print((10 / 3).type())"), "number");
         assert_eq!(say("print(10 / 4)"), "2.5");
-        assert_eq!(say("print(type(10 / 5))"), "number");
+        assert_eq!(say("print((10 / 5).type())"), "number");
     }
 
     #[test]
     fn int_division_via_int_of_quotient() {
         // There's no dedicated `//` operator — users who want
         // integer division coerce the float result back with
-        // `int(...)`. Truncates toward zero, matching the
+        // `(...).to_int()`. Truncates toward zero, matching the
         // behaviour of the removed `//` operator.
-        assert_eq!(say("print(type(int(10 / 3)))"), "int");
-        assert_eq!(say("print(int(10 / 3))"), "3");
-        assert_eq!(say("print(int(-7 / 2))"), "-3");
-        assert_eq!(say("print(int(10 / -3))"), "-3");
+        assert_eq!(say("print((10 / 3).to_int().type())"), "int");
+        assert_eq!(say("print((10 / 3).to_int())"), "3");
+        assert_eq!(say("print((-7 / 2).to_int())"), "-3");
+        assert_eq!(say("print((10 / -3).to_int())"), "-3");
     }
 
     #[test]
     fn int_number_mixed_widens_to_number() {
-        assert_eq!(say("print(type(1 + 2.0))"), "number");
+        assert_eq!(say("print((1 + 2.0).type())"), "number");
         assert_eq!(say("print(1 + 2.0)"), "3");
         assert_eq!(say("print(3 * 0.5)"), "1.5");
-        assert_eq!(say("print(type(2.0 - 1))"), "number");
+        assert_eq!(say("print((2.0 - 1).type())"), "number");
     }
 
     #[test]
@@ -2385,30 +2385,30 @@ print(match r {
 
     #[test]
     fn int_builtin_converts_to_int() {
-        assert_eq!(say("print(int(3.7))"), "3");
-        assert_eq!(say("print(type(int(3.7)))"), "int");
-        assert_eq!(say(r#"print(int("42"))"#), "42");
-        assert_eq!(say(r#"print(type(int("42")))"#), "int");
+        assert_eq!(say("print(3.7.to_int())"), "3");
+        assert_eq!(say("print(3.7.to_int().type())"), "int");
+        assert_eq!(say(r#"print("42".to_int())"#), "42");
+        assert_eq!(say(r#"print("42".to_int().type())"#), "int");
         // Truncating a string that looks float-y still works.
-        assert_eq!(say(r#"print(int("3.7"))"#), "3");
+        assert_eq!(say(r#"print("3.7".to_int())"#), "3");
     }
 
     #[test]
     fn float_builtin_converts_to_number() {
-        assert_eq!(say("print(float(42))"), "42");
-        assert_eq!(say("print(type(float(42)))"), "number");
-        assert_eq!(say(r#"print(float("3.14"))"#), "3.14");
+        assert_eq!(say("print(42.to_float())"), "42");
+        assert_eq!(say("print(42.to_float().type())"), "number");
+        assert_eq!(say(r#"print("3.14".to_float())"#), "3.14");
     }
 
     #[test]
     fn len_returns_int() {
-        assert_eq!(say(r#"print(type(len("hi")))"#), "int");
-        assert_eq!(say("print(type(len([1, 2, 3])))"), "int");
+        assert_eq!(say(r#"print("hi".len().type())"#), "int");
+        assert_eq!(say("print([1, 2, 3].len().type())"), "int");
     }
 
     #[test]
     fn range_produces_int_elements() {
-        assert_eq!(say("print(type(range(3)[0]))"), "int");
+        assert_eq!(say("print((range(3)[0]).type())"), "int");
     }
 
     #[test]
@@ -2811,7 +2811,7 @@ match v {
         let mut host = ModuleHost::new(&[("m", "let x = 1")]);
         run(
             r#"use m as mm
-print(type(mm))"#,
+print(mm.type())"#,
             &mut host,
             &BopLimits::standard(),
         )
@@ -2892,7 +2892,7 @@ print(a == b)"#),
         // to the builtin yet.
         assert_eq!(
             say(r#"struct Foo { a }
-print(type(Foo { a: 1 }))"#),
+print(Foo { a: 1 }.type())"#),
             "struct"
         );
     }
@@ -3189,7 +3189,7 @@ if E::V == E::V {
     fn enum_type_name_is_enum() {
         assert_eq!(
             say(r#"enum E { V }
-print(type(E::V))"#),
+print((E::V).type())"#),
             "enum"
         );
     }

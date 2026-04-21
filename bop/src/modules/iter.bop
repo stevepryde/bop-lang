@@ -45,7 +45,7 @@ fn take(arr, n) {
 }
 
 // Drop the first `n` elements. Negative `n` yields a full
-// copy; `n >= len(arr)` yields an empty array.
+// copy; `n >= arr.len()` yields an empty array.
 fn drop(arr, n) {
     if n <= 0 { return arr + [] }
     let out = []
@@ -61,8 +61,8 @@ fn drop(arr, n) {
 // length. `zip([1, 2], ["a", "b"])` → `[[1, "a"], [2, "b"]]`.
 fn zip(a, b) {
     let out = []
-    let n = len(a)
-    let m = len(b)
+    let n = a.len()
+    let m = b.len()
     let k = if n < m { n } else { m }
     let i = 0
     while i < k {
@@ -157,7 +157,7 @@ fn product(arr) {
 // Min / max of a numeric array. Raises on empty input via a
 // deliberate type error so callers notice.
 fn min_array(arr) {
-    let n = len(arr)
+    let n = arr.len()
     if n == 0 { return none[0] }
     let m = arr[0]
     let i = 1
@@ -169,7 +169,7 @@ fn min_array(arr) {
 }
 
 fn max_array(arr) {
-    let n = len(arr)
+    let n = arr.len()
     if n == 0 { return none[0] }
     let m = arr[0]
     let i = 1

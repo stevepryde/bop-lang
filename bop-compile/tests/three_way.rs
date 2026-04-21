@@ -527,17 +527,17 @@ for i in range(1, 16) {
     } else if i % 5 == 0 {
         result.push("Buzz")
     } else {
-        result.push(str(i))
+        result.push(i.to_str())
     }
 }
 print(result.join(", "))"#,
     ),
-    ("builtin_str_int_type", "print(str(42))\nprint(int(3.7))\nprint(type([]))"),
-    ("builtin_abs_min_max", "print(abs(-5))\nprint(min(3, 7))\nprint(max(3, 7))"),
+    ("builtin_str_int_type", "print(42.to_str())\nprint(3.7.to_int())\nprint([].type())"),
+    ("builtin_abs_min_max", "print((-5).abs())\nprint(3.min(7))\nprint(3.max(7))"),
     ("builtin_range", "print(range(5))\nprint(range(2, 5))\nprint(range(0, 10, 3))"),
-    ("builtin_len_inspect", r#"print(len("hello"))
-print(len([1, 2, 3]))
-print(inspect("hi"))"#),
+    ("builtin_len_inspect", r#"print("hello".len())
+print([1, 2, 3].len())
+print("hi".inspect())"#),
     ("nested_array_access", "let m = [[1, 2], [3, 4]]\nprint(m[1][0])"),
     ("method_chain", r#"print("  HELLO  ".trim().lower())"#),
     (
@@ -609,7 +609,7 @@ print(ops[0](2, 3))
 print(ops[1](2, 3))"#,
     ),
     ("iife_value_call", "print((fn(x) { return x * 3 })(4))"),
-    ("type_of_fn_is_fn", "fn f() { }\nprint(type(f))"),
+    ("type_of_fn_is_fn", "fn f() { }\nprint(f.type())"),
     // ─── Structs / enums / user methods (phase 3) ───────────────
     (
         "struct_basic",
@@ -881,29 +881,29 @@ let r = try Result::Err("boom")"#,
     // ─── Integer type (phase 6) ─────────────────────────────────
     (
         "int_literal_type",
-        r#"print(type(42))
-print(type(42.0))
-print(type(-3))"#,
+        r#"print(42.type())
+print(42.0.type())
+print((-3).type())"#,
     ),
     (
         "int_arithmetic_stays_int",
         r#"print(1 + 2)
-print(type(1 + 2))
+print((1 + 2).type())
 print(10 - 4)
 print(3 * 4)"#,
     ),
     (
         "division_always_number_int_via_cast",
         r#"print(10 / 3)
-print(type(10 / 3))
-print(int(10 / 3))
-print(type(int(10 / 3)))
-print(int(-7 / 2))"#,
+print((10 / 3).type())
+print((10 / 3).to_int())
+print((10 / 3).to_int().type())
+print((-7 / 2).to_int())"#,
     ),
     (
         "int_number_mixed_widens",
         r#"print(1 + 2.0)
-print(type(1 + 2.0))
+print((1 + 2.0).type())
 print(3 * 0.5)"#,
     ),
     (
@@ -921,20 +921,20 @@ print(2 > 1.5)"#,
     ),
     (
         "int_builtin_and_float_builtin",
-        r#"print(int(3.7))
-print(type(int(3.7)))
-print(float(42))
-print(type(float(42)))"#,
+        r#"print(3.7.to_int())
+print(3.7.to_int().type())
+print(42.to_float())
+print(42.to_float().type())"#,
     ),
     (
         "len_returns_int",
-        r#"print(type(len("hi")))
-print(type(len([1, 2, 3])))"#,
+        r#"print("hi".len().type())
+print([1, 2, 3].len().type())"#,
     ),
     (
         "range_int_elements",
         r#"let r = range(3)
-print(type(r[0]))"#,
+print(r[0].type())"#,
     ),
     (
         "int_match_literal",
@@ -1095,10 +1095,10 @@ print(is_palindrome("racecar"))"#,
     ),
     (
         "core_math_builtins_no_import",
-        r#"print(sqrt(16))
-print(floor(3.7))
-print(ceil(3.2))
-print(pow(2, 10))"#,
+        r#"print(16.sqrt())
+print(3.7.floor())
+print(3.2.ceil())
+print(2.pow(10))"#,
         &[],
     ),
     (

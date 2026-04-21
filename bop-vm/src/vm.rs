@@ -1258,110 +1258,20 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // contiguous slice, so pay the `Vec` cost once.
         let args = self.pop_n_values(argc, line)?;
 
-        // 1. Standard-library builtins.
+        // 1. Global builtins — the narrow set that can't be
+        // expressed as methods on a receiver (variadic,
+        // constructor-shape, session-stateful, or takes a
+        // callable). Everything that used to live here is now
+        // a method; see `methods::common_method` and
+        // `methods::numeric_method`.
         match name {
             "range" => {
                 let v = builtins::builtin_range(&args, line, &mut self.rand_state)?;
                 self.push_value(v);
                 return Ok(Next::Continue);
             }
-            "str" => {
-                let v = builtins::builtin_str(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "int" => {
-                let v = builtins::builtin_int(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "float" => {
-                let v = builtins::builtin_float(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "type" => {
-                let v = builtins::builtin_type(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "abs" => {
-                let v = builtins::builtin_abs(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "min" => {
-                let v = builtins::builtin_min(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "max" => {
-                let v = builtins::builtin_max(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
             "rand" => {
                 let v = builtins::builtin_rand(&args, line, &mut self.rand_state)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "len" => {
-                let v = builtins::builtin_len(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "sqrt" => {
-                let v = builtins::builtin_sqrt(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "sin" => {
-                let v = builtins::builtin_sin(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "cos" => {
-                let v = builtins::builtin_cos(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "tan" => {
-                let v = builtins::builtin_tan(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "floor" => {
-                let v = builtins::builtin_floor(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "ceil" => {
-                let v = builtins::builtin_ceil(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "round" => {
-                let v = builtins::builtin_round(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "pow" => {
-                let v = builtins::builtin_pow(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "log" => {
-                let v = builtins::builtin_log(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "exp" => {
-                let v = builtins::builtin_exp(&args, line)?;
-                self.push_value(v);
-                return Ok(Next::Continue);
-            }
-            "inspect" => {
-                let v = builtins::builtin_inspect(&args, line)?;
                 self.push_value(v);
                 return Ok(Next::Continue);
             }
@@ -1535,7 +1445,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // enum receiver — `m` is a `Value::Module` whose `foo`
         // export is a callable. Look it up and dispatch through
         // the regular call-by-value path.
+        //
+        // Before falling through to the binding lookup, check
+        // whether the method name is one of the common methods
+        // (`type`, `to_str`, `inspect`). Those work on every
+        // value, including `Value::Module`, and shouldn't be
+        // gated by whether the module happens to export that
+        // name.
         if let Value::Module(ref m) = obj {
+            if let Some(result) = methods::common_method(&obj, &method, &args, line)? {
+                self.push_value(result.0);
+                return Ok(Next::Continue);
+            }
             if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == &method) {
                 let callee = v.clone();
                 drop(obj);
@@ -1620,15 +1541,36 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
         }
 
-        let (ret, mutated) = match &obj {
-            Value::Array(arr) => methods::array_method(arr, &method, &args, line)?,
-            Value::Str(s) => methods::string_method(s.as_str(), &method, &args, line)?,
-            Value::Dict(entries) => methods::dict_method(entries, &method, &args, line)?,
-            _ => {
-                return Err(error(
-                    line,
-                    bop::error_messages::no_such_method(obj.type_name(), &method),
-                ));
+        // `type` / `to_str` / `inspect` work on every value —
+        // dispatch them ahead of the type-specific tables so
+        // walker / VM / AOT agree on the common method surface.
+        let (ret, mutated) = if let Some(result) =
+            methods::common_method(&obj, &method, &args, line)?
+        {
+            result
+        } else {
+            match &obj {
+                Value::Array(arr) => {
+                    methods::array_method(arr, &method, &args, line)?
+                }
+                Value::Str(s) => {
+                    methods::string_method(s.as_str(), &method, &args, line)?
+                }
+                Value::Dict(entries) => {
+                    methods::dict_method(entries, &method, &args, line)?
+                }
+                Value::Int(_) | Value::Number(_) => {
+                    methods::numeric_method(&obj, &method, &args, line)?
+                }
+                Value::Bool(_) => {
+                    methods::bool_method(&obj, &method, &args, line)?
+                }
+                _ => {
+                    return Err(error(
+                        line,
+                        bop::error_messages::no_such_method(obj.type_name(), &method),
+                    ));
+                }
             }
         };
 

@@ -27,7 +27,7 @@ fn pad_right(s, width, ch) {
 fn center(s, width, ch) {
     let need = width - s.len()
     if need <= 0 { return s }
-    let left = int(need / 2)
+    let left = (need / 2).to_int()
     let right = need - left
     return ch * left + s + ch * right
 }
