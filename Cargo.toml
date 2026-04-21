@@ -3,8 +3,13 @@ members = ["bop", "bop-cli", "bop-compile", "bop-std", "bop-sys", "bop-vm"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
+# MSRV pinned to the release that stabilised the 2024 edition
+# we compile with. If something in the source requires something
+# newer we bump this and document it; otherwise 1.85 is the
+# floor, matching what `edition = "2024"` needs to parse at all.
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/stevepryde/bop-lang"
 homepage = "https://github.com/stevepryde/bop-lang"
