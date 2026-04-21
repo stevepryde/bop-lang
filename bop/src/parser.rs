@@ -106,6 +106,13 @@ pub enum ExprKind {
     /// conditions and `for-in` iterables disallow them so that
     /// `if foo { body }` stays unambiguous.
     StructConstruct {
+        /// `Some("m")` for `m.Entity { ... }` — a namespaced
+        /// struct literal through a module alias. `None` for
+        /// the unqualified `Entity { ... }` form. The walker /
+        /// VM / AOT resolve the (namespace, type_name) pair via
+        /// the current scope's type-alias table before
+        /// constructing the `Value::Struct`.
+        namespace: Option<String>,
         type_name: String,
         fields: Vec<(String, Expr)>,
     },
@@ -114,6 +121,10 @@ pub enum ExprKind {
     /// payload shape is determined at parse time from the syntax
     /// at the construction site.
     EnumConstruct {
+        /// `Some("r")` for `r.Result::Ok(v)` — a namespaced
+        /// variant constructor through a module alias. `None`
+        /// for unqualified `Result::Ok(v)`.
+        namespace: Option<String>,
         type_name: String,
         variant: String,
         payload: VariantPayload,
@@ -189,14 +200,18 @@ pub enum Pattern {
     /// Bare identifier — matches anything, binds the value to
     /// this name for the arm's body.
     Binding(String),
-    /// `Type::Variant` / `Type::Variant(...)` / `Type::Variant { ... }`.
+    /// `Type::Variant` / `Type::Variant(...)` / `Type::Variant { ... }`,
+    /// optionally namespaced via `ns.Type::Variant(...)`.
     EnumVariant {
+        namespace: Option<String>,
         type_name: String,
         variant: String,
         payload: VariantPatternPayload,
     },
-    /// `Type { field: pat, field, .. }` destructures a struct.
+    /// `Type { field: pat, field, .. }` destructures a struct,
+    /// optionally namespaced via `ns.Type { ... }`.
     Struct {
+        namespace: Option<String>,
         type_name: String,
         fields: Vec<(String, Pattern)>,
         rest: bool,
@@ -334,11 +349,35 @@ pub enum StmtKind {
     Break,
     Continue,
     /// `use foo.bar.baz` — resolves the module named by the
-    /// dot-joined path through `BopHost::resolve_module`, evaluates
-    /// its top-level statements in a fresh scope, and injects the
-    /// module's `let` / `fn` bindings into the importer's scope.
+    /// dot-joined path through `BopHost::resolve_module`,
+    /// evaluates its top-level statements in a fresh scope, and
+    /// injects its exports into the importer's scope. The shape
+    /// of the injection depends on the optional `items` / `alias`:
+    ///
+    /// - `use foo`                  — glob: all non-private
+    ///   top-level names land unqualified.
+    /// - `use foo.{a, b}`           — selective: only `a` and
+    ///   `b` land unqualified. `_`-prefixed names can be
+    ///   explicitly listed.
+    /// - `use foo as m`             — aliased: all exports
+    ///   (including `_`-prefixed) hang off a new `m` namespace
+    ///   value. Access via `m.a`, `m.Entity`, etc.
+    /// - `use foo.{a, b} as m`      — selective + aliased:
+    ///   `m` namespace contains only `a` and `b`.
+    ///
+    /// Glob imports skip `_`-prefixed top-level names (privacy
+    /// convention). Aliased and selective imports pass them
+    /// through when the user asks for them explicitly.
     Use {
         path: String,
+        /// `Some` iff the caller used the selective `.{a, b}`
+        /// form. The listed names are injected (whatever shape
+        /// they have); anything not listed is skipped.
+        items: Option<Vec<String>>,
+        /// `Some("m")` iff the caller used the `as m` form.
+        /// Exports are bound inside a `Value::Module` under this
+        /// name rather than in the caller's scope directly.
+        alias: Option<String>,
     },
     /// `struct Point { x, y }` — registers a user-defined struct
     /// type with the listed field names. Field values get their
@@ -729,15 +768,60 @@ impl Parser {
         let (first, first_line) = self.expect_ident()?;
         ensure_value_name(&first, "module path segment", first_line)?;
         let mut path = first;
-        while matches!(self.peek(), Token::Dot) {
-            self.advance();
+
+        // Consume dotted path segments. Breaks early if we see a
+        // `.{` — the selective-import opener.
+        loop {
+            if !matches!(self.peek(), Token::Dot) {
+                break;
+            }
+            // Peek ahead one more token: `.{` opens selective
+            // imports; `.ident` continues the path.
+            if matches!(self.peek_at(1), Token::LBrace) {
+                break;
+            }
+            self.advance(); // consume '.'
             let (seg, seg_line) = self.expect_ident()?;
             ensure_value_name(&seg, "module path segment", seg_line)?;
             path.push('.');
             path.push_str(&seg);
         }
+
+        // Selective import: `use foo.bar.{a, b, c}`.
+        let items = if matches!(self.peek(), Token::Dot) {
+            self.advance(); // '.'
+            self.expect(&Token::LBrace)?;
+            let mut list: Vec<String> = Vec::new();
+            if !matches!(self.peek(), Token::RBrace) {
+                let (name, _) = self.expect_ident()?;
+                list.push(name);
+                while matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    if matches!(self.peek(), Token::RBrace) {
+                        break; // trailing comma
+                    }
+                    let (name, _) = self.expect_ident()?;
+                    list.push(name);
+                }
+            }
+            self.expect(&Token::RBrace)?;
+            Some(list)
+        } else {
+            None
+        };
+
+        // Optional `as alias`.
+        let alias = if matches!(self.peek(), Token::As) {
+            self.advance();
+            let (name, name_line) = self.expect_ident()?;
+            ensure_value_name(&name, "`use` alias", name_line)?;
+            Some(name)
+        } else {
+            None
+        };
+
         Ok(Stmt {
-            kind: StmtKind::Use { path },
+            kind: StmtKind::Use { path, items, alias },
             line,
         })
     }
@@ -1176,6 +1260,39 @@ impl Parser {
                     let line = self.peek_line();
                     self.advance();
                     let (name, _) = self.expect_ident()?;
+
+                    // `a.B::V(...)` / `a.B { ... }` — namespaced
+                    // type access through a module alias. We only
+                    // take this path when the receiver is a bare
+                    // `Ident` (the alias) and the field is a
+                    // type-shape name. Anything else (method
+                    // call, plain field read) falls through.
+                    if let ExprKind::Ident(ns) = &expr.kind {
+                        if naming::is_type_name(&name) {
+                            match self.peek() {
+                                Token::ColonColon => {
+                                    let ns_owned = ns.clone();
+                                    expr = self.parse_enum_variant_tail(
+                                        name,
+                                        Some(ns_owned),
+                                        line,
+                                    )?;
+                                    continue;
+                                }
+                                Token::LBrace if self.allow_struct_literal => {
+                                    let ns_owned = ns.clone();
+                                    expr = self.parse_struct_literal(
+                                        name,
+                                        Some(ns_owned),
+                                        line,
+                                    )?;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
                     if matches!(self.peek(), Token::LParen) {
                         // Method call: `.name(args)`.
                         self.advance();
@@ -1279,7 +1396,7 @@ impl Parser {
                 // payload shape is determined by what follows
                 // the variant name.
                 if matches!(self.peek(), Token::ColonColon) {
-                    return self.parse_enum_variant_tail(name, line);
+                    return self.parse_enum_variant_tail(name, None, line);
                 }
                 // Struct literal: `Name { field: value, ... }`.
                 // Parsed only when struct literals are allowed in
@@ -1287,7 +1404,7 @@ impl Parser {
                 // `without_struct_literal`). This keeps `if foo {
                 // body }` / `for x in arr { body }` parseable.
                 if self.allow_struct_literal && matches!(self.peek(), Token::LBrace) {
-                    return self.parse_struct_literal(name, line);
+                    return self.parse_struct_literal(name, None, line);
                 }
                 Ok(Expr {
                     kind: ExprKind::Ident(name),
@@ -1317,6 +1434,7 @@ impl Parser {
     fn parse_enum_variant_tail(
         &mut self,
         type_name: String,
+        namespace: Option<String>,
         line: u32,
     ) -> Result<Expr, BopError> {
         self.advance(); // consume `::`
@@ -1368,6 +1486,7 @@ impl Parser {
         };
         Ok(Expr {
             kind: ExprKind::EnumConstruct {
+                namespace,
                 type_name,
                 variant,
                 payload,
@@ -1376,7 +1495,12 @@ impl Parser {
         })
     }
 
-    fn parse_struct_literal(&mut self, type_name: String, line: u32) -> Result<Expr, BopError> {
+    fn parse_struct_literal(
+        &mut self,
+        type_name: String,
+        namespace: Option<String>,
+        line: u32,
+    ) -> Result<Expr, BopError> {
         self.enter()?;
         self.expect(&Token::LBrace)?;
         let mut fields: Vec<(String, Expr)> = Vec::new();
@@ -1399,7 +1523,11 @@ impl Parser {
         self.expect(&Token::RBrace)?;
         self.leave();
         Ok(Expr {
-            kind: ExprKind::StructConstruct { type_name, fields },
+            kind: ExprKind::StructConstruct {
+                namespace,
+                type_name,
+                fields,
+            },
             line,
         })
     }
@@ -1599,13 +1727,45 @@ impl Parser {
                 self.advance();
                 // `Type::Variant[...]` path pattern.
                 if matches!(self.peek(), Token::ColonColon) {
-                    self.parse_pattern_variant_tail(name)
+                    self.parse_pattern_variant_tail(name, None)
                 } else if matches!(self.peek(), Token::LBrace) {
                     // `Type { ... }` struct pattern — only when
                     // the `LBrace` is syntactically plausible as
                     // a struct pattern. Inside a match arm pattern
                     // it always is.
-                    self.parse_pattern_struct(name)
+                    self.parse_pattern_struct(name, None)
+                } else if matches!(self.peek(), Token::Dot)
+                    && naming::is_value_name(&name)
+                {
+                    // `ns.Type...` — namespaced variant / struct
+                    // pattern through a module alias. Only fires
+                    // when the first segment is value-shaped
+                    // (an alias), to keep bare `Type.field` from
+                    // being misread as a pattern.
+                    self.advance(); // consume '.'
+                    let (type_name, type_line) = self.expect_ident()?;
+                    if !naming::is_type_name(&type_name) {
+                        return Err(self.error(
+                            type_line,
+                            format!(
+                                "Expected a type name after `{}.` in pattern, got `{}`",
+                                name, type_name
+                            ),
+                        ));
+                    }
+                    if matches!(self.peek(), Token::ColonColon) {
+                        self.parse_pattern_variant_tail(type_name, Some(name))
+                    } else if matches!(self.peek(), Token::LBrace) {
+                        self.parse_pattern_struct(type_name, Some(name))
+                    } else {
+                        Err(self.error(
+                            type_line,
+                            format!(
+                                "Expected `::Variant(...)` or `{{...}}` after `{}.{}` in pattern",
+                                name, type_name
+                            ),
+                        ))
+                    }
                 } else {
                     // Bare identifier = binding. `_` is handled
                     // above as wildcard.
@@ -1661,6 +1821,7 @@ impl Parser {
     fn parse_pattern_variant_tail(
         &mut self,
         type_name: String,
+        namespace: Option<String>,
     ) -> Result<Pattern, BopError> {
         self.advance(); // consume `::`
         let (variant, _) = self.expect_ident()?;
@@ -1688,15 +1849,21 @@ impl Parser {
             _ => VariantPatternPayload::Unit,
         };
         Ok(Pattern::EnumVariant {
+            namespace,
             type_name,
             variant,
             payload,
         })
     }
 
-    fn parse_pattern_struct(&mut self, type_name: String) -> Result<Pattern, BopError> {
+    fn parse_pattern_struct(
+        &mut self,
+        type_name: String,
+        namespace: Option<String>,
+    ) -> Result<Pattern, BopError> {
         let (fields, rest) = self.parse_pattern_field_list()?;
         Ok(Pattern::Struct {
+            namespace,
             type_name,
             fields,
             rest,
@@ -1894,6 +2061,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Break => "break",
         Token::Continue => "continue",
         Token::Use => "use",
+        Token::As => "as",
         Token::Struct => "struct",
         Token::Enum => "enum",
         Token::Match => "match",

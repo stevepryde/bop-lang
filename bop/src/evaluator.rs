@@ -460,7 +460,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             StmtKind::Break => Ok(Signal::Break),
             StmtKind::Continue => Ok(Signal::Continue),
 
-            StmtKind::Use { path } => {
+            StmtKind::Use { path, items: _, alias: _ } => {
                 self.exec_import(path, stmt.line)?;
                 Ok(Signal::None)
             }
@@ -1244,12 +1244,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
 
             ExprKind::EnumConstruct {
+                namespace: _,
                 type_name,
                 variant,
                 payload,
             } => self.eval_enum_construct(type_name, variant, payload, expr.line),
 
-            ExprKind::StructConstruct { type_name, fields } => {
+            ExprKind::StructConstruct {
+                namespace: _,
+                type_name,
+                fields,
+            } => {
                 let decl_fields = self.struct_defs.get(type_name).ok_or_else(|| {
                     error(
                         expr.line,
@@ -1819,6 +1824,7 @@ pub fn pattern_matches(
             _ => false,
         },
         Pattern::EnumVariant {
+            namespace: _,
             type_name,
             variant,
             payload,
@@ -1856,6 +1862,7 @@ pub fn pattern_matches(
             }
         }
         Pattern::Struct {
+            namespace: _,
             type_name,
             fields,
             rest,

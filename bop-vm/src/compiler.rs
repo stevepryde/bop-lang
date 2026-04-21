@@ -617,7 +617,7 @@ impl Compiler {
                 self.emit(Instr::Jump(target), line);
             }
 
-            StmtKind::Use { path } => {
+            StmtKind::Use { path, items: _, alias: _ } => {
                 let n = self.add_name(path);
                 self.emit(Instr::Use(n), line);
             }
@@ -1070,7 +1070,7 @@ impl Compiler {
                 self.emit(Instr::FieldGet(n), line);
             }
 
-            ExprKind::StructConstruct { type_name, fields } => {
+            ExprKind::StructConstruct { namespace: _, type_name, fields } => {
                 // Push each (name, value) pair in the order
                 // provided — the VM's `ConstructStruct` handler
                 // does the matching against the declared fields,
@@ -1092,6 +1092,7 @@ impl Compiler {
             }
 
             ExprKind::EnumConstruct {
+                namespace: _,
                 type_name,
                 variant,
                 payload,

@@ -10,7 +10,7 @@ const RESERVED_KEYWORDS: &[&str] = &[
     // Literals
     "true", "false", "none",
     // Future
-    "on", "event", "entity", "spawn", "state", "loop", "class", "self", "from", "as",
+    "on", "event", "entity", "spawn", "state", "loop", "class", "self", "from",
     // Common-mistake prevention: keywords in neighbouring languages
     // that users might reach for — warn if they try to use one as
     // an identifier so the diagnostic points at the right fix.

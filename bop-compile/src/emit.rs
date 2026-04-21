@@ -415,7 +415,7 @@ fn visit_module(
 fn collect_imports_in_stmts(stmts: &[Stmt]) -> Vec<(String, u32)> {
     let mut out = Vec::new();
     for stmt in stmts {
-        if let StmtKind::Use { path } = &stmt.kind {
+        if let StmtKind::Use { path, items: _, alias: _ } = &stmt.kind {
             out.push((path.clone(), stmt.line));
         }
     }
@@ -1273,7 +1273,7 @@ impl Emitter {
             StmtKind::Break => self.line("break;"),
             StmtKind::Continue => self.line("continue;"),
 
-            StmtKind::Use { path } => {
+            StmtKind::Use { path, items: _, alias: _ } => {
                 self.emit_import_stmt(path, line)?;
             }
 
@@ -1589,11 +1589,12 @@ impl Emitter {
                 )
             }
 
-            ExprKind::StructConstruct { type_name, fields } => {
+            ExprKind::StructConstruct { namespace: _, type_name, fields } => {
                 self.struct_construct_src(type_name, fields, line)?
             }
 
             ExprKind::EnumConstruct {
+                namespace: _,
                 type_name,
                 variant,
                 payload,
@@ -2817,6 +2818,7 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
             literal_pattern_rust(lit)
         ),
         Pattern::EnumVariant {
+            namespace: _,
             type_name,
             variant,
             payload,
@@ -2827,6 +2829,7 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
             variant_payload_rust(payload),
         ),
         Pattern::Struct {
+            namespace: _,
             type_name,
             fields,
             rest,
