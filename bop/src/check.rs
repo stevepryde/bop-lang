@@ -9,19 +9,27 @@
 //! "No match arm matched" runtime error if they ever fire, so
 //! the check is advisory rather than load-bearing.
 //!
-//! Kept deliberately narrow for the first pass:
+//! Kept deliberately narrow:
 //!
 //! - Only enum-shaped matches (all arms `EnumType::Variant`
 //!   with the same outer `EnumType`) are analysed. Literal
 //!   matches and heterogeneous matches are skipped — they'd
 //!   need a different notion of "coverage".
-//! - Only enums declared in the analysed statement list are
-//!   checked. Imported enums are opaque at parse time; we
-//!   don't follow `use` statements here. Users still get
-//!   the runtime error if the match under-covers.
 //! - Guards on arms don't count toward coverage. `Variant(x)
 //!   if x > 0` matches a *subset* of the variant, so the arm
 //!   no longer fully covers `Variant`.
+//!
+//! Imports: `check_program` alone only sees enums declared in
+//! the analysed AST, so `match` arms over an imported enum
+//! would look under-covered. Callers with access to a module
+//! resolver (the CLI has one via `BopHost::resolve_module`)
+//! should use [`check_program_with_resolver`] instead — it
+//! walks every top-level `use` statement, parses the referenced
+//! module's source, and folds its (transitive) enum decls into
+//! the table before running the checks. A resolver that returns
+//! `None` or an error for a given module is treated as a
+//! silent opacity fallback rather than a hard failure; the
+//! checker is advisory.
 
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec::Vec};
@@ -32,9 +40,9 @@ use crate::parser::{
 };
 
 #[cfg(not(feature = "std"))]
-use alloc_import::collections::BTreeMap;
+use alloc_import::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "std")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(not(feature = "std"))]
 use alloc as alloc_import;
@@ -42,11 +50,84 @@ use alloc as alloc_import;
 /// Run every static check over `stmts` and collect the
 /// resulting warnings. Never errors — warnings are the only
 /// output.
+///
+/// See [`check_program_with_resolver`] for a variant that
+/// walks `use` statements to pick up imported enum
+/// declarations; this plain version treats imported enums as
+/// opaque and skips exhaustiveness warnings on them.
 pub fn check_program(stmts: &[Stmt]) -> Vec<BopWarning> {
     let mut warnings = Vec::new();
     let enums = collect_enum_decls(stmts);
     check_stmts(stmts, &enums, &mut warnings);
     warnings
+}
+
+/// Like [`check_program`] but follows `use` statements via a
+/// module resolver so `match` arms over imported enums can be
+/// exhaustiveness-checked. `resolver` has the same shape as
+/// `BopHost::resolve_module`:
+///
+/// - `Some(Ok(source))` — module source; parsed + its enums
+///   (transitively) folded into the table.
+/// - `Some(Err(_))` — resolver failed; treated the same as
+///   `None` (check skips the enum; advisory fallback).
+/// - `None` — not our module; skip.
+///
+/// The checker never surfaces a failure from the resolver — it
+/// simply falls back to "imported enums stay opaque" in that
+/// case, the same behaviour [`check_program`] has.
+pub fn check_program_with_resolver<R>(
+    stmts: &[Stmt],
+    resolver: &mut R,
+) -> Vec<BopWarning>
+where
+    R: FnMut(&str) -> Option<Result<String, crate::error::BopError>>,
+{
+    let mut warnings = Vec::new();
+    let mut enums = collect_enum_decls(stmts);
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    collect_imported_enum_decls(stmts, resolver, &mut enums, &mut visited);
+    check_stmts(stmts, &enums, &mut warnings);
+    warnings
+}
+
+/// Recursively walk `use` statements and fold each imported
+/// module's enum declarations into `enums`. Silently drops
+/// parse / resolver failures — the checker is advisory, not
+/// load-bearing.
+fn collect_imported_enum_decls<R>(
+    stmts: &[Stmt],
+    resolver: &mut R,
+    enums: &mut BTreeMap<String, Vec<VariantDecl>>,
+    visited: &mut BTreeSet<String>,
+) where
+    R: FnMut(&str) -> Option<Result<String, crate::error::BopError>>,
+{
+    for stmt in stmts {
+        if let StmtKind::Use { path, .. } = &stmt.kind {
+            if !visited.insert(path.clone()) {
+                // Already pulled in via a shallower import.
+                continue;
+            }
+            let source = match resolver(path) {
+                Some(Ok(s)) => s,
+                _ => continue,
+            };
+            let imported_stmts = match crate::parse(&source) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // Same-name enums already declared in the root win
+            // (first-write-wins). Imported modules should only
+            // *supply* enums the root program doesn't already
+            // know about.
+            for (name, variants) in collect_enum_decls(&imported_stmts) {
+                enums.entry(name).or_insert(variants);
+            }
+            // Recurse so a module's own imports are followed.
+            collect_imported_enum_decls(&imported_stmts, resolver, enums, visited);
+        }
+    }
 }
 
 /// Walk every top-level `enum Foo { ... }` decl in the program
@@ -556,5 +637,129 @@ if true {
         let ws = warnings(src);
         assert_eq!(ws.len(), 1);
         assert!(ws[0].message.contains("`E::C`"));
+    }
+
+    // ─── Cross-import exhaustiveness ──────────────────────────────
+
+    /// Helper that wires a tiny `(&str, &str)` module map into
+    /// the resolver closure shape.
+    fn warnings_with_modules(
+        source: &str,
+        modules: &[(&str, &str)],
+    ) -> Vec<BopWarning> {
+        let stmts = parse(source).unwrap();
+        let mut resolver = |name: &str| -> Option<Result<String, crate::error::BopError>> {
+            modules
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, src)| Ok(String::from(*src)))
+        };
+        check_program_with_resolver(&stmts, &mut resolver)
+    }
+
+    #[test]
+    fn imported_enum_missing_variant_warns_via_resolver() {
+        // `use` brings `Shape` in from the `geom` module; the
+        // match under-covers (`Triangle` unhandled), so the
+        // checker — now that it follows the import — fires a
+        // warning naming the missing variant.
+        let ws = warnings_with_modules(
+            r#"use geom
+let s = Shape::Circle(5)
+let _ = match s {
+    Shape::Circle(r) => r,
+    Shape::Square(s) => s,
+}"#,
+            &[("geom", "enum Shape { Circle(r), Square(s), Triangle }")],
+        );
+        assert_eq!(ws.len(), 1);
+        assert!(
+            ws[0].message.contains("`Shape::Triangle`"),
+            "got: {}",
+            ws[0].message
+        );
+    }
+
+    #[test]
+    fn imported_enum_exhaustive_match_produces_no_warning_via_resolver() {
+        let ws = warnings_with_modules(
+            r#"use geom
+let s = Shape::Circle(5)
+let _ = match s {
+    Shape::Circle(r) => r,
+    Shape::Square(s) => s,
+    Shape::Triangle => 0,
+}"#,
+            &[("geom", "enum Shape { Circle(r), Square(s), Triangle }")],
+        );
+        assert!(
+            ws.is_empty(),
+            "expected no warnings when all variants covered, got: {:?}",
+            ws
+        );
+    }
+
+    #[test]
+    fn transitive_imported_enum_is_picked_up() {
+        // `a` re-exports via `use b`; the root's match over
+        // the enum declared in `b` should still be checkable.
+        let ws = warnings_with_modules(
+            r#"use a
+let c = Color::Red
+let _ = match c {
+    Color::Red => "r",
+    Color::Blue => "b",
+}"#,
+            &[
+                ("a", "use b"),
+                ("b", "enum Color { Red, Blue, Green }"),
+            ],
+        );
+        assert_eq!(ws.len(), 1);
+        assert!(
+            ws[0].message.contains("`Color::Green`"),
+            "got: {}",
+            ws[0].message
+        );
+    }
+
+    #[test]
+    fn unresolvable_module_is_silently_skipped() {
+        // Resolver returns None → the checker treats the
+        // enum as opaque and suppresses the warning rather
+        // than raising a hard error. Matches the advisory
+        // nature of `check_program`.
+        let ws = warnings_with_modules(
+            r#"use missing
+let c = Color::Red
+let _ = match c {
+    Color::Red => 1,
+}"#,
+            &[],
+        );
+        assert!(ws.is_empty());
+    }
+
+    #[test]
+    fn root_enum_shadows_imported_same_name() {
+        // If the root program declares `Color` too, the
+        // root's definition wins (first-write-wins). The
+        // imported enum's variants don't leak into the
+        // check.
+        let ws = warnings_with_modules(
+            r#"use paint
+enum Color { Red, Blue }
+let c = Color::Red
+let _ = match c {
+    Color::Red => 1,
+    Color::Blue => 2,
+}"#,
+            &[("paint", "enum Color { Red, Green, Yellow }")],
+        );
+        assert!(
+            ws.is_empty(),
+            "expected no warning: root's Color is fully covered, got: {:?}",
+            ws
+        );
     }
 }

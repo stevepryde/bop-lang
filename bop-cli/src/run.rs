@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use bop::BopLimits;
+use bop::{BopHost, BopLimits};
 use bop_sys::StdHost;
 
 /// Read `path`, run the match-exhaustiveness / warning pass, and
@@ -25,7 +25,16 @@ pub fn run_file(path: &str, no_vm: bool) -> ExitCode {
     // Static checks (match exhaustiveness) surface before any
     // program output. Parse errors fail fast; warnings are
     // informational.
-    match bop::parse_with_warnings(&source) {
+    //
+    // We hand the checker a module resolver built from a
+    // dedicated `StdHost` — that way an exhaustiveness
+    // warning can fire on an imported enum, not just ones
+    // declared in the root file. The resolver borrow is
+    // scoped so we're free to build a fresh host for the
+    // actual run below.
+    let mut check_host = StdHost::new();
+    let resolver = |path: &str| check_host.resolve_module(path);
+    match bop::parse_with_warnings_and_resolver(&source, resolver) {
         Ok((_stmts, warnings)) => {
             for w in &warnings {
                 eprint!("{}", w.render(&source));

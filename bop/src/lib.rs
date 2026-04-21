@@ -154,11 +154,38 @@ pub fn parse(source: &str) -> Result<Vec<Stmt>, BopError> {
 /// match-exhaustiveness). Prefer this over [`parse`] in tools
 /// that surface diagnostics to users — the CLI uses it to
 /// print warnings before running the program.
+///
+/// Imported enums are opaque at this layer — see
+/// [`parse_with_warnings_and_resolver`] for a variant that
+/// walks `use` statements to pick up imported enum decls so
+/// exhaustiveness warnings fire on them too.
 pub fn parse_with_warnings(
     source: &str,
 ) -> Result<(Vec<Stmt>, Vec<error::BopWarning>), BopError> {
     let stmts = parse(source)?;
     let warnings = check::check_program(&stmts);
+    Ok((stmts, warnings))
+}
+
+/// Like [`parse_with_warnings`] but follows every top-level
+/// `use` statement via the supplied resolver so the
+/// exhaustiveness check can see imported enums. `resolver`
+/// has the same shape as [`BopHost::resolve_module`].
+///
+/// Returning `Some(Err(_))` or `None` from `resolver` is
+/// *not* propagated — the checker silently falls back to
+/// treating that module's enums as opaque, same as
+/// [`parse_with_warnings`]. Only a parse error of the root
+/// `source` is surfaced.
+pub fn parse_with_warnings_and_resolver<R>(
+    source: &str,
+    mut resolver: R,
+) -> Result<(Vec<Stmt>, Vec<error::BopWarning>), BopError>
+where
+    R: FnMut(&str) -> Option<Result<String, BopError>>,
+{
+    let stmts = parse(source)?;
+    let warnings = check::check_program_with_resolver(&stmts, &mut resolver);
     Ok((stmts, warnings))
 }
 
