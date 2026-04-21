@@ -1,79 +1,55 @@
-use std::io::{self, BufRead, Write};
+//! The `bop` command-line interface.
+//!
+//! Subcommands:
+//!
+//! | command                  | what it does                                |
+//! |--------------------------|---------------------------------------------|
+//! | (no args)                | opens the REPL                              |
+//! | `repl`                   | opens the REPL (explicit)                   |
+//! | `run FILE`               | executes `FILE` with the bytecode VM        |
+//! | `run --novm FILE`        | executes `FILE` with the tree-walker        |
+//! | `compile FILE`           | AOT-transpiles and builds a native binary   |
+//! | `compile --emit-rs FILE` | emits the transpiled Rust source only       |
+//!
+//! The default `run` path goes through the bytecode VM — it's
+//! 2–3× faster than the walker on realistic workloads and the
+//! semantics are identical. `--novm` is kept as an escape hatch
+//! for debugging or when binary size matters.
 
-use bop::BopLimits;
-use bop_sys::StdHost;
+use std::process::ExitCode;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
+mod args;
+mod compile;
+mod repl;
+mod run;
 
-    if args.len() > 1 {
-        // File execution mode
-        let path = &args[1];
-        let source = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error reading {}: {}", path, e);
-                std::process::exit(1);
-            }
-        };
-        // Run the static-check pass first so warnings surface
-        // before any program output. Parse errors fail fast;
-        // warnings are informational and don't block
-        // execution. On a successful check we continue into
-        // `bop::run` which does its own parse again —
-        // acceptable overhead for now.
-        match bop::parse_with_warnings(&source) {
-            Ok((_stmts, warnings)) => {
-                for w in &warnings {
-                    eprint!("{}", w.render(&source));
-                }
-            }
-            Err(e) => {
-                eprint!("{}", e.render(&source));
-                std::process::exit(1);
-            }
+fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().collect();
+    let cmd = match args::parse(&argv) {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("{msg}");
+            eprintln!();
+            args::print_usage();
+            return ExitCode::from(2);
         }
-        let mut host = StdHost::new();
-        if let Err(e) = bop::run(&source, &mut host, &BopLimits::standard()) {
-            // Render with the source so parse errors show the
-            // offending line + a carat under the column. Runtime
-            // errors (no column) still get the snippet.
-            eprint!("{}", e.render(&source));
-            std::process::exit(1);
+    };
+    match cmd {
+        args::Command::Repl => repl::run(),
+        args::Command::Run { file, no_vm } => run::run_file(&file, no_vm),
+        args::Command::Compile {
+            file,
+            output,
+            emit_rs,
+            keep,
+        } => compile::compile_file(&file, output.as_deref(), emit_rs, keep),
+        args::Command::Help => {
+            args::print_usage();
+            ExitCode::SUCCESS
         }
-    } else {
-        // REPL mode
-        repl();
-    }
-}
-
-fn repl() {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-
-    let mut host = StdHost::new();
-
-    print!("> ");
-    stdout.flush().unwrap();
-
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-
-        if line.trim().is_empty() {
-            print!("> ");
-            stdout.flush().unwrap();
-            continue;
+        args::Command::Version => {
+            println!("bop {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
         }
-
-        match bop::run(&line, &mut host, &BopLimits::standard()) {
-            Ok(()) => {}
-            Err(e) => eprint!("{}", e.render(&line)),
-        }
-
-        print!("> ");
-        stdout.flush().unwrap();
     }
 }

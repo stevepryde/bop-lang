@@ -3,11 +3,12 @@ name = "bop-cli"
 description = "CLI and REPL for the Bop programming language"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-readme = "../README.md"
+readme = "README.md"
 keywords = ["language", "interpreter", "scripting", "repl"]
 categories = ["compilers", "command-line-utilities"]
 
@@ -16,5 +17,15 @@ name = "bop"
 path = "src/main.rs"
 
 [dependencies]
-bop = { version = "0.2.0", path = "../bop", package = "bop-lang" }
-bop-sys = { version = "0.2.0", path = "../bop-sys" }
+bop = { version = "0.3.0", path = "../bop", package = "bop-lang" }
+bop-sys = { version = "0.3.0", path = "../bop-sys" }
+# The `run` subcommand defaults to the bytecode VM (2–3× faster
+# than the tree-walker). `--novm` forces the walker path.
+bop-vm = { version = "0.3.0", path = "../bop-vm" }
+# `bop compile` emits Rust via the AOT transpiler, then (by
+# default) invokes cargo to produce a native binary.
+bop-compile = { version = "0.3.0", path = "../bop-compile" }
+# Needed so `bop compile`'s scratch crate can resolve `import
+# std.math` / `std.json` / etc. — the stdlib is bundled Bop
+# source strings.
+bop-std = { version = "0.3.0", path = "../bop-std" }
