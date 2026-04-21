@@ -24,11 +24,7 @@
 //! should implement [`BopHost`] directly or wrap these helpers.
 
 #[cfg(not(feature = "std"))]
-use alloc::{
-    borrow::ToOwned,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;

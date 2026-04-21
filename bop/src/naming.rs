@@ -30,7 +30,7 @@
 //! still expose them.
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc::{format, string::String};
 
 /// The shape bucket an identifier string belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

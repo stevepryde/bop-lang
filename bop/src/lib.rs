@@ -1430,7 +1430,20 @@ repeat 500 {
 
     #[test]
     fn safety_deep_recursion_halts() {
-        let msg = run_err_with_limits("fn f() { f() }\nf()", tight_limits());
+        // Run the recursing program on a worker thread with a
+        // generous stack budget. Debug builds grow each walker
+        // frame enough that the default ~2 MiB stack can abort
+        // (SIGABRT) before the engine's 64-frame call-depth cap
+        // fires — which would look like a crash rather than the
+        // clean "too many nested function calls" the sandbox
+        // promises. 8 MiB comfortably fits `MAX_CALL_DEPTH`
+        // walker frames with debug frame bloat, and release
+        // builds never needed the headroom.
+        let handle = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| run_err_with_limits("fn f() { f() }\nf()", tight_limits()))
+            .expect("spawn recursion test thread");
+        let msg = handle.join().expect("recursion test thread panicked");
         assert!(
             msg.contains("nested function calls") || msg.contains("recursion"),
             "got: {}", msg

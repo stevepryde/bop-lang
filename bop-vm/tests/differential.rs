@@ -2464,7 +2464,18 @@ repeat 500 {
 
 #[test]
 fn safety_deep_recursion_halts() {
-    let msg = run_err_with_limits("fn f() { f() }\nf()", tight());
+    // The VM runs bytecode, but the differential harness
+    // executes both engines — the walker's recursive
+    // `call_bop_fn` path eats real Rust stack per frame, and
+    // debug-build frame bloat can blow the default ~2 MiB
+    // thread stack before the engine's `MAX_CALL_DEPTH = 64`
+    // cap fires. Run both engines on a fatter worker thread so
+    // we observe the clean sandbox error instead of SIGABRT.
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| run_err_with_limits("fn f() { f() }\nf()", tight()))
+        .expect("spawn recursion test thread");
+    let msg = handle.join().expect("recursion test thread panicked");
     assert!(
         msg.contains("nested function calls") || msg.contains("recursion"),
         "got: {}",

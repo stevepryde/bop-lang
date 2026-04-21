@@ -7,7 +7,7 @@
 //! this module cannot access the private inner fields.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, format, rc::Rc, string::{String, ToString}, vec, vec::Vec};
+use alloc::{boxed::Box, format, rc::Rc, string::{String, ToString}, vec::Vec};
 
 #[cfg(feature = "std")]
 use std::rc::Rc;

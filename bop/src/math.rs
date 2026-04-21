@@ -24,7 +24,11 @@
 //! Building with `default-features = false` and no `no_std`
 //! feature is a compile error: there's no floating-point math
 //! library available on the target, and the bop engine can't
-//! reach the language's math builtins without one.
+//! reach the language's math builtins without one. The
+//! `compile_error!` below is the *primary* diagnostic users
+//! see; each fn also has a panicking fallback in the no-feature
+//! cfg branch so the compiler doesn't cascade into a pile of
+//! `expected f64, found ()` errors that would bury the real fix.
 
 #![allow(dead_code)]
 
@@ -36,6 +40,17 @@ compile_error!(
      re-enable the default `std` feature."
 );
 
+// The "no feature enabled" fallback for every 1-arg math fn —
+// keeps the function's return type `f64` under the broken cfg
+// so the type-checker doesn't chase the error into caller
+// sites. `compile_error!` above fires first at build time, so
+// this is genuinely unreachable.
+#[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+#[inline]
+fn no_feature_f1(_: f64) -> f64 {
+    unreachable!("enable `std` or `no_std` feature (see compile_error above)")
+}
+
 /// `√x`.
 #[inline]
 pub fn sqrt(x: f64) -> f64 {
@@ -46,6 +61,10 @@ pub fn sqrt(x: f64) -> f64 {
     #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::sqrt(x)
+    }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
     }
 }
 
@@ -60,6 +79,10 @@ pub fn sin(x: f64) -> f64 {
     {
         libm::sin(x)
     }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
+    }
 }
 
 /// `cos(x)` (radians).
@@ -72,6 +95,10 @@ pub fn cos(x: f64) -> f64 {
     #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::cos(x)
+    }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
     }
 }
 
@@ -86,6 +113,10 @@ pub fn tan(x: f64) -> f64 {
     {
         libm::tan(x)
     }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
+    }
 }
 
 /// `⌊x⌋` — largest integer ≤ x, as a float.
@@ -98,6 +129,10 @@ pub fn floor(x: f64) -> f64 {
     #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::floor(x)
+    }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
     }
 }
 
@@ -112,6 +147,10 @@ pub fn ceil(x: f64) -> f64 {
     {
         libm::ceil(x)
     }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
+    }
 }
 
 /// Round half-away-from-zero (matches `f64::round`).
@@ -124,6 +163,10 @@ pub fn round(x: f64) -> f64 {
     #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::round(x)
+    }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
     }
 }
 
@@ -138,6 +181,10 @@ pub fn trunc(x: f64) -> f64 {
     {
         libm::trunc(x)
     }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
+    }
 }
 
 /// `base ** exp` for floats.
@@ -150,6 +197,11 @@ pub fn powf(base: f64, exp: f64) -> f64 {
     #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::pow(base, exp)
+    }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        let _ = exp;
+        no_feature_f1(base)
     }
 }
 
@@ -164,6 +216,10 @@ pub fn ln(x: f64) -> f64 {
     {
         libm::log(x)
     }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
+    }
 }
 
 /// `e^x`.
@@ -176,5 +232,9 @@ pub fn exp(x: f64) -> f64 {
     #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::exp(x)
+    }
+    #[cfg(all(not(feature = "std"), not(feature = "no_std")))]
+    {
+        no_feature_f1(x)
     }
 }
