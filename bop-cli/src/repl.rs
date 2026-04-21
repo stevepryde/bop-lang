@@ -61,7 +61,7 @@ use rustyline::{Context, Editor, Helper};
 const KEYWORDS: &[&str] = &[
     "let", "const", "fn", "if", "else", "while", "repeat", "for", "in",
     "return", "break", "continue", "match", "struct", "enum", "use",
-    "as", "true", "false", "none", "try", "and", "or", "not",
+    "as", "true", "false", "none", "try",
 ];
 
 /// Every meta-command the REPL recognises. Typing one of

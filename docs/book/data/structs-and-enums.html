@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>Structs &amp; Enums - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -177,103 +177,132 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
+                        <h1 id="structs--enums"><a class="header" href="#structs--enums">Structs &amp; Enums</a></h1>
+<p>Bop supports user-defined <strong>struct</strong> and <strong>enum</strong> types, with methods attached via <code>fn Type.method(self, ...)</code>. They give you type names in error messages, structural pattern matching, and an identity-aware equality.</p>
+<h2 id="structs"><a class="header" href="#structs">Structs</a></h2>
+<p>A <code>struct</code> is a named record — a set of fields in a declared order. Field names are the part that matters; types aren’t declared.</p>
+<pre><code class="language-bop">struct Point { x, y }
+struct Player { name, hp, inventory }
+</code></pre>
+<p>Create a value with <code>TypeName { field: value, ... }</code>:</p>
+<pre><code class="language-bop">let p = Point { x: 3, y: 4 }
+print(p)                  // Point { x: 3, y: 4 }
+print(p.x)                // 3
+print(type(p))            // "struct"
+</code></pre>
+<p>Construction is <strong>strict</strong>: fields you provide must match the declaration exactly (no unknown fields, no duplicates, no missing ones). Extra fields or typos become parse or runtime errors with a “did you mean?” suggestion.</p>
+<h3 id="field-access-and-assignment"><a class="header" href="#field-access-and-assignment">Field access and assignment</a></h3>
+<p>Read with <code>.field</code>, write with <code>.field = value</code> or any compound assignment:</p>
+<pre><code class="language-bop">let c = Counter { n: 10 }
+c.n += 5                 // works
+c.n *= 2                 // works
+print(c.n)               // 30
+</code></pre>
+<p>The field has to already exist; assigning to an undeclared field is an error.</p>
+<h3 id="passing-structs"><a class="header" href="#passing-structs">Passing structs</a></h3>
+<p>Structs follow Bop’s copy-by-value rule: passing one to a function, returning it, or assigning it to another variable makes an independent copy. Mutating the copy leaves the original alone.</p>
+<pre><code class="language-bop">fn grow(p) { p.x += 10; return p }
+
+let a = Point { x: 1, y: 2 }
+let b = grow(a)
+print(a)                 // Point { x: 1, y: 2 }
+print(b)                 // Point { x: 11, y: 2 }
+</code></pre>
+<h2 id="enums"><a class="header" href="#enums">Enums</a></h2>
+<p>An <code>enum</code> is a tagged union — one of several named variants, each with an optional payload:</p>
+<pre><code class="language-bop">enum Shape {
+  Circle(r),
+  Rectangle { w, h },
+  Empty,
 }
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
+<p>Variants come in three shapes:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Shape</th><th>Declaration</th><th>Construction</th></tr>
+</thead>
+<tbody>
+<tr><td>Unit</td><td><code>Empty</code></td><td><code>Shape::Empty</code></td></tr>
+<tr><td>Tuple</td><td><code>Circle(r)</code></td><td><code>Shape::Circle(5)</code></td></tr>
+<tr><td>Struct</td><td><code>Rectangle { w, h }</code></td><td><code>Shape::Rectangle { w: 4, h: 3 }</code></td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">let a = Shape::Circle(5)
+let b = Shape::Rectangle { w: 4, h: 3 }
+let c = Shape::Empty
+print(type(a))           // "enum"
 </code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
+<p>Variants with a struct payload expose their fields via <code>.field</code> just like structs:</p>
+<pre><code class="language-bop">let r = Shape::Rectangle { w: 4, h: 3 }
+print(r.w * r.h)         // 12
 </code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
-  }
-  i += 1
+<p>Short-name variants like <code>enum Dir { N, E, S, W }</code> are accepted — the case rule is “starts with an uppercase letter”, not “must contain a lowercase”.</p>
+<h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
+<p>Attach a method to a type with <code>fn Type.method(self, ...) { ... }</code>. The receiver arrives as the first parameter (called <code>self</code> by convention; any name works).</p>
+<pre><code class="language-bop">struct Point { x, y }
+
+fn Point.sum(self)      { return self.x + self.y }
+fn Point.moved(self, dx, dy) {
+  return Point { x: self.x + dx, y: self.y + dy }
 }
-print("Sum exceeded 100 at i=" + str(i))
+
+let p = Point { x: 3, y: 4 }
+print(p.sum())                   // 7
+print(p.moved(1, 1))             // Point { x: 4, y: 5 }
 </code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
-}
-print("Found " + str(count))
-</code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(str(i))     // 0, 1, 2, 3, 4
-}
-</code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(str(i))     // 2, 3, 4, 5, 6, 7
-}
-</code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
-}
-</code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = str(scores[name])
-  print(name + ": " + s)
-}
-</code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
-}
-</code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + str(row) + ", " + str(col) + ")")
+<p>For enums, methods dispatch on the enum type — not per-variant:</p>
+<pre><code class="language-bop">enum Shape { Circle(r), Rectangle { w, h } }
+
+fn Shape.area(self) {
+  return match self {
+    Shape::Circle(r)          =&gt; 3.14159 * r * r,
+    Shape::Rectangle { w, h } =&gt; w * h,
   }
 }
+
+print(Shape::Circle(3).area())                  // 28.27431
+print(Shape::Rectangle { w: 4, h: 3 }.area())   // 12
 </code></pre>
+<p>A user-declared method with the same name as a builtin (<code>len</code>, <code>keys</code>, etc.) <strong>wins</strong> over the builtin for receivers of that type — the precedence matches the walker, VM, and AOT.</p>
+<h3 id="methods-return-a-new-value"><a class="header" href="#methods-return-a-new-value">Methods return a new value</a></h3>
+<p>Because values are copy-by-value, a method can’t mutate the receiver in place. Return a new instance and reassign:</p>
+<pre><code class="language-bop">fn Point.shift(self, dx, dy) {
+  return Point { x: self.x + dx, y: self.y + dy }
+}
+
+let p = Point { x: 0, y: 0 }
+p = p.shift(3, 4)        // p is now Point { x: 3, y: 4 }
+</code></pre>
+<p>This plays well with fluent chains:</p>
+<pre><code class="language-bop">let final = Point { x: 0, y: 0 }
+  .shift(1, 0)
+  .shift(0, 2)
+  .shift(5, 5)
+</code></pre>
+<h2 id="equality"><a class="header" href="#equality">Equality</a></h2>
+<p>Two struct or enum values are equal when their <strong>full type identity</strong> — the module they were declared in plus the type name — <em>and</em> every payload matches structurally:</p>
+<pre><code class="language-bop">let p = Point { x: 1, y: 2 }
+let q = Point { x: 1, y: 2 }
+print(p == q)            // true (structural)
+
+let r = Point { x: 1, y: 3 }
+print(p == r)            // false (field differs)
+</code></pre>
+<p>Two types with the same name declared in different modules are <strong>distinct</strong> — see <a href="../modules.html#type-identity">Modules</a>.</p>
+<h2 id="redeclaring-the-same-shape-is-fine"><a class="header" href="#redeclaring-the-same-shape-is-fine">Redeclaring the same shape is fine</a></h2>
+<p>Declaring the exact same struct or enum twice inside one module is a no-op — matches the “idempotent re-import” rule <code>use</code> already follows. Declaring two different shapes with the same name in the same module is a hard error.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../data/dictionaries.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../functions/defining-functions.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +312,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../data/dictionaries.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../functions/defining-functions.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

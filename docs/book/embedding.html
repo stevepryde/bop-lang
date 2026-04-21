@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a90c2256.js";
+            window.path_to_searchindex_js = "searchindex-4c5f85d8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-3d459e96.js"></script>
+        <script src="toc-d974ebe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -178,14 +178,17 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="embedding-bop"><a class="header" href="#embedding-bop">Embedding Bop</a></h1>
-<p>Bop is designed to be embedded in Rust applications. You can add custom functions, capture output, and control execution through the <code>BopHost</code> trait.</p>
+<p>Bop is designed to be embedded in Rust applications. Three ways to run a program are available; every one uses the same <code>BopHost</code> trait as the integration seam for print output, custom functions, module resolution, timeouts, etc.</p>
 <h2 id="quick-start"><a class="header" href="#quick-start">Quick start</a></h2>
-<p>Add <code>bop-lang</code> to your <code>Cargo.toml</code>:</p>
+<p>Add the crates you need to <code>Cargo.toml</code>:</p>
 <pre><code class="language-toml">[dependencies]
-bop = { package = "bop-lang", version = "0.1" }
+bop = { package = "bop-lang", version = "0.3" }
+bop-sys = "0.3"          # optional — OS-backed standard host
+bop-vm = "0.3"           # optional — bytecode VM (faster per-fn cost)
 </code></pre>
-<p>Run a program with the default host:</p>
-<pre class="playground"><code class="language-rust">use bop::{run, StdHost, BopLimits};
+<p>Run a program with the standard host:</p>
+<pre class="playground"><code class="language-rust">use bop::BopLimits;
+use bop_sys::StandardHost;
 
 fn main() {
     let source = r#"
@@ -193,19 +196,52 @@ fn main() {
         print("Hello, {name}!")
     "#;
 
-    let mut host = StdHost;
-    let limits = BopLimits::standard();
+    let mut host = StandardHost::new();
 
-    if let Err(e) = run(source, &amp;mut host, &amp;limits) {
-        eprintln!("Error: {e}");
+    if let Err(e) = bop::run(source, &amp;mut host, &amp;BopLimits::standard()) {
+        eprintln!("{}", e.render(source));
     }
 }</code></pre>
-<h2 id="the-bophost-trait"><a class="header" href="#the-bophost-trait">The BopHost trait</a></h2>
-<p>The <code>BopHost</code> trait is the integration point between your application and the Bop interpreter:</p>
+<p><code>StandardHost</code> (aliased as <code>StdHost</code>) lives in <code>bop-sys</code> and is the OS-backed reference host. It supports <code>print()</code> output plus these host functions:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>readline()</code> / <code>readline(prompt)</code></td><td>Read one line from stdin; <code>none</code> at EOF</td></tr>
+<tr><td><code>read_file(path)</code></td><td>Read a UTF-8 file into a string</td></tr>
+<tr><td><code>write_file(path, contents)</code></td><td>Replace a file with string contents</td></tr>
+<tr><td><code>append_file(path, contents)</code></td><td>Append string contents to a file</td></tr>
+<tr><td><code>file_exists(path)</code></td><td><code>true</code> / <code>false</code></td></tr>
+<tr><td><code>env(name)</code></td><td>Environment variable, or <code>none</code> if missing</td></tr>
+<tr><td><code>unix_time()</code></td><td>Seconds since the epoch</td></tr>
+<tr><td><code>unix_time_ms()</code></td><td>Milliseconds since the epoch</td></tr>
+</tbody>
+</table>
+</div>
+<p>Call <code>StandardHost::new().with_module_root(&lt;path&gt;)</code> to enable filesystem module resolution: <code>use foo.bar.baz</code> maps to <code>&lt;root&gt;/foo/bar/baz.bop</code> with path-traversal guards.</p>
+<h2 id="three-engines-same-host"><a class="header" href="#three-engines-same-host">Three engines, same host</a></h2>
+<p>Bop ships three execution engines — all of them share the <code>BopHost</code> trait, <code>BopError</code>, <code>BopLimits</code>, and <code>Value</code> types, so the same program and host work with any of them. Pick whichever fits your workload:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Engine</th><th>Entry point</th><th>When it’s best</th></tr>
+</thead>
+<tbody>
+<tr><td>Tree-walker</td><td><code>bop::run(src, host, limits)</code></td><td>Lowest start-up cost. Best for one-off scripts, REPL, small inputs, no_std / wasm.</td></tr>
+<tr><td>Bytecode VM</td><td><code>bop_vm::run(src, host, limits)</code></td><td>2–3× faster than the walker on hot loops. Same program, no compilation to disk.</td></tr>
+<tr><td>AOT transpiler</td><td><code>bop_compile::transpile(src, opts)</code> → <code>cargo build</code></td><td>Bop → Rust source, compiled to a native binary. Maximum throughput, at the cost of a <code>cargo build</code> step.</td></tr>
+</tbody>
+</table>
+</div>
+<p>All three obey the same <code>BopLimits</code> and surface errors as <code>BopError</code> — the engine choice is an implementation detail from the host’s perspective.</p>
+<h2 id="the-bophost-trait"><a class="header" href="#the-bophost-trait">The <code>BopHost</code> trait</a></h2>
+<p>The <code>BopHost</code> trait is the integration point between your application and Bop:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub trait BopHost {
-    /// Called for unknown function names. Return `None` if not handled.
+    /// Called for unknown function names. `None` = not handled.
     fn call(
         &amp;mut self,
         name: &amp;str,
@@ -213,27 +249,30 @@ fn main() {
         line: u32,
     ) -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt;;
 
-    /// Called by `print()`. Default: writes to stdout.
-    fn on_print(&amp;mut self, message: &amp;str) {
-        println!("{}", message);
-    }
+    /// Called by `print()`. Default: drops the message.
+    fn on_print(&amp;mut self, message: &amp;str) { let _ = message; }
 
-    /// Hint text appended to "function not found" errors.
-    fn function_hint(&amp;self) -&gt; &amp;str {
-        ""
-    }
+    /// Appended to "function not found" errors as a
+    /// friendly hint (e.g. "Available functions: ...").
+    fn function_hint(&amp;self) -&gt; &amp;str { "" }
 
-    /// Called each tick (statement, loop iteration). Return Err to halt.
-    fn on_tick(&amp;mut self) -&gt; Result&lt;(), BopError&gt; {
-        Ok(())
-    }
+    /// Called at each interpreter tick (statement, loop
+    /// iteration, fn entry). Return `Err` to halt.
+    fn on_tick(&amp;mut self) -&gt; Result&lt;(), BopError&gt; { Ok(()) }
+
+    /// Resolve a `use` target to Bop source.
+    /// `None` = "not mine" (the runtime raises "module not
+    /// found"); `Some(Err(e))` = resolver failed (propagated).
+    fn resolve_module(&amp;mut self, name: &amp;str)
+        -&gt; Option&lt;Result&lt;String, BopError&gt;&gt;
+    { let _ = name; None }
 }
 <span class="boring">}</span></code></pre>
 <h3 id="call--custom-functions"><a class="header" href="#call--custom-functions"><code>call</code> — Custom functions</a></h3>
-<p>This is the primary extension point. When Bop encounters a function call that isn’t a built-in or user-defined function, it calls <code>host.call()</code>. Return <code>None</code> if you don’t handle the function name — Bop will report a “function not found” error. Return <code>Some(Ok(value))</code> on success, or <code>Some(Err(error))</code> to raise a runtime error.</p>
+<p>The primary extension point. When Bop encounters a function call that isn’t a built-in or user-defined fn, it asks the host. Return <code>None</code> if you don’t handle the name — Bop then surfaces “function not found” with the optional <code>function_hint</code>. Return <code>Some(Ok(v))</code> on success or <code>Some(Err(e))</code> to raise a runtime error.</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use bop::{BopHost, BopError, Value};
+</span>use bop::{BopError, BopHost, Value};
 
 struct MyHost;
 
@@ -245,73 +284,77 @@ impl BopHost for MyHost {
         line: u32,
     ) -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt; {
         match name {
-            "square" =&gt; {
-                if args.len() != 1 {
-                    return Some(Err(BopError::runtime(
-                        "square() takes 1 argument", line
-                    )));
-                }
-                match &amp;args[0] {
-                    Value::Number(n) =&gt; Some(Ok(Value::Number(n * n))),
-                    _ =&gt; Some(Err(BopError::runtime(
-                        "square() requires a number", line
-                    ))),
-                }
-            }
-            _ =&gt; None, // not handled
+            "square" =&gt; match args {
+                [Value::Int(n)]    =&gt; Some(Ok(Value::Int(n * n))),
+                [Value::Number(n)] =&gt; Some(Ok(Value::Number(n * n))),
+                _ =&gt; Some(Err(BopError::runtime(
+                    "square(n) expects one number", line
+                ))),
+            },
+            _ =&gt; None,
         }
     }
+
+    fn function_hint(&amp;self) -&gt; &amp;str {
+        "Custom functions: square(n)"
+    }
 }
 <span class="boring">}</span></code></pre>
-<p>Bop scripts can then call <code>square()</code> as if it were built-in:</p>
-<pre><code class="language-bop">let result = square(5)
-print(str(result))    // 25
-</code></pre>
+<p>Bop scripts now call <code>square(5)</code> as if it were built-in.</p>
 <h3 id="on_print--capturing-output"><a class="header" href="#on_print--capturing-output"><code>on_print</code> — Capturing output</a></h3>
-<p>Override <code>on_print</code> to redirect <code>print()</code> output to a buffer, log, UI widget, or anywhere else:</p>
+<p>Override <code>on_print</code> to redirect <code>print()</code> output to a buffer, log, UI widget — anywhere that isn’t stdout:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>struct BufferedHost {
-    output: Vec&lt;String&gt;,
-}
+</span>struct Buffered { output: Vec&lt;String&gt; }
 
-impl BopHost for BufferedHost {
+impl BopHost for Buffered {
     fn call(&amp;mut self, _: &amp;str, _: &amp;[Value], _: u32)
-        -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt;
-    {
-        None
-    }
-
-    fn on_print(&amp;mut self, message: &amp;str) {
-        self.output.push(message.to_string());
-    }
+        -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt; { None }
+    fn on_print(&amp;mut self, msg: &amp;str) { self.output.push(msg.into()); }
 }
 <span class="boring">}</span></code></pre>
-<h3 id="on_tick--execution-control"><a class="header" href="#on_tick--execution-control"><code>on_tick</code> — Execution control</a></h3>
-<p><code>on_tick</code> is called on every interpreter step (each statement, loop iteration, etc.). Use it for:</p>
+<h3 id="resolve_module--custom-use-resolution"><a class="header" href="#resolve_module--custom-use-resolution"><code>resolve_module</code> — Custom <code>use</code> resolution</a></h3>
+<p>Supply module source for <code>use path.to.module</code> statements. Return:</p>
 <ul>
-<li><strong>Timeouts</strong> — check elapsed time and halt if exceeded</li>
-<li><strong>Cancellation</strong> — check a flag set by another thread</li>
-<li><strong>Progress tracking</strong> — count steps or update a progress bar</li>
+<li><code>Some(Ok(source))</code> — the module’s source text (Bop parses and executes it).</li>
+<li><code>Some(Err(err))</code> — resolver error; propagated to the user.</li>
+<li><code>None</code> — “not my module”; Bop raises “module <code>foo</code> not found”.</li>
+</ul>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>impl BopHost for MyHost {
+    fn resolve_module(&amp;mut self, name: &amp;str)
+        -&gt; Option&lt;Result&lt;String, BopError&gt;&gt;
+    {
+        match name {
+            "greetings" =&gt; Some(Ok(r#"
+                fn hello(who) { return "hi " + who }
+            "#.into())),
+            _ =&gt; None,
+        }
+    }
+    // ... call, etc.
+}
+<span class="boring">}</span></code></pre>
+<p><code>bop::host::resolve_from_map</code> and <code>bop::host::StringModuleHost</code> (below) are ready-made helpers that cover the common “in-memory module table” pattern.</p>
+<h3 id="on_tick--execution-control"><a class="header" href="#on_tick--execution-control"><code>on_tick</code> — Execution control</a></h3>
+<p>Called on every tick — fn entry, loop iteration, most statements. Use it for:</p>
+<ul>
+<li><strong>Timeouts</strong> — check elapsed time and halt.</li>
+<li><strong>Cancellation</strong> — read a <code>&amp;AtomicBool</code> set by another thread.</li>
+<li><strong>Progress tracking</strong> — increment a counter or refresh a progress bar.</li>
 </ul>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use std::time::{Duration, Instant};
 
-struct TimedHost {
-    start: Instant,
-    timeout: Duration,
-}
+struct Timed { start: Instant, budget: Duration }
 
-impl BopHost for TimedHost {
+impl BopHost for Timed {
     fn call(&amp;mut self, _: &amp;str, _: &amp;[Value], _: u32)
-        -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt;
-    {
-        None
-    }
-
+        -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt; { None }
     fn on_tick(&amp;mut self) -&gt; Result&lt;(), BopError&gt; {
-        if self.start.elapsed() &gt; self.timeout {
+        if self.start.elapsed() &gt; self.budget {
             Err(BopError::runtime("execution timed out", 0))
         } else {
             Ok(())
@@ -319,24 +362,27 @@ impl BopHost for TimedHost {
     }
 }
 <span class="boring">}</span></code></pre>
-<h3 id="function_hint--better-error-messages"><a class="header" href="#function_hint--better-error-messages"><code>function_hint</code> — Better error messages</a></h3>
-<p>Return a hint string that gets appended to “function not found” errors. This helps guide users toward the functions your host provides:</p>
+<p><code>on_tick</code> errors count as runtime errors — they can be caught by <code>try_call</code> inside Bop. Use <code>BopError::fatal</code> instead if you need the halt to be uncatchable:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>fn function_hint(&amp;self) -&gt; &amp;str {
-    "Available functions: square(), cube(), sqrt()"
+</span>fn on_tick(&amp;mut self) -&gt; Result&lt;(), BopError&gt; {
+    if cancel_flag.load(Ordering::Relaxed) {
+        Err(BopError::fatal("cancelled", 0))   // `try_call` won't swallow this
+    } else {
+        Ok(())
+    }
 }
 <span class="boring">}</span></code></pre>
 <h2 id="resource-limits"><a class="header" href="#resource-limits">Resource limits</a></h2>
-<p><code>BopLimits</code> controls how much work a script can do:</p>
+<p><code>BopLimits</code> controls how much work a program can do before it’s killed with a fatal error:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub struct BopLimits {
-    pub max_steps: u64,      // loop iterations, statements, etc.
-    pub max_memory: usize,   // bytes for strings + arrays
+    pub max_steps: u64,      // tick budget
+    pub max_memory: usize,   // bytes for strings + arrays + structs
 }
 <span class="boring">}</span></code></pre>
-<p>Two presets are provided:</p>
+<p>Two presets:</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -348,24 +394,134 @@ impl BopHost for TimedHost {
 </tbody>
 </table>
 </div>
-<p>Or create your own:</p>
+<p>Custom:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>let limits = BopLimits {
     max_steps: 50_000,
-    max_memory: 32 * 1024 * 1024, // 32 MB
+    max_memory: 32 * 1024 * 1024,
 };
 <span class="boring">}</span></code></pre>
-<p>When a limit is exceeded, <code>run()</code> returns a <code>BopError</code> — the script is halted cleanly without panicking.</p>
+<p>Limit violations are <strong>fatal</strong> — <code>try_call</code> in user code can’t swallow them.</p>
+<h2 id="ready-made-host-helpers"><a class="header" href="#ready-made-host-helpers">Ready-made host helpers</a></h2>
+<p><code>bop::host</code> bundles the two most common host shapes so embedders don’t have to hand-roll them.</p>
+<h3 id="bophostresolve_from_mapentries"><a class="header" href="#bophostresolve_from_mapentries"><code>bop::host::resolve_from_map(entries)</code></a></h3>
+<p>Build a <code>resolve_module</code>-compatible closure from any iterable of <code>(name, source)</code> pairs. Drop it inside your own <code>BopHost</code> impl:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop::host::resolve_from_map;
+
+struct MyHost { resolve: Box&lt;dyn Fn(&amp;str) -&gt; Option&lt;Result&lt;String, BopError&gt;&gt;&gt; }
+
+impl MyHost {
+    fn new() -&gt; Self {
+        let resolve = resolve_from_map([
+            ("greetings", "fn hello() { return \"hi\" }"),
+            ("math_ext",  "fn sq(n) { return n * n }"),
+        ]);
+        Self { resolve: Box::new(resolve) }
+    }
+}
+
+impl BopHost for MyHost {
+    // ...
+    fn resolve_module(&amp;mut self, name: &amp;str)
+        -&gt; Option&lt;Result&lt;String, BopError&gt;&gt;
+    { (self.resolve)(name) }
+}
+<span class="boring">}</span></code></pre>
+<h3 id="bophoststringmodulehost"><a class="header" href="#bophoststringmodulehost"><code>bop::host::StringModuleHost</code></a></h3>
+<p>A minimal full <code>BopHost</code> implementation — captures prints to an in-memory vec and resolves modules from a string map. Useful for tests and playgrounds:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop::host::StringModuleHost;
+use bop::BopLimits;
+
+let mut host = StringModuleHost::new([
+    ("greetings", "fn hello(who) { return \"hi \" + who }"),
+]);
+
+bop::run(
+    r#"use greetings
+print(hello("Bop"))"#,
+    &amp;mut host,
+    &amp;BopLimits::standard(),
+).unwrap();
+
+assert_eq!(host.output(), "hi Bop");
+<span class="boring">}</span></code></pre>
+<h2 id="stateful-repl-sessions"><a class="header" href="#stateful-repl-sessions">Stateful REPL sessions</a></h2>
+<p><code>bop::ReplSession</code> carries <code>let</code> bindings, <code>fn</code> declarations, user types, methods, module aliases, and the import cache across <code>eval</code> calls. Use it when you want “one Bop interpreter, many user inputs” — interactive REPLs, notebook cells, per-request scripting.</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop::{BopLimits, ReplSession};
+use bop_sys::StandardHost;
+
+let mut session = ReplSession::new();
+let mut host = StandardHost::new();
+
+session.eval("let x = 5", &amp;mut host, &amp;BopLimits::standard()).unwrap();
+session.eval("let y = x + 3", &amp;mut host, &amp;BopLimits::standard()).unwrap();
+
+// `eval` returns `Ok(Some(v))` when the last statement is a bare
+// expression; `Ok(None)` for `let` / `fn` / `use` / etc.
+let r = session.eval("y * 2", &amp;mut host, &amp;BopLimits::standard()).unwrap();
+assert!(matches!(r, Some(bop::Value::Int(16))));
+
+// Introspection.
+assert!(session.get("x").is_some());
+assert_eq!(session.binding_names(), vec!["x".to_string(), "y".to_string()]);
+<span class="boring">}</span></code></pre>
+<p>Each <code>eval</code> still respects the <code>BopLimits</code> you pass — useful if you want to allow a higher step budget per cell than for a batch-run program. The built-in <code>bop</code> CLI’s <code>repl</code> subcommand is the canonical consumer: it adds rustyline, multi-line input, <code>:help</code> / <code>:vars</code> / <code>:reset</code> / <code>:quit</code> meta-commands, tab completion, and a persistent history file. See <a href="repl.html">REPL</a> for the user-facing view.</p>
+<h2 id="error-rendering"><a class="header" href="#error-rendering">Error rendering</a></h2>
+<p><code>BopError::render(source)</code> produces a terminal-friendly error with a source snippet and a <code>^</code> carat under the offending column (when the error carries column info). Parse errors always have columns; runtime errors do when the failing expression was parsed from source.</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>match bop::run(src, &amp;mut host, &amp;BopLimits::standard()) {
+    Ok(()) =&gt; {}
+    Err(e) =&gt; eprintln!("{}", e.render(src)),
+}
+<span class="boring">}</span></code></pre>
+<p>Typical output:</p>
+<pre><code>error: Variable `undefined` not found
+  --&gt; line 2:7
+  |
+2 | print(undefined)
+  |       ^
+hint: Did you forget to create it with `let`?
+</code></pre>
 <h2 id="putting-it-all-together"><a class="header" href="#putting-it-all-together">Putting it all together</a></h2>
-<p>Here’s a complete example of a host that provides domain-specific functions, captures output, and enforces a timeout:</p>
-<pre class="playground"><code class="language-rust">use bop::{run, BopHost, BopError, BopLimits, Value};
+<p>A complete host that provides domain-specific functions, captures output, resolves modules from memory, and enforces a timeout:</p>
+<pre class="playground"><code class="language-rust">use bop::{BopError, BopHost, BopLimits, Value};
+use bop::host::resolve_from_map;
 use std::time::{Duration, Instant};
 
 struct AppHost {
     output: Vec&lt;String&gt;,
     start: Instant,
     data: Vec&lt;f64&gt;,
+    resolve: Box&lt;dyn Fn(&amp;str) -&gt; Option&lt;Result&lt;String, BopError&gt;&gt;&gt;,
+}
+
+impl AppHost {
+    fn new() -&gt; Self {
+        let resolve = resolve_from_map([
+            ("stats_helpers", r#"
+                fn median(xs) {
+                    let sorted = xs
+                    sorted.sort()
+                    let mid = int(len(sorted) / 2)
+                    return sorted[mid]
+                }
+            "#),
+        ]);
+        Self {
+            output: vec![],
+            start: Instant::now(),
+            data: vec![],
+            resolve: Box::new(resolve),
+        }
+    }
 }
 
 impl BopHost for AppHost {
@@ -376,16 +532,11 @@ impl BopHost for AppHost {
         line: u32,
     ) -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt; {
         match name {
-            "add_data" =&gt; {
-                if let Some(Value::Number(n)) = args.first() {
-                    self.data.push(*n);
-                    Some(Ok(Value::None))
-                } else {
-                    Some(Err(BopError::runtime(
-                        "add_data() requires a number", line
-                    )))
-                }
-            }
+            "add_data" =&gt; match args {
+                [Value::Int(n)]    =&gt; { self.data.push(*n as f64); Some(Ok(Value::None)) }
+                [Value::Number(n)] =&gt; { self.data.push(*n);       Some(Ok(Value::None)) }
+                _ =&gt; Some(Err(BopError::runtime("add_data(n) expects a number", line))),
+            },
             "average" =&gt; {
                 if self.data.is_empty() {
                     Some(Ok(Value::Number(0.0)))
@@ -404,38 +555,38 @@ impl BopHost for AppHost {
 
     fn on_tick(&amp;mut self) -&gt; Result&lt;(), BopError&gt; {
         if self.start.elapsed() &gt; Duration::from_secs(5) {
-            Err(BopError::runtime("timed out", 0))
+            Err(BopError::fatal("timed out", 0))
         } else {
             Ok(())
         }
     }
 
     fn function_hint(&amp;self) -&gt; &amp;str {
-        "Available: add_data(n), average()"
+        "Custom host: add_data(n), average()"
     }
+
+    fn resolve_module(&amp;mut self, name: &amp;str)
+        -&gt; Option&lt;Result&lt;String, BopError&gt;&gt;
+    { (self.resolve)(name) }
 }
 
 fn main() {
     let source = r#"
+        use stats_helpers
         for n in [10, 20, 30, 40, 50] {
             add_data(n)
         }
-        print("Average: " + str(average()))
+        let avg = average()
+        let mid = median([10, 20, 30, 40, 50])
+        print("Average: " + str(avg) + ", median: " + str(mid))
     "#;
 
-    let mut host = AppHost {
-        output: vec![],
-        start: Instant::now(),
-        data: vec![],
-    };
-
-    match run(source, &amp;mut host, &amp;BopLimits::standard()) {
+    let mut host = AppHost::new();
+    match bop::run(source, &amp;mut host, &amp;BopLimits::standard()) {
         Ok(()) =&gt; {
-            for line in &amp;host.output {
-                println!("{line}");
-            }
+            for line in &amp;host.output { println!("{}", line); }
         }
-        Err(e) =&gt; eprintln!("Script error: {e}"),
+        Err(e) =&gt; eprintln!("{}", e.render(source)),
     }
 }</code></pre>
 
@@ -468,22 +619,6 @@ fn main() {
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

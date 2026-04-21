@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-a90c2256.js";
+            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-3d459e96.js"></script>
+        <script src="../toc-d974ebe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -178,30 +178,43 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="operators"><a class="header" href="#operators">Operators</a></h1>
-<p>All Bop operators, grouped by category. No operator overloading — each operator works on specific types and produces an error on type mismatch.</p>
+<p>All Bop operators, grouped by category. No operator overloading — each operator works on specific types and produces a runtime error on type mismatch.</p>
 <h2 id="arithmetic"><a class="header" href="#arithmetic">Arithmetic</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Operator</th><th>Name</th><th>Types</th><th>Notes</th></tr>
+<tr><th>Operator</th><th>Name</th><th>Operands</th><th>Notes</th></tr>
 </thead>
 <tbody>
-<tr><td><code>+</code></td><td>Add</td><td>number</td><td>Also concatenates strings: <code>"a" + "b"</code> → <code>"ab"</code></td></tr>
-<tr><td><code>-</code></td><td>Subtract</td><td>number</td><td>Also unary negation: <code>-x</code></td></tr>
-<tr><td><code>*</code></td><td>Multiply</td><td>number</td><td></td></tr>
-<tr><td><code>/</code></td><td>Divide</td><td>number</td><td>Always produces float: <code>7 / 2</code> → <code>3.5</code></td></tr>
-<tr><td><code>%</code></td><td>Modulo</td><td>number</td><td></td></tr>
+<tr><td><code>+</code></td><td>Add</td><td><code>int</code>, <code>number</code>, <code>string</code>, <code>array</code></td><td>String + anything concats after stringifying the other side. Array + array concatenates.</td></tr>
+<tr><td><code>-</code></td><td>Subtract</td><td><code>int</code>, <code>number</code></td><td>Also unary negation: <code>-x</code></td></tr>
+<tr><td><code>*</code></td><td>Multiply</td><td><code>int</code>, <code>number</code>, or <code>string * int</code></td><td><code>"ab" * 3</code> → <code>"ababab"</code></td></tr>
+<tr><td><code>/</code></td><td>Divide</td><td><code>int</code>, <code>number</code></td><td>Always returns <code>number</code>: <code>7 / 2</code> → <code>3.5</code>, <code>6 / 2</code> → <code>3</code> (as number)</td></tr>
+<tr><td><code>%</code></td><td>Modulo</td><td><code>int</code>, <code>number</code></td><td>Same sign as the dividend</td></tr>
 </tbody>
 </table>
 </div>
 <pre><code class="language-bop">print(10 + 3)      // 13
 print(10 - 3)      // 7
 print(10 * 3)      // 30
-print(10 / 3)      // 3.333...
+print(10 / 3)      // 3.3333333333333335
 print(10 % 3)      // 1
 
 print("Hello" + " " + "world")    // "Hello world"
+print([1, 2] + [3])                // [1, 2, 3]
+print("ha" * 3)                    // "hahaha"
 </code></pre>
+<h3 id="integer-results"><a class="header" href="#integer-results">Integer results</a></h3>
+<p>There is no dedicated integer-division operator. <code>/</code> always widens to <code>number</code>, which avoids the classic “1 / 2 == 0” footgun. When you need an integer result, cast with <code>int(...)</code>:</p>
+<pre><code class="language-bop">let mid = int((low + high) / 2)
+</code></pre>
+<p><code>int(x)</code> truncates toward zero; <code>abs(x)</code> preserves the numeric type.</p>
+<h3 id="overflow-and-divide-by-zero"><a class="header" href="#overflow-and-divide-by-zero">Overflow and divide-by-zero</a></h3>
+<ul>
+<li><code>int + int</code>, <code>int - int</code>, <code>int * int</code> use checked arithmetic — overflow is a runtime error, not silent wrap.</li>
+<li>Division / modulo by zero raises a runtime error.</li>
+<li><code>int / number</code> or <code>number / int</code> widens to <code>number</code> (IEEE-754 rules; division by 0.0 is still a runtime error in Bop).</li>
+</ul>
 <h2 id="comparison"><a class="header" href="#comparison">Comparison</a></h2>
 <div class="table-wrapper">
 <table>
@@ -209,19 +222,29 @@ print("Hello" + " " + "world")    // "Hello world"
 <tr><th>Operator</th><th>Name</th><th>Returns</th></tr>
 </thead>
 <tbody>
-<tr><td><code>==</code></td><td>Equal</td><td>bool</td></tr>
-<tr><td><code>!=</code></td><td>Not equal</td><td>bool</td></tr>
-<tr><td><code>&lt;</code></td><td>Less than</td><td>bool</td></tr>
-<tr><td><code>&gt;</code></td><td>Greater than</td><td>bool</td></tr>
-<tr><td><code>&lt;=</code></td><td>Less or equal</td><td>bool</td></tr>
-<tr><td><code>&gt;=</code></td><td>Greater or equal</td><td>bool</td></tr>
+<tr><td><code>==</code></td><td>Equal</td><td><code>bool</code></td></tr>
+<tr><td><code>!=</code></td><td>Not equal</td><td><code>bool</code></td></tr>
+<tr><td><code>&lt;</code></td><td>Less than</td><td><code>bool</code></td></tr>
+<tr><td><code>&gt;</code></td><td>Greater than</td><td><code>bool</code></td></tr>
+<tr><td><code>&lt;=</code></td><td>Less or equal</td><td><code>bool</code></td></tr>
+<tr><td><code>&gt;=</code></td><td>Greater or equal</td><td><code>bool</code></td></tr>
 </tbody>
 </table>
 </div>
-<p><code>==</code> and <code>!=</code> work on all types. Comparing different types is always <code>false</code> (no implicit coercion). <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code> work on numbers and strings (lexicographic).</p>
-<pre><code class="language-bop">print(5 == 5)         // true
-print(5 == "5")       // false (different types)
-print("abc" &lt; "def")  // true (lexicographic)
+<h3 id="equality--"><a class="header" href="#equality--">Equality (<code>==</code>, <code>!=</code>)</a></h3>
+<p>Works on every type. Arrays and dicts compare structurally (element-wise, then entry-wise). User-defined struct and enum values compare by full type identity <code>(declaring module, type name)</code> plus their payloads — two structs with the same name declared in different modules are <em>not</em> equal even with matching field values.</p>
+<pre><code class="language-bop">print(5 == 5)                   // true
+print(5 == "5")                 // false    (different types)
+print(1 == 1.0)                 // true     (int ↔ number cross-type)
+print([1, 2] == [1, 2])         // true     (structural)
+print({"a": 1} == {"a": 1})     // true
+</code></pre>
+<h3 id="ordering----"><a class="header" href="#ordering----">Ordering (<code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code>)</a></h3>
+<p>Numeric (<code>int</code> + <code>number</code>, with cross-type widening) and strings (lexicographic) only. Applying an ordering operator to anything else raises a runtime error.</p>
+<pre><code class="language-bop">print(3 &lt; 5)                    // true
+print(1 &gt; 0.5)                  // true     (int &gt; number)
+print("abc" &lt; "def")            // true     (lexicographic)
+// print([1, 2] &lt; [3])          // error    — can't use `&lt;` with array
 </code></pre>
 <h2 id="boolean"><a class="header" href="#boolean">Boolean</a></h2>
 <div class="table-wrapper">
@@ -236,6 +259,7 @@ print("abc" &lt; "def")  // true (lexicographic)
 </tbody>
 </table>
 </div>
+<p>There are no word-spelled aliases — <code>and</code>, <code>or</code>, <code>not</code> are not keywords.</p>
 <p>Short-circuiting means the second operand isn’t evaluated if the first determines the result:</p>
 <pre><code class="language-bop">// &amp;&amp; stops at the first false
 if x &gt; 0 &amp;&amp; x &lt; 100 {
@@ -252,6 +276,8 @@ if !found {
   print("Still searching...")
 }
 </code></pre>
+<h3 id="truthiness"><a class="header" href="#truthiness">Truthiness</a></h3>
+<p><code>false</code> and <code>none</code> are falsy; every other value (including <code>0</code>, <code>""</code>, <code>[]</code>, <code>{}</code>) is truthy.</p>
 <h2 id="assignment"><a class="header" href="#assignment">Assignment</a></h2>
 <div class="table-wrapper">
 <table>
@@ -273,8 +299,41 @@ score += 10    // 10
 score -= 3     // 7
 score *= 2     // 14
 </code></pre>
+<p>Assignment targets can be:</p>
+<ul>
+<li>Bare identifiers: <code>x = ...</code></li>
+<li>Index positions: <code>items[0] = ...</code>, <code>dict["key"] = ...</code></li>
+<li>Struct fields: <code>point.x = ...</code></li>
+</ul>
+<p>Reassigning an all-caps identifier is a parse error (“can’t reassign a constant”).</p>
+<h2 id="field-access--method-call"><a class="header" href="#field-access--method-call">Field access / method call</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Operator</th><th>What it does</th></tr>
+</thead>
+<tbody>
+<tr><td><code>.field</code></td><td>Read a struct field or enum struct-variant payload field</td></tr>
+<tr><td><code>.method(...)</code></td><td>Call a builtin method (on arrays / strings / dicts) or a user-declared method</td></tr>
+<tr><td><code>[idx]</code></td><td>Index into an array / string / dict</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-bop">let p = Point { x: 3, y: 4 }
+print(p.x)               // 3
+print(p.sum())           // calls user method `fn Point.sum`
+print([1, 2, 3].len())   // 3
+print("hello".upper())   // "HELLO"
+</code></pre>
+<h2 id="try"><a class="header" href="#try"><code>try</code></a></h2>
+<p><code>try expr</code> is a unary prefix that unwraps <code>Result::Ok(v)</code> to <code>v</code> or propagates <code>Err(e)</code> to the enclosing function’s caller. See <a href="../errors.html">Error Handling</a>.</p>
+<pre><code class="language-bop">fn parse_and_double(s) {
+  let n = try string_to_int(s)    // returns Err early on failure
+  return Result::Ok(n * 2)
+}
+</code></pre>
 <h2 id="conditional-expressions"><a class="header" href="#conditional-expressions">Conditional expressions</a></h2>
-<p>Bop has no ternary operator (<code>?:</code>). Use <code>if/else</code> as an expression instead:</p>
+<p>Bop has no ternary operator (<code>?:</code>). Use <code>if/else</code> as an expression:</p>
 <pre><code class="language-bop">let label = if count &gt; 3 { "lots" } else { "few" }
 </code></pre>
 <p>Both branches are required when <code>if/else</code> is used as an expression. The last expression in each branch is the value.</p>
@@ -286,14 +345,15 @@ score *= 2     // 14
 <tr><th>Priority</th><th>Operators</th></tr>
 </thead>
 <tbody>
-<tr><td>1</td><td><code>!</code>, <code>-</code> (unary)</td></tr>
-<tr><td>2</td><td><code>*</code>, <code>/</code>, <code>%</code></td></tr>
-<tr><td>3</td><td><code>+</code>, <code>-</code></td></tr>
-<tr><td>4</td><td><code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code></td></tr>
-<tr><td>5</td><td><code>==</code>, <code>!=</code></td></tr>
-<tr><td>6</td><td><code>&amp;&amp;</code></td></tr>
-<tr><td>7</td><td><code>||</code></td></tr>
-<tr><td>8</td><td><code>=</code>, <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code>, <code>%=</code></td></tr>
+<tr><td>1</td><td><code>.field</code>, <code>.method(...)</code>, <code>[idx]</code>, <code>(args)</code>, postfix</td></tr>
+<tr><td>2</td><td><code>!</code>, <code>-</code> (unary), <code>try</code></td></tr>
+<tr><td>3</td><td><code>*</code>, <code>/</code>, <code>%</code></td></tr>
+<tr><td>4</td><td><code>+</code>, <code>-</code></td></tr>
+<tr><td>5</td><td><code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code></td></tr>
+<tr><td>6</td><td><code>==</code>, <code>!=</code></td></tr>
+<tr><td>7</td><td><code>&amp;&amp;</code></td></tr>
+<tr><td>8</td><td><code>||</code></td></tr>
+<tr><td>9</td><td><code>=</code>, <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code>, <code>%=</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -305,7 +365,7 @@ score *= 2     // 14
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../functions/defining-functions.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../repl.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
@@ -319,7 +379,7 @@ score *= 2     // 14
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../functions/defining-functions.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../repl.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
@@ -336,22 +396,6 @@ score *= 2     // 14
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

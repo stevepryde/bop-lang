@@ -15,12 +15,12 @@ if count > 3 {
 > **Important:** The opening `{` must be on the same line as its keyword. Bop automatically inserts semicolons at the end of lines, so putting `{` on the next line would cause a parse error.
 
 ```bop
-# Good
+// Good
 if count > 3 {
   print("Nice!")
 }
 
-# Bad — will cause an error
+// Bad — will cause an error
 if count > 3
 {
   print("Nice!")
@@ -44,14 +44,14 @@ let x = 1; let y = 2
 
 ## Comments
 
-Line comments start with `#`. Everything after `#` on that line is ignored:
+Line comments start with `//`. Everything after `//` on that line is ignored:
 
 ```bop
-# This is a comment
-let x = 5   # So is this
+// This is a comment
+let x = 5   // So is this
 ```
 
-There is no block-comment syntax. `//` is the **integer-division operator**, not a comment marker.
+There is no block-comment syntax. `#` is **not** a comment leader — a stray `#` produces a lexer error.
 
 ## Identifiers
 

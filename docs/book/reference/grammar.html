@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-a90c2256.js";
+            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-3d459e96.js"></script>
+        <script src="../toc-d974ebe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -180,56 +180,75 @@
                         <h1 id="grammar"><a class="header" href="#grammar">Grammar</a></h1>
 <p>An informal grammar for the Bop language, plus the complete list of reserved words.</p>
 <h2 id="reserved-words"><a class="header" href="#reserved-words">Reserved words</a></h2>
-<pre><code>let fn return if else while for in repeat break continue
+<pre><code>let const fn return
+if else while for in repeat break continue
+use as struct enum match try
 true false none
 </code></pre>
-<p>These cannot be used as variable or function names.</p>
+<p>These can’t be used as variable or function names. There are no word-spelled logical operators — use <code>&amp;&amp;</code>, <code>||</code>, <code>!</code> rather than <code>and</code>, <code>or</code>, <code>not</code>.</p>
 <h2 id="built-in-functions"><a class="header" href="#built-in-functions">Built-in functions</a></h2>
-<p>Built-in functions available everywhere:</p>
+<p>Always in scope; can’t be shadowed by user fns. See <a href="builtins.html">Built-in Functions</a> for details.</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Function</th><th>Returns</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>range(n)</code></td><td>array</td><td><code>[0, 1, ..., n-1]</code></td></tr>
-<tr><td><code>range(start, end)</code></td><td>array</td><td><code>[start, start+1, ..., end-1]</code> (auto-detects direction)</td></tr>
-<tr><td><code>range(start, end, step)</code></td><td>array</td><td>Sequence with custom step</td></tr>
-<tr><td><code>str(x)</code></td><td>string</td><td>Convert any value to string</td></tr>
-<tr><td><code>int(x)</code></td><td>number</td><td>Truncate to integer, or parse string</td></tr>
-<tr><td><code>type(x)</code></td><td>string</td><td>Type name: <code>"number"</code>, <code>"string"</code>, <code>"bool"</code>, <code>"none"</code>, <code>"array"</code>, <code>"dict"</code></td></tr>
-<tr><td><code>abs(x)</code></td><td>number</td><td>Absolute value</td></tr>
-<tr><td><code>min(a, b)</code></td><td>number</td><td>Smaller of two numbers</td></tr>
-<tr><td><code>max(a, b)</code></td><td>number</td><td>Larger of two numbers</td></tr>
-<tr><td><code>rand(n)</code></td><td>number</td><td>Random integer 0 to n-1</td></tr>
-<tr><td><code>len(x)</code></td><td>number</td><td>Length of string, array, or dict</td></tr>
-<tr><td><code>print(args...)</code></td><td>none</td><td>Print values separated by spaces</td></tr>
-<tr><td><code>inspect(x)</code></td><td>string</td><td>Debug representation (strings quoted)</td></tr>
+<tr><td><code>range(n)</code> / <code>range(s, e)</code> / <code>range(s, e, step)</code></td><td>array</td><td>Integer range</td></tr>
+<tr><td><code>str(x)</code></td><td>string</td><td>Display-based string conversion</td></tr>
+<tr><td><code>int(x)</code></td><td>int</td><td>Truncate / parse to <code>int</code></td></tr>
+<tr><td><code>float(x)</code></td><td>number</td><td>Widen / parse to <code>number</code></td></tr>
+<tr><td><code>type(x)</code></td><td>string</td><td>One of <code>int</code>, <code>number</code>, <code>string</code>, <code>bool</code>, <code>none</code>, <code>array</code>, <code>dict</code>, <code>fn</code>, <code>struct</code>, <code>enum</code>, <code>module</code></td></tr>
+<tr><td><code>abs(x)</code></td><td>int / number</td><td>Absolute value (preserves type)</td></tr>
+<tr><td><code>min(a, b)</code> / <code>max(a, b)</code></td><td>int / number</td><td>Pair-wise min / max</td></tr>
+<tr><td><code>rand(n)</code></td><td>int</td><td>Pseudo-random <code>0..n</code></td></tr>
+<tr><td><code>len(x)</code></td><td>int</td><td>Length of string / array / dict</td></tr>
+<tr><td><code>print(args...)</code></td><td>none</td><td>Host-captured output</td></tr>
+<tr><td><code>inspect(x)</code></td><td>string</td><td>Debug repr (strings quoted)</td></tr>
+<tr><td><code>try_call(f)</code></td><td>Result</td><td>Run <code>f</code>, return <code>Ok(v)</code> or <code>Err(RuntimeError)</code></td></tr>
+<tr><td><code>sqrt</code>, <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>floor</code>, <code>ceil</code>, <code>round</code>, <code>pow</code>, <code>log</code>, <code>exp</code></td><td>int / number</td><td>Math</td></tr>
 </tbody>
 </table>
 </div>
 <h2 id="grammar-1"><a class="header" href="#grammar-1">Grammar</a></h2>
+<p>Informal EBNF. Whitespace is insignificant <em>except</em> for newlines, which auto-insert semicolons (see below).</p>
 <pre><code>program     = statement*
-statement   = letDecl | assignment | ifStmt | whileStmt | repeatStmt
+statement   = letDecl | constDecl | assign | ifStmt | whileStmt | repeatStmt
             | forStmt | fnDecl | returnStmt | breakStmt | continueStmt
+            | useStmt | structDecl | enumDecl | methodDecl
             | exprStmt
 
 letDecl     = "let" IDENT "=" expr
-assignment  = target ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
-target      = IDENT | expr "[" expr "]"
+constDecl   = "const" IDENT "=" expr
+assign      = target ("=" | "+=" | "-=" | "*=" | "/=" | "%=") expr
+target      = IDENT | postfix "[" expr "]" | postfix "." IDENT
 
-ifStmt      = "if" expr "{" statement* "}"
-              ("else" "if" expr "{" statement* "}")*
-              ("else" "{" statement* "}")?
-whileStmt   = "while" expr "{" statement* "}"
-repeatStmt  = "repeat" expr "{" statement* "}"
-forStmt     = "for" IDENT "in" expr "{" statement* "}"
-fnDecl      = "fn" IDENT "(" params? ")" "{" statement* "}"
+ifStmt      = "if" expr block ("else" "if" expr block)* ("else" block)?
+whileStmt   = "while" expr block
+repeatStmt  = "repeat" expr block
+forStmt     = "for" IDENT "in" expr block
+fnDecl      = "fn" IDENT "(" params? ")" block
 returnStmt  = "return" expr?
 breakStmt   = "break"
 continueStmt = "continue"
 
+useStmt     = "use" path
+            | "use" path "." "{" IDENT ("," IDENT)* "}"
+            | "use" path "as" IDENT
+            | "use" path "." "{" IDENT ("," IDENT)* "}" "as" IDENT
+path        = IDENT ("." IDENT)*
+
+structDecl  = "struct" IDENT "{" fields? "}"
+fields      = IDENT ("," IDENT)*
+enumDecl    = "enum" IDENT "{" variants? "}"
+variants    = variant ("," variant)*
+variant     = IDENT                                             // unit
+            | IDENT "(" IDENT ("," IDENT)* ")"                  // tuple
+            | IDENT "{" IDENT ("," IDENT)* "}"                  // struct
+methodDecl  = "fn" IDENT "." IDENT "(" params ")" block
+
 exprStmt    = expr
+block       = "{" statement* "}"
 
 expr        = or
 or          = and ("||" and)*
@@ -238,26 +257,47 @@ equality    = comparison (("==" | "!=") comparison)*
 comparison  = addition (("&lt;" | "&gt;" | "&lt;=" | "&gt;=") addition)*
 addition    = multiply (("+" | "-") multiply)*
 multiply    = unary (("*" | "/" | "%") unary)*
-unary       = ("!" | "-") unary | postfix
-postfix     = primary (call | index | method)*
+unary       = ("!" | "-" | "try") unary | postfix
+postfix     = primary (call | index | field | method | structLit | variantCtor)*
 call        = "(" args? ")"
 index       = "[" expr "]"
+field       = "." IDENT
 method      = "." IDENT "(" args? ")"
-primary     = NUMBER | STRING | "true" | "false" | "none"
+structLit   = "{" (IDENT ":" expr ("," IDENT ":" expr)*)? "}"   // only at expr position
+variantCtor = "::" IDENT payload?
+payload     = "(" expr ("," expr)* ")"                          // tuple variant
+            | "{" IDENT ":" expr ("," IDENT ":" expr)* "}"      // struct variant
+
+primary     = INT | NUMBER | STRING | "true" | "false" | "none"
             | IDENT | "(" expr ")" | arrayLit | dictLit
-            | ifExpr
+            | ifExpr | matchExpr | fnExpr
 
 arrayLit    = "[" (expr ("," expr)*)? "]"
 dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)*)? "}"
 ifExpr      = "if" expr "{" expr "}" "else" "{" expr "}"
+matchExpr   = "match" expr "{" arm ("," arm)* ","? "}"
+arm         = pattern ("if" expr)? "=&gt;" expr
+fnExpr      = "fn" "(" params? ")" block
+
+pattern     = orPattern
+orPattern   = singlePattern ("|" singlePattern)*
+singlePattern = "_" | IDENT | literal | variantPattern | structPattern | arrayPattern
+variantPattern = (IDENT ".")? IDENT "::" IDENT
+              | (IDENT ".")? IDENT "::" IDENT "(" pattern ("," pattern)* ")"
+              | (IDENT ".")? IDENT "::" IDENT "{" IDENT ":" pattern ("," IDENT ":" pattern)* "}"
+structPattern  = (IDENT ".")? IDENT "{" IDENT ":" pattern ("," IDENT ":" pattern)* "}"
+arrayPattern   = "[" patternList? arrayRest? "]"
+patternList    = pattern ("," pattern)*
+arrayRest      = ".." | ".." IDENT
 
 params      = IDENT ("," IDENT)*
 args        = expr ("," expr)*
 </code></pre>
+<p>Note: <code>methodDecl</code>, enum variant <code>IDENT</code>s, and <code>struct</code> names must start with an uppercase letter. <code>IDENT</code> bound by <code>let</code>, <code>fn</code>, parameters, <code>for</code>, etc. must start with lowercase or <code>_</code>. <code>const</code> names must be all-caps. Mis-shaped declarations parse-error with a “did you mean?” suggestion — see <a href="../basics/variables.html#name-shapes-are-checked">Variables</a>.</p>
 <h2 id="automatic-semicolons"><a class="header" href="#automatic-semicolons">Automatic semicolons</a></h2>
 <p>Bop automatically inserts a semicolon at the end of a line if the last token is one of:</p>
 <ul>
-<li>An identifier or literal</li>
+<li>An identifier or literal (<code>int</code>, <code>number</code>, <code>string</code>)</li>
 <li><code>true</code>, <code>false</code>, <code>none</code></li>
 <li><code>break</code>, <code>continue</code>, <code>return</code></li>
 <li><code>)</code>, <code>]</code>, <code>}</code></li>
@@ -274,13 +314,22 @@ if x &gt; 3
   print("yes")
 }
 </code></pre>
+<p>You can also separate statements on the same line with an explicit <code>;</code>:</p>
+<pre><code class="language-bop">let x = 1; let y = 2
+</code></pre>
+<h2 id="comments"><a class="header" href="#comments">Comments</a></h2>
+<p><code>//</code> starts a line comment — everything to the end of line is ignored:</p>
+<pre><code class="language-bop">// Whole-line comment
+let x = 5   // Inline trailing comment
+</code></pre>
+<p>There’s no block-comment syntax.</p>
 <h2 id="string-interpolation"><a class="header" href="#string-interpolation">String interpolation</a></h2>
 <p>Inside double-quoted strings, <code>{identifier}</code> inserts the value of a variable. Only plain variable names are allowed — no expressions, operators, or function calls:</p>
 <pre><code class="language-bop">let name = "Alice"
 print("Hello, {name}!")     // works
 // print("Hello, {1 + 2}!")  // error — expressions not allowed
 </code></pre>
-<p>Use <code>\{</code> and <code>\}</code> for literal braces in strings.</p>
+<p>Use <code>\{</code> and <code>\}</code> for literal braces in strings. Other supported escapes: <code>\"</code>, <code>\\</code>, <code>\n</code>, <code>\t</code>, <code>\r</code>.</p>
 
                     </main>
 
@@ -317,22 +366,6 @@ print("Hello, {name}!")     // works
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

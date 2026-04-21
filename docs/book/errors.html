@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>Error Handling - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -12,33 +12,33 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="../favicon-de23e50b.svg">
-        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
-        <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
-        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
-        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
-        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
-            const path_to_root = "../";
+            const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "searchindex-4c5f85d8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="toc-d974ebe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -105,7 +105,7 @@
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
-                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
             </noscript>
             <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -140,7 +140,7 @@
                     <h1 class="menu-title">The Bop Language</h1>
 
                     <div class="right-buttons">
-                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
                             <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
                         </a>
                         <a href="https://github.com/stevepryde/bop-lang" title="Git repository" aria-label="Git repository">
@@ -177,103 +177,126 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
+                        <h1 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h1>
+<p>Bop uses a <code>Result</code>-shaped value model for recoverable errors, with two language features that make it ergonomic:</p>
+<ul>
+<li><code>try</code> — unwrap an <code>Ok(v)</code> or propagate an <code>Err(e)</code> up to the enclosing function.</li>
+<li><code>try_call(f)</code> — run a zero-arg callable, catch any runtime error, and return the outcome as a <code>Result</code>.</li>
+</ul>
+<p>Both <code>Result</code> and <code>RuntimeError</code> are <strong>engine built-ins</strong> — always in scope, never need <code>use std.result</code> to exist. (The <code>std.result</code> module exists for combinators, not for the types.)</p>
+<h2 id="the-result-type"><a class="header" href="#the-result-type">The <code>Result</code> type</a></h2>
+<pre><code>enum Result {
+  Ok(value),
+  Err(error),
 }
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
-</code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
-</code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
+<p>By convention, <code>Ok(v)</code> carries the successful value and <code>Err(e)</code> carries whatever describes the failure — a string, a struct, anything. Values from fallible operations are the typical shape:</p>
+<pre><code class="language-bop">fn parse_positive(s) {
+  let n = int(s)
+  if n &lt;= 0 {
+    return Result::Err("must be positive, got {n}")
   }
-  i += 1
+  return Result::Ok(n)
 }
-print("Sum exceeded 100 at i=" + str(i))
+
+print(parse_positive("42"))    // Result::Ok(42)
+print(parse_positive("-3"))    // Result::Err("must be positive, got -3")
 </code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
+<h2 id="the-try-operator"><a class="header" href="#the-try-operator">The <code>try</code> operator</a></h2>
+<p><code>try expr</code> evaluates <code>expr</code> and:</p>
+<ul>
+<li>If the result is <code>Result::Ok(v)</code>, unwraps it to <code>v</code>.</li>
+<li>If the result is <code>Result::Err(e)</code>, immediately returns <code>e</code> from the enclosing function as-is (wrapped in the same <code>Err</code> variant the caller will see).</li>
+<li>If the result is anything else (not <code>Result</code>-shaped), raises a runtime error.</li>
+</ul>
+<pre><code class="language-bop">fn pipeline(s) {
+  let n = try parse_positive(s)        // Err propagates; Ok unwraps to `n`
+  let doubled = try double_checked(n)
+  return Result::Ok(doubled)
 }
-print("Found " + str(count))
+
+print(pipeline("21"))    // Result::Ok(42)
+print(pipeline("-3"))    // Result::Err("must be positive, got -3")
 </code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(str(i))     // 0, 1, 2, 3, 4
-}
+<p>Because <code>try</code> propagates by returning from the <em>enclosing function</em>, it only works inside fn bodies. A top-level <code>try</code> that hits an <code>Err</code> raises a runtime error — wrap the call site in a fn.</p>
+<h3 id="unit-ok"><a class="header" href="#unit-ok">Unit-Ok</a></h3>
+<p><code>try Result::Ok</code> with no payload (or <code>try Result::Ok</code> where <code>Ok</code> is a unit variant) yields <code>none</code>. Mostly relevant for APIs where the success case carries no meaningful value.</p>
+<h2 id="try_callf"><a class="header" href="#try_callf"><code>try_call(f)</code></a></h2>
+<p>Catch runtime errors from a zero-arg callable. Returns <code>Result::Ok(value)</code> on success or <code>Result::Err(RuntimeError { message, line })</code> on a caught error.</p>
+<pre><code class="language-bop">let r = try_call(fn() { return 1 / 0 })
+
+print(match r {
+  Result::Ok(v)                      =&gt; "got {v}",
+  Result::Err(RuntimeError { message, line }) =&gt;
+    "failed at line {line}: {message}",
+})
+// failed at line 1: Division by zero
 </code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(str(i))     // 2, 3, 4, 5, 6, 7
-}
-</code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
-}
-</code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = str(scores[name])
-  print(name + ": " + s)
-}
-</code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
+<p><code>try_call</code> is Bop’s answer to exception-like error handling without exceptions. It <em>only</em> catches <strong>non-fatal</strong> errors. Fatal conditions — step-budget exhaustion, memory-limit violation, host <code>on_tick</code> returning <code>BopError::fatal</code> — are <strong>not</strong> caught. That keeps the sandbox invariant intact: a runaway loop can’t wrap itself in <code>try_call</code> and keep going.</p>
+<h3 id="runtimeerror--the-caught-error-shape"><a class="header" href="#runtimeerror--the-caught-error-shape"><code>RuntimeError</code> — the caught error shape</a></h3>
+<pre><code>struct RuntimeError {
+  message,   // string
+  line,      // int — 1-indexed source line of the failing expression
 }
 </code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + str(row) + ", " + str(col) + ")")
-  }
+<p>You can construct one explicitly (it’s a regular struct), but most of the time you’ll see them as the payload inside <code>Result::Err(...)</code> returned from <code>try_call</code>.</p>
+<h2 id="combinators--stdresult"><a class="header" href="#combinators--stdresult">Combinators — <code>std.result</code></a></h2>
+<p>The <code>std.result</code> module provides the usual Result helpers. All take a <code>Result</code> and don’t panic on <code>Err</code>:</p>
+<pre><code class="language-bop">use std.result
+
+print(is_ok(Result::Ok(1)))                  // true
+print(is_err(Result::Err("oops")))            // true
+
+// unwrap_or — default on Err
+print(unwrap_or(Result::Ok(10), 0))          // 10
+print(unwrap_or(Result::Err("fail"), 0))     // 0
+
+// map — transform the Ok payload, pass Err through
+print(map(Result::Ok(5), fn(n) { return n * n }))     // Result::Ok(25)
+print(map(Result::Err("x"), fn(n) { return n * n }))  // Result::Err("x")
+
+// and_then — monadic bind (for chaining fallible steps)
+fn halve(x) {
+  if x % 2 == 0 { return Result::Ok(int(x / 2)) }
+  return Result::Err("odd")
 }
+print(and_then(and_then(Result::Ok(8), halve), halve))   // Result::Ok(2)
+print(and_then(Result::Ok(7), halve))                     // Result::Err("odd")
 </code></pre>
+<p>Available: <code>is_ok</code>, <code>is_err</code>, <code>unwrap</code>, <code>expect</code>, <code>unwrap_or</code>, <code>map</code>, <code>map_err</code>, <code>and_then</code>.</p>
+<p><code>unwrap</code> and <code>expect</code> raise a runtime error on <code>Err</code> — use sparingly, and prefer <code>try</code> / pattern matching in production code.</p>
+<h2 id="when-to-use-which"><a class="header" href="#when-to-use-which">When to use which</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Situation</th><th>Use</th></tr>
+</thead>
+<tbody>
+<tr><td>Writing a fallible function</td><td>Return <code>Result::Ok(v)</code> / <code>Result::Err(e)</code></td></tr>
+<tr><td>Chaining several fallible calls</td><td><code>try</code> inside a fn, or <code>and_then</code></td></tr>
+<tr><td>Running user-supplied code with a safety net</td><td><code>try_call(fn() { ... })</code></td></tr>
+<tr><td>Handling every <code>Err</code> case explicitly</td><td><code>match</code></td></tr>
+<tr><td>You know it’s <code>Ok</code> and want the value</td><td><code>unwrap()</code> / <code>expect("...")</code> (sparingly)</td></tr>
+<tr><td>Supplying a default on <code>Err</code></td><td><code>unwrap_or(r, default)</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="fatal-vs-non-fatal"><a class="header" href="#fatal-vs-non-fatal">Fatal vs non-fatal</a></h2>
+<ul>
+<li><strong>Non-fatal</strong> (catchable by <code>try_call</code>): division by zero, “variable not found”, type mismatches, host-raised errors via <code>BopError::runtime</code>, wrong arg count, missing field, etc.</li>
+<li><strong>Fatal</strong> (not catchable): step-budget exceeded, memory-limit exceeded, fn-call-depth exceeded, host-raised <code>BopError::fatal</code>.</li>
+</ul>
+<p>A script can observe whether an error was fatal by inspecting whether <code>try_call</code> caught it — fatal errors propagate past <code>try_call</code> to the host.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="modules.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="repl.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +306,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="modules.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="repl.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -307,13 +330,13 @@ for ch in word {
         </script>
 
 
-        <script src="../elasticlunr-ef4e11c1.min.js"></script>
-        <script src="../mark-09e88c2c.min.js"></script>
-        <script src="../searcher-c2a407aa.js"></script>
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
 
-        <script src="../clipboard-1626706a.min.js"></script>
-        <script src="../highlight-c782337f.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-c782337f.js"></script>
+        <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
 

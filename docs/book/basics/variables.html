@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-a90c2256.js";
+            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-3d459e96.js"></script>
+        <script src="../toc-d974ebe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -191,18 +191,48 @@ let config = {"width": 10, "height": 5}
 <pre><code class="language-bop">let count = 5
 conut = 10    // Error: I don't know what 'conut' is — did you mean 'count'?
 </code></pre>
+<h2 id="constants"><a class="header" href="#constants">Constants</a></h2>
+<p>Use <code>const</code> for values that won’t change:</p>
+<pre><code class="language-bop">const PI = 3.14
+const MAX_SIZE = 100
+</code></pre>
+<p>Reassigning a constant is rejected at parse time — the compiler sees that the left-hand side is an all-caps identifier and refuses:</p>
+<pre><code class="language-bop">const MAX_SIZE = 100
+MAX_SIZE = 200      // Error: can't reassign a constant
+</code></pre>
+<p>Constants must be <strong>all-caps</strong> (with digits / underscores allowed). <code>const Pi = 3.14</code> is rejected: the parser will suggest <code>const PI = 3.14</code> instead.</p>
 <h2 id="reassignment"><a class="header" href="#reassignment">Reassignment</a></h2>
 <p>After declaration, reassign with just <code>=</code>:</p>
 <pre><code class="language-bop">let score = 0
 score = 10
 score += 5     // score is now 15
 </code></pre>
-<p>Compound assignment operators work too: <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code>, <code>%=</code>.</p>
+<p>Compound assignment operators: <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code>, <code>%=</code>.</p>
 <pre><code class="language-bop">let x = 10
 x += 3    // x = x + 3 → 13
 x -= 1    // x = x - 1 → 12
 x *= 2    // x = x * 2 → 24
 </code></pre>
+<h2 id="name-shapes-are-checked"><a class="header" href="#name-shapes-are-checked">Name shapes are checked</a></h2>
+<p>Bop enforces case conventions at declaration sites so intent is visible at a glance:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Declaration</th><th>Required shape</th></tr>
+</thead>
+<tbody>
+<tr><td><code>let x</code>, <code>fn foo(param)</code>, struct fields, match bindings, <code>for</code> variables, aliases</td><td>starts with lowercase or <code>_</code></td></tr>
+<tr><td><code>const FOO</code></td><td>all caps (+ digits / <code>_</code>)</td></tr>
+<tr><td><code>struct Point</code>, <code>enum Shape</code>, enum variants</td><td>starts with uppercase</td></tr>
+</tbody>
+</table>
+</div>
+<p>Mis-shaped declarations parse-error with a suggestion:</p>
+<pre><code class="language-bop">let Count = 5        // Error: names bound by `let` start with a lowercase letter. Try `count`?
+const pi = 3.14      // Error: `const` names are SCREAMING_SNAKE_CASE. Try `PI`?
+struct point {}      // Error: type names start with an uppercase letter. Try `Point`?
+</code></pre>
+<p>A leading underscore marks a name as “private by convention.” It doesn’t change the shape check — <code>_count</code> is still a lowercase-starting name — but glob <code>use</code> imports skip names that start with <code>_</code> (see <a href="../modules.html">Modules</a>).</p>
 <h2 id="block-scoping"><a class="header" href="#block-scoping">Block scoping</a></h2>
 <p>Variables are block-scoped — a variable declared inside <code>{ }</code> is not visible outside:</p>
 <pre><code class="language-bop">let x = 1
@@ -223,7 +253,7 @@ if true {
 print(x)         // 1 — outer x is unchanged
 </code></pre>
 <h2 id="copying-and-passing-values"><a class="header" href="#copying-and-passing-values">Copying and passing values</a></h2>
-<p>Every value in Bop is a <strong>copy</strong>. When you assign a variable, pass an argument to a function, or return a value, you get an independent copy — even for arrays and dicts. Changing the copy never affects the original.</p>
+<p>Every value in Bop is a <strong>copy</strong>. When you assign a variable, pass an argument to a function, or return a value, you get an independent copy — even for arrays, dicts, and structs. Changing the copy never affects the original.</p>
 <h3 id="assignment-copies"><a class="header" href="#assignment-copies">Assignment copies</a></h3>
 <pre><code class="language-bop">let a = [1, 2, 3]
 let b = a           // b is a separate copy
@@ -252,16 +282,16 @@ let original = [1, 2, 3]
 original = add_item(original, 99)
 print(original)      // [1, 2, 3, 99]
 </code></pre>
-<p>This works the same way for all types — numbers, strings, bools, arrays, and dicts are all copied. There are no references or shared mutable state in Bop.</p>
+<p>This applies to every value type — numbers, strings, bools, arrays, dicts, structs, enum variants. Closures (<code>Value::Fn</code>) and modules (<code>Value::Module</code>) are reference-counted, so passing one of those around is cheap and the shared state is visible from both handles.</p>
 <h2 id="dynamic-typing"><a class="header" href="#dynamic-typing">Dynamic typing</a></h2>
 <p>Variables can hold any type. You can even change the type of a variable by reassigning it:</p>
 <pre><code class="language-bop">let val = 42
-print(type(val))    // "number"
+print(type(val))    // "int"
 
 val = "hello"
 print(type(val))    // "string"
 </code></pre>
-<p>This flexibility is useful, but can be surprising if you’re not careful.</p>
+<p>This flexibility is useful but can be surprising — the error only surfaces when some later operation expects the original type. Case conventions help: a <code>count</code>-like variable holding a string usually means the wrong thing landed in it upstream.</p>
 
                     </main>
 
@@ -298,22 +328,6 @@ print(type(val))    // "string"
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

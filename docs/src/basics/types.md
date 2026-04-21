@@ -18,13 +18,13 @@ Bop is dynamically typed — variables can hold any type, and types are checked 
 
 ```bop
 let x = 42
-print(type(x))      # "int"
+print(type(x))      // "int"
 
 let y = 3.14
-print(type(y))      # "number"
+print(type(y))      // "number"
 
 let s = "hello"
-print(type(s))      # "string"
+print(type(s))      // "string"
 ```
 
 ## Integers and floats
@@ -32,33 +32,40 @@ print(type(s))      # "string"
 Integer literals (`42`, `-7`) produce `int` values; anything with a decimal point or `e`-exponent (`3.14`, `4.0`, `1e6`) produces `number`. The two coexist — arithmetic between them widens to `number`, and `==` compares numerically across the split:
 
 ```bop
-print(1 + 1)         # 2       (int + int → int)
-print(1 + 1.0)       # 2       (int + number → number, prints as whole)
-print(1 == 1.0)      # true    (cross-type numeric equality)
+print(1 + 1)         // 2       (int + int → int)
+print(1 + 1.0)       // 2       (int + number → number, prints as whole)
+print(1 == 1.0)      // true    (cross-type numeric equality)
 ```
 
 Use `int(x)` to truncate a number to an integer (toward zero), and `float(x)` to widen an int to a number:
 
 ```bop
-print(int(3.7))      # 3
-print(int(-2.7))     # -2
-print(float(5))      # 5       (now a number internally)
+print(int(3.7))      // 3
+print(int(-2.7))     // -2
+print(float(5))      // 5       (now a number internally)
 ```
 
 ### Division
 
-Bop has two division operators:
-
-- `/` always produces a `number`. `7 / 2` → `3.5`, `6 / 2` → `3` (whole, but still a number type).
-- `//` is **integer division** — truncates toward zero and always returns an `int`. `7 // 2` → `3`, `-7 // 2` → `-3`.
+`/` always produces a `number`, even for `int / int`:
 
 ```bop
-print(7 / 2)         # 3.5
-print(7 // 2)        # 3
-print(type(7 // 2))  # "int"
+print(7 / 2)           // 3.5
+print(6 / 2)           // 3        (whole value — still a number)
+print(type(6 / 2))     // "number"
 ```
 
-Both raise a runtime error on division by zero.
+This sidesteps the classic "1 / 2 == 0" footgun that trips beginners in C / Rust / Java.
+
+When you *do* want an integer result (index math, bucketing, etc.), coerce the quotient back with `int(...)`:
+
+```bop
+print(int(7 / 2))      // 3
+print(int(-7 / 2))     // -3
+print(type(int(7 / 2))) // "int"
+```
+
+`int(...)` truncates toward zero. `/` raises a runtime error on division by zero.
 
 ## Strings
 
@@ -73,11 +80,11 @@ Strings are indexable and iterable, but immutable — you can read characters bu
 
 ```bop
 let s = "hello"
-print(s[0])          # "h"
-print(s[-1])         # "o"
+print(s[0])          // "h"
+print(s[-1])         // "o"
 
 for ch in s {
-  print(ch)          # "h", "e", "l", "l", "o"
+  print(ch)          // "h", "e", "l", "l", "o"
 }
 ```
 
@@ -97,7 +104,7 @@ For computed values, store the result in a variable first:
 let doubled = count * 2
 print("Double: {doubled}")
 
-# Or use concatenation:
+// Or use concatenation:
 print("Double: " + str(count * 2))
 ```
 
@@ -105,7 +112,7 @@ To include a literal `{` or `}` in a string, escape it with a backslash:
 
 ```bop
 print("Use \{name\} for interpolation")
-# prints: Use {name} for interpolation
+// prints: Use {name} for interpolation
 ```
 
 ### String concatenation
@@ -113,8 +120,8 @@ print("Use \{name\} for interpolation")
 `+` joins two strings, or a string and a number (the number is converted first):
 
 ```bop
-print("Score: " + str(42))    # "Score: 42"
-print("n=" + 7)                # "n=7"   (int auto-stringified)
+print("Score: " + str(42))    // "Score: 42"
+print("n=" + 7)                // "n=7"   (int auto-stringified)
 ```
 
 ## Booleans
@@ -136,7 +143,7 @@ if found {
 ```bop
 let stats = {"hp": 10}
 let missing = stats["armor"]
-print(missing)    # none
+print(missing)    // none
 ```
 
 `none` is falsy in conditions; every other value except `false` is truthy.

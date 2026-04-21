@@ -21,6 +21,24 @@ let count = 5
 conut = 10    // Error: I don't know what 'conut' is — did you mean 'count'?
 ```
 
+## Constants
+
+Use `const` for values that won't change:
+
+```bop
+const PI = 3.14
+const MAX_SIZE = 100
+```
+
+Reassigning a constant is rejected at parse time — the compiler sees that the left-hand side is an all-caps identifier and refuses:
+
+```bop
+const MAX_SIZE = 100
+MAX_SIZE = 200      // Error: can't reassign a constant
+```
+
+Constants must be **all-caps** (with digits / underscores allowed). `const Pi = 3.14` is rejected: the parser will suggest `const PI = 3.14` instead.
+
 ## Reassignment
 
 After declaration, reassign with just `=`:
@@ -31,7 +49,7 @@ score = 10
 score += 5     // score is now 15
 ```
 
-Compound assignment operators work too: `+=`, `-=`, `*=`, `/=`, `%=`.
+Compound assignment operators: `+=`, `-=`, `*=`, `/=`, `%=`.
 
 ```bop
 let x = 10
@@ -39,6 +57,26 @@ x += 3    // x = x + 3 → 13
 x -= 1    // x = x - 1 → 12
 x *= 2    // x = x * 2 → 24
 ```
+
+## Name shapes are checked
+
+Bop enforces case conventions at declaration sites so intent is visible at a glance:
+
+| Declaration | Required shape |
+|-------------|----------------|
+| `let x`, `fn foo(param)`, struct fields, match bindings, `for` variables, aliases | starts with lowercase or `_` |
+| `const FOO` | all caps (+ digits / `_`) |
+| `struct Point`, `enum Shape`, enum variants | starts with uppercase |
+
+Mis-shaped declarations parse-error with a suggestion:
+
+```bop
+let Count = 5        // Error: names bound by `let` start with a lowercase letter. Try `count`?
+const pi = 3.14      // Error: `const` names are SCREAMING_SNAKE_CASE. Try `PI`?
+struct point {}      // Error: type names start with an uppercase letter. Try `Point`?
+```
+
+A leading underscore marks a name as "private by convention." It doesn't change the shape check — `_count` is still a lowercase-starting name — but glob `use` imports skip names that start with `_` (see [Modules](../modules.md)).
 
 ## Block scoping
 
@@ -69,7 +107,7 @@ print(x)         // 1 — outer x is unchanged
 
 ## Copying and passing values
 
-Every value in Bop is a **copy**. When you assign a variable, pass an argument to a function, or return a value, you get an independent copy — even for arrays and dicts. Changing the copy never affects the original.
+Every value in Bop is a **copy**. When you assign a variable, pass an argument to a function, or return a value, you get an independent copy — even for arrays, dicts, and structs. Changing the copy never affects the original.
 
 ### Assignment copies
 
@@ -109,7 +147,7 @@ original = add_item(original, 99)
 print(original)      // [1, 2, 3, 99]
 ```
 
-This works the same way for all types — numbers, strings, bools, arrays, and dicts are all copied. There are no references or shared mutable state in Bop.
+This applies to every value type — numbers, strings, bools, arrays, dicts, structs, enum variants. Closures (`Value::Fn`) and modules (`Value::Module`) are reference-counted, so passing one of those around is cheap and the shared state is visible from both handles.
 
 ## Dynamic typing
 
@@ -117,10 +155,10 @@ Variables can hold any type. You can even change the type of a variable by reass
 
 ```bop
 let val = 42
-print(type(val))    // "number"
+print(type(val))    // "int"
 
 val = "hello"
 print(type(val))    // "string"
 ```
 
-This flexibility is useful, but can be surprising if you're not careful.
+This flexibility is useful but can be surprising — the error only surfaces when some later operation expects the original type. Case conventions help: a `count`-like variable holding a string usually means the wrong thing landed in it upstream.

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>Modules - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -12,33 +12,33 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="../favicon-de23e50b.svg">
-        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
-        <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
-        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
-        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
-        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
-            const path_to_root = "../";
+            const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "searchindex-4c5f85d8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="toc-d974ebe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -105,7 +105,7 @@
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
-                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
             </noscript>
             <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -140,7 +140,7 @@
                     <h1 class="menu-title">The Bop Language</h1>
 
                     <div class="right-buttons">
-                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
                             <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
                         </a>
                         <a href="https://github.com/stevepryde/bop-lang" title="Git repository" aria-label="Git repository">
@@ -177,103 +177,130 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
-}
+                        <h1 id="modules"><a class="header" href="#modules">Modules</a></h1>
+<p>A Bop program can be split across multiple files — or in-memory source strings, asset bundles, anywhere the embedding host can return Bop source. The <code>use</code> statement pulls another module’s public surface into the current scope.</p>
+<h2 id="the-four-forms-of-use"><a class="header" href="#the-four-forms-of-use">The four forms of <code>use</code></a></h2>
+<pre><code class="language-bop">use path                    // glob:        everything public
+use path.{a, b, Type}       // selective:   just the listed items
+use path as m               // aliased:     binds `m` as a Value::Module
+use path.{a, b} as m        // aliased + selective
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
+<p>Paths are dot-joined identifiers: <code>std.math</code>, <code>game.entity.player</code>. How the host resolves a path is up to the embedder — <code>bop-sys</code>’s <code>StandardHost::with_module_root</code> maps <code>foo.bar</code> to <code>&lt;root&gt;/foo/bar.bop</code>, in-memory hosts can look up a string table, a web host can fetch a URL. See <a href="embedding.html#resolve_module--custom-use-resolution">Embedding</a>.</p>
+<h2 id="glob-use"><a class="header" href="#glob-use">Glob <code>use</code></a></h2>
+<p>Brings every public export of a module into the current scope as a bare name:</p>
+<pre><code class="language-bop">use std.math
+print(pi)            // constant from std.math
+print(sqrt(9))       // fn from std.math
 </code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
+<p>Names that start with <code>_</code> are considered <strong>private by convention</strong> and glob imports skip them:</p>
+<pre><code class="language-bop">// In module `foo`:
+fn _helper() { return 42 }
+fn public() { return _helper() }
+
+// Elsewhere:
+use foo
+print(public())      // 42
+// print(_helper())  // error: `_helper` not in scope
 </code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
+<p>Glob is idempotent at the injection site — running <code>use foo</code> twice in the same scope is a no-op (matches Python’s <code>import foo; import foo</code>). When two glob imports would introduce the same name, the first wins and the second emits a runtime warning — explicit selective imports are the way to disambiguate.</p>
+<h2 id="selective-use"><a class="header" href="#selective-use">Selective <code>use</code></a></h2>
+<p>Pick exactly which names you want:</p>
+<pre><code class="language-bop">use std.math.{pi, sqrt}
+print(pi)
+print(sqrt(16))
+// print(sin(0))   // error — not imported
+</code></pre>
+<p>Selective imports can reach private names explicitly:</p>
+<pre><code class="language-bop">use foo.{_helper}
+print(_helper())     // ok — explicit opt-in
+</code></pre>
+<p>If a listed name doesn’t exist in the target module, you get a clear error pointing at the <code>use</code> site.</p>
+<h2 id="aliased-use"><a class="header" href="#aliased-use">Aliased <code>use</code></a></h2>
+<p>Binds the whole module as a single value under the alias:</p>
+<pre><code class="language-bop">use std.math as m
+print(m.pi)
+print(m.sqrt(9))
+</code></pre>
+<p><code>m</code> is a <code>Value::Module</code> — <code>type(m)</code> is <code>"module"</code>. You access its exports via the <code>.</code> operator. Methods on aliased modules (<code>m.helper(...)</code>) work the same way they would on a bare imported fn.</p>
+<p>Combine with selective to shrink the alias’s surface:</p>
+<pre><code class="language-bop">use std.math.{pi, sqrt} as m
+print(m.pi)
+print(m.sqrt(9))
+// print(m.sin(0))   // error — `sin` wasn't imported
+</code></pre>
+<h2 id="namespaced-types"><a class="header" href="#namespaced-types">Namespaced types</a></h2>
+<p>User-defined <code>struct</code> and <code>enum</code> types can be constructed and pattern-matched through the alias:</p>
+<pre><code class="language-bop">// In `paint.bop`:
+enum Color { Red, Green, Blue }
+struct Point { x, y }
+
+// In main:
+use paint as p
+let c = p.Color::Red
+let origin = p.Point { x: 0, y: 0 }
+
+print(match c {
+  p.Color::Red   =&gt; "stop",
+  p.Color::Green =&gt; "go",
+  p.Color::Blue  =&gt; "cool",
+})
+</code></pre>
+<p>The namespace is required — bare <code>Color::Red</code> inside the main file wouldn’t find the type unless you also imported <code>paint.{Color}</code> by bare name.</p>
+<h2 id="type-identity"><a class="header" href="#type-identity">Type identity</a></h2>
+<p>Types carry their declaring module as part of their identity. Two modules can declare a type with the same name; values from them are <strong>distinct types</strong> — equality is always <code>false</code> across the module boundary, and patterns only match values from the module the pattern named.</p>
+<pre><code class="language-bop">// paint.bop: enum Color { Red, Blue }
+// other.bop: enum Color { Red, Green, Yellow }
+
+use paint as p
+use other as o
+
+let a = p.Color::Red
+let b = o.Color::Red
+
+print(a == b)        // false — different `Color` types
+print(a == a)        // true
+</code></pre>
+<p>A pattern over an aliased module’s type only fires for values from that module:</p>
+<pre><code class="language-bop">fn label(c) {
+  return match c {
+    p.Color::Red =&gt; "paint-red",
+    o.Color::Red =&gt; "other-red",
+    _            =&gt; "something else",
   }
-  i += 1
 }
-print("Sum exceeded 100 at i=" + str(i))
+print(label(p.Color::Red))   // "paint-red"
+print(label(o.Color::Red))   // "other-red"
 </code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
-}
-print("Found " + str(count))
-</code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(str(i))     // 0, 1, 2, 3, 4
-}
-</code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(str(i))     // 2, 3, 4, 5, 6, 7
-}
-</code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
-}
-</code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = str(scores[name])
-  print(name + ": " + s)
-}
-</code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
-}
-</code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + str(row) + ", " + str(col) + ")")
+<p>This is Bop’s answer to the “same-named type, different shape, in different modules” problem. No renames required.</p>
+<h2 id="re-exports-are-transitive"><a class="header" href="#re-exports-are-transitive">Re-exports are transitive</a></h2>
+<p>A module’s effective exports include everything it <code>use</code>s from other modules (minus privacy filtering). If <code>a</code> does <code>use b</code> and <code>b</code> declares <code>fn foo()</code>, then <code>use a</code> in the top-level program makes <code>foo</code> visible too. The same applies to types — importing <code>a</code> brings <code>b</code>’s public types in scope.</p>
+<h2 id="builtin-types"><a class="header" href="#builtin-types">Builtin types</a></h2>
+<p><code>Result</code> and <code>RuntimeError</code> are engine built-ins. They’re always in scope — you don’t need <code>use std.result</code> to write <code>Result::Ok(v)</code> or to match on <code>RuntimeError { message, line }</code>. The <code>std.result</code> module exists for combinators (<code>unwrap</code>, <code>map</code>, <code>and_then</code>, …), not for the types themselves. See <a href="errors.html">Error Handling</a>.</p>
+<h2 id="cycles"><a class="header" href="#cycles">Cycles</a></h2>
+<p>Circular imports (<code>a</code> uses <code>b</code> which uses <code>a</code>) are detected at load time and raise a clear error naming the cycle path. Restructure the code so the cycle breaks — usually by pulling shared definitions into a third module that neither circular node depends on.</p>
+<h2 id="inside-a-function-body"><a class="header" href="#inside-a-function-body">Inside a function body</a></h2>
+<p>Aliased modules and bare-imported types remain visible inside function bodies declared in the same module:</p>
+<pre><code class="language-bop">use paint as p
+
+fn describe(c) {
+  return match c {
+    p.Color::Red   =&gt; "red",
+    p.Color::Blue  =&gt; "blue",
+    _              =&gt; "other",
   }
 }
 </code></pre>
+<p>The <code>p</code> alias doesn’t need to be a parameter — module-level aliases persist across function call boundaries so patterns inside fn bodies can resolve them.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="functions/defining-functions.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="errors.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +310,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="functions/defining-functions.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="errors.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -307,13 +334,13 @@ for ch in word {
         </script>
 
 
-        <script src="../elasticlunr-ef4e11c1.min.js"></script>
-        <script src="../mark-09e88c2c.min.js"></script>
-        <script src="../searcher-c2a407aa.js"></script>
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
 
-        <script src="../clipboard-1626706a.min.js"></script>
-        <script src="../highlight-c782337f.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-c782337f.js"></script>
+        <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
 

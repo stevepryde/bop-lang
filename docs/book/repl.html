@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Loops - The Bop Language</title>
+        <title>REPL - The Bop Language</title>
 
 
         <!-- Custom HTML head -->
@@ -12,33 +12,33 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="../favicon-de23e50b.svg">
-        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
-        <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
-        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
-        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
-        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
-            const path_to_root = "../";
+            const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-4c5f85d8.js";
+            window.path_to_searchindex_js = "searchindex-4c5f85d8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-d974ebe2.js"></script>
+        <script src="toc-d974ebe2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -105,7 +105,7 @@
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
-                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
             </noscript>
             <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -140,7 +140,7 @@
                     <h1 class="menu-title">The Bop Language</h1>
 
                     <div class="right-buttons">
-                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
                             <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
                         </a>
                         <a href="https://github.com/stevepryde/bop-lang" title="Git repository" aria-label="Git repository">
@@ -177,103 +177,108 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="loops"><a class="header" href="#loops">Loops</a></h1>
-<p>Loops let you repeat actions. Bop has three kinds: <code>repeat</code>, <code>while</code>, and <code>for...in</code>.</p>
-<h2 id="repeat"><a class="header" href="#repeat">repeat</a></h2>
-<p>The simplest loop — just “do this N times.” No loop variable, no fuss:</p>
-<pre><code class="language-bop">repeat 4 {
-  print("Hello!")
-}
+                        <h1 id="repl"><a class="header" href="#repl">REPL</a></h1>
+<p>The <code>bop</code> CLI ships an interactive REPL that carries state across submissions, echoes bare-expression results, supports multi-line input, and persists history across sessions.</p>
+<pre><code>$ bop repl
+&gt; let x = 5
+&gt; let f = fn(n) { return n * x }
+&gt; f(7)
+35
+&gt; :quit
 </code></pre>
-<p>The count can be any expression:</p>
-<pre><code class="language-bop">let times = 3
-repeat times {
-  print("Again!")
-}
+<h2 id="starting-the-repl"><a class="header" href="#starting-the-repl">Starting the REPL</a></h2>
+<pre><code>bop            # default subcommand is `repl`
+bop repl
 </code></pre>
-<p><code>repeat</code> is perfect when you just need repetition without tracking a counter.</p>
-<h2 id="while"><a class="header" href="#while">while</a></h2>
-<p>Loops as long as a condition is true:</p>
-<pre><code class="language-bop">let n = 1
-while n &lt;= 100 {
-  n *= 2
-}
-print(n)    // 128
+<p>Ctrl-D on an empty prompt exits. Ctrl-C clears the current line without touching the session.</p>
+<h2 id="what-persists-across-submissions"><a class="header" href="#what-persists-across-submissions">What persists across submissions</a></h2>
+<p>Everything that shows up in the program’s scope:</p>
+<ul>
+<li><code>let</code> / <code>const</code> bindings.</li>
+<li><code>fn</code> declarations (named and anonymous-then-let-bound).</li>
+<li><code>struct</code> / <code>enum</code> / method declarations.</li>
+<li><code>use</code> imports and module aliases.</li>
+<li>The <code>rand()</code> seed — same starting seed, same sequence (helpful for reproducing bugs).</li>
+</ul>
+<p>Resource limits (<code>BopLimits::standard()</code> by default) reset per submission, so the step budget doesn’t accumulate across lines.</p>
+<h2 id="bare-expressions-echo"><a class="header" href="#bare-expressions-echo">Bare expressions echo</a></h2>
+<p>When the last statement in a submission is a bare expression, the REPL prints its value:</p>
+<pre><code>&gt; 1 + 2
+3
+&gt; let x = 5      // `let` has no value — no echo
+&gt; x
+5
 </code></pre>
-<p>A <code>while true</code> loop runs forever (until you <code>break</code> out of it or hit the step limit):</p>
-<pre><code class="language-bop">let total = 0
-let i = 1
-while true {
-  total += i
-  if total &gt; 100 {
-    break
-  }
-  i += 1
-}
-print("Sum exceeded 100 at i=" + str(i))
+<p><code>print(...)</code> returns <code>none</code>; the REPL suppresses <code>none</code> echoes so <code>print(42)</code> only shows <code>42</code> once (from the host), not “42” followed by “none”.</p>
+<h2 id="multi-line-input"><a class="header" href="#multi-line-input">Multi-line input</a></h2>
+<p>When a line parses with “end of code” — unclosed brace, trailing <code>+</code>, unfinished <code>match</code> — the REPL keeps the buffer open and prompts for more. Paste a multi-line block and it runs as one submission:</p>
+<pre><code>&gt; fn greet(name) {
+...   return "hi " + name
+... }
+&gt; greet("Bop")
+hi Bop
 </code></pre>
-<h3 id="counting-example"><a class="header" href="#counting-example">Counting example</a></h3>
-<pre><code class="language-bop">// Count how many numbers under 50 are divisible by 7
-let count = 0
-let n = 1
-while n &lt; 50 {
-  if n % 7 == 0 {
-    count += 1
-  }
-  n += 1
-}
-print("Found " + str(count))
+<p>A different parse error (typo, unexpected token) submits immediately so you can see the error rather than hunting through a stale buffer.</p>
+<h2 id="tab-completion"><a class="header" href="#tab-completion">Tab completion</a></h2>
+<p>Hit Tab on an identifier prefix to see matches from:</p>
+<ul>
+<li>Bop keywords (<code>let</code>, <code>fn</code>, <code>match</code>, <code>use</code>, …)</li>
+<li>Built-in functions (<code>print</code>, <code>len</code>, <code>range</code>, <code>int</code>, <code>float</code>, <code>sqrt</code>, …)</li>
+<li>Names currently in the session (<code>let my_var = …</code> shows up after declaration)</li>
+<li>Identifiers the REPL has seen you type in previous submissions (covers fn parameters, struct field names)</li>
+</ul>
+<h2 id="meta-commands"><a class="header" href="#meta-commands">Meta-commands</a></h2>
+<p>Lines starting with <code>:</code> are REPL commands, not Bop code:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Command</th><th>Action</th></tr>
+</thead>
+<tbody>
+<tr><td><code>:help</code></td><td>Print the meta-command list</td></tr>
+<tr><td><code>:vars</code></td><td>List all currently-bound names (sorted)</td></tr>
+<tr><td><code>:reset</code> / <code>:clear</code></td><td>Drop every binding and start fresh</td></tr>
+<tr><td><code>:quit</code> / <code>:q</code> / <code>:exit</code></td><td>Exit the REPL</td></tr>
+</tbody>
+</table>
+</div>
+<p>Unknown commands surface a friendly “try <code>:help</code>” hint rather than being silently ignored.</p>
+<h2 id="history"><a class="header" href="#history">History</a></h2>
+<p>Arrow keys browse history. <code>~/.bop_history</code> (<code>$USERPROFILE\.bop_history</code> on Windows) persists history across sessions. History save on exit is best-effort — the REPL doesn’t error if it can’t write the file.</p>
+<h2 id="error-handling"><a class="header" href="#error-handling">Error handling</a></h2>
+<p>Runtime and parse errors render with the same source-snippet + carat as errors from <code>bop run</code>:</p>
+<pre><code>&gt; let f = fn(n) { return missing(n) }
+&gt; f(5)
+error: I don't know what 'missing' is
+  --&gt; line 1:23
+  |
+1 | let f = fn(n) { return missing(n) }
+  |                        ^
+hint: Did you forget to create it with `let`?
 </code></pre>
-<h2 id="forin"><a class="header" href="#forin">for…in</a></h2>
-<p>Iterates over ranges, arrays, or dictionary keys.</p>
-<h3 id="ranges"><a class="header" href="#ranges">Ranges</a></h3>
-<pre><code class="language-bop">for i in range(5) {
-  print(str(i))     // 0, 1, 2, 3, 4
+<p>The error doesn’t reset the session — subsequent submissions still see the prior bindings.</p>
+<h2 id="piped--non-tty-input"><a class="header" href="#piped--non-tty-input">Piped / non-TTY input</a></h2>
+<p>When stdin isn’t a terminal (piped, heredoc, test harness), the REPL accumulates stdin line by line using the same incomplete-input heuristic, so a script like:</p>
+<pre><code class="language-bash">bop repl &lt;&lt;EOF
+fn double(n) {
+  return n + n
 }
+print(double(21))
+EOF
 </code></pre>
-<p>With a start value:</p>
-<pre><code class="language-bop">for i in range(2, 8) {
-  print(str(i))     // 2, 3, 4, 5, 6, 7
-}
-</code></pre>
-<h3 id="arrays"><a class="header" href="#arrays">Arrays</a></h3>
-<pre><code class="language-bop">let fruits = ["apple", "banana", "cherry"]
-for fruit in fruits {
-  print(fruit)
-}
-</code></pre>
-<h3 id="dictionary-keys"><a class="header" href="#dictionary-keys">Dictionary keys</a></h3>
-<pre><code class="language-bop">let scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-for name in scores {
-  let s = str(scores[name])
-  print(name + ": " + s)
-}
-</code></pre>
-<h3 id="strings"><a class="header" href="#strings">Strings</a></h3>
-<p>You can iterate over the characters of a string:</p>
-<pre><code class="language-bop">let word = "hello"
-for ch in word {
-  print(ch)    // "h", "e", "l", "l", "o"
-}
-</code></pre>
-<h2 id="nesting-loops"><a class="header" href="#nesting-loops">Nesting loops</a></h2>
-<p>Loops can be nested. This is useful for working with grids or combinations:</p>
-<pre><code class="language-bop">for row in range(3) {
-  for col in range(4) {
-    print("(" + str(row) + ", " + str(col) + ")")
-  }
-}
-</code></pre>
+<p>prints <code>42</code> and exits 0. Errors during a piped session exit 1 but don’t abort the remaining input — if you pipe five submissions and #2 fails, #3 through #5 still run. That matches how a user would experience the same sequence interactively.</p>
+<h2 id="using-the-session-from-rust"><a class="header" href="#using-the-session-from-rust">Using the session from Rust</a></h2>
+<p><code>bop::ReplSession</code> is the same session type the CLI uses, exposed for embedders that want to drive Bop as a scripting layer from their own app. See <a href="embedding.html#stateful-repl-sessions">Embedding → Stateful REPL sessions</a>.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../control-flow/if-else.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="errors.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../control-flow/break-continue.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="reference/operators.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -283,11 +288,11 @@ for ch in word {
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../control-flow/if-else.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="errors.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../control-flow/break-continue.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="reference/operators.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -307,13 +312,13 @@ for ch in word {
         </script>
 
 
-        <script src="../elasticlunr-ef4e11c1.min.js"></script>
-        <script src="../mark-09e88c2c.min.js"></script>
-        <script src="../searcher-c2a407aa.js"></script>
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
 
-        <script src="../clipboard-1626706a.min.js"></script>
-        <script src="../highlight-c782337f.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-c782337f.js"></script>
+        <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
 

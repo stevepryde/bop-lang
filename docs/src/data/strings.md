@@ -10,7 +10,7 @@ let empty = ""
 let escaped = "Line 1\nLine 2"
 ```
 
-Supported escape sequences: `\"`, `\\`, `\n`, `\t`, `\{`, `\}`.
+Supported escape sequences: `\"`, `\\`, `\n`, `\t`, `\r`, `\{`, `\}`. Any other `\x` escape is a lexer error.
 
 ## Indexing
 

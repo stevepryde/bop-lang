@@ -7,7 +7,7 @@ Bop isn't Python, JavaScript, or any existing language, but it deliberately borr
 ## Quick example
 
 ```bop
-# Sum the numbers from 1 to 10
+// Sum the numbers from 1 to 10
 let total = 0
 for i in range(1, 11) {
   total += i
