@@ -27,3 +27,8 @@ bop-vm = { version = "0.3.0", path = "../bop-vm" }
 # `bop compile` emits Rust via the AOT transpiler, then (by
 # default) invokes cargo to produce a native binary.
 bop-compile = { version = "0.3.0", path = "../bop-compile" }
+# Readline-style line editing for the REPL: arrow-key history,
+# Ctrl-A/E/K edits, persisted history, and the
+# Validator/Completer hooks that drive multi-line input + tab
+# completion.
+rustyline = { version = "17", features = ["with-file-history"] }
