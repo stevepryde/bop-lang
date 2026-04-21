@@ -50,10 +50,6 @@ pub enum Token {
     Minus,
     Star,
     Slash,
-    /// `//` integer division (phase 6). Distinct from `/` so
-    /// `10 / 3 == 3.3…` (Number) and `10 // 3 == 3` (Int)
-    /// behave predictably — same Python convention.
-    SlashSlash,
     Percent,
     EqEq,
     BangEq,
@@ -257,19 +253,6 @@ impl Lexer {
                     });
                 }
 
-                '#' => {
-                    // Line comment — Python-style. Phase 6 moved
-                    // off `//` so integer division can claim that
-                    // token. Runs to end of line; no block-comment
-                    // form.
-                    while let Some(c) = self.peek() {
-                        if c == '\n' {
-                            break;
-                        }
-                        self.advance();
-                    }
-                }
-
                 '"' => {
                     tokens.push(SpannedToken {
                         token: self.lex_string()?,
@@ -355,16 +338,19 @@ impl Lexer {
                         column,
                         });
                     } else if self.peek() == Some('/') {
-                        // `//` integer division. Line-comment
-                        // duty stays with `#` (Bop never used
-                        // `//` for comments) so there's no
-                        // ambiguity here.
+                        // `//` — line comment. Runs to end of
+                        // line; no block-comment form. (There's
+                        // no integer-division operator: `/`
+                        // always returns a `Number` even for
+                        // `Int / Int`, and users who want an
+                        // integer result write `int(a / b)`.)
                         self.advance();
-                        tokens.push(SpannedToken {
-                            token: Token::SlashSlash,
-                            line,
-                        column,
-                        });
+                        while let Some(c) = self.peek() {
+                            if c == '\n' {
+                                break;
+                            }
+                            self.advance();
+                        }
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Slash,
@@ -1011,24 +997,21 @@ mod tests {
     #[test]
     fn line_comment_skipped() {
         assert_eq!(
-            toks("1 # comment\n2"),
+            toks("1 // comment\n2"),
             vec![Token::Int(1), Token::Semicolon, Token::Int(2)]
         );
     }
 
     #[test]
     fn comment_at_end() {
-        assert_eq!(toks("x # done"), vec![Token::Ident("x".into())]);
+        assert_eq!(toks("x // done"), vec![Token::Ident("x".into())]);
     }
 
     #[test]
-    fn double_slash_is_int_division_not_comment() {
-        // Since phase 6, `//` is the integer-division operator
-        // (`Token::SlashSlash`). `#` is the line comment.
-        assert_eq!(
-            toks("10 // 3"),
-            vec![Token::Int(10), Token::SlashSlash, Token::Int(3)]
-        );
+    fn hash_is_not_a_comment() {
+        // `#` used to be the line-comment token; comments are
+        // now `//` and `#` is just an unrecognised character.
+        assert!(lex_err("x # nope").contains("don't understand"));
     }
 
     // ─── Auto-semicolons ──────────────────────────────────────────

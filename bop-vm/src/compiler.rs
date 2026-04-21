@@ -1323,7 +1323,6 @@ impl Compiler {
             BinOp::Sub => Instr::Sub,
             BinOp::Mul => Instr::Mul,
             BinOp::Div => Instr::Div,
-            BinOp::IntDiv => Instr::IntDiv,
             BinOp::Mod => Instr::Rem,
             BinOp::Eq => Instr::Eq,
             BinOp::NotEq => Instr::NotEq,

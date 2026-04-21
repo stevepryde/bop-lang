@@ -114,10 +114,6 @@ pub enum Instr {
     Sub,
     Mul,
     Div,
-    /// `//` — integer division (phase 6). Distinct from `Div`
-    /// because `/` always returns a `Number` while `//` always
-    /// returns an `Int`.
-    IntDiv,
     Rem,
     Eq,
     NotEq,

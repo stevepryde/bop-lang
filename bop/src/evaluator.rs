@@ -2014,7 +2014,6 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             BinOp::Sub => ops::sub(left, right, line),
             BinOp::Mul => ops::mul(left, right, line),
             BinOp::Div => ops::div(left, right, line),
-            BinOp::IntDiv => ops::int_div(left, right, line),
             BinOp::Mod => ops::rem(left, right, line),
             BinOp::Eq => Ok(ops::eq(left, right)),
             BinOp::NotEq => Ok(ops::not_eq(left, right)),

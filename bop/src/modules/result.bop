@@ -1,14 +1,14 @@
-# std.result — combinators for `Result`-shaped values.
-#
-# `Result { Ok(value), Err(error) }` and `RuntimeError { message,
-# line }` are engine-wide builtins (pre-registered in walker, VM,
-# and AOT) so programs can use them without first having to `use
-# std.result`. This module no longer re-declares those types —
-# doing so would either shadow the builtin (if we allowed it) or
-# error out as a double-decl. Instead, it provides the helpers
-# that turn `Result` into something pleasant to work with.
+// std.result — combinators for `Result`-shaped values.
+//
+// `Result { Ok(value), Err(error) }` and `RuntimeError { message,
+// line }` are engine-wide builtins (pre-registered in walker, VM,
+// and AOT) so programs can use them without first having to `use
+// std.result`. This module no longer re-declares those types —
+// doing so would either shadow the builtin (if we allowed it) or
+// error out as a double-decl. Instead, it provides the helpers
+// that turn `Result` into something pleasant to work with.
 
-# True when `r` is an `Ok`.
+// True when `r` is an `Ok`.
 fn is_ok(r) {
     return match r {
         Result::Ok(_) => true,
@@ -16,7 +16,7 @@ fn is_ok(r) {
     }
 }
 
-# True when `r` is an `Err`.
+// True when `r` is an `Err`.
 fn is_err(r) {
     return match r {
         Result::Ok(_) => false,
@@ -24,8 +24,8 @@ fn is_err(r) {
     }
 }
 
-# Unwrap `Ok(v)` to `v`. Raises a runtime error on `Err(...)`.
-# Use sparingly — for propagation, use the `try` operator.
+// Unwrap `Ok(v)` to `v`. Raises a runtime error on `Err(...)`.
+// Use sparingly — for propagation, use the `try` operator.
 fn unwrap(r) {
     return match r {
         Result::Ok(v) => v,
@@ -33,8 +33,8 @@ fn unwrap(r) {
     }
 }
 
-# Extract the `Ok` value or raise a user-supplied error
-# message on `Err`.
+// Extract the `Ok` value or raise a user-supplied error
+// message on `Err`.
 fn expect(r, message) {
     return match r {
         Result::Ok(v) => v,
@@ -42,7 +42,7 @@ fn expect(r, message) {
     }
 }
 
-# Unwrap `Ok(v)` to `v`, or return `default` on `Err`.
+// Unwrap `Ok(v)` to `v`, or return `default` on `Err`.
 fn unwrap_or(r, default) {
     return match r {
         Result::Ok(v) => v,
@@ -50,7 +50,7 @@ fn unwrap_or(r, default) {
     }
 }
 
-# Apply `f` to the `Ok` payload; pass `Err` through unchanged.
+// Apply `f` to the `Ok` payload; pass `Err` through unchanged.
 fn map(r, f) {
     return match r {
         Result::Ok(v) => Result::Ok(f(v)),
@@ -58,7 +58,7 @@ fn map(r, f) {
     }
 }
 
-# Apply `f` to the `Err` payload; pass `Ok` through unchanged.
+// Apply `f` to the `Err` payload; pass `Ok` through unchanged.
 fn map_err(r, f) {
     return match r {
         Result::Ok(v) => Result::Ok(v),
@@ -66,8 +66,8 @@ fn map_err(r, f) {
     }
 }
 
-# Monadic bind: if `r` is `Ok(v)`, run `f(v)` (which should
-# return a Result). If `Err`, pass it through.
+// Monadic bind: if `r` is `Ok(v)`, run `f(v)` (which should
+// return a Result). If `Err`, pass it through.
 fn and_then(r, f) {
     return match r {
         Result::Ok(v) => f(v),

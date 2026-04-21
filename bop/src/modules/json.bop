@@ -1,27 +1,27 @@
-# std.json — JSON parse and stringify.
-#
-# Implemented in pure Bop. Performance is reasonable for
-# scripting workloads (config files, API payloads up to a few
-# MB); a C-backed parser would be faster but would live
-# outside `bop-std`'s zero-Rust-dep contract.
-#
-# `stringify(value)` walks a Bop value and emits RFC-8259 JSON.
-# `parse(text)` is a recursive-descent parser that returns the
-# decoded value. Parse errors raise a runtime error with a
-# position marker; callers who want `Result`-shaped handling
-# should wrap the call in `try_call`:
-#
-#     let r = try_call(fn() { return parse(text) })
-#     match r {
-#         Result::Ok(v)  => ...,
-#         Result::Err(e) => log("parse failed: " + e.message),
-#     }
+// std.json — JSON parse and stringify.
+//
+// Implemented in pure Bop. Performance is reasonable for
+// scripting workloads (config files, API payloads up to a few
+// MB); a C-backed parser would be faster but would live
+// outside `bop-std`'s zero-Rust-dep contract.
+//
+// `stringify(value)` walks a Bop value and emits RFC-8259 JSON.
+// `parse(text)` is a recursive-descent parser that returns the
+// decoded value. Parse errors raise a runtime error with a
+// position marker; callers who want `Result`-shaped handling
+// should wrap the call in `try_call`:
+//
+//     let r = try_call(fn() { return parse(text) })
+//     match r {
+//         Result::Ok(v)  => ...,
+//         Result::Err(e) => log("parse failed: " + e.message),
+//     }
 
-# ─── Stringify ────────────────────────────────────────────────
+// ─── Stringify ────────────────────────────────────────────────
 
-# Emit `value` as JSON text. Bop values that have no JSON
-# analogue (fns, structs, enum variants) raise a runtime
-# error — caller is expected to strip them out first.
+// Emit `value` as JSON text. Bop values that have no JSON
+// analogue (fns, structs, enum variants) raise a runtime
+// error — caller is expected to strip them out first.
 fn stringify(value) {
     let t = type(value)
     if t == "none" { return "null" }
@@ -31,7 +31,7 @@ fn stringify(value) {
     if t == "string" { return escape_string(value) }
     if t == "array" { return array_to_json(value) }
     if t == "dict" { return dict_to_json(value) }
-    # fn / struct / enum have no JSON representation.
+    // fn / struct / enum have no JSON representation.
     panic_json("cannot stringify " + t, 0)
 }
 
@@ -40,12 +40,12 @@ fn bool_to_json(b) {
     return "false"
 }
 
-# Escape a Bop string for JSON output: wrap in quotes, escape
-# the five characters JSON requires (`"`, `\`, newline, CR,
-# tab), pass everything else through verbatim. Control chars
-# under 0x20 are not currently escaped — the common cases
-# (`\n`, `\t`, `\r`) are covered and the rest are rare in
-# practice.
+// Escape a Bop string for JSON output: wrap in quotes, escape
+// the five characters JSON requires (`"`, `\`, newline, CR,
+// tab), pass everything else through verbatim. Control chars
+// under 0x20 are not currently escaped — the common cases
+// (`\n`, `\t`, `\r`) are covered and the rest are rare in
+// practice.
 fn escape_string(s) {
     let out = "\""
     for c in s {
@@ -84,12 +84,12 @@ fn dict_to_json(d) {
     return out + "}"
 }
 
-# ─── Parse ────────────────────────────────────────────────────
-#
-# Parser state is a plain `(text, pos)` pair threaded through
-# each helper. Helpers return `[new_pos, value]` on success
-# and raise on failure. The top-level `parse` wraps the whole
-# thing and checks for trailing garbage.
+// ─── Parse ────────────────────────────────────────────────────
+//
+// Parser state is a plain `(text, pos)` pair threaded through
+// each helper. Helpers return `[new_pos, value]` on success
+// and raise on failure. The top-level `parse` wraps the whole
+// thing and checks for trailing garbage.
 
 fn parse(text) {
     let pos = skip_ws(text, 0)
@@ -128,9 +128,9 @@ fn parse_value(text, pos) {
     if c == "t" { return parse_literal(text, pos, "true", true) }
     if c == "f" { return parse_literal(text, pos, "false", false) }
     if c == "n" { return parse_literal(text, pos, "null", none) }
-    # Numbers start with `-` or a digit. Anything else is a
-    # syntax error — the user probably forgot quotes on a
-    # bareword.
+    // Numbers start with `-` or a digit. Anything else is a
+    // syntax error — the user probably forgot quotes on a
+    // bareword.
     if c == "-" || is_digit(c) {
         return parse_number(text, pos)
     }
@@ -138,7 +138,7 @@ fn parse_value(text, pos) {
 }
 
 fn parse_object(text, pos) {
-    pos = pos + 1  # skip {
+    pos = pos + 1  // skip {
     let obj = {}
     pos = skip_ws(text, pos)
     if pos < text.len() && text[pos] == "}" {
@@ -156,7 +156,7 @@ fn parse_object(text, pos) {
         if pos >= text.len() || text[pos] != ":" {
             panic_json("expected `:` after object key", pos)
         }
-        pos = pos + 1  # skip :
+        pos = pos + 1  // skip :
         let val_result = parse_value(text, pos)
         pos = val_result[0]
         obj[key] = val_result[1]
@@ -170,13 +170,13 @@ fn parse_object(text, pos) {
         if text[pos] != "," {
             panic_json("expected `,` or `}` in object", pos)
         }
-        pos = pos + 1  # skip ,
+        pos = pos + 1  // skip ,
     }
     panic_json("unterminated object", pos)
 }
 
 fn parse_array(text, pos) {
-    pos = pos + 1  # skip [
+    pos = pos + 1  // skip [
     let arr = []
     pos = skip_ws(text, pos)
     if pos < text.len() && text[pos] == "]" {
@@ -196,7 +196,7 @@ fn parse_array(text, pos) {
         if text[pos] != "," {
             panic_json("expected `,` or `]` in array", pos)
         }
-        pos = pos + 1  # skip ,
+        pos = pos + 1  // skip ,
     }
     panic_json("unterminated array", pos)
 }
@@ -218,12 +218,12 @@ fn parse_string(text, pos) {
                 panic_json("unterminated escape", pos)
             }
             let esc = text[pos]
-            # `\b`, `\f`, and `\uXXXX` aren't supported in this
-            # pass. The first two are rare in real payloads;
-            # `\u` escapes would need 4-hex parsing and
-            # code-point → UTF-8 conversion, which is a
-            # nontrivial Bop exercise. Document as a known
-            # gap and surface a clean error.
+            // `\b`, `\f`, and `\uXXXX` aren't supported in this
+            // pass. The first two are rare in real payloads;
+            // `\u` escapes would need 4-hex parsing and
+            // code-point → UTF-8 conversion, which is a
+            // nontrivial Bop exercise. Document as a known
+            // gap and surface a clean error.
             let decoded = match esc {
                 "\"" => "\"",
                 "\\" => "\\",
@@ -261,7 +261,7 @@ fn parse_number(text, pos) {
         } else if (c == "e" || c == "E") && !has_exp {
             has_exp = true
             pos = pos + 1
-            # Optional sign after exponent.
+            // Optional sign after exponent.
             if pos < text.len() && (text[pos] == "+" || text[pos] == "-") {
                 pos = pos + 1
             }
@@ -270,8 +270,8 @@ fn parse_number(text, pos) {
         }
     }
     let slice = text.slice(start, pos)
-    # Int or float? If we saw a dot or exponent, it's a float;
-    # otherwise int. Matches JSON's numeric subtyping.
+    // Int or float? If we saw a dot or exponent, it's a float;
+    // otherwise int. Matches JSON's numeric subtyping.
     if has_dot || has_exp {
         return [pos, float(slice)]
     }
@@ -287,15 +287,15 @@ fn parse_literal(text, pos, lit, value) {
 }
 
 fn is_digit(c) {
-    # Kept on one line — ASI would treat each `"4"` / `"9"` as
-    # a statement terminator on a line-wrapped `||` chain.
+    // Kept on one line — ASI would treat each `"4"` / `"9"` as
+    // a statement terminator on a line-wrapped `||` chain.
     return c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
 }
 
-# Raise a runtime error tagged with the JSON parse position.
-# We can't `raise` directly, so we provoke one by indexing
-# `none` — the engine error carries `detail` in the crash
-# trace so `try_call` can surface it.
+// Raise a runtime error tagged with the JSON parse position.
+// We can't `raise` directly, so we provoke one by indexing
+// `none` — the engine error carries `detail` in the crash
+// trace so `try_call` can surface it.
 fn panic_json(message, pos) {
     let detail = "json: " + message + " at position " + str(pos)
     let _ = none[detail]

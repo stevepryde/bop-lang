@@ -3742,7 +3742,6 @@ fn bin_op_path(op: BinOp) -> &'static str {
         BinOp::Sub => "::bop::ops::sub",
         BinOp::Mul => "::bop::ops::mul",
         BinOp::Div => "::bop::ops::div",
-        BinOp::IntDiv => "::bop::ops::int_div",
         BinOp::Mod => "::bop::ops::rem",
         BinOp::Eq => "::bop::ops::eq",
         BinOp::NotEq => "::bop::ops::not_eq",

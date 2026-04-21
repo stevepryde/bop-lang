@@ -102,7 +102,7 @@ fn result_and_then_chains_fallible_steps() {
     let host = run(
         r#"use std.result
 fn halve(x) {
-    if x % 2 == 0 { return Result::Ok(x // 2) }
+    if x % 2 == 0 { return Result::Ok(int(x / 2)) }
     return Result::Err("odd")
 }
 let r = and_then(and_then(Result::Ok(8), halve), halve)
@@ -459,7 +459,7 @@ fn collections_set_add_remove_has() {
 let s = set()
 s = s.add(1)
 s = s.add(2)
-s = s.add(2)  # duplicate, no-op
+s = s.add(2)  // duplicate, no-op
 s = s.add(3)
 print(s.size())
 print(s.has(2))

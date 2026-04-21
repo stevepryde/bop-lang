@@ -1235,12 +1235,13 @@ print(lenght)"#;
 
     #[test]
     fn comments_in_code() {
-        // Phase 6 swapped line comments from `//` (needed for
-        // integer division) to `#` (Python-style). Single-line
-        // only; no block-comment form.
+        // `//` is the line-comment marker. There's no
+        // integer-division operator — `/` always returns a
+        // `Number`, and users who want an integer cast through
+        // `int(a / b)` — which frees `//` for comments.
         assert_eq!(
-            say(r#"# this is a comment
-let x = 42 # inline comment
+            say(r#"// this is a comment
+let x = 42 // inline comment
 print(x)"#),
             "42"
         );
@@ -2318,19 +2319,25 @@ print(match r {
     }
 
     #[test]
-    fn int_division_slash_returns_number() {
-        // `/` always floats, even Int/Int. Matches Python.
+    fn division_slash_always_returns_number() {
+        // `/` always produces a `Number`, even for `Int / Int`.
+        // Sidesteps the "1 / 2 == 0" surprise every C-family
+        // language inflicts on beginners.
         assert_eq!(say("print(type(10 / 3))"), "number");
         assert_eq!(say("print(10 / 4)"), "2.5");
+        assert_eq!(say("print(type(10 / 5))"), "number");
     }
 
     #[test]
-    fn int_division_slash_slash_returns_int() {
-        // `//` — integer division, truncating toward zero.
-        assert_eq!(say("print(type(10 // 3))"), "int");
-        assert_eq!(say("print(10 // 3)"), "3");
-        assert_eq!(say("print(-7 // 2)"), "-3");
-        assert_eq!(say("print(10 // -3)"), "-3");
+    fn int_division_via_int_of_quotient() {
+        // There's no dedicated `//` operator — users who want
+        // integer division coerce the float result back with
+        // `int(...)`. Truncates toward zero, matching the
+        // behaviour of the removed `//` operator.
+        assert_eq!(say("print(type(int(10 / 3)))"), "int");
+        assert_eq!(say("print(int(10 / 3))"), "3");
+        assert_eq!(say("print(int(-7 / 2))"), "-3");
+        assert_eq!(say("print(int(10 / -3))"), "-3");
     }
 
     #[test]
@@ -2352,8 +2359,8 @@ print(match r {
     }
 
     #[test]
-    fn int_division_by_zero_errors() {
-        let msg = run_err("print(10 // 0)");
+    fn division_by_zero_errors() {
+        let msg = run_err("print(10 / 0)");
         assert!(msg.contains("Division by zero"), "got: {}", msg);
     }
 

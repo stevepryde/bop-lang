@@ -881,7 +881,6 @@ impl<'h, H: BopHost> Vm<'h, H> {
             Instr::Sub => self.binary(line, ops::sub)?,
             Instr::Mul => self.binary(line, ops::mul)?,
             Instr::Div => self.binary(line, ops::div)?,
-            Instr::IntDiv => self.binary(line, ops::int_div)?,
             Instr::Rem => self.binary(line, ops::rem)?,
             Instr::Eq => self.binary_infallible(line, |a, b, _| Ok(ops::eq(a, b)))?,
             Instr::NotEq => self.binary_infallible(line, |a, b, _| Ok(ops::not_eq(a, b)))?,

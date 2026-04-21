@@ -1,19 +1,19 @@
-# std.iter — functional helpers on arrays.
-#
-# Array-in, array-out. No lazy iterator protocol in v1 — if you
-# care about the allocation, use a hand-written `for` loop.
-# Every helper handles empty arrays gracefully and preserves
-# relative element order.
+// std.iter — functional helpers on arrays.
+//
+// Array-in, array-out. No lazy iterator protocol in v1 — if you
+// care about the allocation, use a hand-written `for` loop.
+// Every helper handles empty arrays gracefully and preserves
+// relative element order.
 
-# Apply `f` to each element; return a new array of results.
-# `map([1, 2, 3], fn(x) { return x * 2 })` → `[2, 4, 6]`.
+// Apply `f` to each element; return a new array of results.
+// `map([1, 2, 3], fn(x) { return x * 2 })` → `[2, 4, 6]`.
 fn map(arr, f) {
     let out = []
     for x in arr { out.push(f(x)) }
     return out
 }
 
-# Keep only the elements for which `pred(x)` is truthy.
+// Keep only the elements for which `pred(x)` is truthy.
 fn filter(arr, pred) {
     let out = []
     for x in arr {
@@ -22,16 +22,16 @@ fn filter(arr, pred) {
     return out
 }
 
-# Fold over the array left-to-right with a two-arg combiner.
-# `reduce([1, 2, 3], 0, fn(acc, x) { return acc + x })` → `6`.
+// Fold over the array left-to-right with a two-arg combiner.
+// `reduce([1, 2, 3], 0, fn(acc, x) { return acc + x })` → `6`.
 fn reduce(arr, initial, combine) {
     let acc = initial
     for x in arr { acc = combine(acc, x) }
     return acc
 }
 
-# First `n` elements (or the whole array if it's shorter).
-# Negative `n` yields an empty array.
+// First `n` elements (or the whole array if it's shorter).
+// Negative `n` yields an empty array.
 fn take(arr, n) {
     if n <= 0 { return [] }
     let out = []
@@ -44,8 +44,8 @@ fn take(arr, n) {
     return out
 }
 
-# Drop the first `n` elements. Negative `n` yields a full
-# copy; `n >= len(arr)` yields an empty array.
+// Drop the first `n` elements. Negative `n` yields a full
+// copy; `n >= len(arr)` yields an empty array.
 fn drop(arr, n) {
     if n <= 0 { return arr + [] }
     let out = []
@@ -57,8 +57,8 @@ fn drop(arr, n) {
     return out
 }
 
-# Pair elements from two arrays. Stops at the shorter array's
-# length. `zip([1, 2], ["a", "b"])` → `[[1, "a"], [2, "b"]]`.
+// Pair elements from two arrays. Stops at the shorter array's
+// length. `zip([1, 2], ["a", "b"])` → `[[1, "a"], [2, "b"]]`.
 fn zip(a, b) {
     let out = []
     let n = len(a)
@@ -72,8 +72,8 @@ fn zip(a, b) {
     return out
 }
 
-# Pair each element with its 0-based index.
-# `enumerate(["a", "b"])` → `[[0, "a"], [1, "b"]]`.
+// Pair each element with its 0-based index.
+// `enumerate(["a", "b"])` → `[[0, "a"], [1, "b"]]`.
 fn enumerate(arr) {
     let out = []
     let i = 0
@@ -84,8 +84,8 @@ fn enumerate(arr) {
     return out
 }
 
-# `true` if `pred(x)` is truthy for every `x` (and for an empty
-# array, by vacuous convention).
+// `true` if `pred(x)` is truthy for every `x` (and for an empty
+// array, by vacuous convention).
 fn all(arr, pred) {
     for x in arr {
         if !pred(x) { return false }
@@ -93,7 +93,7 @@ fn all(arr, pred) {
     return true
 }
 
-# `true` if `pred(x)` is truthy for at least one `x`.
+// `true` if `pred(x)` is truthy for at least one `x`.
 fn any(arr, pred) {
     for x in arr {
         if pred(x) { return true }
@@ -101,7 +101,7 @@ fn any(arr, pred) {
     return false
 }
 
-# Count elements for which `pred(x)` is truthy.
+// Count elements for which `pred(x)` is truthy.
 fn count(arr, pred) {
     let c = 0
     for x in arr {
@@ -110,8 +110,8 @@ fn count(arr, pred) {
     return c
 }
 
-# First element for which `pred(x)` is truthy, or `none` if no
-# match. Caller is expected to pattern-match / null-check.
+// First element for which `pred(x)` is truthy, or `none` if no
+// match. Caller is expected to pattern-match / null-check.
 fn find(arr, pred) {
     for x in arr {
         if pred(x) { return x }
@@ -119,7 +119,7 @@ fn find(arr, pred) {
     return none
 }
 
-# Index of the first matching element, or `-1` if no match.
+// Index of the first matching element, or `-1` if no match.
 fn find_index(arr, pred) {
     let i = 0
     for x in arr {
@@ -129,8 +129,8 @@ fn find_index(arr, pred) {
     return -1
 }
 
-# Flatten an array of arrays one level down.
-# `flatten([[1, 2], [3, 4]])` → `[1, 2, 3, 4]`.
+// Flatten an array of arrays one level down.
+// `flatten([[1, 2], [3, 4]])` → `[1, 2, 3, 4]`.
 fn flatten(arr) {
     let out = []
     for inner in arr {
@@ -139,23 +139,23 @@ fn flatten(arr) {
     return out
 }
 
-# Sum of a numeric array. Empty → 0.
+// Sum of a numeric array. Empty → 0.
 fn sum(arr) {
     let s = 0
     for x in arr { s = s + x }
     return s
 }
 
-# Product of a numeric array. Empty → 1 (multiplicative
-# identity; matches NumPy / Python's `math.prod`).
+// Product of a numeric array. Empty → 1 (multiplicative
+// identity; matches NumPy / Python's `math.prod`).
 fn product(arr) {
     let p = 1
     for x in arr { p = p * x }
     return p
 }
 
-# Min / max of a numeric array. Raises on empty input via a
-# deliberate type error so callers notice.
+// Min / max of a numeric array. Raises on empty input via a
+// deliberate type error so callers notice.
 fn min_array(arr) {
     let n = len(arr)
     if n == 0 { return none[0] }

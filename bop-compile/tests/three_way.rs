@@ -893,12 +893,12 @@ print(10 - 4)
 print(3 * 4)"#,
     ),
     (
-        "slash_returns_number_int_div_returns_int",
+        "division_always_number_int_via_cast",
         r#"print(10 / 3)
 print(type(10 / 3))
-print(10 // 3)
-print(type(10 // 3))
-print(-7 // 2)"#,
+print(int(10 / 3))
+print(type(int(10 / 3)))
+print(int(-7 / 2))"#,
     ),
     (
         "int_number_mixed_widens",
@@ -912,8 +912,8 @@ print(3 * 0.5)"#,
 print(2 > 1.5)"#,
     ),
     (
-        "int_div_by_zero_errors",
-        "print(10 // 0)",
+        "division_by_zero_errors",
+        "print(10 / 0)",
     ),
     (
         "int_overflow_add_errors",

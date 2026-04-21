@@ -1071,16 +1071,19 @@ fn int_arithmetic_stays_int_diff() {
 }
 
 #[test]
-fn int_div_slash_returns_number_diff() {
+fn division_always_returns_number_diff() {
     assert_eq!(say("print(type(10 / 3))"), "number");
     assert_eq!(say("print(10 / 4)"), "2.5");
+    assert_eq!(say("print(type(10 / 5))"), "number");
 }
 
 #[test]
-fn int_div_slash_slash_returns_int_diff() {
-    assert_eq!(say("print(type(10 // 3))"), "int");
-    assert_eq!(say("print(10 // 3)"), "3");
-    assert_eq!(say("print(-7 // 2)"), "-3");
+fn int_division_via_int_of_quotient_diff() {
+    // There's no dedicated `//`; `int(a / b)` does the job
+    // and agrees across both engines.
+    assert_eq!(say("print(type(int(10 / 3)))"), "int");
+    assert_eq!(say("print(int(10 / 3))"), "3");
+    assert_eq!(say("print(int(-7 / 2))"), "-3");
 }
 
 #[test]
@@ -1096,8 +1099,8 @@ fn int_number_equality_is_numeric_diff() {
 }
 
 #[test]
-fn int_div_by_zero_errors_diff() {
-    let msg = run_err("print(10 // 0)");
+fn division_by_zero_errors_diff() {
+    let msg = run_err("print(10 / 0)");
     assert!(msg.contains("Division by zero"), "got: {}", msg);
 }
 
@@ -1168,7 +1171,7 @@ fn std_result_map_and_and_then_diff() {
     assert_eq!(
         say(r#"use std.result
 fn halve(x) {
-    if x % 2 == 0 { return Result::Ok(x // 2) }
+    if x % 2 == 0 { return Result::Ok(int(x / 2)) }
     return Result::Err("odd")
 }
 let r = and_then(and_then(Result::Ok(8), halve), halve)
@@ -2133,11 +2136,11 @@ fn method_chain() {
 
 #[test]
 fn comments_in_code() {
-    // Phase 6: `#` is the line-comment leader; `//` is integer
-    // division.
+    // `//` is the line-comment leader. No integer-division
+    // operator in Bop — `int(a / b)` covers that case.
     assert_eq!(
-        say(r#"# this is a comment
-let x = 42 # inline comment
+        say(r#"// this is a comment
+let x = 42 // inline comment
 print(x)"#),
         "42"
     );

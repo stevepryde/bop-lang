@@ -285,11 +285,6 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
-    /// `//` integer division (phase 6). Unlike `/` (which
-    /// always returns a `Number`), `//` always returns an
-    /// `Int` — truncating toward zero, with overflow and
-    /// divide-by-zero surfacing as runtime errors.
-    IntDiv,
     Mod,
     Eq,
     NotEq,
@@ -1233,13 +1228,12 @@ impl Parser {
         let mut left = self.parse_unary()?;
         while matches!(
             self.peek(),
-            Token::Star | Token::Slash | Token::SlashSlash | Token::Percent
+            Token::Star | Token::Slash | Token::Percent
         ) {
             let (line, column) = self.peek_pos();
             let op = match self.peek() {
                 Token::Star => BinOp::Mul,
                 Token::Slash => BinOp::Div,
-                Token::SlashSlash => BinOp::IntDiv,
                 _ => BinOp::Mod,
             };
             self.advance();
@@ -2177,7 +2171,6 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Minus => "-",
         Token::Star => "*",
         Token::Slash => "/",
-        Token::SlashSlash => "//",
         Token::Percent => "%",
         Token::EqEq => "==",
         Token::BangEq => "!=",

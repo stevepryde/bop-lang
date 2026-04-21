@@ -1,10 +1,10 @@
 # Syntax
 
-Bop's syntax is deliberately simple. If you've seen JavaScript or Python, most of it will look familiar.
+Bop's syntax is deliberately simple. If you've seen Python or a C-family language, most of it will look familiar — curly braces for blocks, `#` for comments, newlines (rather than semicolons) terminating statements.
 
 ## Blocks
 
-Code blocks use curly braces `{ }` and only appear after control flow keywords (`if`, `else`, `while`, `for`, `repeat`, `fn`):
+Code blocks use curly braces `{ }` and only appear after control-flow or declaration keywords (`if`, `else`, `while`, `for`, `repeat`, `fn`, `struct`, `enum`, `match`):
 
 ```bop
 if count > 3 {
@@ -15,12 +15,12 @@ if count > 3 {
 > **Important:** The opening `{` must be on the same line as its keyword. Bop automatically inserts semicolons at the end of lines, so putting `{` on the next line would cause a parse error.
 
 ```bop
-// Good
+# Good
 if count > 3 {
   print("Nice!")
 }
 
-// Bad — will cause an error
+# Bad — will cause an error
 if count > 3
 {
   print("Nice!")
@@ -29,7 +29,12 @@ if count > 3
 
 ## Statements
 
-Statements end with a newline. Bop automatically inserts semicolons after lines ending in an identifier, literal, `true`, `false`, `none`, `break`, `continue`, `return`, `)`, `]`, or `}`.
+Statements end with a newline. Bop automatically inserts semicolons after lines ending in:
+
+- An identifier or literal
+- `true`, `false`, `none`
+- `break`, `continue`, `return`
+- `)`, `]`, `}`
 
 You can put multiple statements on one line with an explicit semicolon:
 
@@ -39,12 +44,14 @@ let x = 1; let y = 2
 
 ## Comments
 
-Line comments start with `//`. Everything after `//` on that line is ignored:
+Line comments start with `#`. Everything after `#` on that line is ignored:
 
 ```bop
-// This is a comment
-let x = 5   // So is this
+# This is a comment
+let x = 5   # So is this
 ```
+
+There is no block-comment syntax. `//` is the **integer-division operator**, not a comment marker.
 
 ## Identifiers
 
@@ -56,6 +63,33 @@ let _count = 0
 let item3 = "hello"
 ```
 
+### Case conventions are enforced
+
+Bop checks the *shape* of every declared name at parse time and rejects mismatches with a suggestion:
+
+| Declaration | Required shape | Examples |
+|-------------|----------------|----------|
+| `let`, `fn`, parameters, fields, aliases, `for`-loop vars, match bindings | starts with a lowercase letter or `_` | `let x`, `fn double(n)`, `for i in …` |
+| `const` | ALL_CAPS (+ digits / `_`) | `const PI = 3.14`, `const MAX_SIZE = 100` |
+| `struct`, `enum`, variant names | starts with an uppercase letter | `struct Point`, `enum Shape { Circle, Rect }` |
+
+Single-letter types like `enum Dir { N, E, S, W }` are fine — the rule is "starts with an uppercase letter", not "must have a lowercase character somewhere."
+
+A leading underscore (`_foo`, `_Internal`, `_DEBUG`) marks a name as "private by convention" — glob `use` imports skip them. The wildcard `_` on its own is used in `let _ = foo()` (explicitly ignore) and in patterns (match anything).
+
 ## Whitespace
 
 Spaces and tabs are insignificant — use whatever indentation style you like. Only newlines matter (they end statements).
+
+## Keywords
+
+These words are reserved and can't be used as identifiers:
+
+```
+let const fn return
+if else while for in repeat break continue
+use as struct enum match try
+true false none
+```
+
+There are no word-spelled logical operators — use `&&`, `||`, `!` rather than `and`, `or`, `not`.

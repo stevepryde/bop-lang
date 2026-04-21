@@ -165,63 +165,6 @@ pub fn div(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
     Ok(Value::Number(a / b))
 }
 
-/// `//` — integer division. Always returns an `Int`, truncating
-/// toward zero. Operands may be either `Int` or `Number` (the
-/// latter truncates through `i64`); division by zero is still a
-/// runtime error.
-pub fn int_div(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
-    match (left, right) {
-        (Value::Int(a), Value::Int(b)) => {
-            if *b == 0 {
-                return Err(error_with_hint(
-                    line,
-                    "Division by zero",
-                    "You can't divide by 0.",
-                ));
-            }
-            a.checked_div(*b)
-                .map(Value::Int)
-                .ok_or_else(|| int_overflow("//", line))
-        }
-        (l, r) => {
-            // At least one side is a float — truncate through
-            // f64 and cast. Raise on NaN / inf / zero-divisor.
-            let a = to_f64(l).ok_or_else(|| {
-                error(
-                    line,
-                    format!(
-                        "Can't use `//` with {} and {}",
-                        l.type_name(),
-                        r.type_name()
-                    ),
-                )
-            })?;
-            let b = to_f64(r).ok_or_else(|| {
-                error(
-                    line,
-                    format!(
-                        "Can't use `//` with {} and {}",
-                        l.type_name(),
-                        r.type_name()
-                    ),
-                )
-            })?;
-            if b == 0.0 {
-                return Err(error_with_hint(
-                    line,
-                    "Division by zero",
-                    "You can't divide by 0.",
-                ));
-            }
-            let q = crate::math::trunc(a / b);
-            if !q.is_finite() || q < i64::MIN as f64 || q > i64::MAX as f64 {
-                return Err(int_overflow("//", line));
-            }
-            Ok(Value::Int(q as i64))
-        }
-    }
-}
-
 pub fn rem(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
     match (left, right) {
         (Value::Int(_), Value::Int(b)) if *b == 0 => Err(error_with_hint(
