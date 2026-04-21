@@ -16,5 +16,15 @@ categories = ["compilers"]
 name = "bop_sys"
 
 [dependencies]
-bop = { version = "0.3.0", path = "../bop", package = "bop-lang" }
-bop-std = { version = "0.3.0", path = "../bop-std" }
+bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false, features = ["std"] }
+
+[features]
+default = ["bop-std"]
+# Forwards to bop-lang's `bop-std` feature. On by default
+# because `StdHost` — the whole point of this crate — is a
+# "batteries included" host and its `resolve_module` impl
+# wants to route `import std.*` through the bundled stdlib.
+# Turn off with `default-features = false` if you only need
+# the filesystem / stdio / env / time hooks without the
+# bundled stdlib blob.
+bop-std = ["bop/bop-std"]

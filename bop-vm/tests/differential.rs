@@ -80,7 +80,7 @@ impl BopHost for RecordHost {
         if let Some(src) = MODULES.with(|m| m.borrow().get(name).cloned()) {
             return Some(Ok(src));
         }
-        bop_std::resolve(name).map(|s| Ok(s.to_string()))
+        bop::stdlib::resolve(name).map(|s| Ok(s.to_string()))
     }
 }
 
@@ -1139,7 +1139,7 @@ print(match x {
 
 // ─── bop-std stdlib (phase 7) ─────────────────────────────────────
 //
-// Every stdlib import is resolved via `bop_std::resolve` (see the
+// Every stdlib import is resolved via `bop::stdlib::resolve` (see the
 // `RecordHost::resolve_module` fallback), so walker and VM use
 // identical source. These tests confirm the two engines agree on
 // the stdlib's observable behaviour — the type-transfer import

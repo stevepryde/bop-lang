@@ -19,6 +19,17 @@ pub mod builtins;
 pub mod methods;
 pub mod suggest;
 pub mod check;
+/// Bundled Bop standard library (`import std.math`, `std.json`,
+/// `std.collections`, `std.iter`, `std.string`, `std.result`,
+/// `std.test`). Feature-gated behind `bop-std` (on by default).
+///
+/// The module is named `stdlib` rather than `std` specifically
+/// to avoid shadowing Rust's own `::std` when a consumer does
+/// `use bop::*` (or when anything in the crate's own tests
+/// does `use super::*`). `bop::stdlib::resolve(...)` is the
+/// public entry point.
+#[cfg(feature = "bop-std")]
+pub mod stdlib;
 
 mod evaluator;
 

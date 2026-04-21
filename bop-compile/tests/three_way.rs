@@ -75,7 +75,7 @@ impl BopHost for BufHost {
         if let Some(src) = self.modules.get(name) {
             return Some(Ok(src.clone()));
         }
-        bop_std::resolve(name).map(|s| Ok(s.to_string()))
+        bop::stdlib::resolve(name).map(|s| Ok(s.to_string()))
     }
 }
 
@@ -134,7 +134,7 @@ struct CorpusEntry {
 }
 
 /// Construct an AOT `ModuleResolver` that looks up corpus-local
-/// overrides first, then falls back to `bop_std::resolve` so
+/// overrides first, then falls back to `bop::stdlib::resolve` so
 /// `import std.*` works without every test having to redeclare
 /// the stdlib. Entries with no imports at all still receive a
 /// resolver — it's never called for them, so the extra
@@ -150,7 +150,7 @@ fn build_resolver(
         if let Some(src) = map.get(name) {
             return Some(Ok(src.clone()));
         }
-        bop_std::resolve(name).map(|s| Ok(s.to_string()))
+        bop::stdlib::resolve(name).map(|s| Ok(s.to_string()))
     })))
 }
 

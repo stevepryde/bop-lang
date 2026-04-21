@@ -123,7 +123,7 @@ fn make_resolver(root: PathBuf) -> ModuleResolver {
 
     Rc::new(RefCell::new(move |name: &str| {
         // `bop-std` canonical stdlib modules first.
-        if let Some(src) = bop_std::resolve(name) {
+        if let Some(src) = bop::stdlib::resolve(name) {
             return Some(Ok(src.to_string()));
         }
         // Filesystem fallback — look for `<name>.bop` relative
@@ -261,9 +261,11 @@ fn scratch_dir(stem: &str) -> PathBuf {
 }
 
 /// Manifest for the scratch cargo crate we feed the transpiled
-/// Rust into. Declares `bop-lang` / `bop-sys` / `bop-std` at the
-/// current `bop` CLI's version — the CLI and libraries ship
-/// together, so by construction the deps are always in lockstep.
+/// Rust into. Declares `bop-lang` + `bop-sys` at the current
+/// `bop` CLI's version — the CLI and libraries ship together,
+/// so by construction the deps are always in lockstep. The
+/// bundled stdlib comes for free via the `bop-std` feature
+/// (default on) on both deps — no separate crate line needed.
 ///
 /// The generated crate carries `[workspace]` on its own so
 /// cargo doesn't try to adopt it as a member of some surrounding
@@ -282,13 +284,11 @@ fn manifest_for_output(stem: &str) -> String {
     let deps = match std::env::var("BOP_DEV_WORKSPACE") {
         Ok(root) if !root.is_empty() => format!(
             r#"bop = {{ path = "{root}/bop", package = "bop-lang" }}
-bop-sys = {{ path = "{root}/bop-sys" }}
-bop-std = {{ path = "{root}/bop-std" }}"#,
+bop-sys = {{ path = "{root}/bop-sys" }}"#,
         ),
         _ => format!(
             r#"bop = {{ version = "{version}", package = "bop-lang" }}
-bop-sys = "{version}"
-bop-std = "{version}""#,
+bop-sys = "{version}""#,
         ),
     };
     format!(

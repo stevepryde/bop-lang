@@ -67,13 +67,20 @@ fn main() {
 | feature | default | what it does |
 |---|---|---|
 | `std` | yes | uses `std::f64` math, `std` collections, and full runtime |
+| `bop-std` | yes | bundles the Bop stdlib (`import std.math`, `std.json`, `std.collections`, `std.iter`, `std.string`, `std.result`, `std.test`) as `&'static str` constants reachable via [`bop::stdlib::resolve`] |
 | `no_std` | no | drops the `std` dep, pulls in `libm` for float math. Enable with `default-features = false, features = ["no_std"]` |
+
+A truly minimal build — core language only, no bundled stdlib:
+
+```toml
+bop-lang = { version = "0.3", default-features = false, features = ["std"] }
+```
 
 ## WASM example
 
 ```toml
 [dependencies]
-bop-lang = { version = "0.3", default-features = false, features = ["no_std"] }
+bop-lang = { version = "0.3", default-features = false, features = ["no_std", "bop-std"] }
 ```
 
 Build for `wasm32-unknown-unknown` as usual. See [`bop-vm`](https://crates.io/crates/bop-vm) for the faster runtime if you need it.
@@ -82,7 +89,6 @@ Build for `wasm32-unknown-unknown` as usual. See [`bop-vm`](https://crates.io/cr
 
 - [`bop-vm`](https://crates.io/crates/bop-vm) — bytecode compiler + VM, 2–3× faster than this crate's walker, same API
 - [`bop-compile`](https://crates.io/crates/bop-compile) — AOT Bop → Rust transpiler for native-speed scripts
-- [`bop-std`](https://crates.io/crates/bop-std) — the Bop standard library (bundled as Bop source)
 - [`bop-sys`](https://crates.io/crates/bop-sys) — ready-made `StdHost` with filesystem / stdio / env / time
 - [`bop-cli`](https://crates.io/crates/bop-cli) — the `bop` command-line tool (`bop run`, `bop compile`, REPL)
 

@@ -1,36 +1,36 @@
-//! # bop-std
+//! Bundled Bop standard library modules, resolved by name.
 //!
-//! Bop's standard library, shipped as bundled **Bop source**
-//! rather than Rust code. Nothing in this crate runs unless an
-//! embedder wires [`resolve`] into their `BopHost::resolve_module`
-//! implementation — which is exactly what `bop-sys`'s
-//! `StandardHost` does out of the box.
+//! Each `.bop` file under `src/modules/` is baked into the binary
+//! as an `&'static str` via `include_str!`. When a Bop script
+//! does `import std.math`, the engine asks its `BopHost` to
+//! resolve the module — embedders route that call to
+//! [`resolve`], which returns the bundled source text.
 //!
-//! The crate has zero runtime dependencies; each module is a
-//! plain string constant baked in at build time via
-//! `include_str!`. That means the stdlib can't drift from what
-//! ships — the `.bop` source files in `src/modules/` are the
-//! source of truth.
+//! Gated behind the `bop-std` feature (on by default). Disable
+//! with `default-features = false` when you want a truly minimal
+//! core with no bundled modules:
 //!
-//! ## Available modules
+//! ```toml
+//! bop-lang = { version = "0.3", default-features = false, features = ["std"] }
+//! ```
+//!
+//! Available modules:
 //!
 //! - `std.result` — `Result` enum, `RuntimeError` struct, and
-//!   combinators (`is_ok`, `unwrap`, `map`, `and_then`, …).
+//!   combinators (`is_ok`, `unwrap`, `map`, `and_then`, …)
 //! - `std.math` — numeric constants and helpers that wrap core
-//!   builtins (`pi`, `e`, `sqrt_safe`, `clamp`, …).
+//!   builtins (`pi`, `e`, `sqrt_safe`, `clamp`, …)
 //! - `std.iter` — functional helpers on arrays (`map`, `filter`,
-//!   `reduce`, `sum`, `find`, …).
+//!   `reduce`, `sum`, `find`, …)
 //! - `std.string` — string helpers that didn't fit the
 //!   method-on-string pattern (`pad_left`, `pad_right`,
-//!   `chars`, …).
+//!   `chars`, …)
 //! - `std.test` — `assert`, `assert_eq`, `assert_near` plus a
-//!   tiny test-runner.
+//!   tiny test-runner
 //! - `std.collections` — `Set`, `Queue`, `Stack` as struct
-//!   types with value-semantic methods (`s = s.push(v)` etc.).
+//!   types with value-semantic methods (`s = s.push(v)` etc.)
 //! - `std.json` — `parse(text)` / `stringify(value)`. Pure
 //!   Bop implementation; adequate for scripting workloads.
-
-#![deny(missing_docs)]
 
 const RESULT: &str = include_str!("modules/result.bop");
 const MATH: &str = include_str!("modules/math.bop");
@@ -43,20 +43,28 @@ const JSON_MOD: &str = include_str!("modules/json.bop");
 /// Map a `std.*` module name to its bundled Bop source.
 ///
 /// Returns `None` for any path outside the stdlib — chain this
-/// with your own `BopHost::resolve_module` so user modules
-/// still resolve:
+/// with your own [`crate::BopHost::resolve_module`] so user
+/// modules still resolve:
 ///
 /// ```ignore
+/// use bop::{BopError, BopHost};
+///
 /// impl BopHost for MyHost {
 ///     fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
-///         if let Some(src) = bop_std::resolve(name) {
+///         if let Some(src) = bop::stdlib::resolve(name) {
 ///             return Some(Ok(src.to_string()));
 ///         }
-///         // fall back to your own resolver (filesystem, embedded
-///         // modules, ...)
+///         // fall back to your own resolver (filesystem,
+///         // embedded modules, etc.)
 ///         self.my_own_resolver(name)
 ///     }
+///     # fn call(&mut self, _: &str, _: &[bop::Value], _: u32)
+///     #     -> Option<Result<bop::Value, BopError>> { None }
 /// }
+/// # struct MyHost;
+/// # impl MyHost {
+/// #     fn my_own_resolver(&mut self, _: &str) -> Option<Result<String, BopError>> { None }
+/// # }
 /// ```
 pub fn resolve(name: &str) -> Option<&'static str> {
     match name {

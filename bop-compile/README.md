@@ -50,6 +50,12 @@ let rust_source = transpile(
 - **Same semantics as walker + VM.** The three-engine differential suite exercises hundreds of programs to catch any behavioural drift.
 - **Same `BopHost` surface.** The generated binary uses `bop-sys::StdHost` by default, so your custom hosts work without changes.
 
+## Features
+
+| feature | default | what it does |
+|---|---|---|
+| `bop-std` | yes | forwards to `bop-lang`'s `bop-std` feature (bundles the Bop stdlib). Turn off with `default-features = false` when building a truly minimal AOT pipeline. |
+
 ## Related crates
 
 - [`bop-lang`](https://crates.io/crates/bop-lang) — the language core the generated code depends on

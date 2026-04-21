@@ -127,10 +127,9 @@ bop-vm   = { version = "0.3", default-features = false, features = ["no_std"] }
 
 ## Crates in this workspace
 
-- [`bop-lang`](bop/) — the language core (parser, walker, `BopHost` trait, `Value`)
+- [`bop-lang`](bop/) — the language core (parser, walker, `BopHost` trait, `Value`). The Bop stdlib (`import std.math`, `std.json`, …) ships inside this crate as bundled Bop source, gated behind the `bop-std` feature (on by default).
 - [`bop-vm`](bop-vm/) — bytecode compiler + VM, 2–3× the walker
 - [`bop-compile`](bop-compile/) — Bop → Rust AOT transpiler
-- [`bop-std`](bop-std/) — the Bop standard library (bundled as Bop source)
 - [`bop-sys`](bop-sys/) — `StdHost`, the default OS-backed host
 - [`bop-cli`](bop-cli/) — the `bop` command-line tool
 

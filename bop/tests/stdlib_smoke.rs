@@ -1,13 +1,13 @@
 //! Smoke tests for the bundled stdlib modules. Each module is
-//! resolved through `bop_std::resolve` and executed against the
+//! resolved through `bop::stdlib::resolve` and executed against the
 //! tree-walker with a minimal host that:
 //!
 //! - captures `print` output so tests can assert on it
-//! - routes `import std.*` back through `bop_std::resolve` so
+//! - routes `import std.*` back through `bop::stdlib::resolve` so
 //!   stdlib modules importing each other work the same way
 //!   `StandardHost` handles them.
 //!
-//! Keeping this in `bop-std` itself means refactors to the
+//! Keeping these smoke tests in `bop-lang` itself means refactors to the
 //! `.bop` sources break cleanly inside this crate rather than
 //! trickling into `bop-cli` or embedder tests downstream.
 
@@ -45,7 +45,7 @@ impl BopHost for BufHost {
     }
 
     fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
-        bop_std::resolve(name).map(|src| Ok(src.to_string()))
+        bop::stdlib::resolve(name).map(|src| Ok(src.to_string()))
     }
 }
 

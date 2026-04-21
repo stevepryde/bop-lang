@@ -1,6 +1,6 @@
 # bop-sys
 
-The standard host for the [Bop](https://github.com/stevepryde/bop-lang) programming language — a `BopHost` implementation that wires Bop up to the normal OS-backed conveniences (filesystem, stdio, environment, time) plus the bundled stdlib from [`bop-std`](https://crates.io/crates/bop-std).
+The standard host for the [Bop](https://github.com/stevepryde/bop-lang) programming language — a `BopHost` implementation that wires Bop up to the normal OS-backed conveniences (filesystem, stdio, environment, time) plus the bundled Bop stdlib.
 
 If you're writing a command-line tool or a desktop / server app that runs Bop scripts, `StdHost` is the default you want. Custom embeddings (sandboxed, wasm, no_std) should write their own `BopHost` impl.
 
@@ -8,7 +8,7 @@ If you're writing a command-line tool or a desktop / server app that runs Bop sc
 
 ### Import resolution
 
-- `import std.math` / `std.json` / `std.collections` / … → resolved via `bop-std`
+- `import std.math` / `std.json` / `std.collections` / … → resolved via `bop-lang`'s bundled stdlib (the `bop-std` feature, forwarded by default)
 - `import my_module` / `my.nested.module` → resolved from the filesystem relative to the script
 
 ### Host functions (available to Bop code as `fn_name(...)`)
@@ -52,13 +52,13 @@ bop_vm::run(source, &mut host, &BopLimits::standard())?;
 ## When *not* to use `bop-sys`
 
 - **Sandboxed embeddings** that need to block filesystem / env access — write a bare `BopHost` impl and skip this crate entirely.
-- **WASM / no_std builds** — `bop-sys` depends on `std` for filesystem and time. Use `bop-lang` (and optionally `bop-vm` + `bop-std`) directly.
+- **WASM / no_std builds** — `bop-sys` depends on `std` for filesystem and time. Use `bop-lang` (optionally with `bop-vm`, and with `features = ["bop-std"]` if you want the stdlib) directly.
 - **Anywhere you want a tighter custom host surface** — `BopHost::call` is the only thing you need to implement; your host can expose exactly the functions your app wants Bop to reach.
 
 ## Related crates
 
 - [`bop-lang`](https://crates.io/crates/bop-lang) — the language core + `BopHost` trait
-- [`bop-std`](https://crates.io/crates/bop-std) — the Bop stdlib modules this crate routes `import std.*` to
+- The Bop stdlib this crate routes `import std.*` to lives inside `bop-lang` behind the `bop-std` feature (forwarded by default from `bop-sys`).
 - [`bop-vm`](https://crates.io/crates/bop-vm) — faster bytecode runtime, drop-in with the same `StdHost`
 - [`bop-cli`](https://crates.io/crates/bop-cli) — the `bop` binary built on top of `bop-sys`
 

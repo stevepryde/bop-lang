@@ -46,7 +46,7 @@ Running `bop script.bop` goes through the bytecode VM because it's **2–3× fas
 - [`bop-vm`](https://crates.io/crates/bop-vm) — the bytecode runtime `bop run` uses by default
 - [`bop-compile`](https://crates.io/crates/bop-compile) — the AOT transpiler `bop compile` drives
 - [`bop-sys`](https://crates.io/crates/bop-sys) — the standard host `bop` uses (filesystem imports, stdio, env, time)
-- [`bop-std`](https://crates.io/crates/bop-std) — the Bop stdlib (`import std.math`, `std.json`, …)
+- The Bop stdlib (`import std.math`, `std.json`, …) is bundled inside `bop-lang` behind the `bop-std` feature — on by default, so `bop run` / `bop compile` Just Work.
 
 ## License
 

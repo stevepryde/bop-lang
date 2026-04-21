@@ -51,19 +51,25 @@ impl BopHost for StandardHost {
 
     /// Resolve `import foo.bar.baz`:
     ///
-    /// 1. **Stdlib first** — `std.*` names hit `bop_std::resolve`,
-    ///    which returns bundled source. Stdlib modules never
-    ///    touch the filesystem, so they work in every host
-    ///    (including ones that set a `module_root` pointed at
-    ///    a directory with no stdlib).
+    /// 1. **Stdlib first** — when the `bop-std` feature is on
+    ///    (default), `std.*` names hit [`bop::stdlib::resolve`],
+    ///    which returns bundled Bop source. Stdlib modules
+    ///    never touch the filesystem, so they work in every
+    ///    host (including ones that set a `module_root` pointed
+    ///    at a directory with no stdlib). When the feature is
+    ///    off the step is skipped, so `std.*` falls through to
+    ///    the filesystem like any other name.
     /// 2. **Filesystem fallback** — the rest map to
     ///    `<root>/foo/bar/baz.bop`. Missing files return
     ///    `None` so the runtime can raise a clean
     ///    *module not found* error; I/O errors (e.g.
     ///    permissions) are surfaced as `Some(Err(...))`.
     fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
-        if let Some(src) = bop_std::resolve(name) {
-            return Some(Ok(src.to_string()));
+        #[cfg(feature = "bop-std")]
+        {
+            if let Some(src) = bop::stdlib::resolve(name) {
+                return Some(Ok(src.to_string()));
+            }
         }
         if !is_valid_module_name(name) {
             return Some(Err(crate::error::io_error(

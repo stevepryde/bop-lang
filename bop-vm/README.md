@@ -69,14 +69,15 @@ for _ in 0..1000 {
 | feature | default | what it does |
 |---|---|---|
 | `std` | yes | standard runtime, no external deps |
+| `bop-std` | yes | forwards to `bop-lang`'s `bop-std` feature (bundles the Bop stdlib so `import std.math` etc. resolve through any host that calls `bop::stdlib::resolve`) |
 | `no_std` | no | forwards to `bop-lang`'s `no_std` feature, which pulls in `libm`. Enable with `default-features = false, features = ["no_std"]` |
 
 ## WASM example
 
 ```toml
 [dependencies]
-bop-lang = { version = "0.3", default-features = false, features = ["no_std"] }
-bop-vm   = { version = "0.3", default-features = false, features = ["no_std"] }
+bop-lang = { version = "0.3", default-features = false, features = ["no_std", "bop-std"] }
+bop-vm   = { version = "0.3", default-features = false, features = ["no_std", "bop-std"] }
 ```
 
 Tested and working end-to-end on `wasm32-unknown-unknown` with `lol_alloc` as the global allocator.
