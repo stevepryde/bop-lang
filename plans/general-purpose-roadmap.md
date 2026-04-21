@@ -1110,18 +1110,20 @@ shipping, but each one hurts maintenance or future work.
   `core::f64`. Fixes:
   - New `bop::math` module wraps each `f64` method with a
     one-liner that dispatches to the native method under
-    `std` and to `libm` under `no_std + libm`. Every
+    `std` and to `libm` under the `no_std` feature. Every
     builtin call site goes through the wrapper so the rest
     of the code stays `#[cfg]`-free.
-  - New `libm` feature (opt-in, forwarded from `bop-vm`)
-    pulls in the tiny pure-Rust `libm` crate. Gated as an
-    `optional = true` dep so std users never see it in
-    their dep graph — verified via `cargo tree -p
+  - New `no_std` feature (opt-in, forwarded from `bop-vm`)
+    pulls in the tiny pure-Rust `libm` crate under the
+    hood. Named after the user intent ("I'm targeting
+    no_std"), not the implementation detail (libm). Gated
+    as an `optional = true` dep so std users never see it
+    in their dep graph — verified via `cargo tree -p
     bop-lang` (empty) vs `cargo tree -p bop-lang
-    --no-default-features --features libm` (one line:
+    --no-default-features --features no_std` (one line:
     `libm v0.2.16`).
   - `compile_error!` in `bop::math` if someone disables
-    `std` without enabling `libm`, pointing at the fix.
+    `std` without enabling `no_std`, pointing at the fix.
 
   End-to-end proof the `no_std` surface works: a
   `wasm32-unknown-unknown` `cdylib` that `#![no_std]`s,

@@ -1,9 +1,9 @@
 //! Tiny `f64` math facade that works under both `std` and
-//! `no_std + libm`. `core::f64` doesn't expose `sqrt` / `sin` /
-//! `cos` / etc. — those methods live in `std::f64`'s
-//! platform-dependent math library — so the no_std build has to
-//! forward to the pure-Rust `libm` crate instead. The std build
-//! stays dep-free and calls the native `f64` methods directly.
+//! `no_std`. `core::f64` doesn't expose `sqrt` / `sin` / `cos` /
+//! etc. — those methods live in `std::f64`'s platform-dependent
+//! math library — so the no_std build has to forward to the
+//! pure-Rust `libm` crate instead. The std build stays dep-free
+//! and calls the native `f64` methods directly.
 //!
 //! Every bop math builtin and `ops::div` / `ops::rem`'s float
 //! path goes through here rather than calling `x.sqrt()` /
@@ -16,21 +16,24 @@
 //!
 //! - `std` (default) — uses `f64`'s built-in math methods. No
 //!   external deps.
-//! - `libm` (for `no_std`) — uses the `libm` crate. Add
-//!   `features = ["libm"]` to your dependency declaration.
+//! - `no_std` — for bare-metal / edge wasm / embedded targets.
+//!   Pulls in the tiny pure-Rust `libm` crate internally.
+//!   Enable with `default-features = false, features =
+//!   ["no_std"]` in your `Cargo.toml`.
 //!
-//! Building with `default-features = false` and neither `libm`
-//! nor `std` is a compile error: there's no floating-point math
+//! Building with `default-features = false` and no `no_std`
+//! feature is a compile error: there's no floating-point math
 //! library available on the target, and the bop engine can't
 //! reach the language's math builtins without one.
 
 #![allow(dead_code)]
 
-#[cfg(all(not(feature = "std"), not(feature = "libm")))]
+#[cfg(all(not(feature = "std"), not(feature = "no_std")))]
 compile_error!(
-    "bop-lang in no_std mode needs the `libm` feature for \
-     floating-point math. Add `features = [\"libm\"]` to your \
-     bop-lang dependency, or re-enable the default `std` feature."
+    "bop-lang needs either the default `std` feature or the \
+     `no_std` feature for floating-point math. Add \
+     `features = [\"no_std\"]` to your bop-lang dependency, or \
+     re-enable the default `std` feature."
 );
 
 /// `√x`.
@@ -40,7 +43,7 @@ pub fn sqrt(x: f64) -> f64 {
     {
         x.sqrt()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::sqrt(x)
     }
@@ -53,7 +56,7 @@ pub fn sin(x: f64) -> f64 {
     {
         x.sin()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::sin(x)
     }
@@ -66,7 +69,7 @@ pub fn cos(x: f64) -> f64 {
     {
         x.cos()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::cos(x)
     }
@@ -79,7 +82,7 @@ pub fn tan(x: f64) -> f64 {
     {
         x.tan()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::tan(x)
     }
@@ -92,7 +95,7 @@ pub fn floor(x: f64) -> f64 {
     {
         x.floor()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::floor(x)
     }
@@ -105,7 +108,7 @@ pub fn ceil(x: f64) -> f64 {
     {
         x.ceil()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::ceil(x)
     }
@@ -118,7 +121,7 @@ pub fn round(x: f64) -> f64 {
     {
         x.round()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::round(x)
     }
@@ -131,7 +134,7 @@ pub fn trunc(x: f64) -> f64 {
     {
         x.trunc()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::trunc(x)
     }
@@ -144,7 +147,7 @@ pub fn powf(base: f64, exp: f64) -> f64 {
     {
         base.powf(exp)
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::pow(base, exp)
     }
@@ -157,7 +160,7 @@ pub fn ln(x: f64) -> f64 {
     {
         x.ln()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::log(x)
     }
@@ -170,7 +173,7 @@ pub fn exp(x: f64) -> f64 {
     {
         x.exp()
     }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
+    #[cfg(all(not(feature = "std"), feature = "no_std"))]
     {
         libm::exp(x)
     }

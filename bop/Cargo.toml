@@ -17,15 +17,19 @@ name = "bop"
 [features]
 default = ["std"]
 std = []
-# Opt-in for no_std builds that want floating-point math
-# (sqrt / sin / cos / …). Those `f64` methods live in `std`,
-# so without them bop-lang can't offer the math builtins. The
-# flag pulls in the tiny, pure-Rust `libm` crate; std users
-# never see libm in their dep graph (optional = true). A
-# no_std build that disables `std` *must* enable `libm` — the
-# math module emits a `compile_error!` otherwise, pointing at
-# the fix.
-libm = ["dep:libm"]
+# Enable when building for `no_std` targets (bare-metal, edge
+# wasm, embedded). Pulls in the tiny pure-Rust `libm` crate
+# internally so the math builtins (`sqrt`, `sin`, `cos`, …)
+# still work — those `f64` methods live in `std`, not `core`.
+# Named `no_std` rather than `libm` because the *intent* is
+# "I'm targeting a no_std environment"; the libm dep is an
+# implementation detail the user shouldn't have to know about.
+# std users never see libm in their dep graph (it's an
+# `optional = true` dep, only activated by this feature). A
+# build that disables `std` without enabling `no_std` fails
+# fast with a `compile_error!` in `bop::math` pointing at the
+# fix.
+no_std = ["dep:libm"]
 
 [dependencies]
 libm = { version = "0.2", default-features = false, optional = true }
