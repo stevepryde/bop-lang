@@ -144,6 +144,31 @@ pub enum Value {
     // counter before overflowing the native stack.
     Struct(Box<BopStruct>),
     EnumVariant(Box<BopEnumVariant>),
+    /// Namespace value produced by an aliased `use` statement
+    /// (`use std.math as m` binds `m` as a `Module`). Field
+    /// access dispatches to the module's exported `let` / `fn`
+    /// bindings; the runtime also consults the type list for
+    /// `m.Type { ... }` / `m.Type::Variant(...)` forms so those
+    /// namespaced constructors find the right declared type.
+    Module(Rc<BopModule>),
+}
+
+/// Exported surface of a module, as presented through an aliased
+/// `use` statement. `Rc<BopModule>` is what a `Value::Module`
+/// carries so cloning the Value stays cheap.
+#[derive(Debug)]
+pub struct BopModule {
+    /// The dotted path the module was loaded from ("std.math",
+    /// "game.entity", …). Useful for error messages.
+    pub path: String,
+    /// Exported `let` / `fn` / `const` bindings, in declaration
+    /// order. Accessed via `m.name` field reads.
+    pub bindings: Vec<(String, Value)>,
+    /// Names of struct / enum types the module declared.
+    /// Construction through the namespace (`m.Entity { ... }`)
+    /// verifies the type name appears in this list before
+    /// falling through to the engine's type registry.
+    pub types: Vec<String>,
 }
 
 // ─── Tracked constructors ──────────────────────────────────────────────────
@@ -313,6 +338,10 @@ impl Clone for Value {
             // moment the BopFn is constructed (by `new_fn`), via
             // their own Value Clone/Drop hooks.
             Value::Fn(f) => Value::Fn(Rc::clone(f)),
+            // Modules are reference-counted — same cheap clone as
+            // fns. The `bindings` and `types` vectors track their
+            // own memory when the `BopModule` is first built.
+            Value::Module(m) => Value::Module(Rc::clone(m)),
             Value::EnumVariant(e) => {
                 let tn = e.type_name.clone();
                 let vn = e.variant.clone();
@@ -443,6 +472,7 @@ impl core::fmt::Display for Value {
                 Some(name) => write!(f, "<fn {}>", name),
                 None => write!(f, "<fn>"),
             },
+            Value::Module(m) => write!(f, "<module {}>", m.path),
             Value::Struct(s) => {
                 write!(f, "{} {{", s.type_name)?;
                 for (i, (k, v)) in s.fields.iter().enumerate() {
@@ -518,6 +548,7 @@ impl Value {
             // `type(Point { ... })` shows `"Point"`.
             Value::Struct(_) => "struct",
             Value::EnumVariant(_) => "enum",
+            Value::Module(_) => "module",
         }
     }
 
@@ -553,6 +584,9 @@ impl Value {
             // Enum variants represent a tagged choice; always
             // truthy regardless of payload.
             Value::EnumVariant(_) => true,
+            // A module is always a concrete thing — matches
+            // fn's behaviour.
+            Value::Module(_) => true,
         }
     }
 }

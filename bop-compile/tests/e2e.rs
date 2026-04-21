@@ -591,6 +591,85 @@ print(x)"#,
     );
 }
 
+#[test]
+#[ignore]
+fn e2e_use_selective_items() {
+    // `use m.{a, b}` brings only the listed exports in as locals.
+    assert_aot_matches_with_modules(
+        "use_selective_items",
+        r#"use m.{pi, tau}
+print(pi)
+print(tau)"#,
+        &[("m", "let pi = 3\nlet tau = 6\nlet unused = 99")],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_use_selective_reaches_private() {
+    // Selective form can reach `_`-prefixed names; glob can't.
+    assert_aot_matches_with_modules(
+        "use_selective_private",
+        r#"use m.{_helper}
+print(_helper(5))"#,
+        &[("m", "fn _helper(n) { return n * 10 }")],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_use_aliased_glob() {
+    // `use m as n` — namespaced binding read + call through alias.
+    assert_aot_matches_with_modules(
+        "use_aliased_glob",
+        r#"use m as n
+print(n.pi)
+print(n.double(7))"#,
+        &[("m", "let pi = 3\nfn double(x) { return x + x }")],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_use_aliased_selective() {
+    // `use m.{double} as n` — only `double` ends up on `n`.
+    assert_aot_matches_with_modules(
+        "use_aliased_selective",
+        r#"use m.{double} as n
+print(n.double(21))"#,
+        &[("m", "let pi = 3\nfn double(x) { return x + x }")],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_use_namespaced_struct_construct() {
+    // `n.Entity { ... }` constructs the aliased module's type.
+    assert_aot_matches_with_modules(
+        "use_namespaced_struct",
+        r#"use m as n
+let p = n.Point { x: 3, y: 4 }
+print(p.x + p.y)"#,
+        &[("m", "struct Point { x, y }")],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_use_namespaced_enum_construct() {
+    // `n.Color::Red` and `n.Result::Ok(v)` via alias.
+    assert_aot_matches_with_modules(
+        "use_namespaced_enum",
+        r#"use m as n
+print(n.Color::Red)
+print(n.Result::Ok(42))"#,
+        &[(
+            "m",
+            "enum Color { Red, Green, Blue }\nenum Result { Ok(v), Err(e) }",
+        )],
+    );
+}
+
 // ─── Structs / enums / user methods ──────────────────────────────
 
 #[test]

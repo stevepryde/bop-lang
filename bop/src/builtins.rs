@@ -9,7 +9,56 @@ use alloc::{format, string::{String, ToString}, vec::Vec};
 
 use crate::error::BopError;
 use crate::memory::bop_would_exceed;
+use crate::parser::{VariantDecl, VariantKind};
 use crate::value::Value;
+
+// ─── Engine-wide builtin types ────────────────────────────────────
+//
+// `Result` and `RuntimeError` are pre-declared in every engine
+// (walker, VM, AOT) so:
+//
+//   - `try` / `try_call` can construct `Result::Ok(..)` /
+//     `Result::Err(RuntimeError { .. })` without requiring the
+//     program to have imported `std.result` first;
+//   - user programs can write `Result::Ok(..)` or match on
+//     `RuntimeError { message, line }` out of the box;
+//   - engine-to-engine behaviour stays in lockstep — each engine
+//     seeds its type table from these same helpers, so the
+//     shapes can't drift.
+//
+// The combinator fns (`is_ok`, `unwrap`, `map`, …) stay in
+// `std.result`; only the bare type shapes live here.
+
+/// The canonical `Result { Ok(value), Err(error) }` enum shape,
+/// seeded into every engine's type registry at construction time.
+pub fn builtin_result_variants() -> Vec<VariantDecl> {
+    alloc_import::vec![
+        VariantDecl {
+            name: String::from("Ok"),
+            kind: VariantKind::Tuple(alloc_import::vec![String::from("value")]),
+        },
+        VariantDecl {
+            name: String::from("Err"),
+            kind: VariantKind::Tuple(alloc_import::vec![String::from("error")]),
+        },
+    ]
+}
+
+/// The canonical `RuntimeError { message, line }` struct field
+/// list. `try_call` produces these directly; declaring them as a
+/// builtin lets user code pattern-match the same shape.
+pub fn builtin_runtime_error_fields() -> Vec<String> {
+    alloc_import::vec![String::from("message"), String::from("line")]
+}
+
+// Small alias so this file compiles both under std and no_std. The
+// parser module already uses `alloc::vec!` under no_std, so the
+// engines follow the same convention here. Nothing clever — just a
+// re-export that picks the right `vec!` macro per config.
+#[cfg(feature = "std")]
+use std as alloc_import;
+#[cfg(not(feature = "std"))]
+use alloc as alloc_import;
 
 pub fn builtin_range(
     args: &[Value],

@@ -214,11 +214,13 @@ pub enum Instr {
     JumpIfTruePeek(CodeOffset),
 
     // ─── Modules ─────────────────────────────────────────────────
-    /// Resolve, parse, compile, and run the module at `name`, then
-    /// inject its top-level bindings into the current scope. The
-    /// VM caches by module path so re-uses are cheap. Emitted by
-    /// the compiler for the `use foo.bar.baz` statement.
-    Use(NameIdx),
+    /// Resolve, parse, compile, and run the module at the path
+    /// stored in `chunk.use_specs[idx]`, then inject its exports
+    /// per the spec — glob (default), selective (`.{a, b}`),
+    /// aliased (`as m`), or both. The VM caches by module path
+    /// so re-uses are cheap. Instruction stays `Copy` by keeping
+    /// the variable-length `items` / `alias` data in a side pool.
+    Use(UseIdx),
 
     // ─── User-defined types ─────────────────────────────────────
     /// Register the struct type at `StructIdx` (declared fields
@@ -240,8 +242,12 @@ pub enum Instr {
     /// Struct literal: pop `2 * count` stack entries (field-name
     /// string + value, alternating — same layout as `MakeDict`),
     /// validate against the struct declaration, push a
-    /// `Value::Struct`.
+    /// `Value::Struct`. `namespace` (when present) is the alias
+    /// for a `m.Type { ... }` access — the VM checks that the
+    /// name resolves to a `Value::Module` whose exports include
+    /// this type before falling through to the normal registry.
     ConstructStruct {
+        namespace: Option<NameIdx>,
         type_name: NameIdx,
         count: u32,
     },
@@ -250,7 +256,10 @@ pub enum Instr {
     /// - `Unit` — no pops
     /// - `Tuple(argc)` — pop `argc` values
     /// - `Struct(count)` — pop `2 * count` (name, value) pairs
+    /// `namespace` mirrors the `ConstructStruct` field — set for
+    /// `m.Result::Ok(v)` forms.
     ConstructEnum {
+        namespace: Option<NameIdx>,
         type_name: NameIdx,
         variant: NameIdx,
         shape: EnumConstructShape,
@@ -347,6 +356,14 @@ pub struct EnumIdx(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PatternIdx(pub u32);
 
+/// Index into a chunk's `use_specs` pool. Each `use` statement
+/// emits one [`UseSpec`] describing the shape of the import
+/// (path + optional `items` + optional `alias`); `Instr::Use`
+/// stays `Copy` by holding this side-table index rather than the
+/// variable-length spec inline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UseIdx(pub u32);
+
 /// Shape of an enum variant's payload at the construction site —
 /// tells the VM how many stack entries to pop.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -393,6 +410,17 @@ pub struct InterpRecipe {
     pub parts: Vec<StringPart>,
 }
 
+/// Compiled descriptor for a `use` statement. Parallel to the
+/// parser's `StmtKind::Use` fields — the VM's `Use` opcode picks
+/// this up by [`UseIdx`] at runtime so the hot-path instruction
+/// stays `Copy`.
+#[derive(Debug, Clone)]
+pub struct UseSpec {
+    pub path: String,
+    pub items: Option<Vec<String>>,
+    pub alias: Option<String>,
+}
+
 // ─── Chunk ─────────────────────────────────────────────────────────
 
 /// A single compiled unit: either the top-level program or one
@@ -410,6 +438,10 @@ pub struct Chunk {
     pub enum_defs: Vec<EnumDef>,
     /// Match patterns referenced by `MatchFail` instructions.
     pub patterns: Vec<bop::parser::Pattern>,
+    /// Side-table of `use` descriptors referenced by
+    /// `Instr::Use`. Holds variable-length fields (path, items,
+    /// alias) so the instruction payload stays `Copy`.
+    pub use_specs: Vec<UseSpec>,
     /// Slot count for this chunk when it serves as a function /
     /// lambda body. Zero at the top-level program chunk (where
     /// bindings live in the BTreeMap scope). The VM uses this
@@ -484,6 +516,10 @@ impl Chunk {
 
     pub fn pattern(&self, idx: PatternIdx) -> &bop::parser::Pattern {
         &self.patterns[idx.0 as usize]
+    }
+
+    pub fn use_spec(&self, idx: UseIdx) -> &UseSpec {
+        &self.use_specs[idx.0 as usize]
     }
 }
 

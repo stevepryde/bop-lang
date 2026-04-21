@@ -1,23 +1,12 @@
-# std.result — Result type and helper fns for error handling.
+# std.result — combinators for `Result`-shaped values.
 #
-# `try` and `try_call` already work on any enum whose variants
-# are named `Ok` and `Err` (phase 5), but the language is more
-# pleasant when those types are declared with a canonical name.
-# This module provides that declaration plus a starter set of
-# combinators so `Result`-shaped values feel native.
-
-enum Result {
-    Ok(value),
-    Err(error),
-}
-
-# `RuntimeError` is the payload `try_call` puts in the `Err`
-# arm on a caught non-fatal error. Declared here so user code
-# can construct and pattern-match it explicitly.
-struct RuntimeError {
-    message,
-    line,
-}
+# `Result { Ok(value), Err(error) }` and `RuntimeError { message,
+# line }` are engine-wide builtins (pre-registered in walker, VM,
+# and AOT) so programs can use them without first having to `use
+# std.result`. This module no longer re-declares those types —
+# doing so would either shadow the builtin (if we allowed it) or
+# error out as a double-decl. Instead, it provides the helpers
+# that turn `Result` into something pleasant to work with.
 
 # True when `r` is an `Ok`.
 fn is_ok(r) {

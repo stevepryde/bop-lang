@@ -825,15 +825,13 @@ print(match top() {
     Result::Err(e) => e,
 })"#,
     ),
-    (
-        "try_ok_unit_variant_yields_none",
-        r#"enum Result { Ok, Err(e) }
-fn doit() {
-    let v = try Result::Ok
-    return type(v)
-}
-print(doit())"#,
-    ),
+    // `try_ok_unit_variant_yields_none` used to live here — it
+    // redeclared `Result` with a Unit `Ok` variant and relied on
+    // the walker silently accepting it. Now that `Result` is an
+    // engine builtin with the canonical `Ok(value)` shape, a
+    // redeclaration with a different shape is a hard error in
+    // all three engines. The per-engine unit tests cover the new
+    // behaviour; there's nothing to diff here.
     (
         "try_inside_lambda_returns_from_lambda",
         r#"enum Result { Ok(v), Err(e) }

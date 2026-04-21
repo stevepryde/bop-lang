@@ -971,16 +971,19 @@ print(match top() {
 }
 
 #[test]
-fn try_ok_unit_variant_diff() {
-    assert_eq!(
-        say(r#"enum Result { Ok, Err(e) }
+fn result_cant_be_redeclared_with_unit_ok_diff() {
+    // Same rule the walker enforces: `Result` is a builtin enum,
+    // so a redeclaration with a different variant shape (Unit
+    // `Ok` vs the canonical `Ok(value)`) is now rejected at
+    // declaration time. Used to be a silent runtime quirk.
+    let msg = run_err(
+        r#"enum Result { Ok, Err(e) }
 fn doit() {
-    let v = try Result::Ok
-    return type(v)
+    return try Result::Ok
 }
-print(doit())"#),
-        "none"
+doit()"#,
     );
+    assert!(msg.contains("already declared"), "got: {}", msg);
 }
 
 #[test]

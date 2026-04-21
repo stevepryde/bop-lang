@@ -127,16 +127,22 @@ pub struct Evaluator<'h, H: BopHost> {
     /// `Signal::Return`. Always `None` outside the narrow
     /// unwinding window.
     pending_try_return: Option<Value>,
+    /// Non-fatal runtime warnings accumulated during execution —
+    /// currently only `use`-time name-shadowing events (glob
+    /// imports bringing in a name that's already bound). Read
+    /// after `run()` returns via [`Self::take_warnings`].
+    runtime_warnings: Vec<crate::error::BopWarning>,
 }
 
 impl<'h, H: BopHost> Evaluator<'h, H> {
     pub fn new(host: &'h mut H, limits: BopLimits) -> Self {
         crate::memory::bop_memory_init(limits.max_memory);
+        let (struct_defs, enum_defs) = seed_builtin_types();
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
-            struct_defs: BTreeMap::new(),
-            enum_defs: BTreeMap::new(),
+            struct_defs,
+            enum_defs,
             methods: BTreeMap::new(),
             host,
             steps: 0,
@@ -146,6 +152,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             imports: Rc::new(RefCell::new(alloc_import::collections::BTreeMap::new())),
             imported_here: alloc_import::collections::BTreeSet::new(),
             pending_try_return: None,
+            runtime_warnings: Vec::new(),
         }
     }
 
@@ -158,11 +165,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         limits: BopLimits,
         imports: ImportCache,
     ) -> Self {
+        let (struct_defs, enum_defs) = seed_builtin_types();
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
-            struct_defs: BTreeMap::new(),
-            enum_defs: BTreeMap::new(),
+            struct_defs,
+            enum_defs,
             methods: BTreeMap::new(),
             host,
             steps: 0,
@@ -172,11 +180,26 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             imports,
             imported_here: alloc_import::collections::BTreeSet::new(),
             pending_try_return: None,
+            runtime_warnings: Vec::new(),
         }
     }
 
     pub fn run(mut self, stmts: &[Stmt]) -> Result<(), BopError> {
-        match self.exec_block(stmts)? {
+        let result = self.exec_block(stmts);
+        #[cfg(feature = "std")]
+        {
+            // Surface any runtime warnings accumulated during the
+            // run (currently: glob-import shadowing). They land on
+            // stderr with the standard `warning:` prefix so
+            // terminal users see them — no public API change
+            // needed. Embedders that want structured access can
+            // use `run_with_warnings` (future) or implement their
+            // own evaluation loop.
+            for w in &self.runtime_warnings {
+                eprintln!("warning: {}", w.message);
+            }
+        }
+        match result? {
             Signal::Break => {
                 return Err(error(0, "break used outside of a loop"));
             }
@@ -460,18 +483,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             StmtKind::Break => Ok(Signal::Break),
             StmtKind::Continue => Ok(Signal::Continue),
 
-            StmtKind::Use { path, items: _, alias: _ } => {
-                self.exec_import(path, stmt.line)?;
+            StmtKind::Use { path, items, alias } => {
+                self.exec_import(
+                    path,
+                    items.as_deref(),
+                    alias.as_deref(),
+                    stmt.line,
+                )?;
                 Ok(Signal::None)
             }
 
             StmtKind::StructDecl { name, fields } => {
-                if self.struct_defs.contains_key(name) {
-                    return Err(error(
-                        stmt.line,
-                        format!("Struct `{}` is already declared", name),
-                    ));
-                }
                 // Reject duplicate field names at decl time so
                 // downstream code doesn't have to re-check. Walker,
                 // VM, and AOT all assume unique fields per struct.
@@ -484,12 +506,34 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                 }
+                if let Some(existing) = self.struct_defs.get(name) {
+                    // Same-shape redeclaration is allowed — that's
+                    // the rule `use` already uses for idempotent
+                    // re-imports, and it lets engine-wide builtins
+                    // (`RuntimeError`) coexist with a user program
+                    // that happens to redeclare them with the same
+                    // fields (e.g. a legacy `use std.result`).
+                    if existing == fields {
+                        return Ok(Signal::None);
+                    }
+                    return Err(error(
+                        stmt.line,
+                        format!("Struct `{}` is already declared", name),
+                    ));
+                }
                 self.struct_defs.insert(name.clone(), fields.clone());
                 Ok(Signal::None)
             }
 
             StmtKind::EnumDecl { name, variants } => {
-                if self.enum_defs.contains_key(name) {
+                if let Some(existing) = self.enum_defs.get(name) {
+                    // Same rule as `StructDecl` above — a
+                    // same-shape redeclaration of a builtin (or
+                    // of a type a module already brought in) is a
+                    // no-op, anything else is a clash.
+                    if variants_equivalent(existing, variants) {
+                        return Ok(Signal::None);
+                    }
                     return Err(error(
                         stmt.line,
                         format!("Enum `{}` is already declared", name),
@@ -534,24 +578,57 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         }
     }
 
-    fn exec_import(&mut self, path: &str, line: u32) -> Result<(), BopError> {
-        // Idempotent at the injection site: re-importing a module
-        // this evaluator already applied is a no-op. Keeps
-        // `import foo; import foo` clean without requiring the
-        // shadow check to understand "same module re-imported".
-        if self.imported_here.contains(path) {
+    /// Execute a `use` statement.
+    ///
+    /// Four shapes are dispatched from the parser:
+    ///
+    /// - `use foo`                 — glob: inject all public
+    ///   (non-`_`-prefixed) exports into the caller's scope.
+    ///   Name collisions emit a `BopWarning` and the first
+    ///   binding wins (already-present beats newcomer).
+    /// - `use foo.{a, b}`          — selective: inject only the
+    ///   listed names. Missing names raise a clear error. Names
+    ///   that start with `_` are accepted when listed
+    ///   explicitly (the selective form is how you opt-in to
+    ///   private bindings).
+    /// - `use foo as m`            — aliased: every export
+    ///   (including `_`-prefixed) hangs off a `Value::Module`
+    ///   bound as `m`. Access via `m.binding` or
+    ///   `m.Type { ... }` / `m.Type::Variant(...)`.
+    /// - `use foo.{a, b} as m`     — selective + aliased: same
+    ///   filtering, and the resulting module only exposes the
+    ///   listed names.
+    ///
+    /// Struct / enum / method declarations from the imported
+    /// module still register globally on every form — types
+    /// are first-come-first-served across the engine. Conflicts
+    /// there produce the same "clashes with existing" error as
+    /// before. (Qualified type names that genuinely disambiguate
+    /// same-named types across modules are a future extension.)
+    fn exec_import(
+        &mut self,
+        path: &str,
+        items: Option<&[String]>,
+        alias: Option<&str>,
+        line: u32,
+    ) -> Result<(), BopError> {
+        // Idempotent at the glob injection site: re-importing a
+        // module already applied is a no-op. Aliased / selective
+        // forms don't enter this cache — they always run, because
+        // the same module imported with different shapes can
+        // legitimately produce different scope effects.
+        let is_plain_glob = items.is_none() && alias.is_none();
+        if is_plain_glob && self.imported_here.contains(path) {
             return Ok(());
         }
+
         let bindings = self.load_module(path, line)?;
-        // Type decls transfer first so the fn bindings below —
-        // which may reference them in default values or capture
-        // them implicitly — resolve cleanly.
-        for (name, fields) in bindings.struct_defs {
-            // Idempotent on identical re-declaration so
-            // re-importing a module via a different path doesn't
-            // trip the duplicate-struct error.
-            if let Some(existing) = self.struct_defs.get(&name) {
-                if existing == &fields {
+
+        // Types (struct / enum / method) always register globally
+        // regardless of form.
+        for (name, fields) in &bindings.struct_defs {
+            if let Some(existing) = self.struct_defs.get(name) {
+                if existing == fields {
                     continue;
                 }
                 return Err(error(
@@ -562,11 +639,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     ),
                 ));
             }
-            self.struct_defs.insert(name, fields);
+            self.struct_defs.insert(name.clone(), fields.clone());
         }
-        for (name, variants) in bindings.enum_defs {
-            if let Some(existing) = self.enum_defs.get(&name) {
-                if existing == &variants {
+        for (name, variants) in &bindings.enum_defs {
+            if let Some(existing) = self.enum_defs.get(name) {
+                if variants_equivalent(existing, variants) {
                     continue;
                 }
                 return Err(error(
@@ -577,53 +654,171 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     ),
                 ));
             }
-            self.enum_defs.insert(name, variants);
+            self.enum_defs.insert(name.clone(), variants.clone());
         }
-        for (type_name, method_name, fn_def) in bindings.methods {
-            let slot = self.methods.entry(type_name).or_default();
-            slot.insert(method_name, fn_def);
+        for (type_name, method_name, fn_def) in &bindings.methods {
+            let slot = self.methods.entry(type_name.clone()).or_default();
+            slot.insert(method_name.clone(), fn_def.clone());
         }
-        // Module fns register in `self.functions` — that's the
-        // call-resolution path for bare-ident calls (including
-        // calls between sibling fns inside the module). They
-        // also land in the current scope as `Value::Fn`s so
-        // first-class use (`let f = some_imported_fn`) works.
-        for (name, fn_def) in bindings.fn_decls {
-            if self.scopes.last().map(|s| s.contains_key(&name)).unwrap_or(false)
-                || self.functions.contains_key(&name)
-            {
-                return Err(error(
-                    line,
-                    format!(
-                        "Use of `{}` from `{}` would shadow an existing binding",
-                        name, path
-                    ),
-                ));
-            }
+
+        // Figure out which name-value pairs to surface based on
+        // the (items, alias) combination. Fn declarations and
+        // plain `let` bindings are threaded together so the
+        // caller-visible order matches the module's declaration
+        // order.
+        let mut exports: Vec<(String, Value)> =
+            Vec::with_capacity(bindings.fn_decls.len() + bindings.bindings.len());
+        let mut fn_entries: Vec<(String, FnDef)> =
+            Vec::with_capacity(bindings.fn_decls.len());
+        for (name, fn_def) in &bindings.fn_decls {
             let value = Value::new_fn(
                 fn_def.params.clone(),
                 Vec::new(),
                 fn_def.body.clone(),
                 Some(name.clone()),
             );
-            self.functions.insert(name.clone(), fn_def);
-            self.define(name, value);
+            exports.push((name.clone(), value));
+            fn_entries.push((name.clone(), fn_def.clone()));
         }
-        for (name, value) in bindings.bindings {
-            if self.scopes.last().map(|s| s.contains_key(&name)).unwrap_or(false)
-                || self.functions.contains_key(&name)
+        for (name, value) in &bindings.bindings {
+            exports.push((name.clone(), value.clone()));
+        }
+
+        // Selective filter: restrict to the listed names.
+        // Missing names error loudly — a silent skip would make
+        // typos hard to spot.
+        if let Some(list) = items {
+            let available: alloc_import::collections::BTreeSet<&str> =
+                exports.iter().map(|(k, _)| k.as_str()).collect();
+            for wanted in list {
+                if !available.contains(wanted.as_str())
+                    && !bindings
+                        .struct_defs
+                        .iter()
+                        .any(|(k, _)| k == wanted)
+                    && !bindings
+                        .enum_defs
+                        .iter()
+                        .any(|(k, _)| k == wanted)
+                {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{}` isn't exported from `{}` (selective import)",
+                            wanted, path
+                        ),
+                    ));
+                }
+            }
+            let listed: alloc_import::collections::BTreeSet<String> =
+                list.iter().cloned().collect();
+            exports.retain(|(k, _)| listed.contains(k));
+            fn_entries.retain(|(k, _)| listed.contains(k));
+        }
+
+        if let Some(alias_name) = alias {
+            // Aliased form: build a `Value::Module` and bind it
+            // under the alias. The module carries its bindings
+            // (let + fn) and the names of declared types so
+            // namespaced constructors like `m.Entity { ... }`
+            // can verify they're reaching for something the
+            // module actually exports.
+            if self
+                .scopes
+                .last()
+                .map(|s| s.contains_key(alias_name))
+                .unwrap_or(false)
+                || self.functions.contains_key(alias_name)
             {
                 return Err(error(
                     line,
                     format!(
-                        "Use of `{}` from `{}` would shadow an existing binding",
-                        name, path
+                        "`{}` is already bound — can't use it as a module alias",
+                        alias_name
                     ),
                 ));
             }
-            self.define(name, value);
+            // Fn entries imported via alias also register in
+            // `self.functions` so `m.foo()` (which lowers to
+            // `Value::Fn` lookup in the module) and `foo()`
+            // (bare call, never reaches the alias) stay
+            // consistent when the module itself has sibling fn
+            // calls inside its own body. Selective + alias:
+            // only the listed fns register.
+            for (name, fn_def) in fn_entries {
+                if !self.functions.contains_key(&name) {
+                    self.functions.insert(name, fn_def);
+                }
+            }
+            let type_names: Vec<String> = bindings
+                .struct_defs
+                .iter()
+                .map(|(n, _)| n.clone())
+                .chain(bindings.enum_defs.iter().map(|(n, _)| n.clone()))
+                .filter(|n| {
+                    items.map(|list| list.iter().any(|i| i == n)).unwrap_or(true)
+                })
+                .collect();
+            let module_value = Value::Module(Rc::new(crate::value::BopModule {
+                path: path.to_string(),
+                bindings: exports,
+                types: type_names,
+            }));
+            self.define(alias_name.to_string(), module_value);
+        } else {
+            // Glob / selective without alias — flat injection.
+            // Privacy: glob-only drops `_`-prefixed names.
+            // Selective lets the user reach into private
+            // bindings explicitly.
+            let skip_private = items.is_none();
+            for (name, fn_def) in fn_entries {
+                if skip_private && crate::naming::is_private(&name) {
+                    continue;
+                }
+                if self
+                    .scopes
+                    .last()
+                    .map(|s| s.contains_key(&name))
+                    .unwrap_or(false)
+                    || self.functions.contains_key(&name)
+                {
+                    self.runtime_warnings.push(crate::error::BopWarning::at(
+                        format!(
+                            "`{}` from `{}` shadowed by an existing binding — the first definition wins",
+                            name, path
+                        ),
+                        line,
+                    ));
+                    continue;
+                }
+                self.functions.insert(name, fn_def);
+            }
+            for (name, value) in exports {
+                if skip_private && crate::naming::is_private(&name) {
+                    continue;
+                }
+                if self
+                    .scopes
+                    .last()
+                    .map(|s| s.contains_key(&name))
+                    .unwrap_or(false)
+                {
+                    self.runtime_warnings.push(crate::error::BopWarning::at(
+                        format!(
+                            "`{}` from `{}` shadowed by an existing binding — the first definition wins",
+                            name, path
+                        ),
+                        line,
+                    ));
+                    continue;
+                }
+                self.define(name, value);
+            }
         }
-        self.imported_here.insert(path.to_string());
+
+        if is_plain_glob {
+            self.imported_here.insert(path.to_string());
+        }
         Ok(())
     }
 
@@ -737,13 +932,59 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         })
     }
 
+    /// Validate `ns.Type` — the caller wrote `ns.Type { ... }`
+    /// or `ns.Type::Variant(...)`. `ns` must be a
+    /// `Value::Module` in scope, and `Type` must appear in that
+    /// module's list of exported type names. The return is
+    /// `Ok(())` for now because types still register under their
+    /// bare names globally; once qualified type names land, this
+    /// is where we translate `ns.Type` into its qualified form.
+    fn validate_namespaced_type(
+        &self,
+        ns: &str,
+        type_name: &str,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let v = self.get_var(ns).ok_or_else(|| {
+            error(line, format!("`{}` isn't a module alias in scope", ns))
+        })?;
+        let module = match v {
+            Value::Module(m) => m,
+            _ => {
+                return Err(error(
+                    line,
+                    format!(
+                        "`{}` is a {}, not a module alias — can't reach `{}` through it",
+                        ns,
+                        v.type_name(),
+                        type_name
+                    ),
+                ));
+            }
+        };
+        if !module.types.iter().any(|t| t == type_name) {
+            return Err(error(
+                line,
+                format!(
+                    "`{}` isn't a type exported from `{}`",
+                    type_name, module.path
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn eval_enum_construct(
         &mut self,
+        namespace: Option<&str>,
         type_name: &str,
         variant: &str,
         payload: &VariantPayload,
         line: u32,
     ) -> Result<Value, BopError> {
+        if let Some(ns) = namespace {
+            self.validate_namespaced_type(ns, type_name, line)?;
+        }
         let variants = self.enum_defs.get(type_name).ok_or_else(|| {
             error(line, crate::error_messages::enum_not_declared(type_name))
         })?
@@ -1146,6 +1387,25 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 }
                 let obj_val = self.eval_expr(object)?;
 
+                // `m.foo(args)` on a module alias: this parsed as
+                // a `MethodCall`, but there's no struct/enum
+                // receiver — `m` is a `Value::Module` whose
+                // `foo` export is a callable value. Look it up,
+                // then treat the result as a regular value call.
+                if let Value::Module(m) = &obj_val {
+                    if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == method) {
+                        let callee = v.clone();
+                        return self.call_value(callee, eval_args, expr.line, Some(method));
+                    }
+                    return Err(error(
+                        expr.line,
+                        format!(
+                            "`{}` isn't exported from `{}`",
+                            method, m.path
+                        ),
+                    ));
+                }
+
                 // User-defined method dispatch comes first — any
                 // user method registered against the receiver's
                 // type wins over built-in methods of the same
@@ -1236,6 +1496,39 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             ),
                         )
                     }),
+                    Value::Module(m) => {
+                        // `alias.name` — look up an export in the
+                        // aliased module.
+                        if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
+                            return Ok(v.clone());
+                        }
+                        if m.types.iter().any(|t| t == field) {
+                            // Types aren't first-class values; the
+                            // parser should have taken the namespaced
+                            // struct-lit / variant-ctor path
+                            // already. Reaching a FieldAccess here
+                            // means the user wrote `m.Type` in a
+                            // value-returning position.
+                            return Err(error_with_hint(
+                                expr.line,
+                                format!("`{}` in `{}` is a type, not a value", field, m.path),
+                                format!(
+                                    "construct through the alias: `{}.{} {{ ... }}` or `{}.{}::Variant(...)`",
+                                    m.path.split('.').last().unwrap_or(&m.path),
+                                    field,
+                                    m.path.split('.').last().unwrap_or(&m.path),
+                                    field,
+                                ),
+                            ));
+                        }
+                        Err(error(
+                            expr.line,
+                            format!(
+                                "`{}` isn't exported from `{}`",
+                                field, m.path
+                            ),
+                        ))
+                    }
                     other => Err(error(
                         expr.line,
                         crate::error_messages::cant_read_field(field, other.type_name()),
@@ -1244,17 +1537,26 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
 
             ExprKind::EnumConstruct {
-                namespace: _,
+                namespace,
                 type_name,
                 variant,
                 payload,
-            } => self.eval_enum_construct(type_name, variant, payload, expr.line),
+            } => self.eval_enum_construct(
+                namespace.as_deref(),
+                type_name,
+                variant,
+                payload,
+                expr.line,
+            ),
 
             ExprKind::StructConstruct {
-                namespace: _,
+                namespace,
                 type_name,
                 fields,
             } => {
+                if let Some(ns) = namespace {
+                    self.validate_namespaced_type(ns, type_name, expr.line)?;
+                }
                 let decl_fields = self.struct_defs.get(type_name).ok_or_else(|| {
                     error(
                         expr.line,
@@ -1790,6 +2092,63 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 // match it's the caller's responsibility to discard the bindings
 // — `eval_match` does this by only consuming them after the match
 // + guard both succeed.
+
+/// Seed a fresh evaluator's type tables with the engine-wide
+/// builtin types (`Result`, `RuntimeError`). The shapes come from
+/// `crate::builtins` so walker / VM / AOT can never drift out of
+/// sync — they all read the same source.
+fn seed_builtin_types() -> (
+    BTreeMap<String, Vec<String>>,
+    BTreeMap<String, Vec<VariantDecl>>,
+) {
+    let mut struct_defs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut enum_defs: BTreeMap<String, Vec<VariantDecl>> = BTreeMap::new();
+    struct_defs.insert(
+        String::from("RuntimeError"),
+        crate::builtins::builtin_runtime_error_fields(),
+    );
+    enum_defs.insert(
+        String::from("Result"),
+        crate::builtins::builtin_result_variants(),
+    );
+    (struct_defs, enum_defs)
+}
+
+/// True when two enum declarations describe the same runtime
+/// shape. Strictly looser than `PartialEq` on `Vec<VariantDecl>`:
+/// tuple variants compare by *arity* only (their payload field
+/// names are positional stubs with no runtime meaning), while
+/// struct variants still require matching field names. Same for
+/// the outer variant ordering — positional.
+///
+/// Used by the "redeclare-same-shape" rules so a user program
+/// that declares `enum Result { Ok(v), Err(e) }` is compatible
+/// with the engine's builtin `enum Result { Ok(value), Err(error) }`.
+fn variants_equivalent(a: &[VariantDecl], b: &[VariantDecl]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for (va, vb) in a.iter().zip(b.iter()) {
+        if va.name != vb.name {
+            return false;
+        }
+        match (&va.kind, &vb.kind) {
+            (VariantKind::Unit, VariantKind::Unit) => {}
+            (VariantKind::Tuple(fa), VariantKind::Tuple(fb)) => {
+                if fa.len() != fb.len() {
+                    return false;
+                }
+            }
+            (VariantKind::Struct(fa), VariantKind::Struct(fb)) => {
+                if fa != fb {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
 
 /// Attempt to match `pattern` against `value`. On success, appends
 /// any captured `(name, Value)` bindings to `bindings` and returns

@@ -143,6 +143,12 @@ struct FnEntry {
 /// Structural equality check for two enum-variant lists.
 /// Used when the same module is resolved via two paths so a
 /// re-import is idempotent rather than an error.
+///
+/// Matches the walker's `variants_equivalent` rule: variant
+/// order + names must match, tuple variants compare by arity
+/// only (payload names are positional stubs with no runtime
+/// meaning), struct variants still require matching field
+/// names.
 fn shapes_match(
     a: &[(String, EnumVariantShape)],
     b: &[(String, EnumVariantShape)],
@@ -150,7 +156,47 @@ fn shapes_match(
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|((an, av), (bn, bv))| an == bn && av == bv)
+    a.iter().zip(b.iter()).all(|((an, av), (bn, bv))| {
+        if an != bn {
+            return false;
+        }
+        match (av, bv) {
+            (EnumVariantShape::Unit, EnumVariantShape::Unit) => true,
+            (EnumVariantShape::Tuple(fa), EnumVariantShape::Tuple(fb)) => fa.len() == fb.len(),
+            (EnumVariantShape::Struct(fa), EnumVariantShape::Struct(fb)) => fa == fb,
+            _ => false,
+        }
+    })
+}
+
+/// Seed a VM's type tables with the engine-wide builtin shapes
+/// (`Result`, `RuntimeError`). Same source of truth as the walker
+/// — both engines read `crate::builtins::builtin_*` so they can
+/// never drift out of sync.
+fn seed_builtin_types() -> (
+    BTreeMap<String, Vec<String>>,
+    BTreeMap<String, Vec<(String, EnumVariantShape)>>,
+) {
+    use bop::parser::VariantKind;
+    let mut struct_defs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut enum_defs: BTreeMap<String, Vec<(String, EnumVariantShape)>> = BTreeMap::new();
+    struct_defs.insert(
+        String::from("RuntimeError"),
+        bop::builtins::builtin_runtime_error_fields(),
+    );
+    let variants = bop::builtins::builtin_result_variants()
+        .into_iter()
+        .map(|v| {
+            let shape = match v.kind {
+                VariantKind::Unit => EnumVariantShape::Unit,
+                VariantKind::Tuple(fs) => EnumVariantShape::Tuple(fs),
+                VariantKind::Struct(fs) => EnumVariantShape::Struct(fs),
+            };
+            (v.name, shape)
+        })
+        .collect();
+    enum_defs.insert(String::from("Result"), variants);
+    (struct_defs, enum_defs)
 }
 
 /// Cached result of loading a module. `Loading` is the
@@ -262,6 +308,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             try_call_wrapper: false,
         };
         let step_budget = limits.max_steps.saturating_mul(STEP_SCALE);
+        let (struct_defs, enum_defs) = seed_builtin_types();
         Self {
             frames: vec![top],
             stack: Vec::new(),
@@ -273,8 +320,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
             imports,
             imported_here: BTreeSet::new(),
             limits,
-            struct_defs: BTreeMap::new(),
-            enum_defs: BTreeMap::new(),
+            struct_defs,
+            enum_defs,
             user_methods: BTreeMap::new(),
             slots_freelist: Vec::new(),
         }
@@ -977,28 +1024,33 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
 
             // ─── Modules ─────────────────────────────────────────
-            Instr::Use(name_idx) => {
-                let path = self.current_chunk().name(name_idx).to_string();
-                self.exec_import(&path, line)?;
+            Instr::Use(idx) => {
+                let spec = self.current_chunk().use_spec(idx).clone();
+                self.exec_use(&spec, line)?;
             }
 
             // ─── User-defined types ──────────────────────────────
-            Instr::DefineStruct(idx) => self.define_struct(idx),
-            Instr::DefineEnum(idx) => self.define_enum(idx),
+            Instr::DefineStruct(idx) => self.define_struct(idx, line)?,
+            Instr::DefineEnum(idx) => self.define_enum(idx, line)?,
             Instr::DefineMethod {
                 type_name,
                 method_name,
                 fn_idx,
             } => self.define_method(type_name, method_name, fn_idx),
-            Instr::ConstructStruct { type_name, count } => {
-                self.construct_struct(type_name, count as usize, line)?;
+            Instr::ConstructStruct {
+                namespace,
+                type_name,
+                count,
+            } => {
+                self.construct_struct(namespace, type_name, count as usize, line)?;
             }
             Instr::ConstructEnum {
+                namespace,
                 type_name,
                 variant,
                 shape,
             } => {
-                self.construct_enum(type_name, variant, shape, line)?;
+                self.construct_enum(namespace, type_name, variant, shape, line)?;
             }
             Instr::FieldGet(n) => {
                 let field = self.current_chunk().name(n).to_string();
@@ -1390,6 +1442,20 @@ impl<'h, H: BopHost> Vm<'h, H> {
     fn call_value(&mut self, argc: usize, line: u32) -> Result<Next, BopError> {
         let args = self.pop_n_values(argc, line)?;
         let callee = self.pop_value(line)?;
+        self.invoke_value(callee, args, line)
+    }
+
+    /// Invoke an already-evaluated callable with already-popped
+    /// args. Shared between `Instr::CallValue` and the
+    /// `Value::Module` fast path in `call_method` (where
+    /// `m.foo(...)` resolves the fn through a module field
+    /// lookup rather than going through the stack callee slot).
+    fn invoke_value(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Next, BopError> {
         match &callee {
             Value::Fn(f) => {
                 let f = Rc::clone(f);
@@ -1414,6 +1480,22 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
         let args = self.pop_n_values(argc, line)?;
         let obj = self.pop_value(line)?;
+
+        // `m.foo(args)` on a module alias: there's no struct /
+        // enum receiver — `m` is a `Value::Module` whose `foo`
+        // export is a callable. Look it up and dispatch through
+        // the regular call-by-value path.
+        if let Value::Module(ref m) = obj {
+            if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == &method) {
+                let callee = v.clone();
+                drop(obj);
+                return self.invoke_value(callee, args, line);
+            }
+            return Err(error(
+                line,
+                format!("`{}` isn't exported from `{}`", method, m.path),
+            ));
+        }
 
         // User-method dispatch comes first — any method declared
         // on the receiver's type wins over the built-in method of
@@ -1516,19 +1598,43 @@ impl<'h, H: BopHost> Vm<'h, H> {
         Ok(Next::Continue)
     }
 
-    fn define_struct(&mut self, idx: StructIdx) {
+    fn define_struct(&mut self, idx: StructIdx, line: u32) -> Result<(), BopError> {
         let def = self.current_chunk().struct_def(idx).clone();
+        if let Some(existing) = self.struct_defs.get(&def.name) {
+            // Same rule as the walker: same-shape redeclarations
+            // are a no-op (covers engine builtins shadowed by the
+            // canonical program source, and idempotent re-import
+            // paths); anything else is a clash.
+            if existing == &def.fields {
+                return Ok(());
+            }
+            return Err(error(
+                line,
+                format!("Struct `{}` is already declared", def.name),
+            ));
+        }
         self.struct_defs.insert(def.name, def.fields);
+        Ok(())
     }
 
-    fn define_enum(&mut self, idx: EnumIdx) {
+    fn define_enum(&mut self, idx: EnumIdx, line: u32) -> Result<(), BopError> {
         let def = self.current_chunk().enum_def(idx).clone();
-        let variants = def
+        let variants: Vec<(String, EnumVariantShape)> = def
             .variants
             .into_iter()
             .map(|v| (v.name, v.shape))
             .collect();
+        if let Some(existing) = self.enum_defs.get(&def.name) {
+            if shapes_match(existing, &variants) {
+                return Ok(());
+            }
+            return Err(error(
+                line,
+                format!("Enum `{}` is already declared", def.name),
+            ));
+        }
         self.enum_defs.insert(def.name, variants);
+        Ok(())
     }
 
     fn define_method(
@@ -1552,11 +1658,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
     fn construct_struct(
         &mut self,
+        namespace: Option<NameIdx>,
         type_name: NameIdx,
         count: usize,
         line: u32,
     ) -> Result<(), BopError> {
         let type_name_s = self.current_chunk().name(type_name).to_string();
+        if let Some(ns_idx) = namespace {
+            let ns_name = self.current_chunk().name(ns_idx).to_string();
+            self.validate_namespaced_type(&ns_name, &type_name_s, line)?;
+        }
         let decl = self
             .struct_defs
             .get(&type_name_s)
@@ -1630,6 +1741,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
     fn construct_enum(
         &mut self,
+        namespace: Option<NameIdx>,
         type_name: NameIdx,
         variant: NameIdx,
         shape: EnumConstructShape,
@@ -1637,6 +1749,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
     ) -> Result<(), BopError> {
         let type_name_s = self.current_chunk().name(type_name).to_string();
         let variant_s = self.current_chunk().name(variant).to_string();
+        if let Some(ns_idx) = namespace {
+            let ns_name = self.current_chunk().name(ns_idx).to_string();
+            self.validate_namespaced_type(&ns_name, &type_name_s, line)?;
+        }
         let decl = self
             .enum_defs
             .get(&type_name_s)
@@ -1787,6 +1903,21 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     ),
                 )
             }),
+            Value::Module(m) => {
+                if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
+                    return Ok(v.clone());
+                }
+                if m.types.iter().any(|t| t == field) {
+                    return Err(error(
+                        line,
+                        format!("`{}` in `{}` is a type, not a value", field, m.path),
+                    ));
+                }
+                Err(error(
+                    line,
+                    format!("`{}` isn't exported from `{}`", field, m.path),
+                ))
+            }
             other => Err(error(
                 line,
                 bop::error_messages::cant_read_field(field, other.type_name()),
@@ -2102,21 +2233,29 @@ impl<'h, H: BopHost> Vm<'h, H> {
         Ok(Next::Continue)
     }
 
-    /// Resolve and evaluate a module via a sub-VM, then inject
-    /// the resulting bindings into the current frame's top scope.
-    fn exec_import(&mut self, path: &str, line: u32) -> Result<(), BopError> {
-        if self.imported_here.contains(path) {
+    /// Execute a `use` statement. Dispatches the four shapes
+    /// (glob / selective / aliased / selective + aliased) against
+    /// the module's exported bindings. Types register globally
+    /// on every form; the distinction is in how the caller sees
+    /// the module's *values and fns* (flat in their scope vs.
+    /// behind a namespace binding).
+    fn exec_use(&mut self, spec: &crate::chunk::UseSpec, line: u32) -> Result<(), BopError> {
+        let path = spec.path.as_str();
+        let items = spec.items.as_deref();
+        let alias = spec.alias.as_deref();
+
+        let is_plain_glob = items.is_none() && alias.is_none();
+        if is_plain_glob && self.imported_here.contains(path) {
             return Ok(());
         }
         let artifacts = self.load_module(path, line)?;
-        // Type decls transfer first so an arriving fn binding
-        // whose body references them resolves at dispatch time.
-        // Duplicate decls are idempotent when shapes match (the
-        // same module imported via two different paths); a real
-        // clash is rejected with a friendly error.
-        for (name, fields) in artifacts.struct_defs {
-            if let Some(existing) = self.struct_defs.get(&name) {
-                if existing == &fields {
+
+        // Types always register globally. Idempotent on same-
+        // shape re-declaration (a module imported via two paths
+        // shouldn't error on the second sight of its struct).
+        for (name, fields) in &artifacts.struct_defs {
+            if let Some(existing) = self.struct_defs.get(name) {
+                if existing == fields {
                     continue;
                 }
                 return Err(error(
@@ -2127,11 +2266,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     ),
                 ));
             }
-            self.struct_defs.insert(name, fields);
+            self.struct_defs.insert(name.clone(), fields.clone());
         }
-        for (name, variants) in artifacts.enum_defs {
-            if let Some(existing) = self.enum_defs.get(&name) {
-                if shapes_match(existing, &variants) {
+        for (name, variants) in &artifacts.enum_defs {
+            if let Some(existing) = self.enum_defs.get(name) {
+                if shapes_match(existing, variants) {
                     continue;
                 }
                 return Err(error(
@@ -2142,36 +2281,24 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     ),
                 ));
             }
-            self.enum_defs.insert(name, variants);
+            self.enum_defs.insert(name.clone(), variants.clone());
         }
-        for (type_name, method_name, entry) in artifacts.methods {
+        for (type_name, method_name, entry) in &artifacts.methods {
             self.user_methods
-                .entry(type_name)
+                .entry(type_name.clone())
                 .or_default()
-                .insert(method_name, entry);
+                .insert(method_name.clone(), entry.clone());
         }
-        // Module fns go into `self.functions` (so cross-fn bare
-        // calls inside the module resolve) AND into the scope as
-        // `Value::Fn`s (so first-class use `let g = some_fn`
-        // works). Clashes with existing bindings are rejected
-        // up front.
-        for (name, entry) in artifacts.fn_decls {
-            let clashes = self
-                .frames
-                .last()
-                .and_then(|f| f.scopes.last())
-                .map(|s| s.contains_key(&name))
-                .unwrap_or(false)
-                || self.functions.contains_key(&name);
-            if clashes {
-                return Err(error(
-                    line,
-                    format!(
-                        "Use of `{}` from `{}` would shadow an existing binding",
-                        name, path
-                    ),
-                ));
-            }
+
+        // Gather the module's value-level exports as a single
+        // name-keyed list. Fn declarations produce both a
+        // scope-visible `Value::Fn` and a `self.functions` entry;
+        // plain let bindings contribute just the value.
+        let mut exports: Vec<(String, Value)> =
+            Vec::with_capacity(artifacts.fn_decls.len() + artifacts.bindings.len());
+        let mut fn_entries: Vec<(String, Rc<FnEntry>)> =
+            Vec::with_capacity(artifacts.fn_decls.len());
+        for (name, entry) in &artifacts.fn_decls {
             let chunk_rc: Rc<Chunk> = entry.chunk.clone();
             let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
             let value = Value::new_compiled_fn(
@@ -2180,40 +2307,184 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 body,
                 Some(name.clone()),
             );
-            self.functions.insert(name.clone(), entry);
-            if let Some(frame) = self.frames.last_mut() {
-                if let Some(scope) = frame.scopes.last_mut() {
-                    scope.insert(name, value);
+            exports.push((name.clone(), value));
+            fn_entries.push((name.clone(), entry.clone()));
+        }
+        for (name, value) in &artifacts.bindings {
+            exports.push((name.clone(), value.clone()));
+        }
+
+        // Selective filter: ensure every listed name exists, then
+        // retain only the listed exports.
+        if let Some(list) = items {
+            let available: std::collections::BTreeSet<&str> =
+                exports.iter().map(|(k, _)| k.as_str()).collect();
+            for wanted in list {
+                if !available.contains(wanted.as_str())
+                    && !artifacts
+                        .struct_defs
+                        .iter()
+                        .any(|(k, _)| k == wanted)
+                    && !artifacts
+                        .enum_defs
+                        .iter()
+                        .any(|(k, _)| k == wanted)
+                {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{}` isn't exported from `{}` (selective import)",
+                            wanted, path
+                        ),
+                    ));
                 }
             }
+            let listed: std::collections::BTreeSet<String> =
+                list.iter().cloned().collect();
+            exports.retain(|(k, _)| listed.contains(k));
+            fn_entries.retain(|(k, _)| listed.contains(k));
         }
-        // Inject into the current frame's top scope. Reject shadow
-        // conflicts with existing locals or named fns in the same
-        // frame — matches the walker.
-        for (name, value) in artifacts.bindings {
-            let clashes = self
+
+        if let Some(alias_name) = alias {
+            // Aliased form: pack the exports into a Value::Module
+            // and bind it under the alias. The alias lives in the
+            // current frame's top scope; `self.functions` still
+            // gets the module's fn entries so sibling bare calls
+            // inside module-owned code resolve.
+            let frame_has = self
                 .frames
                 .last()
                 .and_then(|f| f.scopes.last())
-                .map(|s| s.contains_key(&name))
-                .unwrap_or(false)
-                || self.functions.contains_key(&name);
-            if clashes {
+                .map(|s| s.contains_key(alias_name))
+                .unwrap_or(false);
+            if frame_has || self.functions.contains_key(alias_name) {
                 return Err(error(
                     line,
                     format!(
-                        "Use of `{}` from `{}` would shadow an existing binding",
-                        name, path
+                        "`{}` is already bound — can't use it as a module alias",
+                        alias_name
                     ),
                 ));
             }
+            for (name, entry) in fn_entries {
+                if !self.functions.contains_key(&name) {
+                    self.functions.insert(name, entry);
+                }
+            }
+            let type_names: Vec<String> = artifacts
+                .struct_defs
+                .iter()
+                .map(|(n, _)| n.clone())
+                .chain(artifacts.enum_defs.iter().map(|(n, _)| n.clone()))
+                .filter(|n| {
+                    items
+                        .map(|list| list.iter().any(|i| i == n))
+                        .unwrap_or(true)
+                })
+                .collect();
+            let module_value = Value::Module(Rc::new(bop::value::BopModule {
+                path: path.to_string(),
+                bindings: exports,
+                types: type_names,
+            }));
             if let Some(frame) = self.frames.last_mut() {
                 if let Some(scope) = frame.scopes.last_mut() {
-                    scope.insert(name, value);
+                    scope.insert(alias_name.to_string(), module_value);
+                }
+            }
+        } else {
+            // Flat form (glob / selective). Glob skips
+            // `_`-prefixed names (privacy); selective doesn't
+            // (the user explicitly asked).
+            let skip_private = items.is_none();
+            for (name, entry) in fn_entries {
+                if skip_private && bop::naming::is_private(&name) {
+                    continue;
+                }
+                let clashes = self
+                    .frames
+                    .last()
+                    .and_then(|f| f.scopes.last())
+                    .map(|s| s.contains_key(&name))
+                    .unwrap_or(false)
+                    || self.functions.contains_key(&name);
+                if clashes {
+                    continue;
+                }
+                self.functions.insert(name, entry);
+            }
+            for (name, value) in exports {
+                if skip_private && bop::naming::is_private(&name) {
+                    continue;
+                }
+                let clashes = self
+                    .frames
+                    .last()
+                    .and_then(|f| f.scopes.last())
+                    .map(|s| s.contains_key(&name))
+                    .unwrap_or(false);
+                if clashes {
+                    continue;
+                }
+                if let Some(frame) = self.frames.last_mut() {
+                    if let Some(scope) = frame.scopes.last_mut() {
+                        scope.insert(name, value);
+                    }
                 }
             }
         }
-        self.imported_here.insert(path.to_string());
+
+        if is_plain_glob {
+            self.imported_here.insert(path.to_string());
+        }
+        Ok(())
+    }
+
+    /// Validate `ns.Type` — confirm `ns` binds a `Value::Module`
+    /// whose type exports include `type_name`. Used by
+    /// namespaced struct-literal / variant-ctor dispatch.
+    fn validate_namespaced_type(
+        &self,
+        ns: &str,
+        type_name: &str,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let frame = self.frames.last().ok_or_else(|| {
+            error(line, "VM: no frame for namespaced type access")
+        })?;
+        let mut found: Option<&Value> = None;
+        for scope in frame.scopes.iter().rev() {
+            if let Some(v) = scope.get(ns) {
+                found = Some(v);
+                break;
+            }
+        }
+        let value = found.ok_or_else(|| {
+            error(line, format!("`{}` isn't a module alias in scope", ns))
+        })?;
+        let module = match value {
+            Value::Module(m) => m,
+            other => {
+                return Err(error(
+                    line,
+                    format!(
+                        "`{}` is a {}, not a module alias — can't reach `{}` through it",
+                        ns,
+                        other.type_name(),
+                        type_name
+                    ),
+                ));
+            }
+        };
+        if !module.types.iter().any(|t| t == type_name) {
+            return Err(error(
+                line,
+                format!(
+                    "`{}` isn't a type exported from `{}`",
+                    type_name, module.path
+                ),
+            ));
+        }
         Ok(())
     }
 

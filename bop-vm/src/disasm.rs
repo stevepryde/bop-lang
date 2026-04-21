@@ -151,7 +151,18 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::JumpIfFalsePeek(t) => format!("JumpIfFalsePeek -> {}", t.0),
         Instr::JumpIfTruePeek(t) => format!("JumpIfTruePeek -> {}", t.0),
 
-        Instr::Use(n) => format!("Use {}", chunk.name(*n)),
+        Instr::Use(idx) => {
+            let spec = chunk.use_spec(*idx);
+            let items = match &spec.items {
+                Some(list) => format!(".{{{}}}", list.join(", ")),
+                None => String::new(),
+            };
+            let alias = match &spec.alias {
+                Some(a) => format!(" as {}", a),
+                None => String::new(),
+            };
+            format!("Use {}{}{}", spec.path, items, alias)
+        }
 
         Instr::DefineStruct(idx) => {
             let def = chunk.struct_def(*idx);
@@ -177,10 +188,24 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 fn_idx.0,
             )
         }
-        Instr::ConstructStruct { type_name, count } => {
-            format!("ConstructStruct {}/{}", chunk.name(*type_name), count)
+        Instr::ConstructStruct {
+            namespace,
+            type_name,
+            count,
+        } => {
+            let ns_prefix = match namespace {
+                Some(ns) => format!("{}.", chunk.name(*ns)),
+                None => String::new(),
+            };
+            format!(
+                "ConstructStruct {}{}/{}",
+                ns_prefix,
+                chunk.name(*type_name),
+                count
+            )
         }
         Instr::ConstructEnum {
+            namespace,
             type_name,
             variant,
             shape,
@@ -191,8 +216,13 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 S::Tuple(n) => format!("Tuple({})", n),
                 S::Struct(n) => format!("Struct({})", n),
             };
+            let ns_prefix = match namespace {
+                Some(ns) => format!("{}.", chunk.name(*ns)),
+                None => String::new(),
+            };
             format!(
-                "ConstructEnum {}::{} {}",
+                "ConstructEnum {}{}::{} {}",
+                ns_prefix,
                 chunk.name(*type_name),
                 chunk.name(*variant),
                 shape_str,

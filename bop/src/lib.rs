@@ -17,6 +17,7 @@ pub mod naming;
 pub mod ops;
 pub mod precheck;
 pub mod builtins;
+pub mod host;
 pub mod methods;
 pub mod suggest;
 pub mod check;
@@ -1962,15 +1963,24 @@ print(match top() {
     }
 
     #[test]
-    fn try_ok_with_unit_variant_yields_none() {
-        assert_eq!(
-            say(r#"enum Result { Ok, Err(e) }
+    fn result_cant_be_redeclared_with_unit_ok_variant() {
+        // `Result` is a builtin type now, so a redeclaration with
+        // a different shape (Unit `Ok` vs the canonical tuple
+        // `Ok(value)`) is rejected at decl time. Previously the
+        // walker would let this through and then `try` would
+        // gracefully handle the unit-Ok case; now the engine
+        // enforces the canonical shape up-front.
+        let msg = run_err(
+            r#"enum Result { Ok, Err(e) }
 fn doit() {
-    let v = try Result::Ok
-    return type(v)
+    return try Result::Ok
 }
-print(doit())"#),
-            "none"
+doit()"#,
+        );
+        assert!(
+            msg.contains("already declared"),
+            "got: {}",
+            msg
         );
     }
 
@@ -2016,19 +2026,22 @@ doit()"#,
     }
 
     #[test]
-    fn try_ok_tuple_wrong_arity_errors() {
-        // `Ok(a, b)` isn't a Result-shape for `try` — single
-        // positional is the only recognised payload.
+    fn result_cant_be_redeclared_with_wrong_ok_arity() {
+        // Same rule as the Unit-Ok test: the builtin Result
+        // enum is `Ok(value), Err(error)` — trying to redeclare
+        // it with a two-field `Ok(a, b)` tuple is a clash, not
+        // a silently-different Result. `try`'s old "Ok must carry
+        // exactly one" check is now unreachable because the
+        // engine won't let the program get that far.
         let msg = run_err(
             r#"enum Result { Ok(a, b), Err(e) }
 fn doit() {
-    let v = try Result::Ok(1, 2)
-    return v
+    return try Result::Ok(1, 2)
 }
 doit()"#,
         );
         assert!(
-            msg.contains("Ok variant must carry exactly one"),
+            msg.contains("already declared"),
             "got: {}",
             msg
         );
@@ -2556,20 +2569,204 @@ print(doubled_pi)"#,
     }
 
     #[test]
-    fn import_would_shadow_local_binding_errors() {
+    fn glob_use_shadowing_is_a_warning_first_wins() {
+        // Under the new semantics, glob imports emit a warning
+        // (rather than an error) when a name they'd bring in is
+        // already bound. The first definition wins and the
+        // program continues. A user who genuinely wants the
+        // imported value can use the selective or aliased form
+        // to opt in explicitly.
         let mut host = ModuleHost::new(&[("m", "let x = 99")]);
-        let err = run(
+        run(
             r#"let x = 1
-use m"#,
+use m
+print(x)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["1".to_string()]);
+    }
+
+    #[test]
+    fn use_selective_form_pulls_only_listed_names() {
+        let mut host = ModuleHost::new(&[("m", "let a = 1\nlet b = 2\nlet c = 3")]);
+        run(
+            r#"use m.{a, c}
+print(a)
+print(c)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["1".to_string(), "3".to_string()]);
+    }
+
+    #[test]
+    fn use_selective_unknown_name_errors() {
+        let mut host = ModuleHost::new(&[("m", "let a = 1")]);
+        let err = run(
+            r#"use m.{b}"#,
             &mut host,
             &BopLimits::standard(),
         )
         .unwrap_err();
         assert!(
-            err.message.contains("would shadow"),
+            err.message.contains("isn't exported"),
             "got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn use_alias_binds_module_value() {
+        let mut host = ModuleHost::new(&[(
+            "m",
+            "let pi = 3\nfn double(n) { return n + n }",
+        )]);
+        run(
+            r#"use m as m
+print(m.pi)
+print(m.double(7))"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["3".to_string(), "14".to_string()]);
+    }
+
+    #[test]
+    fn use_alias_selective_form() {
+        let mut host = ModuleHost::new(&[("m", "let a = 1\nlet b = 2\nlet c = 3")]);
+        run(
+            r#"use m.{a, c} as m
+print(m.a)
+print(m.c)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["1".to_string(), "3".to_string()]);
+    }
+
+    #[test]
+    fn use_alias_rejects_missing_module_field() {
+        let mut host = ModuleHost::new(&[("m", "let a = 1")]);
+        let err = run(
+            r#"use m as m
+print(m.b)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("isn't exported"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn glob_skips_underscore_prefixed_exports() {
+        // Privacy convention: glob import skips `_foo`, so the
+        // importer can't see it unless they selectively opt in.
+        let mut host = ModuleHost::new(&[("m", "let public = 1\nlet _private = 2")]);
+        let err = run(
+            r#"use m
+print(_private)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap_err();
+        // The private binding didn't land in scope — we get a
+        // normal "variable not found" error.
+        assert!(
+            err.message.contains("_private"),
+            "expected `_private not found`, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn selective_form_can_reach_underscore_prefixed_names() {
+        // Explicit listing overrides the privacy skip — the user
+        // said they want `_private` and got it.
+        let mut host = ModuleHost::new(&[("m", "let _private = 42")]);
+        run(
+            r#"use m.{_private}
+print(_private)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["42".to_string()]);
+    }
+
+    #[test]
+    fn alias_exposes_underscore_prefixed_names() {
+        // Alias form keeps everything — privacy was about not
+        // polluting the caller's scope with glob. When the user
+        // says `as m`, they accept the whole module surface.
+        let mut host = ModuleHost::new(&[("m", "let _private = 7")]);
+        run(
+            r#"use m as m
+print(m._private)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["7".to_string()]);
+    }
+
+    #[test]
+    fn alias_namespaced_struct_literal() {
+        let mut host = ModuleHost::new(&[(
+            "g",
+            "struct Entity { id, hp }\nfn spawn(id) { return Entity { id: id, hp: 100 } }",
+        )]);
+        run(
+            r#"use g as g
+let e = g.Entity { id: 1, hp: 50 }
+print(e.id)
+print(e.hp)"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["1".to_string(), "50".to_string()]);
+    }
+
+    #[test]
+    fn alias_namespaced_variant_ctor() {
+        let mut host = ModuleHost::new(&[(
+            "r",
+            "enum Result { Ok(v), Err(e) }",
+        )]);
+        run(
+            r#"use r as r
+let v = r.Result::Ok(42)
+match v {
+    r.Result::Ok(n) => print(n),
+    r.Result::Err(_) => print("err"),
+}"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["42".to_string()]);
+    }
+
+    #[test]
+    fn alias_module_value_is_a_module_type() {
+        let mut host = ModuleHost::new(&[("m", "let x = 1")]);
+        run(
+            r#"use m as mm
+print(type(mm))"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .expect("run ok");
+        assert_eq!(host.prints(), vec!["module".to_string()]);
     }
 
     // ─── Structs ──────────────────────────────────────────────────
@@ -3229,5 +3426,36 @@ print(leak())"#,
             "#),
             "1"
         );
+    }
+
+    // ─── host helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn string_module_host_runs_use_end_to_end() {
+        // End-to-end sanity on the embedder helper: the host
+        // exposes modules through its in-memory map, captures
+        // prints, and the runtime threads them together with no
+        // extra wiring on the embedder side.
+        let mut host = crate::host::StringModuleHost::new([
+            ("greetings", "fn hello(name) { print(\"hi \" + name) }"),
+        ]);
+        run(
+            "use greetings\nhello(\"bop\")",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(host.output(), "hi bop");
+    }
+
+    #[test]
+    fn resolve_from_map_returns_none_for_unknown_modules() {
+        // The closure helper is a pure resolver — no print
+        // handling, no default module. Unknown names return
+        // `None` so the runtime falls through to its normal
+        // "module not found" error.
+        let resolver = crate::host::resolve_from_map([("m", "let x = 1")]);
+        assert!(resolver("m").is_some());
+        assert!(resolver("other").is_none());
     }
 }

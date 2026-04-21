@@ -617,9 +617,15 @@ impl Compiler {
                 self.emit(Instr::Jump(target), line);
             }
 
-            StmtKind::Use { path, items: _, alias: _ } => {
-                let n = self.add_name(path);
-                self.emit(Instr::Use(n), line);
+            StmtKind::Use { path, items, alias } => {
+                let spec = crate::chunk::UseSpec {
+                    path: path.clone(),
+                    items: items.clone(),
+                    alias: alias.clone(),
+                };
+                let idx = crate::chunk::UseIdx(self.chunk.use_specs.len() as u32);
+                self.chunk.use_specs.push(spec);
+                self.emit(Instr::Use(idx), line);
             }
 
             StmtKind::StructDecl { name, fields } => {
@@ -1070,7 +1076,11 @@ impl Compiler {
                 self.emit(Instr::FieldGet(n), line);
             }
 
-            ExprKind::StructConstruct { namespace: _, type_name, fields } => {
+            ExprKind::StructConstruct {
+                namespace,
+                type_name,
+                fields,
+            } => {
                 // Push each (name, value) pair in the order
                 // provided — the VM's `ConstructStruct` handler
                 // does the matching against the declared fields,
@@ -1082,8 +1092,10 @@ impl Compiler {
                     self.compile_expr(fexpr)?;
                 }
                 let type_idx = self.add_name(type_name);
+                let ns_idx = namespace.as_ref().map(|ns| self.add_name(ns));
                 self.emit(
                     Instr::ConstructStruct {
+                        namespace: ns_idx,
                         type_name: type_idx,
                         count: fields.len() as u32,
                     },
@@ -1092,7 +1104,7 @@ impl Compiler {
             }
 
             ExprKind::EnumConstruct {
-                namespace: _,
+                namespace,
                 type_name,
                 variant,
                 payload,
@@ -1117,8 +1129,10 @@ impl Compiler {
                 };
                 let type_idx = self.add_name(type_name);
                 let var_idx = self.add_name(variant);
+                let ns_idx = namespace.as_ref().map(|ns| self.add_name(ns));
                 self.emit(
                     Instr::ConstructEnum {
+                        namespace: ns_idx,
                         type_name: type_idx,
                         variant: var_idx,
                         shape,

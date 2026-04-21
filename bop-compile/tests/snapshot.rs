@@ -206,7 +206,7 @@ fn method_call_on_ident_emits_back_assign_for_mutating() {
     contains_all(
         &out,
         &[
-            "__bop_call_method(&",
+            "__bop_call_method(ctx, &",
             "\"push\"",
             "if let Some(__new_obj) = __mutated",
             "a = __new_obj",
@@ -219,7 +219,7 @@ fn method_call_on_ident_skips_back_assign_for_pure() {
     // `len` is pure, so the mutated slot is discarded with `_`.
     let out = compile("let a = [1, 2, 3]\nprint(a.len())");
     assert!(
-        out.contains("let (__r, _) = __bop_call_method(&"),
+        out.contains("let (__r, _) = __bop_call_method(ctx, &"),
         "expected pure-method discard in:\n{}",
         out
     );
@@ -239,7 +239,7 @@ fn method_call_on_literal_has_no_back_assign() {
     // no-back-assign branch.
     let out = compile("print([1, 2, 3].push(4))");
     assert!(
-        out.contains("let (__r, _) = __bop_call_method(&"),
+        out.contains("let (__r, _) = __bop_call_method(ctx, &"),
         "expected literal-receiver discard in:\n{}",
         out
     );

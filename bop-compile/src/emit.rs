@@ -116,6 +116,35 @@ fn collect_type_registry(
     let mut struct_origins: HashMap<String, DeclOrigin> = HashMap::new();
     let mut enum_origins: HashMap<String, DeclOrigin> = HashMap::new();
 
+    // Engine-wide builtins (`Result`, `RuntimeError`) go into the
+    // registry before any user source is inspected, so a user
+    // program that also declares them (e.g. importing the legacy
+    // `std.result` module that used to own these types) hits the
+    // same same-shape-redeclare rule as any other double-decl.
+    reg.structs.insert(
+        String::from("RuntimeError"),
+        bop::builtins::builtin_runtime_error_fields(),
+    );
+    struct_origins.insert(
+        String::from("RuntimeError"),
+        DeclOrigin {
+            path: "<builtin>".to_string(),
+            line: 0,
+        },
+    );
+    let result_variants: HashMap<String, VariantKind> = bop::builtins::builtin_result_variants()
+        .into_iter()
+        .map(|v| (v.name, v.kind))
+        .collect();
+    reg.enums.insert(String::from("Result"), result_variants);
+    enum_origins.insert(
+        String::from("Result"),
+        DeclOrigin {
+            path: "<builtin>".to_string(),
+            line: 0,
+        },
+    );
+
     // Root program contributes with an empty prefix.
     collect_types_from_stmts(
         root,
@@ -143,6 +172,43 @@ fn collect_type_registry(
         }
     }
     Ok(reg)
+}
+
+/// Shape-equivalence check for two enum variant maps. Looser than
+/// `PartialEq`: tuple variants compare by arity only (payload
+/// field names are positional stubs with no runtime meaning),
+/// struct variants still require matching field names. Same rule
+/// the walker (`variants_equivalent` in `bop::evaluator`) and VM
+/// (`shapes_match` in `bop_vm::vm`) use, so a program that
+/// compiles under one engine compiles under all three.
+fn enum_variants_equivalent(
+    a: &HashMap<String, VariantKind>,
+    b: &HashMap<String, VariantKind>,
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for (name, va) in a {
+        let vb = match b.get(name) {
+            Some(v) => v,
+            None => return false,
+        };
+        match (va, vb) {
+            (VariantKind::Unit, VariantKind::Unit) => {}
+            (VariantKind::Tuple(fa), VariantKind::Tuple(fb)) => {
+                if fa.len() != fb.len() {
+                    return false;
+                }
+            }
+            (VariantKind::Struct(fa), VariantKind::Struct(fb)) => {
+                if fa != fb {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn collect_types_from_stmts(
@@ -193,7 +259,7 @@ fn collect_types_from_stmts(
                     v_map.insert(v.name.clone(), v.kind.clone());
                 }
                 if let Some(existing) = reg.enums.get(name) {
-                    if existing == &v_map {
+                    if enum_variants_equivalent(existing, &v_map) {
                         continue;
                     }
                     let origin = enum_origins
@@ -270,6 +336,12 @@ pub(crate) struct ModuleEntry {
     /// effective exports. Matches the walker's injection
     /// semantics (`use` re-exports by default).
     pub effective_exports: Vec<String>,
+    /// Every *type* (struct / enum) name reachable through this
+    /// module: its own declarations plus the types its imports
+    /// re-export. Used when packing a `Value::Module` for aliased
+    /// `use`, and when validating `use foo.{SomeType}` selective
+    /// items that name types rather than bindings.
+    pub effective_types: Vec<String>,
     // Kept during analysis for potential future use (e.g. more
     // precise `let` vs `fn` handling in exports packing), but not
     // currently read by the emitter.
@@ -370,6 +442,7 @@ fn visit_module(
 
     let own_lets = collect_top_level_lets(&ast);
     let own_fns = collect_top_level_fn_params(&ast);
+    let own_types = collect_top_level_types(&ast);
 
     // effective_exports = own_lets + own_fn_names + (transitively,
     // every import's effective_exports). De-dup while preserving
@@ -396,6 +469,26 @@ fn visit_module(
         }
     }
 
+    // effective_types = own_types + transitively from imports.
+    // Types live in the global registry for AOT, so this list only
+    // drives `Value::Module.types` and selective-import validation.
+    let mut seen_types: BTreeSet<String> = BTreeSet::new();
+    let mut type_exports: Vec<String> = Vec::new();
+    for (imp_name, _) in &direct_imports {
+        if let Some(m) = graph.modules.get(imp_name) {
+            for ty in &m.effective_types {
+                if seen_types.insert(ty.clone()) {
+                    type_exports.push(ty.clone());
+                }
+            }
+        }
+    }
+    for ty in &own_types {
+        if seen_types.insert(ty.clone()) {
+            type_exports.push(ty.clone());
+        }
+    }
+
     graph.modules.insert(
         name.to_string(),
         ModuleEntry {
@@ -404,6 +497,7 @@ fn visit_module(
             own_lets,
             direct_imports: direct_imports.into_iter().map(|(n, _)| n).collect(),
             effective_exports: exports,
+            effective_types: type_exports,
         },
     );
     graph.order.push(name.to_string());
@@ -427,6 +521,21 @@ fn collect_top_level_lets(stmts: &[Stmt]) -> Vec<String> {
         .iter()
         .filter_map(|s| match &s.kind {
             StmtKind::Let { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Gather the names of struct / enum types declared at the top
+/// level of `stmts`. Used to seed a module's `effective_types`
+/// list so aliased `use foo as m` can populate `m.types` for
+/// runtime namespace-validation of `m.Entity { ... }` etc.
+fn collect_top_level_types(stmts: &[Stmt]) -> Vec<String> {
+    stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::StructDecl { name, .. } => Some(name.clone()),
+            StmtKind::EnumDecl { name, .. } => Some(name.clone()),
             _ => None,
         })
         .collect()
@@ -696,16 +805,44 @@ impl Emitter {
         self.out.push_str("}\n\n");
     }
 
-    /// Emit an `import foo.bar` statement as Rust code that loads
-    /// the module once (via its `__mod_*__load` fn, which handles
-    /// caching + cycle detection) and then unpacks each of its
-    /// effective exports as a local Bop binding. Matches the
-    /// walker's flat-injection semantics.
-    fn emit_import_stmt(&mut self, path: &str, line: u32) -> Result<(), BopError> {
-        // Idempotent at the injection site: re-importing a module
-        // we already injected into this scope is a no-op. Matches
-        // the walker's `imported_here` short-circuit.
-        if self.imported_in_scope.contains(path) {
+    /// Emit a `use` statement in one of four forms, loading the
+    /// module once (via its `__mod_*__load` fn — which handles
+    /// caching + cycle detection) and then either:
+    ///
+    /// - **Glob** (`use path`) — injects every public export as a
+    ///   Rust local. Private names (`_`-prefixed) are filtered out.
+    ///   Idempotent: re-running the same plain-glob in the same
+    ///   scope is a no-op.
+    /// - **Selective** (`use path.{a, b, Type}`) — injects only the
+    ///   listed items as locals. Private names *are* reachable
+    ///   through this form (the list is explicit, so a leading
+    ///   `_` isn't meaningful here). Items may name bindings *or*
+    ///   types: types are globally registered in the AOT, so they
+    ///   don't need a Rust local — the emitter just validates the
+    ///   name is actually exported.
+    /// - **Aliased glob** (`use path as m`) — packs every public
+    ///   export into a `Value::Module` and binds it under `m`.
+    /// - **Aliased selective** (`use path.{a, b} as m`) — packs
+    ///   only the listed items into a `Value::Module` and binds
+    ///   it under `m`.
+    ///
+    /// Shadow conflicts on injected names are emitted as a
+    /// transpile-time error for the explicit (selective + alias)
+    /// forms and silently skipped for glob — matching the walker's
+    /// "first-win, warn on conflict" behaviour.
+    fn emit_use_stmt(
+        &mut self,
+        path: &str,
+        items: &Option<Vec<String>>,
+        alias: &Option<String>,
+        line: u32,
+    ) -> Result<(), BopError> {
+        // Idempotency: only plain-glob re-imports are cached. The
+        // other three forms can legitimately produce different
+        // visible effects (different item subset, different alias
+        // binding) when re-run in the same scope, so we always
+        // re-emit them.
+        if items.is_none() && alias.is_none() && self.imported_in_scope.contains(path) {
             return Ok(());
         }
         let entry = self
@@ -719,33 +856,138 @@ impl Emitter {
                     line,
                 )
             })?;
+
+        // Load once, regardless of form — the exports struct is
+        // what every form ultimately reads from.
         let tmp = self.fresh_tmp();
         self.line(&format!(
             "let {tmp} = {load}(ctx)?;",
             tmp = tmp,
             load = module_load_fn_name(path)
         ));
-        for export in &entry.effective_exports {
-            // Shadow-check: the importer can't already have this
-            // name in its scope. Emitted as a transpile-time
-            // guard so it mirrors the walker / VM behaviour.
-            if self.is_local(export) {
-                return Err(BopError::runtime(
-                    format!(
-                        "Use of `{}` from `{}` would shadow an existing binding",
-                        export, path
-                    ),
-                    line,
-                ));
+
+        // Selective form: validate every listed item is actually
+        // reachable through this module (as a binding or a type).
+        // Run this up-front so the error points at the use-site.
+        if let Some(list) = items {
+            for item in list {
+                let is_binding = entry.effective_exports.iter().any(|e| e == item);
+                let is_type = entry.effective_types.iter().any(|t| t == item);
+                if !is_binding && !is_type {
+                    return Err(BopError::runtime(
+                        format!("Module `{}` has no export `{}`", path, item),
+                        line,
+                    ));
+                }
             }
-            self.line(&format!(
-                "let mut {ident}: ::bop::value::Value = {tmp}.{ident}.clone();",
-                ident = rust_ident(export),
-                tmp = tmp
-            ));
-            self.bind_local(export);
         }
-        self.imported_in_scope.insert(path.to_string());
+
+        // Decide which names to expose + in what form.
+        let expose_bindings: Vec<String> = match items {
+            Some(list) => list
+                .iter()
+                .filter(|n| entry.effective_exports.iter().any(|e| e == *n))
+                .cloned()
+                .collect(),
+            None => entry
+                .effective_exports
+                .iter()
+                .filter(|n| !n.starts_with('_'))
+                .cloned()
+                .collect(),
+        };
+        let expose_types: Vec<String> = match items {
+            Some(list) => list
+                .iter()
+                .filter(|n| entry.effective_types.iter().any(|t| t == *n))
+                .cloned()
+                .collect(),
+            None => entry
+                .effective_types
+                .iter()
+                .filter(|n| !n.starts_with('_'))
+                .cloned()
+                .collect(),
+        };
+
+        match alias {
+            Some(alias_name) => {
+                // Aliased: build a `Value::Module` and bind it
+                // under the alias. All reads through the alias
+                // (`m.helper`, `m.Entity { ... }`) resolve at
+                // runtime by inspecting this value.
+                let bindings_src: String = expose_bindings
+                    .iter()
+                    .map(|n| {
+                        format!(
+                            "({}.to_string(), {tmp}.{ident}.clone())",
+                            rust_string_literal(n),
+                            tmp = tmp,
+                            ident = rust_ident(n)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let types_src: String = expose_types
+                    .iter()
+                    .map(|t| format!("{}.to_string()", rust_string_literal(t)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if self.is_local(alias_name) {
+                    return Err(BopError::runtime(
+                        format!(
+                            "Alias `{}` in `use {} as {}` would shadow an existing binding",
+                            alias_name, path, alias_name
+                        ),
+                        line,
+                    ));
+                }
+                self.line(&format!(
+                    "let mut {alias}: ::bop::value::Value = ::bop::value::Value::Module(::std::rc::Rc::new(::bop::value::BopModule {{ path: {path_lit}.to_string(), bindings: ::std::vec![{bindings}], types: ::std::vec![{types}] }}));",
+                    alias = rust_ident(alias_name),
+                    path_lit = rust_string_literal(path),
+                    bindings = bindings_src,
+                    types = types_src,
+                ));
+                self.bind_local(alias_name);
+            }
+            None => {
+                // Non-aliased: inject each binding as a local.
+                // Types are globally registered in the AOT, so
+                // they don't need a Rust local.
+                for name in &expose_bindings {
+                    if self.is_local(name) {
+                        if items.is_some() {
+                            // Explicit: an explicit conflict is a
+                            // hard error.
+                            return Err(BopError::runtime(
+                                format!(
+                                    "Use of `{}` from `{}` would shadow an existing binding",
+                                    name, path
+                                ),
+                                line,
+                            ));
+                        } else {
+                            // Glob: first-win, skip silently to
+                            // match the walker's warn-and-keep
+                            // behaviour. (We don't surface the
+                            // warning through AOT; the walker is
+                            // the canonical source for that.)
+                            continue;
+                        }
+                    }
+                    self.line(&format!(
+                        "let mut {ident}: ::bop::value::Value = {tmp}.{ident}.clone();",
+                        ident = rust_ident(name),
+                        tmp = tmp
+                    ));
+                    self.bind_local(name);
+                }
+                if items.is_none() {
+                    self.imported_in_scope.insert(path.to_string());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1273,8 +1515,8 @@ impl Emitter {
             StmtKind::Break => self.line("break;"),
             StmtKind::Continue => self.line("continue;"),
 
-            StmtKind::Use { path, items: _, alias: _ } => {
-                self.emit_import_stmt(path, line)?;
+            StmtKind::Use { path, items, alias } => {
+                self.emit_use_stmt(path, items, alias, line)?;
             }
 
             StmtKind::StructDecl { .. }
@@ -1589,16 +1831,22 @@ impl Emitter {
                 )
             }
 
-            ExprKind::StructConstruct { namespace: _, type_name, fields } => {
-                self.struct_construct_src(type_name, fields, line)?
+            ExprKind::StructConstruct { namespace, type_name, fields } => {
+                self.struct_construct_src(namespace.as_deref(), type_name, fields, line)?
             }
 
             ExprKind::EnumConstruct {
-                namespace: _,
+                namespace,
                 type_name,
                 variant,
                 payload,
-            } => self.enum_construct_src(type_name, variant, payload, line)?,
+            } => self.enum_construct_src(
+                namespace.as_deref(),
+                type_name,
+                variant,
+                payload,
+                line,
+            )?,
 
             ExprKind::Lambda { params, body } => self.lambda_src(params, body, line)?,
 
@@ -2140,6 +2388,7 @@ impl Emitter {
 
     fn struct_construct_src(
         &mut self,
+        namespace: Option<&str>,
         type_name: &str,
         fields: &[(String, Expr)],
         line: u32,
@@ -2150,6 +2399,21 @@ impl Emitter {
                 line,
             )
         })?;
+        // Namespaced path (`m.Entity { ... }`) — validate at
+        // runtime that `m` is a Module actually exporting this
+        // type. Types are registered globally in the AOT, so the
+        // actual construction doesn't change; this is purely a
+        // correctness check matching walker + VM behaviour.
+        let ns_check = match namespace {
+            Some(ns) => format!(
+                "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
+                ns_ident = rust_ident(ns),
+                ns_lit = rust_string_literal(ns),
+                ty_lit = rust_string_literal(type_name),
+                line = line,
+            ),
+            None => String::new(),
+        };
         // Compile-time validation: set matches exactly, no dups.
         let mut seen = HashSet::new();
         for (fname, _) in fields {
@@ -2206,15 +2470,17 @@ impl Emitter {
             })
             .collect();
         Ok(format!(
-            "{{ {}::bop::value::Value::new_struct({}.to_string(), vec![{}]) }}",
-            lets,
-            rust_string_literal(type_name),
-            ordered.join(", ")
+            "{{ {ns_check}{lets}::bop::value::Value::new_struct({tn}.to_string(), vec![{fields}]) }}",
+            ns_check = ns_check,
+            lets = lets,
+            tn = rust_string_literal(type_name),
+            fields = ordered.join(", ")
         ))
     }
 
     fn enum_construct_src(
         &mut self,
+        namespace: Option<&str>,
         type_name: &str,
         variant: &str,
         payload: &VariantPayload,
@@ -2246,10 +2512,27 @@ impl Emitter {
         })?;
         let tn_lit = rust_string_literal(type_name);
         let vn_lit = rust_string_literal(variant);
+        // Namespaced path (`m.Result::Ok(v)`) — validate at runtime
+        // that `m` is a Module actually exporting this type. The
+        // variant itself resolves through the global type registry
+        // same as a bare construct, so the check is purely a guard
+        // matching walker + VM semantics.
+        let ns_check = match namespace {
+            Some(ns) => format!(
+                "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
+                ns_ident = rust_ident(ns),
+                ns_lit = rust_string_literal(ns),
+                ty_lit = rust_string_literal(type_name),
+                line = line,
+            ),
+            None => String::new(),
+        };
         match (&declared, payload) {
             (VariantKind::Unit, VariantPayload::Unit) => Ok(format!(
-                "::bop::value::Value::new_enum_unit({}.to_string(), {}.to_string())",
-                tn_lit, vn_lit
+                "{{ {ns_check}::bop::value::Value::new_enum_unit({tn}.to_string(), {vn}.to_string()) }}",
+                ns_check = ns_check,
+                tn = tn_lit,
+                vn = vn_lit
             )),
             (VariantKind::Tuple(decl_fields), VariantPayload::Tuple(args)) => {
                 if decl_fields.len() != args.len() {
@@ -2274,7 +2557,8 @@ impl Emitter {
                     names.push(tmp);
                 }
                 Ok(format!(
-                    "{{ {lets}::bop::value::Value::new_enum_tuple({tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    "{{ {ns_check}{lets}::bop::value::Value::new_enum_tuple({tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    ns_check = ns_check,
                     lets = lets,
                     tn = tn_lit,
                     vn = vn_lit,
@@ -2334,7 +2618,8 @@ impl Emitter {
                     })
                     .collect();
                 Ok(format!(
-                    "{{ {lets}::bop::value::Value::new_enum_struct({tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    "{{ {ns_check}{lets}::bop::value::Value::new_enum_struct({tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    ns_check = ns_check,
                     lets = lets,
                     tn = tn_lit,
                     vn = vn_lit,
@@ -2463,7 +2748,7 @@ impl Emitter {
                     "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
                         Some(v) => v, \
                         None => {{ \
-                            let (__r, __mutated) = __bop_call_method(&{}, {}, &{}, {})?; \
+                            let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
                             if let Some(__new_obj) = __mutated {{ {} = __new_obj; }} \
                             __r \
                         }}, \
@@ -2478,7 +2763,7 @@ impl Emitter {
                     "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
                         Some(v) => v, \
                         None => {{ \
-                            let (__r, _) = __bop_call_method(&{}, {}, &{}, {})?; __r \
+                            let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
                         }}, \
                     }}; __ret }}",
                     obj_tmp, method_lit, args_arr, line, obj_tmp, method_lit, args_arr, line
@@ -2818,18 +3103,19 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
             literal_pattern_rust(lit)
         ),
         Pattern::EnumVariant {
-            namespace: _,
+            namespace,
             type_name,
             variant,
             payload,
         } => format!(
-            "::bop::parser::Pattern::EnumVariant {{ type_name: {}.to_string(), variant: {}.to_string(), payload: {} }}",
+            "::bop::parser::Pattern::EnumVariant {{ namespace: {}, type_name: {}.to_string(), variant: {}.to_string(), payload: {} }}",
+            optional_string_rust(namespace.as_deref()),
             rust_string_literal(type_name),
             rust_string_literal(variant),
             variant_payload_rust(payload),
         ),
         Pattern::Struct {
-            namespace: _,
+            namespace,
             type_name,
             fields,
             rest,
@@ -2850,7 +3136,8 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
                 format!("::std::vec::Vec::from([{}])", parts.join(", "))
             };
             format!(
-                "::bop::parser::Pattern::Struct {{ type_name: {}.to_string(), fields: {}, rest: {} }}",
+                "::bop::parser::Pattern::Struct {{ namespace: {}, type_name: {}.to_string(), fields: {}, rest: {} }}",
+                optional_string_rust(namespace.as_deref()),
                 rust_string_literal(type_name),
                 fields_src,
                 rest,
@@ -3232,6 +3519,22 @@ fn rust_f64(n: f64) -> String {
     }
 }
 
+/// Lower an `Option<&str>` to a Rust expression of type
+/// `Option<String>`. Used when emitting `Pattern::EnumVariant` /
+/// `Pattern::Struct` with their `namespace` field: runtime
+/// pattern matching doesn't consult the namespace (types
+/// register globally), but we still have to populate the field
+/// so the struct literal type-checks.
+fn optional_string_rust(s: Option<&str>) -> String {
+    match s {
+        Some(v) => format!(
+            "::std::option::Option::Some({}.to_string())",
+            rust_string_literal(v)
+        ),
+        None => "::std::option::Option::None".to_string(),
+    }
+}
+
 /// Escape a Bop string literal for embedding in Rust source.
 fn rust_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -3472,9 +3775,17 @@ fn __bop_try_call(
     }
 }
 
-/// Field read for `Value::Struct` and struct-payload enum
-/// variants. Returns a cloned value; missing fields surface as
+/// Field read for `Value::Struct`, struct-payload enum variants,
+/// and `Value::Module`. Returns a cloned value; misses surface as
 /// a runtime error with the type name in the message.
+///
+/// Module field reads resolve against the module's `bindings`
+/// list. A field name that matches the module's own `types` list
+/// raises a targeted error — types aren't first-class values at
+/// this stage, so `m.MyType` by itself is a programming mistake
+/// (callers reach types through `m.MyType { ... }` or
+/// `m.MyEnum::Variant(...)`, which go through namespace-aware
+/// construct codegen, not `__bop_field_get`).
 #[inline]
 fn __bop_field_get(
     obj: &::bop::value::Value,
@@ -3503,8 +3814,64 @@ fn __bop_field_get(
                 line,
             )
         }),
+        ::bop::value::Value::Module(m) => {
+            if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
+                return Ok(v.clone());
+            }
+            if m.types.iter().any(|t| t == field) {
+                return Err(::bop::error::BopError::runtime(
+                    format!(
+                        "`{}.{}` is a type, not a value — construct it with `{{ ... }}` or `::Variant(...)`",
+                        m.path, field
+                    ),
+                    line,
+                ));
+            }
+            Err(::bop::error::BopError::runtime(
+                format!("Module `{}` has no export `{}`", m.path, field),
+                line,
+            ))
+        }
         other => Err(::bop::error::BopError::runtime(
             ::bop::error_messages::cant_read_field(field, other.type_name()),
+            line,
+        )),
+    }
+}
+
+/// Runtime guard for namespaced type access: verifies that the
+/// value behind the alias is actually a `Value::Module`, and that
+/// the module's published `types` list contains the name. Used by
+/// struct / enum construct emission when `namespace` is `Some(...)`,
+/// so the AOT surfaces the same error as walker + VM when someone
+/// writes `m.MissingType { ... }` or uses a non-module as a namespace.
+#[inline]
+fn __bop_validate_namespace_type(
+    ns: &::bop::value::Value,
+    alias: &str,
+    type_name: &str,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    match ns {
+        ::bop::value::Value::Module(m) => {
+            if m.types.iter().any(|t| t == type_name) {
+                Ok(())
+            } else {
+                Err(::bop::error::BopError::runtime(
+                    format!(
+                        "Module `{}` (bound as `{}`) has no type `{}`",
+                        m.path, alias, type_name
+                    ),
+                    line,
+                ))
+            }
+        }
+        other => Err(::bop::error::BopError::runtime(
+            format!(
+                "`{}` is not a module (got {})",
+                alias,
+                other.type_name()
+            ),
             line,
         )),
     }
@@ -3540,8 +3907,14 @@ fn __bop_field_set(
 
 /// Mirror of Evaluator::call_method from bop-lang: dispatches a
 /// method call to the right family for the receiver's type.
+///
+/// For `Value::Module`, `m.helper(args)` reads the binding and
+/// invokes it via the value-call path — the resulting value has
+/// no "self" to write back, so the back-assign slot is always
+/// `None`.
 #[inline]
 fn __bop_call_method(
+    ctx: &mut Ctx<'_>,
     obj: &::bop::value::Value,
     method: &str,
     args: &[::bop::value::Value],
@@ -3551,6 +3924,21 @@ fn __bop_call_method(
         ::bop::value::Value::Array(arr) => ::bop::methods::array_method(arr, method, args, line),
         ::bop::value::Value::Str(s) => ::bop::methods::string_method(s.as_str(), method, args, line),
         ::bop::value::Value::Dict(d) => ::bop::methods::dict_method(d, method, args, line),
+        ::bop::value::Value::Module(m) => {
+            let binding = m
+                .bindings
+                .iter()
+                .find(|(k, _)| k == method)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| {
+                    ::bop::error::BopError::runtime(
+                        format!("Module `{}` has no export `{}`", m.path, method),
+                        line,
+                    )
+                })?;
+            let result = __bop_call_value(ctx, binding, args.to_vec(), line)?;
+            Ok((result, None))
+        }
         _ => Err(::bop::error::BopError::runtime(
             ::bop::error_messages::no_such_method(obj.type_name(), method),
             line,
