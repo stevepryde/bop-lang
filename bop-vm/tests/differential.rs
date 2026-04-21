@@ -2082,6 +2082,20 @@ fn error_unknown_function() {
 }
 
 #[test]
+fn dict_missing_key_returns_none_diff() {
+    // Walker and VM share `ops::index_get` — the soft-lookup
+    // behaviour must be identical byte-for-byte.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"let d = {"x": 1}
+print(d["x"])
+print(d["y"])
+print(d["y"].is_none())"#),
+        "true"
+    );
+}
+
+#[test]
 fn is_none_is_some_universal_methods_diff() {
     // Works on every value shape and matches `== none` exactly.
     // Walker and VM must agree for any receiver.

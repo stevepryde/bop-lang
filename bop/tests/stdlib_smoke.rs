@@ -169,6 +169,66 @@ print(Result::Err("x").is_err())"#,
     );
 }
 
+// ─── Dict missing-key lookup ──────────────────────────────────
+//
+// `d[key]` for an absent key returns `none` rather than raising.
+// Matches Python / JS / Lua — composes naturally with the
+// `.is_none()` / `.is_some()` check, and aligns with the
+// language's "any variable can be `none`" story. Callers who
+// need strict presence checks use `d.has(key)` explicitly.
+
+#[test]
+fn dict_missing_key_returns_none() {
+    let host = run(
+        r#"let d = {"hp": 10}
+print(d["hp"])
+print(d["missing"])
+print(d["missing"].is_none())
+print(d["missing"].is_some())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["10", "none", "true", "false"],
+    );
+}
+
+#[test]
+fn dict_missing_key_distinct_from_explicit_none_value() {
+    // A key mapped to an actual `none` value is still "present"
+    // in the sense that `d.has(k)` reports `true`; the soft
+    // lookup can't distinguish the two (both yield `none`),
+    // which matches Python's default behaviour and keeps the
+    // primitive simple. Callers who care reach for `d.has(k)`.
+    let host = run(
+        r#"let d = {"set": none}
+print(d["set"])
+print(d["set"].is_none())
+print(d["absent"].is_none())
+print(d.has("set"))
+print(d.has("absent"))"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["none", "true", "true", "true", "false"],
+    );
+}
+
+#[test]
+fn dict_assign_to_missing_key_creates_entry() {
+    // Regression: the soft-read behaviour must not affect
+    // writes. Assigning to an absent key still inserts it.
+    let host = run(
+        r#"let d = {}
+d["new"] = 42
+print(d["new"])
+print(d.has("new"))"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["42", "true"],
+    );
+}
+
 // ─── is_none / is_some universal methods ──────────────────────
 //
 // Any value can be checked for `none`-ness via `.is_none()` /

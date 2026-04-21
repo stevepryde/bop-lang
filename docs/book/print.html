@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-403bd645.js";
+            window.path_to_searchindex_js = "searchindex-cb35a9ca.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-4a0c6a8e.js"></script>
@@ -1038,7 +1038,14 @@ let age = person["age"]       // 30
 <p>Accessing a missing key returns <code>none</code> (no error):</p>
 <pre><code class="language-bop">let email = person["email"]
 print(email)    // none
+
+if email.is_none() { print("no email on file") }
 </code></pre>
+<p>Two caveats:</p>
+<ul>
+<li>A key whose value is explicitly <code>none</code> is <strong>present</strong> — <code>d.has(k)</code> returns <code>true</code> for it, even though <code>d[k]</code> and <code>d["absent_key"]</code> are both <code>none</code>. Use <code>d.has(k)</code> when you need to distinguish “unset” from “set to none”.</li>
+<li>If you want a read to <em>fail</em> on a missing key, check <code>d.has(key)</code> first and raise explicitly — <code>d[key]</code> itself always succeeds.</li>
+</ul>
 <h2 id="modifying-values"><a class="header" href="#modifying-values">Modifying values</a></h2>
 <pre><code class="language-bop">person["age"] = 31             // update existing key
 person["email"] = "a@b.com"   // add new entry

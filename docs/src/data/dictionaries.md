@@ -23,7 +23,14 @@ Accessing a missing key returns `none` (no error):
 ```bop
 let email = person["email"]
 print(email)    // none
+
+if email.is_none() { print("no email on file") }
 ```
+
+Two caveats:
+
+- A key whose value is explicitly `none` is **present** — `d.has(k)` returns `true` for it, even though `d[k]` and `d["absent_key"]` are both `none`. Use `d.has(k)` when you need to distinguish "unset" from "set to none".
+- If you want a read to *fail* on a missing key, check `d.has(key)` first and raise explicitly — `d[key]` itself always succeeds.
 
 ## Modifying values
 

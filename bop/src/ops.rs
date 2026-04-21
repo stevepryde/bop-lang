@@ -325,11 +325,17 @@ pub fn index_get(obj: &Value, idx: &Value, line: u32) -> Result<Value, BopError>
                 })
         }
         Value::Dict(entries) => match idx {
-            Value::Str(key) => entries
+            // Missing keys return `none` — matches Python / JS /
+            // Lua convention and lines up with the language's
+            // "any variable can be `none`" story. Callers who
+            // need "present vs absent" disambiguation use
+            // `d.has(key)` explicitly, or `d[key].is_some()` to
+            // reach the same check via method.
+            Value::Str(key) => Ok(entries
                 .iter()
                 .find(|(k, _)| k.as_str() == key.as_str())
                 .map(|(_, v)| v.clone())
-                .ok_or_else(|| error(line, format!("Key \"{}\" not found in dict", key))),
+                .unwrap_or(Value::None)),
             _ => Err(error(
                 line,
                 format!(

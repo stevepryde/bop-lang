@@ -1094,6 +1094,17 @@ let r = Result::Ok(8).and_then(halve).and_then(halve)
 print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#,
         &[],
     ),
+    // ─── Dict missing-key soft lookup ─────────────────────────
+    (
+        "dict_missing_key_returns_none",
+        // AOT emits `ops::index_get` inline, so the soft-lookup
+        // result has to match walker / VM exactly.
+        r#"let d = {"hp": 10}
+print(d["hp"])
+print(d["missing"])
+print(d["missing"].is_none())"#,
+        &[],
+    ),
     // ─── is_none / is_some universal methods ─────────────────
     (
         "is_none_basic_dispatch",
