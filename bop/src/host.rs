@@ -23,12 +23,12 @@
 //! environment variables. Embedders that want richer behaviour
 //! should implement [`BopHost`] directly or wrap these helpers.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 use std::collections::BTreeMap;
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::collections::BTreeMap;
 
 use crate::error::BopError;

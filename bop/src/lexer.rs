@@ -1,4 +1,4 @@
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::String, vec::Vec};
 
 use crate::error::BopError;

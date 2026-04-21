@@ -1,4 +1,4 @@
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::format;
 
 use crate::error::BopError;

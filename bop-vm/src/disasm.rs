@@ -5,7 +5,7 @@
 //! operand resolved inline (constants, names, jump targets). Nested
 //! functions are recursively rendered after the main body.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
 use bop::lexer::StringPart;

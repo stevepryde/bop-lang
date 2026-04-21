@@ -16,7 +16,10 @@ categories = ["compilers"]
 name = "bop_compile"
 
 [dependencies]
-bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false, features = ["std"] }
+# AOT transpilation always runs on a std host, so we explicitly
+# drop `default-features` only to avoid pulling the `bop-std`
+# stdlib blob when the transpiler doesn't need it.
+bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false }
 
 [features]
 default = ["bop-std"]

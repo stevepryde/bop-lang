@@ -1,7 +1,7 @@
 //! AST → bytecode compilation. See `crate` docs for the instruction
 //! set overview.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{string::{String, ToString}, vec, vec::Vec};
 
 use bop::error::BopError;

@@ -2,7 +2,7 @@
 //! bodies. See the crate root for the textual description of the
 //! instruction set.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{string::String, vec::Vec};
 
 use bop::lexer::StringPart;

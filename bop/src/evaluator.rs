@@ -1,17 +1,17 @@
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 
 use alloc_import::collections::BTreeMap;
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 use std as alloc_import;
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc as alloc_import;
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::rc::Rc;
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 use std::rc::Rc;
 
 use core::cell::RefCell;
@@ -238,7 +238,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
     pub fn run(mut self, stmts: &[Stmt]) -> Result<(), BopError> {
         let result = self.exec_block(stmts);
-        #[cfg(feature = "std")]
+        #[cfg(not(feature = "no_std"))]
         {
             // Surface any runtime warnings accumulated during the
             // run (currently: glob-import shadowing). They land on
@@ -3127,7 +3127,7 @@ impl ReplSession {
         // matches `Evaluator::run`; embedders that want
         // structured access can call `eval` via a custom host
         // and take warnings out through that path.
-        #[cfg(feature = "std")]
+        #[cfg(not(feature = "no_std"))]
         {
             for w in &eval.runtime_warnings {
                 eprintln!("warning: {}", w.message);

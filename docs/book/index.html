@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a6bf7ab9.js";
+            window.path_to_searchindex_js = "searchindex-c04594b9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-4a0c6a8e.js"></script>
@@ -178,8 +178,8 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="welcome-to-bop"><a class="header" href="#welcome-to-bop">Welcome to Bop</a></h1>
-<p>Bop is a small, dynamically-typed programming language designed for teaching and embedding. It has a simple, modern syntax with no semicolons, no boilerplate, and no surprises — just the core concepts that matter. It runs in a sandbox with bounded resources and no filesystem or network access unless the embedding host opts in.</p>
-<p>Bop isn’t Python, JavaScript, or any existing language, but it deliberately borrows familiar syntax so that skills transfer directly to real-world languages. Variables, loops, functions, arrays, dictionaries, structs, enums, pattern matching, modules — real programming concepts, zero setup. The core library has no dependencies and supports no-std and wasm.</p>
+<p>Bop is a small, dynamically-typed programming language built to be <strong>embedded inside other Rust programs</strong> and run untrusted code safely. It ships with zero runtime dependencies, three interchangeable execution engines, first-class <code>no_std</code> and wasm support, and a resource-bounded sandbox that treats step count, memory, and call depth as first-class invariants — not features bolted on after the fact.</p>
+<p>If you’re here to embed Bop in a host application, jump to <a href="embedding.html">Embedding Bop</a> and start there. The rest of this book is the language guide and reference.</p>
 <h2 id="quick-example"><a class="header" href="#quick-example">Quick example</a></h2>
 <pre><code class="language-bop">// Sum the numbers from 1 to 10
 let total = 0
@@ -188,16 +188,41 @@ for i in range(1, 11) {
 }
 print("Sum: {total}")
 </code></pre>
-<h2 id="what-makes-bop-different"><a class="header" href="#what-makes-bop-different">What makes Bop different?</a></h2>
+<p>That’s a complete Bop program — no imports, no boilerplate, no semicolons. The syntax is intentionally familiar: curly braces, <code>let</code>, <code>fn</code>, pattern matching, modules. Skills transfer directly to Rust, JavaScript, Python.</p>
+<h2 id="why-bop"><a class="header" href="#why-bop">Why Bop?</a></h2>
 <ul>
-<li><strong>Built for learning</strong> — no semicolons, no boilerplate, simple syntax that teaches real programming concepts without getting in the way.</li>
-<li><strong>Looks like real code</strong> — curly braces, functions, structs, enums, pattern matching, modules. Skills transfer directly to real-world languages.</li>
-<li><strong>Friendly errors</strong> — never cryptic, always helpful. Error messages include a source snippet with a carat under the offending column and a <code>hint:</code> line when the parser / runtime can guess what you meant (<code>"I don't know what 'pritn' is — did you mean 'print'?"</code>).</li>
-<li><strong>Sandboxed by default</strong> — the core library never touches the filesystem, network, or the clock. Anything stateful or side-effecting goes through the <code>BopHost</code> trait; the embedder chooses what to expose.</li>
-<li><strong>Embeddable</strong> — zero dependencies, wasm support, three engines (tree-walker, bytecode VM, AOT Rust transpiler) you can pick from per workload, and a <code>ReplSession</code> API for tools that want to drive Bop as a scripting layer.</li>
+<li>
+<p><strong>Embedded-first design.</strong> The entire language core lives in one crate (<code>bop-lang</code>) with no runtime deps and a minimal API surface. Host interaction goes through a single <code>BopHost</code> trait — you wire up exactly the functions and state you want exposed; Bop can’t reach anything else.</p>
+</li>
+<li>
+<p><strong>Sandboxed by default.</strong> No filesystem, no network, no clock, no ambient I/O of any kind. Every side-effecting operation is host-mediated. The sandbox also caps three things the language itself can’t escape: steps executed (against runaway loops), bytes allocated (against memory bombs), and fn-call depth (against deep recursion). See <a href="errors.html#fatal-vs-non-fatal">Error Handling → Fatal vs non-fatal</a>.</p>
+</li>
+<li>
+<p><strong>Three engines, one language.</strong> Same parser, same semantics, pick the right executor per workload:</p>
+<ul>
+<li><strong>Tree-walker</strong> — fast to start, great diagnostics, zero build step. Ideal for short-lived scripts and REPLs.</li>
+<li><strong>Bytecode VM</strong> — compiles once, runs many times. Best for programs that loop or re-enter a hot path.</li>
+<li><strong>AOT Rust transpiler</strong> — emits plain Rust source that links against <code>bop-lang</code>’s runtime. Closest to native speed; useful when you want compiled artifacts or you’re already shipping a Rust build pipeline.</li>
+</ul>
+<p>All three are wire-compatible on <code>Value</code> and <code>BopError</code>, and the test suite pins them to byte-for-byte output agreement via a three-way differential harness.</p>
+</li>
+<li>
+<p><strong><code>no_std</code> and wasm.</strong> The core crate compiles unchanged for <code>wasm32-unknown-unknown</code> and bare-metal targets. Enable the <code>no_std</code> feature for a <code>libm</code>-backed math facade; the rest of the language is already <code>#![cfg_attr(not(feature = "std"), no_std)]</code>.</p>
+</li>
+<li>
+<p><strong>Friendly errors.</strong> Parse and runtime errors both include the source snippet, a carat under the offending column, and a <code>hint:</code> line when the parser or runtime can guess what you meant (<code>"I don't know what 'pritn' is — did you mean 'print'?"</code>). Designed to be read by humans <em>and</em> by automated callers that need to correct themselves.</p>
+</li>
+<li>
+<p><strong>Small, stable grammar.</strong> Variables, loops, functions, arrays, dicts, structs, enums, pattern matching, modules, <code>Result</code> / <code>Iter</code> built-ins — that’s close to the whole surface. Everything else (math, JSON, iteration helpers, string utilities, test assertions) lives in the bundled <code>std.*</code> modules or as methods on the value types. The shape is deliberately small so it stays consistent across versions.</p>
+</li>
 </ul>
 <h2 id="where-to-start"><a class="header" href="#where-to-start">Where to start</a></h2>
-<p>If you’re new to Bop, start with the <strong>Basics</strong> section and work your way through. If you’re looking for a specific function or operator, jump straight to the <strong>Reference</strong> section. If you want to embed Bop in your own Rust project, see the <strong>Embedding</strong> chapter.</p>
+<ul>
+<li><strong>Embedding Bop in a host</strong> — <a href="embedding.html">Embedding Bop</a> walks through the <code>BopHost</code> trait, resource limits, module resolution, and picking an engine.</li>
+<li><strong>Learning the language</strong> — start with the <a href="basics/syntax.html">Language Guide</a> and work through <code>Basics</code> → <code>Control Flow</code> → <code>Data</code> → <code>Functions</code> → <code>Modules</code> → <code>Error Handling</code>.</li>
+<li><strong>Looking up a specific thing</strong> — the <a href="reference/operators.html">Reference</a> covers <a href="reference/operators.html">Operators</a>, <a href="reference/builtins.html">Built-in Functions</a>, <a href="reference/methods.html">Methods</a>, and the <a href="reference/grammar.html">Grammar</a>. The <a href="stdlib/index.html">Standard Library</a> section documents every <code>std.*</code> module.</li>
+<li><strong>Trying it interactively</strong> — <a href="repl.html"><code>bop repl</code></a> opens a persistent REPL with multi-line input, history, and tab completion.</li>
+</ul>
 
                     </main>
 

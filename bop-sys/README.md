@@ -36,7 +36,7 @@ fn main() {
     let mut host = StdHost::new();
     run(r#"
         use std.math
-        print("pi ≈ {pi}")
+        print("π ≈ {PI}")
         let now = unix_time()
         print("running at {now}")
     "#, &mut host, &BopLimits::standard()).unwrap();

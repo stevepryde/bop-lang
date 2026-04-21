@@ -11,7 +11,6 @@ Then:
 | command                       | what it does                                          |
 |-------------------------------|-------------------------------------------------------|
 | `bop`                         | open the REPL                                         |
-| `bop script.bop`              | run `script.bop` (shorthand for `bop run`)            |
 | `bop run script.bop`          | run with the bytecode VM (default, 2–3× the walker)   |
 | `bop run script.bop --novm`   | run with the tree-walker                              |
 | `bop compile script.bop`      | AOT-compile to a native binary                        |

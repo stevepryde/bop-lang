@@ -12,7 +12,7 @@
 
 // ─── std: thread-local storage ──────────────────────────────────────────────
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 mod imp {
     use std::cell::Cell;
 
@@ -45,7 +45,7 @@ mod imp {
 
 // ─── no-std: global statics (single-threaded only) ──────────────────────────
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 mod imp {
     use core::cell::Cell;
 

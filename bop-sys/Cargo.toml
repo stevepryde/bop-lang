@@ -16,7 +16,12 @@ categories = ["compilers"]
 name = "bop_sys"
 
 [dependencies]
-bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false, features = ["std"] }
+# `bop-sys` is an OS-backed host — it only makes sense on a
+# std target. `default-features = false` here just opts out of
+# bundling the `bop-std` blob at this layer; we forward the
+# feature explicitly below so embedders still get it when they
+# want it.
+bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false }
 
 [features]
 default = ["bop-std"]

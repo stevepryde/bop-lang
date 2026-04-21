@@ -21,7 +21,7 @@
 //! off per-engine messages (e.g. `"VM: stack underflow"`) stay
 //! with their engine — there's nothing to deduplicate.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::String};
 
 /// `Variable `<name>` not found`.

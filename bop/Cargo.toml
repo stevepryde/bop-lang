@@ -16,30 +16,25 @@ categories = ["compilers"]
 name = "bop"
 
 [features]
-default = ["std", "bop-std"]
-std = []
-# Bundle the Bop standard library (`import std.math`,
-# `std.json`, `std.collections`, `std.iter`, `std.string`,
-# `std.result`, `std.test`) as `&'static str` constants the
-# engine can resolve at runtime via `bop::stdlib::resolve`. On
-# by default; turn off with `default-features = false` (and
-# re-enable `std` or `no_std` explicitly) for a truly minimal
-# core with no bundled modules. The feature name matches the
-# old standalone `bop-std` crate — consumers who used to
-# depend on that flip `features = ["bop-std"]` on `bop-lang`.
+default = ["bop-std"]
+# Bundle the Bop standard library (`use std.math`, `std.json`,
+# `std.collections`, `std.iter`, `std.string`, `std.test`) as
+# `&'static str` constants the engine can resolve at runtime
+# via `bop::stdlib::resolve`. On by default; turn off with
+# `default-features = false` for a truly minimal core with no
+# bundled modules. The feature name matches the old standalone
+# `bop-std` crate — consumers who used to depend on that flip
+# `features = ["bop-std"]` on `bop-lang`.
 bop-std = []
-# Enable when building for `no_std` targets (bare-metal, edge
-# wasm, embedded). Pulls in the tiny pure-Rust `libm` crate
-# internally so the math builtins (`sqrt`, `sin`, `cos`, …)
-# still work — those `f64` methods live in `std`, not `core`.
-# Named `no_std` rather than `libm` because the *intent* is
-# "I'm targeting a no_std environment"; the libm dep is an
-# implementation detail the user shouldn't have to know about.
-# std users never see libm in their dep graph (it's an
-# `optional = true` dep, only activated by this feature). A
-# build that disables `std` without enabling `no_std` fails
-# fast with a `compile_error!` in `bop::math` pointing at the
-# fix.
+# Opt in when building for bare-metal / embedded / edge wasm
+# targets where Rust's `std` crate isn't available. Pulls in
+# the tiny pure-Rust `libm` crate internally so the math
+# builtins (`sqrt`, `sin`, `cos`, …) still work — those `f64`
+# methods live in `std`, not `core`. Named `no_std` rather
+# than `libm` because the *intent* is "I'm targeting a no_std
+# environment"; the libm dep is an implementation detail the
+# user shouldn't have to know about. Default (std) users never
+# see libm in their dep graph.
 no_std = ["dep:libm"]
 
 [dependencies]

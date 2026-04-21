@@ -19,16 +19,15 @@ name = "bop_vm"
 bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false }
 
 [features]
-default = ["std", "bop-std"]
-std = ["bop/std"]
-# Forwards to bop-lang's `no_std` feature — enable when
-# building for bare-metal / edge wasm / embedded targets. std
-# users can ignore this entirely and won't pull libm into
-# their dep graph.
+default = ["bop-std"]
+# Forwards to bop-lang's `no_std` feature — opt in when
+# building for bare-metal / edge wasm / embedded targets.
+# Default (std) users can ignore this entirely and won't pull
+# libm into their dep graph.
 no_std = ["bop/no_std"]
 # Forwards to bop-lang's `bop-std` feature — bundles the
-# Bop standard library (`import std.math`, `std.json`, …)
-# at build time. On by default so that `bop_vm::run` with a
+# Bop standard library (`use std.math`, `std.json`, …) at
+# build time. On by default so that `bop_vm::run` with a
 # default `BopHost::resolve_module` path resolves `std.*`
 # correctly.
 bop-std = ["bop/bop-std"]

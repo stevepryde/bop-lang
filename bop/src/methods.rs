@@ -1,4 +1,4 @@
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
 use crate::builtins::{error, expect_number};

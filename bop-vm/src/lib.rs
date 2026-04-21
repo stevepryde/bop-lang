@@ -77,9 +77,9 @@
 //! The VM shares [`bop::BopHost`] / [`bop::BopLimits`] semantics with
 //! the tree-walking evaluator in `bop-lang`.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(feature = "no_std", no_std)]
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 extern crate alloc;
 
 pub mod chunk;

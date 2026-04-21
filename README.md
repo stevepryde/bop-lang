@@ -1,29 +1,29 @@
 # bop-lang
 
-Bop is a small, dynamically-typed, **embeddable** programming language for Rust applications — hand your users or your AI a real programming language at runtime, without shipping a compiler to the target machine.
+A small, dynamically-typed, **embeddable** programming language for Rust hosts — give your users or your agent a real scripting language at runtime, with the sandbox treated as a first-class invariant instead of a bolted-on afterthought.
 
 [Documentation](https://stevepryde.github.io/bop-lang/)
 
-> **Note:** Bop is experimental and not yet battle-tested. Fine for tooling, scripting, and embedding experiments; use with care in production.
+> **Note:** Bop is experimental and not yet battle-tested. Good for tooling, scripting, embedding experiments, and sandbox-first workloads; use with care in production.
+
+## Why Bop?
+
+- **Embedded-first.** One crate (`bop-lang`), one trait (`BopHost`), no runtime dependencies. You wire up the functions you want Bop to reach; Bop can't touch anything else.
+- **Sandboxed by default.** No filesystem, network, clock, or ambient I/O. `BopLimits` caps three things the language itself can't escape: steps executed, bytes allocated, and fn-call depth. A runaway script halts cleanly with a diagnostic, not a hung process.
+- **Three engines, one language.** Walker, bytecode VM, or AOT-to-Rust transpiler — same parser, same semantics, same error shapes. Switch engines with a one-line change.
+- **`no_std` + WASM.** Core crate builds clean for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade.
+- **Small, stable grammar.** Functions, closures, arrays, dicts, structs, enums, pattern matching, string interpolation, modules, `Result` / `Iter` built-ins. Deliberately small — easy to teach, easy for tooling to target.
+- **Helpful errors.** Parse and runtime errors include the source snippet, a carat under the offending column, and `hint:` suggestions (`"I don't know what 'pritn' is — did you mean 'print'?"`).
 
 ## Three engines, one language
 
 | engine | crate | when to use it |
 |---|---|---|
-| Tree-walker | [`bop-lang`](https://crates.io/crates/bop-lang) | simplest embedding, smallest binary, zero deps |
+| Tree-walker | [`bop-lang`](https://crates.io/crates/bop-lang) | simplest embedding, smallest binary, best diagnostics |
 | Bytecode VM | [`bop-vm`](https://crates.io/crates/bop-vm) | **2–3× faster** than the walker, drop-in API, still zero deps |
 | AOT transpile | [`bop-compile`](https://crates.io/crates/bop-compile) | compile a script to a native binary at hand-written-Rust speed |
 
-All three share the same parser, `BopHost` trait, `Value` type, and semantics. Switching between them is a one-line change in the consumer's code.
-
-## Features
-
-- **Embeddable** via the `BopHost` trait — call your Rust functions from Bop, and vice-versa
-- **Sandboxed by default** — `BopLimits` caps step count and memory so a runaway script can't hang or OOM your process
-- **Zero Rust deps** in `std` mode — nothing in your supply chain but Bop itself
-- **`no_std` + WASM** compatible (pulls in `libm` for float math, nothing else)
-- **Expressive syntax** — functions, closures, arrays, dicts, structs, enums, pattern matching, string interpolation
-- **Helpful errors** — source-pointer renderer with carats, "did you mean?" suggestions, match-exhaustiveness warnings
+All three share the same parser, `BopHost` trait, `Value` type, and semantics. A three-way differential test suite pins them to byte-for-byte output agreement.
 
 ## Examples
 
@@ -37,7 +37,7 @@ fn fizzbuzz(n) {
     if n % 15 == 0 { return "FizzBuzz" }
     if n % 3 == 0 { return "Fizz" }
     if n % 5 == 0 { return "Buzz" }
-    return str(n)
+    return n.to_str()
 }
 
 // Loops, arrays, method calls
@@ -47,14 +47,21 @@ for i in range(1, 16) {
 }
 print(results.join(", "))
 
-// Dictionaries
+// Dicts + missing-key soft lookup
 let player = {"name": "Ada", "hp": 100}
 player["hp"] -= 20
-print("{player[\"name\"]} has {player[\"hp\"]} HP")
+if player["inventory"].is_none() { print("no inventory") }
 
-// Pull in the stdlib
+// Result + try
+fn parse_positive(s) {
+    let n = s.to_int()
+    if n <= 0 { return Err("must be positive") }
+    return Ok(n)
+}
+
+// Stdlib
 use std.math
-print(pi)
+print(PI)
 ```
 
 ## Quick start — CLI
@@ -65,11 +72,11 @@ cargo install bop-cli
 
 | | |
 |---|---|
-| `bop`                     | open the REPL |
-| `bop script.bop`          | run a script (bytecode VM, 2–3× the walker) |
+| `bop`                       | open the REPL |
+| `bop run script.bop`        | run a script (bytecode VM by default) |
 | `bop run script.bop --novm` | run with the tree-walker instead |
-| `bop compile script.bop`  | AOT-compile to a native binary |
-| `bop --help`              | full usage |
+| `bop compile script.bop`    | AOT-compile to a native binary |
+| `bop --help`                | full usage |
 
 ## Quick start — embedding
 
@@ -77,7 +84,7 @@ cargo install bop-cli
 [dependencies]
 bop-lang = "0.3"
 bop-vm   = "0.3"       # optional — drop in for 2–3× speed
-bop-sys  = "0.3"       # ready-made filesystem / stdio host
+bop-sys  = "0.3"       # ready-made filesystem / stdio / env / time host
 ```
 
 ```rust
@@ -93,7 +100,7 @@ fn main() {
 }
 ```
 
-Custom host (sandboxed, expose only what you want Bop to reach):
+Custom sandboxed host — Bop can only reach the fns you expose:
 
 ```rust
 use bop::{BopError, BopHost, BopLimits, Value};
@@ -105,7 +112,9 @@ impl BopHost for SandboxedHost {
         -> Option<Result<Value, BopError>>
     {
         match name {
-            "now" => Some(Ok(Value::Int(42))), // whatever your app wants
+            // Expose exactly the primitives your program wants to
+            // let scripts reach. Everything else is invisible.
+            "now" => Some(Ok(Value::Int(42))),
             _ => None,
         }
     }

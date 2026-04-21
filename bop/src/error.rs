@@ -1,6 +1,6 @@
 //! Error type for the Bop interpreter.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::String};
 
 #[derive(Debug, Clone)]
@@ -270,7 +270,7 @@ impl BopWarning {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 impl std::error::Error for BopError {}
 
 #[cfg(test)]

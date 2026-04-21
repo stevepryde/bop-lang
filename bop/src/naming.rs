@@ -29,7 +29,7 @@
 //! start with an underscore; explicit selective or aliased imports
 //! still expose them.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::String};
 
 /// The shape bucket an identifier string belongs to.

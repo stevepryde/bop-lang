@@ -31,7 +31,7 @@
 //! silent opacity fallback rather than a hard failure; the
 //! checker is advisory.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::String, vec::Vec};
 
 use crate::error::BopWarning;
@@ -39,12 +39,12 @@ use crate::parser::{
     Expr, ExprKind, MatchArm, Pattern, Stmt, StmtKind, VariantDecl,
 };
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc_import::collections::{BTreeMap, BTreeSet};
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc as alloc_import;
 
 /// Run every static check over `stmts` and collect the

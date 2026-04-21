@@ -8,7 +8,7 @@
 //! Short-circuiting operators (`&&`, `||`) are NOT here: they depend on
 //! evaluation order and are the engine's responsibility.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{format, string::ToString, vec::Vec};
 
 use crate::builtins::{

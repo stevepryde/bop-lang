@@ -18,8 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 # The CLI always bundles the stdlib — users running `bop run`
-# or `bop compile` expect `import std.math` to Just Work.
-bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false, features = ["std", "bop-std"] }
+# or `bop compile` expect `use std.math` to Just Work.
+bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false, features = ["bop-std"] }
 bop-sys = { version = "0.3.0", path = "../bop-sys" }
 # The `run` subcommand defaults to the bytecode VM (2–3× faster
 # than the tree-walker). `--novm` forces the walker path.

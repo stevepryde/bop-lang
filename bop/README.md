@@ -66,14 +66,13 @@ fn main() {
 
 | feature | default | what it does |
 |---|---|---|
-| `std` | yes | uses `std::f64` math, `std` collections, and full runtime |
-| `bop-std` | yes | bundles the Bop stdlib (`use std.math`, `std.json`, `std.collections`, `std.iter`, `std.string`, `std.result`, `std.test`) as `&'static str` constants reachable via [`bop::stdlib::resolve`] |
-| `no_std` | no | drops the `std` dep, pulls in `libm` for float math. Enable with `default-features = false, features = ["no_std"]` |
+| `bop-std` | yes | bundles the Bop stdlib (`use std.math`, `std.json`, `std.collections`, `std.iter`, `std.string`, `std.test`) as `&'static str` constants reachable via [`bop::stdlib::resolve`] |
+| `no_std` | no | opt in for bare-metal / embedded / edge wasm targets. Pulls in `libm` for float math. Enable with `default-features = false, features = ["no_std"]` (add `"bop-std"` too if you want the bundled stdlib on those targets). |
 
 A truly minimal build — core language only, no bundled stdlib:
 
 ```toml
-bop-lang = { version = "0.3", default-features = false, features = ["std"] }
+bop-lang = { version = "0.3", default-features = false }
 ```
 
 ## WASM example

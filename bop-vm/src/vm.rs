@@ -38,7 +38,7 @@
 //!   still fits under the tree-walker's calibration of
 //!   `BopLimits::standard()` / `BopLimits::demo()`.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{
     format,
     rc::Rc,
@@ -47,14 +47,14 @@ use alloc::{
     vec::Vec,
 };
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 use std::rc::Rc;
 
 use core::cell::RefCell;
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::collections::{BTreeMap, BTreeSet};
 
 use bop::builtins::{self, error, error_fatal_with_hint, error_with_hint};

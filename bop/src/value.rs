@@ -6,10 +6,10 @@
 //! call `bop_alloc`. This is enforced by the type system — code outside
 //! this module cannot access the private inner fields.
 
-#[cfg(not(feature = "std"))]
+#[cfg(feature = "no_std")]
 use alloc::{boxed::Box, format, rc::Rc, string::{String, ToString}, vec::Vec};
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "no_std"))]
 use std::rc::Rc;
 
 use core::cell::RefCell;
