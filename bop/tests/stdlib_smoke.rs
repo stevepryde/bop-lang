@@ -56,15 +56,18 @@ fn run(code: &str) -> BufHost {
     host
 }
 
-// ─── std.result ────────────────────────────────────────────────
+// ─── Result methods ───────────────────────────────────────────
+//
+// `Result` is a built-in enum; its combinators are engine-level
+// methods dispatched via `methods::result_method` and the per-
+// engine callable helpers. No `use std.result` required.
 
 #[test]
 fn result_is_ok_and_is_err() {
     let host = run(
-        r#"use std.result
-print(is_ok(Result::Ok(1)))
-print(is_err(Result::Err("boom")))
-print(is_ok(Result::Err("x")))"#,
+        r#"print(Result::Ok(1).is_ok())
+print(Result::Err("boom").is_err())
+print(Result::Err("x").is_ok())"#,
     );
     assert_eq!(host.prints.borrow().clone(), vec!["true", "true", "false"]);
 }
@@ -72,9 +75,8 @@ print(is_ok(Result::Err("x")))"#,
 #[test]
 fn result_unwrap_or_returns_default_on_err() {
     let host = run(
-        r#"use std.result
-print(unwrap_or(Result::Ok(42), 0))
-print(unwrap_or(Result::Err("boom"), 99))"#,
+        r#"print(Result::Ok(42).unwrap_or(0))
+print(Result::Err("boom").unwrap_or(99))"#,
     );
     assert_eq!(host.prints.borrow().clone(), vec!["42", "99"]);
 }
@@ -82,13 +84,12 @@ print(unwrap_or(Result::Err("boom"), 99))"#,
 #[test]
 fn result_map_applies_only_to_ok() {
     let host = run(
-        r#"use std.result
-let doubled = map(Result::Ok(5), fn(x) { return x * 2 })
+        r#"let doubled = Result::Ok(5).map(fn(x) { return x * 2 })
 print(match doubled {
     Result::Ok(v) => v,
     Result::Err(_) => -1,
 })
-let passed = map(Result::Err("stop"), fn(x) { return x * 2 })
+let passed = Result::Err("stop").map(fn(x) { return x * 2 })
 print(match passed {
     Result::Ok(_) => "ok?",
     Result::Err(e) => e,
@@ -98,16 +99,32 @@ print(match passed {
 }
 
 #[test]
+fn result_map_err_applies_only_to_err() {
+    let host = run(
+        r#"let tagged = Result::Err("bad").map_err(fn(e) { return e + "!" })
+print(match tagged {
+    Result::Ok(_)  => "ok?",
+    Result::Err(e) => e,
+})
+let passed = Result::Ok(5).map_err(fn(e) { return e + "!" })
+print(match passed {
+    Result::Ok(v)  => v,
+    Result::Err(_) => -1,
+})"#,
+    );
+    assert_eq!(host.prints.borrow().clone(), vec!["bad!", "5"]);
+}
+
+#[test]
 fn result_and_then_chains_fallible_steps() {
     let host = run(
-        r#"use std.result
-fn halve(x) {
+        r#"fn halve(x) {
     if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
     return Result::Err("odd")
 }
-let r = and_then(and_then(Result::Ok(8), halve), halve)
+let r = Result::Ok(8).and_then(halve).and_then(halve)
 print(match r { Result::Ok(v) => v, Result::Err(e) => e })
-let bad = and_then(Result::Ok(7), halve)
+let bad = Result::Ok(7).and_then(halve)
 print(match bad { Result::Ok(_) => "ok?", Result::Err(e) => e })"#,
     );
     assert_eq!(host.prints.borrow().clone(), vec!["2", "odd"]);
@@ -115,19 +132,16 @@ print(match bad { Result::Ok(_) => "ok?", Result::Err(e) => e })"#,
 
 #[test]
 fn result_unwrap_on_err_raises_with_message() {
-    // `unwrap` / `expect` call the `panic` builtin. The resulting
-    // runtime error has to carry the caller's message (via
-    // `try_call`) so users can see *why* the unwrap failed
-    // instead of the pre-`panic` "Function `panic` not found"
-    // surface.
+    // `unwrap` / `expect` raise a runtime error carrying the
+    // inspected payload (or caller-supplied message). `try_call`
+    // catches it so the test can observe `e.message` directly.
     let host = run(
-        r#"use std.result
-let r = try_call(fn() { return unwrap(Result::Err("boom")) })
+        r#"let r = try_call(fn() { return Result::Err("boom").unwrap() })
 print(match r {
     Result::Ok(_)  => "unexpected ok",
     Result::Err(e) => e.message,
 })
-let r2 = try_call(fn() { return expect(Result::Err("bad"), "custom message") })
+let r2 = try_call(fn() { return Result::Err("bad").expect("custom message") })
 print(match r2 {
     Result::Ok(_)  => "unexpected ok",
     Result::Err(e) => e.message,
@@ -136,6 +150,22 @@ print(match r2 {
     assert_eq!(
         host.prints.borrow().clone(),
         vec!["unwrap on Err: \"boom\"", "custom message"],
+    );
+}
+
+#[test]
+fn result_methods_work_without_any_use() {
+    // The whole point of moving these off `std.result` was to
+    // make them always available — no imports, no host resolver
+    // involvement, just method calls on the built-in `Result`.
+    let host = run(
+        r#"let mapped = Result::Ok(10).map(fn(v) { return v + 1 })
+print(mapped)
+print(Result::Err("x").is_err())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["Result::Ok(11)", "true"],
     );
 }
 
@@ -198,9 +228,9 @@ print(match r {
 fn math_constants_have_expected_precision() {
     let host = run(
         r#"use std.math
-print(pi)
-print(e)
-print(tau)"#,
+print(PI)
+print(E)
+print(TAU)"#,
     );
     let prints = host.prints.borrow();
     assert!(prints[0].starts_with("3.14159"));
@@ -800,7 +830,6 @@ print(roundtrip["vals"])"#,
 fn json_parse_error_raises_and_try_call_catches() {
     let host = run(
         r#"use std.json
-use std.result
 let r = try_call(fn() { return parse("[1, 2,") })
 print(match r {
     Result::Ok(_) => "ok?",

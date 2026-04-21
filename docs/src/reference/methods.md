@@ -115,6 +115,34 @@ See [Dictionaries](../data/dictionaries.md) for worked examples.
 | `d.values()` | array | All values. |
 | `d.has(key)` | bool | Whether `key` exists. |
 
+## Result methods — `Result`
+
+`Result` is an [engine built-in](../errors.md). All combinators are methods on the built-in type — no import required.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `r.is_ok()` | bool | `true` when `r` is `Result::Ok(_)`. |
+| `r.is_err()` | bool | `true` when `r` is `Result::Err(_)`. |
+| `r.unwrap()` | value | Payload on `Ok`; raises a runtime error on `Err` (message includes the `.inspect()` of the payload). |
+| `r.expect(msg)` | value | Payload on `Ok`; raises with `msg` on `Err`. |
+| `r.unwrap_or(default)` | value | Payload on `Ok`; `default` on `Err`. |
+| `r.map(f)` | Result | `Ok(v)` → `Ok(f(v))`; `Err(e)` passes through. |
+| `r.map_err(f)` | Result | `Err(e)` → `Err(f(e))`; `Ok(v)` passes through. |
+| `r.and_then(f)` | Result | `Ok(v)` → `f(v)` (expected to return a Result); `Err(e)` passes through. |
+
+```bop
+print(Result::Ok(5).is_ok())                           // true
+print(Result::Err("bad").unwrap_or(0))                 // 0
+print(Result::Ok(5).map(fn(v) { return v * 2 }))       // Result::Ok(10)
+print(Result::Err("x").map(fn(v) { return v * 2 }))    // Result::Err("x")
+
+fn halve(x) {
+  if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
+  return Result::Err("odd")
+}
+print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+```
+
 ## Struct / enum methods
 
 User-declared. See [Structs & Enums](../data/structs-and-enums.md). Method dispatch on a struct tries the universal common methods first, then looks up `fn TypeName.method` declared in the same module.
@@ -125,6 +153,6 @@ If you `use path as m`, `m` is a `Value::Module`. `m.type()` → `"module"`, `m.
 
 ```bop
 use std.math as m
-print(m.pi)             // exported constant
+print(m.PI)             // exported constant
 print(m.type())         // "module"   (universal method, not an export)
 ```

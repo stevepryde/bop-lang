@@ -7,9 +7,9 @@
 // itself. This module adds the canonical constants plus a few
 // convenience wrappers built in Bop.
 
-let pi = 3.141592653589793
-let e = 2.718281828459045
-let tau = 6.283185307179586
+const PI = 3.141592653589793
+const E = 2.718281828459045
+const TAU = 6.283185307179586
 
 // Clamp `x` into the range `[lo, hi]`. Accepts ints and floats
 // in any combination; return type mirrors the widest input.

@@ -1064,22 +1064,37 @@ use m
 print(x)"#,
         &[("m", "let x = 42")],
     ),
-    // ─── bop-std stdlib (phase 7) ─────────────────────────────
+    // ─── Result methods (engine-level, no `use` required) ────
     (
-        "std_result_helpers",
-        r#"use std.result
-print(is_ok(Result::Ok(1)))
-print(is_err(Result::Err("x")))
-print(unwrap_or(Result::Err("x"), 42))"#,
+        "result_method_helpers",
+        r#"print(Result::Ok(1).is_ok())
+print(Result::Err("x").is_err())
+print(Result::Err("x").unwrap_or(42))"#,
         &[],
     ),
     (
-        "std_result_map",
-        r#"use std.result
-let r = map(Result::Ok(5), fn(x) { return x * 2 })
+        "result_method_map",
+        r#"let r = Result::Ok(5).map(fn(x) { return x * 2 })
 print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#,
         &[],
     ),
+    (
+        "result_method_map_err",
+        r#"let r = Result::Err("bad").map_err(fn(e) { return e + "!" })
+print(match r { Result::Err(v) => v, Result::Ok(_) => "ok?" })"#,
+        &[],
+    ),
+    (
+        "result_method_and_then",
+        r#"fn halve(x) {
+    if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
+    return Result::Err("odd")
+}
+let r = Result::Ok(8).and_then(halve).and_then(halve)
+print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#,
+        &[],
+    ),
+    // ─── bop-std stdlib (phase 7) ─────────────────────────────
     (
         "std_math_factorial",
         r#"use std.math

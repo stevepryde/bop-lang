@@ -529,3 +529,166 @@ pub fn is_mutating_method(method: &str) -> bool {
         "push" | "pop" | "insert" | "remove" | "reverse" | "sort"
     )
 }
+
+// ─── Result methods ────────────────────────────────────────────
+//
+// `Result` is a built-in enum (see `builtins::builtin_result_variants`
+// seeded into every engine's type table). Its combinators live
+// here so `r.is_ok()`, `r.unwrap()`, etc. are always available
+// without `use std.result`. Callable-taking variants (`map`,
+// `map_err`, `and_then`) need the evaluator's call primitive and
+// therefore live in each engine's MethodCall dispatch alongside
+// the user-method table, not here — see [`is_result_callable_method`].
+
+/// True when `receiver` is a `Value::EnumVariant` whose type
+/// identity is the built-in `Result`. Shared by each engine
+/// so a user enum named `Result` in some module can't
+/// accidentally steal the built-in method dispatch.
+pub fn is_builtin_result(receiver: &Value) -> bool {
+    match receiver {
+        Value::EnumVariant(e) => {
+            e.module_path() == crate::value::BUILTIN_MODULE_PATH && e.type_name() == "Result"
+        }
+        _ => false,
+    }
+}
+
+/// Identifies `map` / `map_err` / `and_then` as the
+/// callable-taking Result methods each engine handles inline.
+/// Returns `None` for anything else so the caller can fall
+/// through to [`result_method`] or the standard dispatcher.
+pub enum ResultCallableKind {
+    /// `r.map(f)` — `Ok(v)` becomes `Ok(f(v))`, `Err(e)` passes.
+    Map,
+    /// `r.map_err(f)` — `Err(e)` becomes `Err(f(e))`, `Ok(v)` passes.
+    MapErr,
+    /// `r.and_then(f)` — `Ok(v)` becomes `f(v)` (expected to
+    /// return a Result), `Err(e)` passes.
+    AndThen,
+}
+
+pub fn is_result_callable_method(method: &str) -> Option<ResultCallableKind> {
+    match method {
+        "map" => Some(ResultCallableKind::Map),
+        "map_err" => Some(ResultCallableKind::MapErr),
+        "and_then" => Some(ResultCallableKind::AndThen),
+        _ => None,
+    }
+}
+
+/// Pure Result method dispatch. Handles `is_ok`, `is_err`,
+/// `unwrap`, `expect`, `unwrap_or` — the combinators whose
+/// implementation doesn't need to invoke a user callable.
+///
+/// Returns `Ok(Some(value))` when the method name matched,
+/// `Ok(None)` when it didn't (so the caller falls through to
+/// the callable-taking Result methods, then to the standard
+/// dispatcher). Assumes `receiver` is already known to be a
+/// built-in Result — callers check [`is_builtin_result`] first.
+pub fn result_method(
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    line: u32,
+) -> Result<Option<Value>, BopError> {
+    use crate::builtins::expect_args;
+    let e = match receiver {
+        Value::EnumVariant(e) => e,
+        _ => return Ok(None),
+    };
+    let ok_payload = || -> Option<Value> {
+        if e.variant() != "Ok" {
+            return None;
+        }
+        match e.payload() {
+            crate::value::EnumPayload::Tuple(items) if items.len() == 1 => {
+                Some(items[0].clone())
+            }
+            _ => None,
+        }
+    };
+    let err_payload = || -> Option<Value> {
+        if e.variant() != "Err" {
+            return None;
+        }
+        match e.payload() {
+            crate::value::EnumPayload::Tuple(items) if items.len() == 1 => {
+                Some(items[0].clone())
+            }
+            _ => None,
+        }
+    };
+    match method {
+        "is_ok" => {
+            expect_args("is_ok", args, 0, line)?;
+            Ok(Some(Value::Bool(e.variant() == "Ok")))
+        }
+        "is_err" => {
+            expect_args("is_err", args, 0, line)?;
+            Ok(Some(Value::Bool(e.variant() == "Err")))
+        }
+        "unwrap" => {
+            expect_args("unwrap", args, 0, line)?;
+            if let Some(v) = ok_payload() {
+                return Ok(Some(v));
+            }
+            // Err case — construct the same message std.result
+            // used to emit so migrated programs keep their
+            // crash-trace text stable.
+            let detail = match err_payload() {
+                Some(payload) => format!("unwrap on Err: {}", payload.inspect()),
+                None => String::from("unwrap on Err"),
+            };
+            Err(error(line, detail))
+        }
+        "expect" => {
+            expect_args("expect", args, 1, line)?;
+            if let Some(v) = ok_payload() {
+                return Ok(Some(v));
+            }
+            let message = match &args[0] {
+                Value::Str(s) => s.as_str().to_string(),
+                other => format!("{}", other),
+            };
+            Err(error(line, message))
+        }
+        "unwrap_or" => {
+            expect_args("unwrap_or", args, 1, line)?;
+            if let Some(v) = ok_payload() {
+                return Ok(Some(v));
+            }
+            Ok(Some(args[0].clone()))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Build a `Result::Ok(value)` with the builtin's module path so
+/// pattern matches against `Result::Ok(_)` fire regardless of
+/// which module the receiver came from. Mirror of the helper in
+/// `builtins` but specialised to the "wrap a value" case each
+/// engine's callable dispatch uses.
+pub fn make_result_ok(value: Value) -> Value {
+    Value::new_enum_tuple(
+        String::from(crate::value::BUILTIN_MODULE_PATH),
+        String::from("Result"),
+        String::from("Ok"),
+        alloc_vec_of(value),
+    )
+}
+
+/// Same as [`make_result_ok`] but for `Err`.
+pub fn make_result_err(value: Value) -> Value {
+    Value::new_enum_tuple(
+        String::from(crate::value::BUILTIN_MODULE_PATH),
+        String::from("Result"),
+        String::from("Err"),
+        alloc_vec_of(value),
+    )
+}
+
+fn alloc_vec_of(value: Value) -> Vec<Value> {
+    let mut v = Vec::with_capacity(1);
+    v.push(value);
+    v
+}

@@ -16,10 +16,9 @@
 //!
 //! Available modules:
 //!
-//! - `std.result` — `Result` enum, `RuntimeError` struct, and
-//!   combinators (`is_ok`, `unwrap`, `map`, `and_then`, …)
-//! - `std.math` — numeric constants and helpers that wrap core
-//!   builtins (`pi`, `e`, `sqrt_safe`, `clamp`, …)
+//! - `std.math` — numeric constants (`PI`, `E`, `TAU`) and
+//!   helpers that don't fit on a numeric receiver (`clamp`,
+//!   `factorial`, `gcd`, …)
 //! - `std.iter` — functional helpers on arrays (`map`, `filter`,
 //!   `reduce`, `sum`, `find`, …)
 //! - `std.string` — string helpers that didn't fit the
@@ -31,8 +30,12 @@
 //!   types with value-semantic methods (`s = s.push(v)` etc.)
 //! - `std.json` — `parse(text)` / `stringify(value)`. Pure
 //!   Bop implementation; adequate for scripting workloads.
+//!
+//! `Result` combinators (`is_ok`, `unwrap`, `map`, `and_then`,
+//! …) used to live in `std.result` but are now methods on the
+//! built-in `Result` type — always available without a `use`.
+//! See `methods::result_method`.
 
-const RESULT: &str = include_str!("modules/result.bop");
 const MATH: &str = include_str!("modules/math.bop");
 const ITER: &str = include_str!("modules/iter.bop");
 const STRING_MOD: &str = include_str!("modules/string.bop");
@@ -68,7 +71,6 @@ const JSON_MOD: &str = include_str!("modules/json.bop");
 /// ```
 pub fn resolve(name: &str) -> Option<&'static str> {
     match name {
-        "std.result" => Some(RESULT),
         "std.math" => Some(MATH),
         "std.iter" => Some(ITER),
         "std.string" => Some(STRING_MOD),
@@ -82,7 +84,6 @@ pub fn resolve(name: &str) -> Option<&'static str> {
 /// Every module name this crate can resolve. Useful for docs,
 /// diagnostics, or a "did you mean…" suggestion in error paths.
 pub const MODULES: &[&str] = &[
-    "std.result",
     "std.math",
     "std.iter",
     "std.string",

@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f7770b37.js";
+            window.path_to_searchindex_js = "searchindex-7add6b7f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c7edef4c.js"></script>
+        <script src="toc-4a0c6a8e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -189,7 +189,7 @@ use path.{a, b} as m        // aliased + selective
 <h2 id="glob-use"><a class="header" href="#glob-use">Glob <code>use</code></a></h2>
 <p>Brings every public export of a module into the current scope as a bare name:</p>
 <pre><code class="language-bop">use std.math
-print(pi)            // constant from std.math
+print(PI)            // constant from std.math
 print(factorial(5))  // fn from std.math → 120
 </code></pre>
 <p>Names that start with <code>_</code> are considered <strong>private by convention</strong> and glob imports skip them:</p>
@@ -205,8 +205,8 @@ print(public())      // 42
 <p>Glob is idempotent at the injection site — running <code>use foo</code> twice in the same scope is a no-op (matches Python’s <code>import foo; import foo</code>). When two glob imports would introduce the same name, the first wins and the second emits a runtime warning — explicit selective imports are the way to disambiguate.</p>
 <h2 id="selective-use"><a class="header" href="#selective-use">Selective <code>use</code></a></h2>
 <p>Pick exactly which names you want:</p>
-<pre><code class="language-bop">use std.math.{pi, factorial}
-print(pi)
+<pre><code class="language-bop">use std.math.{PI, factorial}
+print(PI)
 print(factorial(4))
 // print(clamp(1, 0, 10))   // error — not imported
 </code></pre>
@@ -218,13 +218,13 @@ print(_helper())     // ok — explicit opt-in
 <h2 id="aliased-use"><a class="header" href="#aliased-use">Aliased <code>use</code></a></h2>
 <p>Binds the whole module as a single value under the alias:</p>
 <pre><code class="language-bop">use std.math as m
-print(m.pi)
+print(m.PI)
 print(m.factorial(5))
 </code></pre>
 <p><code>m</code> is a <code>Value::Module</code> — <code>m.type()</code> is <code>"module"</code>. You access its exports via the <code>.</code> operator. Methods on aliased modules (<code>m.helper(...)</code>) work the same way they would on a bare imported fn.</p>
 <p>Combine with selective to shrink the alias’s surface:</p>
-<pre><code class="language-bop">use std.math.{pi, factorial} as m
-print(m.pi)
+<pre><code class="language-bop">use std.math.{PI, factorial} as m
+print(m.PI)
 print(m.factorial(5))
 // print(m.clamp(1, 0, 10))   // error — `clamp` wasn't imported
 </code></pre>
@@ -275,7 +275,7 @@ print(label(o.Color::Red))   // "other-red"
 <h2 id="re-exports-are-transitive"><a class="header" href="#re-exports-are-transitive">Re-exports are transitive</a></h2>
 <p>A module’s effective exports include everything it <code>use</code>s from other modules (minus privacy filtering). If <code>a</code> does <code>use b</code> and <code>b</code> declares <code>fn foo()</code>, then <code>use a</code> in the top-level program makes <code>foo</code> visible too. The same applies to types — importing <code>a</code> brings <code>b</code>’s public types in scope.</p>
 <h2 id="builtin-types"><a class="header" href="#builtin-types">Builtin types</a></h2>
-<p><code>Result</code> and <code>RuntimeError</code> are engine built-ins. They’re always in scope — you don’t need <code>use std.result</code> to write <code>Result::Ok(v)</code> or to match on <code>RuntimeError { message, line }</code>. The <code>std.result</code> module exists for combinators (<code>unwrap</code>, <code>map</code>, <code>and_then</code>, …), not for the types themselves. See <a href="errors.html">Error Handling</a>.</p>
+<p><code>Result</code> and <code>RuntimeError</code> are engine built-ins. They’re always in scope — you don’t need any <code>use</code> to write <code>Result::Ok(v)</code> or to match on <code>RuntimeError { message, line }</code>. The combinators (<code>unwrap</code>, <code>map</code>, <code>and_then</code>, …) live as <a href="reference/methods.html#result-methods--result">methods on the <code>Result</code> type</a>, also always available. See <a href="errors.html">Error Handling</a>.</p>
 <h2 id="cycles"><a class="header" href="#cycles">Cycles</a></h2>
 <p>Circular imports (<code>a</code> uses <code>b</code> which uses <code>a</code>) are detected at load time and raise a clear error naming the cycle path. Restructure the code so the cycle breaks — usually by pulling shared definitions into a third module that neither circular node depends on.</p>
 <h2 id="inside-a-function-body"><a class="header" href="#inside-a-function-body">Inside a function body</a></h2>
@@ -327,6 +327,22 @@ fn describe(c) {
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
+        <!-- Livereload script (if served using the cli tool) -->
+        <script>
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
+            const socket = new WebSocket(wsAddress);
+            socket.onmessage = function (event) {
+                if (event.data === "reload") {
+                    socket.close();
+                    location.reload();
+                }
+            };
+
+            window.onbeforeunload = function() {
+                socket.close();
+            }
+        </script>
 
 
         <script>

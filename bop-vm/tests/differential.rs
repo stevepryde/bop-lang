@@ -1154,42 +1154,59 @@ print(match x {
 // path is a new code path this phase introduces.
 
 #[test]
-fn std_result_helpers_diff() {
+fn result_method_helpers_diff() {
+    // `is_ok` / `is_err` / `unwrap_or` are engine-level methods
+    // on the built-in `Result` — no `use` required. Walker and
+    // VM must produce the same printed output.
     set_modules(&[]);
     assert_eq!(
-        say(r#"use std.result
-print(is_ok(Result::Ok(1)))
-print(is_err(Result::Err("boom")))
-print(unwrap_or(Result::Err("x"), 42))"#),
+        say(r#"print(Result::Ok(1).is_ok())
+print(Result::Err("boom").is_err())
+print(Result::Err("x").unwrap_or(42))"#),
         "42"
     );
 }
 
 #[test]
-fn std_result_map_and_and_then_diff() {
+fn result_map_and_and_then_methods_diff() {
+    // Callable-taking Result methods need the engine's closure-
+    // call plumbing to produce the same `Result::Ok(v)` /
+    // `Result::Err(e)` shapes in both walker and VM.
     set_modules(&[]);
     assert_eq!(
-        say(r#"use std.result
-fn halve(x) {
+        say(r#"fn halve(x) {
     if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
     return Result::Err("odd")
 }
-let r = and_then(and_then(Result::Ok(8), halve), halve)
+let r = Result::Ok(8).and_then(halve).and_then(halve)
 print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#),
         "2"
     );
 }
 
 #[test]
-fn std_math_constants_diff() {
+fn result_map_err_on_err_transforms_payload_diff() {
+    // Covers the VM's `FrameWrap::ResultErr` path: the closure
+    // body runs with the Err payload, and the frame wraps the
+    // return value back up in `Result::Err(...)`.
     set_modules(&[]);
-    // The full constants spill a lot of digits. We only care
-    // that walker and VM print identical strings here — the
-    // harness already checks that via `say`.
+    assert_eq!(
+        say(r#"let e = Result::Err("bad").map_err(fn(s) { return s + "!" })
+print(match e { Result::Err(v) => v, Result::Ok(_) => "ok?" })"#),
+        "bad!"
+    );
+}
+
+#[test]
+fn std_math_constants_diff() {
+    // Constants renamed to all-caps (`PI` / `E` / `TAU`) now
+    // that they're `const` declarations. Walker and VM share
+    // the same parsed source, so the output has to match.
+    set_modules(&[]);
     let out = say(r#"use std.math
-print(pi)
-print(e)"#);
-    // Both engines should yield the same string for `e`.
+print(PI)
+print(E)"#);
+    // Both engines should yield the same string for `E`.
     assert!(out.starts_with("2.71828"), "got: {}", out);
 }
 

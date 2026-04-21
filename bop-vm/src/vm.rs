@@ -125,14 +125,32 @@ struct Frame {
     scopes: Vec<BTreeMap<String, Value>>,
     stack_base: usize,
     is_function: bool,
-    /// Marks this frame as the landing pad for a `try_call(f)`
-    /// invocation. When set, a clean return wraps the value in
-    /// `Result::Ok(v)` before pushing it for the caller; a
-    /// non-fatal error unwinds to this frame and pushes
-    /// `Result::Err(RuntimeError { message, line })` instead.
+    /// How this frame's return value should be transformed
+    /// before being pushed for the caller. See [`FrameWrap`].
+    wrap: FrameWrap,
+}
+
+/// Post-processing applied to a frame's return value / error at
+/// the moment it resumes the caller. Most frames don't need
+/// any — only callable-dispatch helpers (`try_call`, Result's
+/// `map` / `map_err`) set this so the engine can wrap the
+/// closure's bare return value without the user having to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameWrap {
+    /// Plain return — push the value as-is.
+    None,
+    /// `try_call(f)` landing pad: wrap a clean return in
+    /// `Result::Ok(v)`; a non-fatal error unwinds to this frame
+    /// and pushes `Result::Err(RuntimeError { … })` instead.
     /// Fatal errors still bypass the trap — see
     /// `BopError::is_fatal`.
-    try_call_wrapper: bool,
+    TryCall,
+    /// `r.map(f)` landing pad: wrap the clean return in
+    /// `Result::Ok(v)`. Errors in `f` propagate unchanged.
+    ResultOk,
+    /// `r.map_err(f)` landing pad: wrap the clean return in
+    /// `Result::Err(v)`. Errors in `f` propagate unchanged.
+    ResultErr,
 }
 
 struct FnEntry {
@@ -341,7 +359,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scopes: vec![BTreeMap::new()],
             stack_base: 0,
             is_function: false,
-            try_call_wrapper: false,
+            wrap: FrameWrap::None,
         };
         let step_budget = limits.max_steps.saturating_mul(STEP_SCALE);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
@@ -1393,7 +1411,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scopes: Vec::new(),
             stack_base: self.stack.len(),
             is_function: true,
-            try_call_wrapper: false,
+            wrap: FrameWrap::None,
         };
         self.frames.push(frame);
         // A fresh type_bindings frame scopes any type decl
@@ -1538,7 +1556,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     scopes: Vec::new(),
                     stack_base: self.stack.len(),
                     is_function: true,
-                    try_call_wrapper: false,
+                    wrap: FrameWrap::None,
                 });
                 self.type_bindings.push(BTreeMap::new());
                 // User methods don't do mutation back-assign
@@ -1553,33 +1571,47 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // `type` / `to_str` / `inspect` work on every value —
         // dispatch them ahead of the type-specific tables so
         // walker / VM / AOT agree on the common method surface.
-        let (ret, mutated) = if let Some(result) =
-            methods::common_method(&obj, &method, &args, line)?
-        {
-            result
-        } else {
-            match &obj {
-                Value::Array(arr) => {
-                    methods::array_method(arr, &method, &args, line)?
-                }
-                Value::Str(s) => {
-                    methods::string_method(s.as_str(), &method, &args, line)?
-                }
-                Value::Dict(entries) => {
-                    methods::dict_method(entries, &method, &args, line)?
-                }
-                Value::Int(_) | Value::Number(_) => {
-                    methods::numeric_method(&obj, &method, &args, line)?
-                }
-                Value::Bool(_) => {
-                    methods::bool_method(&obj, &method, &args, line)?
-                }
-                _ => {
-                    return Err(error(
-                        line,
-                        bop::error_messages::no_such_method(obj.type_name(), &method),
-                    ));
-                }
+        if let Some((ret, _)) = methods::common_method(&obj, &method, &args, line)? {
+            self.push_value(ret);
+            return Ok(Next::Continue);
+        }
+
+        // Built-in `Result` combinators. Pure methods (`is_ok`,
+        // `unwrap`, …) return through the regular path; callable-
+        // taking ones (`map`, `map_err`, `and_then`) push a
+        // closure frame with a `FrameWrap` that wraps the return
+        // in `Ok`/`Err` or passes it through.
+        if methods::is_builtin_result(&obj) {
+            if let Some(v) = methods::result_method(&obj, &method, &args, line)? {
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
+            if let Some(kind) = methods::is_result_callable_method(&method) {
+                return self.call_result_callable_method(obj, kind, &method, args, line);
+            }
+        }
+
+        let (ret, mutated) = match &obj {
+            Value::Array(arr) => {
+                methods::array_method(arr, &method, &args, line)?
+            }
+            Value::Str(s) => {
+                methods::string_method(s.as_str(), &method, &args, line)?
+            }
+            Value::Dict(entries) => {
+                methods::dict_method(entries, &method, &args, line)?
+            }
+            Value::Int(_) | Value::Number(_) => {
+                methods::numeric_method(&obj, &method, &args, line)?
+            }
+            Value::Bool(_) => {
+                methods::bool_method(&obj, &method, &args, line)?
+            }
+            _ => {
+                return Err(error(
+                    line,
+                    bop::error_messages::no_such_method(obj.type_name(), &method),
+                ));
             }
         };
 
@@ -2299,7 +2331,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scopes: vec![scope],
             stack_base: self.stack.len(),
             is_function: true,
-            try_call_wrapper: false,
+            wrap: FrameWrap::None,
         });
         self.type_bindings.push(BTreeMap::new());
         Ok(Next::Continue)
@@ -2813,12 +2845,15 @@ impl<'h, H: BopHost> Vm<'h, H> {
         if !frame.slots.is_empty() {
             self.return_slots(frame.slots);
         }
-        // A `try_call` wrapper frame wraps the return value in
-        // `Result::Ok(v)` before handing it back to its caller.
-        let final_value = if frame.try_call_wrapper {
-            builtins::make_try_call_ok(value)
-        } else {
-            value
+        // Apply the frame-level return wrapper: `try_call` wraps
+        // in `Result::Ok`, `r.map` / `r.map_err` wrap the closure
+        // result in Ok / Err respectively. Plain frames pass the
+        // value through untouched.
+        let final_value = match frame.wrap {
+            FrameWrap::None => value,
+            FrameWrap::TryCall => builtins::make_try_call_ok(value),
+            FrameWrap::ResultOk => methods::make_result_ok(value),
+            FrameWrap::ResultErr => methods::make_result_err(value),
         };
         if frame.is_function {
             self.push_value(final_value);
@@ -2833,7 +2868,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
     /// Implement the `try_call(f)` builtin. Validates the arg
     /// shape, dispatches to `call_closure` to push a frame for
-    /// `f`, and flips that frame's `try_call_wrapper` flag so
+    /// `f`, and marks that frame with `FrameWrap::TryCall` so
     /// the outcome (whether a normal return or a non-fatal
     /// error) gets wrapped in a `Result::Ok`/`Result::Err`
     /// before returning to the original `try_call` caller.
@@ -2870,17 +2905,138 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // The frame we just pushed is the one that should
         // participate in the try_call wrap/catch dance.
         if let Some(frame) = self.frames.last_mut() {
-            frame.try_call_wrapper = true;
+            frame.wrap = FrameWrap::TryCall;
         }
         Ok(Next::Continue)
     }
 
+    /// Handle `r.map(f)`, `r.map_err(f)`, `r.and_then(f)` for a
+    /// built-in `Result`. `map` / `map_err` push a closure frame
+    /// marked with a `FrameWrap` that wraps the closure's return
+    /// value in `Ok` / `Err`; the short-circuit branch (map on
+    /// Err, map_err on Ok) skips the call and pushes the passed-
+    /// through Result directly. `and_then` trusts the closure to
+    /// return a Result and pushes the call with no wrap.
+    fn call_result_callable_method(
+        &mut self,
+        obj: Value,
+        kind: methods::ResultCallableKind,
+        method: &str,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Next, BopError> {
+        use methods::{make_result_err, make_result_ok, ResultCallableKind};
+        if args.len() != 1 {
+            return Err(error(
+                line,
+                format!(
+                    "`{}` expects 1 argument, but got {}",
+                    method,
+                    args.len()
+                ),
+            ));
+        }
+        let mut args_iter = args.into_iter();
+        let callable = args_iter.next().unwrap();
+
+        let (is_ok, payload) = match &obj {
+            Value::EnumVariant(e) => {
+                let payload = match e.payload() {
+                    bop::value::EnumPayload::Tuple(items) if items.len() == 1 => {
+                        items[0].clone()
+                    }
+                    _ => {
+                        return Err(error(
+                            line,
+                            format!("malformed Result::{} payload", e.variant()),
+                        ));
+                    }
+                };
+                (e.variant() == "Ok", payload)
+            }
+            _ => return Err(error(line, "Result method called on non-Result")),
+        };
+        drop(obj);
+
+        match kind {
+            ResultCallableKind::Map => {
+                if !is_ok {
+                    // Err passes through unchanged — no closure call.
+                    self.push_value(make_result_err(payload));
+                    return Ok(Next::Continue);
+                }
+                let func = match &callable {
+                    Value::Fn(f) => Rc::clone(f),
+                    other => {
+                        return Err(error(
+                            line,
+                            format!("`map` expects a function, got {}", other.type_name()),
+                        ));
+                    }
+                };
+                drop(callable);
+                self.call_closure(&func, vec![payload], line)?;
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.wrap = FrameWrap::ResultOk;
+                }
+                Ok(Next::Continue)
+            }
+            ResultCallableKind::MapErr => {
+                if is_ok {
+                    self.push_value(make_result_ok(payload));
+                    return Ok(Next::Continue);
+                }
+                let func = match &callable {
+                    Value::Fn(f) => Rc::clone(f),
+                    other => {
+                        return Err(error(
+                            line,
+                            format!(
+                                "`map_err` expects a function, got {}",
+                                other.type_name()
+                            ),
+                        ));
+                    }
+                };
+                drop(callable);
+                self.call_closure(&func, vec![payload], line)?;
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.wrap = FrameWrap::ResultErr;
+                }
+                Ok(Next::Continue)
+            }
+            ResultCallableKind::AndThen => {
+                if !is_ok {
+                    self.push_value(make_result_err(payload));
+                    return Ok(Next::Continue);
+                }
+                let func = match &callable {
+                    Value::Fn(f) => Rc::clone(f),
+                    other => {
+                        return Err(error(
+                            line,
+                            format!(
+                                "`and_then` expects a function, got {}",
+                                other.type_name()
+                            ),
+                        ));
+                    }
+                };
+                drop(callable);
+                // Closure is expected to return a Result — no
+                // wrapping. The result flows back via the normal
+                // `do_return` path (`FrameWrap::None`).
+                self.call_closure(&func, vec![payload], line)
+            }
+        }
+    }
+
     /// Propagate a non-fatal error up through any number of fn
-    /// frames until we find a `try_call_wrapper`. On success,
-    /// truncates the frame stack and value stack back to the
-    /// wrapper's base, pushes a `Result::Err(RuntimeError { … })`
-    /// for the outer caller, and returns `Ok(())` so the dispatch
-    /// loop keeps going.
+    /// frames until we find a `FrameWrap::TryCall` landing pad.
+    /// On success, truncates the frame stack and value stack
+    /// back to the wrapper's base, pushes a
+    /// `Result::Err(RuntimeError { … })` for the outer caller,
+    /// and returns `Ok(())` so the dispatch loop keeps going.
     ///
     /// Returns `Err(err)` (untouched) when:
     /// - the error is fatal (resource-limit violation), or
@@ -2889,7 +3045,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
         if err.is_fatal {
             return Err(err);
         }
-        let wrap_idx = match self.frames.iter().rposition(|f| f.try_call_wrapper) {
+        let wrap_idx = match self
+            .frames
+            .iter()
+            .rposition(|f| f.wrap == FrameWrap::TryCall)
+        {
             Some(i) => i,
             None => return Err(err),
         };

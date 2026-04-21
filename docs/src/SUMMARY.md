@@ -37,7 +37,6 @@
 - [std.iter](stdlib/iter.md)
 - [std.collections](stdlib/collections.md)
 - [std.string](stdlib/string.md)
-- [std.result](stdlib/result.md)
 - [std.json](stdlib/json.md)
 - [std.test](stdlib/test.md)
 

@@ -8,17 +8,19 @@ Numeric constants and helpers that aren't idiomatic as methods.
 
 ```bop
 use std.math                           // glob
-use std.math.{pi, clamp}               // selective
+use std.math.{PI, clamp}               // selective
 use std.math as m                      // aliased
 ```
 
 ## Constants
 
+All three are `const` (all-caps name, value is fixed at module load).
+
 | Name | Value |
 |------|-------|
-| `pi` | `3.141592653589793` |
-| `e` | `2.718281828459045` |
-| `tau` | `6.283185307179586` |
+| `PI` | `3.141592653589793` |
+| `E` | `2.718281828459045` |
+| `TAU` | `6.283185307179586` |
 
 ## Functions
 

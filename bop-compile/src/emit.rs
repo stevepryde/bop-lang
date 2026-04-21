@@ -4111,6 +4111,97 @@ fn __bop_try_call(
     }
 }
 
+/// Handle `r.map(f)` / `r.map_err(f)` / `r.and_then(f)` for a
+/// built-in `Result`. Invokes the callable synchronously via
+/// the AOT closure pathway and wraps the result according to
+/// the method kind. Short-circuit branches (map on Err,
+/// map_err on Ok) skip the call and pass the Result through.
+fn __bop_result_callable_method(
+    ctx: &mut Ctx<'_>,
+    receiver: &::bop::value::Value,
+    kind: ::bop::methods::ResultCallableKind,
+    method: &str,
+    args: &[::bop::value::Value],
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    use ::bop::methods::{make_result_err, make_result_ok, ResultCallableKind};
+    if args.len() != 1 {
+        return Err(::bop::error::BopError::runtime(
+            format!("`{}` expects 1 argument, but got {}", method, args.len()),
+            line,
+        ));
+    }
+    let callable = args[0].clone();
+    let (is_ok, payload) = match receiver {
+        ::bop::value::Value::EnumVariant(e) => {
+            let payload = match e.payload() {
+                ::bop::value::EnumPayload::Tuple(items) if items.len() == 1 => {
+                    items[0].clone()
+                }
+                _ => {
+                    return Err(::bop::error::BopError::runtime(
+                        format!("malformed Result::{} payload", e.variant()),
+                        line,
+                    ));
+                }
+            };
+            (e.variant() == "Ok", payload)
+        }
+        _ => {
+            return Err(::bop::error::BopError::runtime(
+                "Result method called on non-Result",
+                line,
+            ));
+        }
+    };
+
+    // Short-circuit: these branches don't invoke the callable,
+    // they just rebuild the Result with the existing payload.
+    match kind {
+        ResultCallableKind::Map if !is_ok => return Ok(make_result_err(payload)),
+        ResultCallableKind::MapErr if is_ok => return Ok(make_result_ok(payload)),
+        ResultCallableKind::AndThen if !is_ok => return Ok(make_result_err(payload)),
+        _ => {}
+    }
+
+    let func = match &callable {
+        ::bop::value::Value::Fn(f) => ::std::rc::Rc::clone(f),
+        other => {
+            return Err(::bop::error::BopError::runtime(
+                format!("`{}` expects a function, got {}", method, other.type_name()),
+                line,
+            ));
+        }
+    };
+    drop(callable);
+    let callable_fn = match &func.body {
+        ::bop::value::FnBody::Compiled(body) => match body.downcast_ref::<AotClosure>() {
+            Some(aot) => ::std::rc::Rc::clone(&aot.callable),
+            None => {
+                return Err(::bop::error::BopError::runtime(
+                    format!("{}: callee wasn't compiled by the AOT transpiler", method),
+                    line,
+                ));
+            }
+        },
+        ::bop::value::FnBody::Ast(_) => {
+            return Err(::bop::error::BopError::runtime(
+                format!("{}: callee was compiled for the walker, not AOT", method),
+                line,
+            ));
+        }
+    };
+    drop(func);
+    let result = callable_fn(ctx, ::std::vec![payload])?;
+    match kind {
+        ResultCallableKind::Map => Ok(make_result_ok(result)),
+        ResultCallableKind::MapErr => Ok(make_result_err(result)),
+        // `and_then` trusts the closure to have produced a
+        // Result already — pass it through untouched.
+        ResultCallableKind::AndThen => Ok(result),
+    }
+}
+
 /// Field read for `Value::Struct`, struct-payload enum variants,
 /// and `Value::Module`. Returns a cloned value; misses surface as
 /// a runtime error with the type name in the message.
@@ -4262,6 +4353,18 @@ fn __bop_call_method(
     // type-specific dispatcher.
     if let Some(result) = ::bop::methods::common_method(obj, method, args, line)? {
         return Ok(result);
+    }
+    // Built-in `Result` combinators — pure methods inline;
+    // callable-taking variants (`map`, `map_err`, `and_then`)
+    // dispatch through `__bop_result_callable_method`.
+    if ::bop::methods::is_builtin_result(obj) {
+        if let Some(v) = ::bop::methods::result_method(obj, method, args, line)? {
+            return Ok((v, None));
+        }
+        if let Some(kind) = ::bop::methods::is_result_callable_method(method) {
+            let value = __bop_result_callable_method(ctx, obj, kind, method, args, line)?;
+            return Ok((value, None));
+        }
     }
     match obj {
         ::bop::value::Value::Array(arr) => ::bop::methods::array_method(arr, method, args, line),

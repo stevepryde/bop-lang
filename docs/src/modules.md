@@ -19,7 +19,7 @@ Brings every public export of a module into the current scope as a bare name:
 
 ```bop
 use std.math
-print(pi)            // constant from std.math
+print(PI)            // constant from std.math
 print(factorial(5))  // fn from std.math → 120
 ```
 
@@ -43,8 +43,8 @@ Glob is idempotent at the injection site — running `use foo` twice in the same
 Pick exactly which names you want:
 
 ```bop
-use std.math.{pi, factorial}
-print(pi)
+use std.math.{PI, factorial}
+print(PI)
 print(factorial(4))
 // print(clamp(1, 0, 10))   // error — not imported
 ```
@@ -64,7 +64,7 @@ Binds the whole module as a single value under the alias:
 
 ```bop
 use std.math as m
-print(m.pi)
+print(m.PI)
 print(m.factorial(5))
 ```
 
@@ -73,8 +73,8 @@ print(m.factorial(5))
 Combine with selective to shrink the alias's surface:
 
 ```bop
-use std.math.{pi, factorial} as m
-print(m.pi)
+use std.math.{PI, factorial} as m
+print(m.PI)
 print(m.factorial(5))
 // print(m.clamp(1, 0, 10))   // error — `clamp` wasn't imported
 ```
@@ -142,7 +142,7 @@ A module's effective exports include everything it `use`s from other modules (mi
 
 ## Builtin types
 
-`Result` and `RuntimeError` are engine built-ins. They're always in scope — you don't need `use std.result` to write `Result::Ok(v)` or to match on `RuntimeError { message, line }`. The `std.result` module exists for combinators (`unwrap`, `map`, `and_then`, …), not for the types themselves. See [Error Handling](errors.md).
+`Result` and `RuntimeError` are engine built-ins. They're always in scope — you don't need any `use` to write `Result::Ok(v)` or to match on `RuntimeError { message, line }`. The combinators (`unwrap`, `map`, `and_then`, …) live as [methods on the `Result` type](reference/methods.md#result-methods--result), also always available. See [Error Handling](errors.md).
 
 ## Cycles
 

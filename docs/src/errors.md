@@ -5,7 +5,7 @@ Bop uses a `Result`-shaped value model for recoverable errors, with two language
 - `try` — unwrap an `Ok(v)` or propagate an `Err(e)` up to the enclosing function.
 - `try_call(f)` — run a zero-arg callable, catch any runtime error, and return the outcome as a `Result`.
 
-Both `Result` and `RuntimeError` are **engine built-ins** — always in scope, never need `use std.result` to exist. (The `std.result` module exists for combinators, not for the types.)
+Both `Result` and `RuntimeError` are **engine built-ins** — always in scope, no import required. The combinators (`is_ok`, `unwrap`, `map`, `and_then`, …) are [methods on the `Result` type](reference/methods.md#result-methods--result), also always available.
 
 ## The `Result` type
 
@@ -84,47 +84,45 @@ struct RuntimeError {
 
 You can construct one explicitly (it's a regular struct), but most of the time you'll see them as the payload inside `Result::Err(...)` returned from `try_call`.
 
-## Combinators — `std.result`
+## Combinators — methods on `Result`
 
-The `std.result` module provides the usual Result helpers. All take a `Result` and don't panic on `Err`:
+Every `Result` value has a small set of always-available methods. No import needed — `Result` is a built-in type and its combinators are engine-level methods.
 
 ```bop
-use std.result
-
-print(is_ok(Result::Ok(1)))                  // true
-print(is_err(Result::Err("oops")))            // true
+print(Result::Ok(1).is_ok())                     // true
+print(Result::Err("oops").is_err())              // true
 
 // unwrap_or — default on Err
-print(unwrap_or(Result::Ok(10), 0))          // 10
-print(unwrap_or(Result::Err("fail"), 0))     // 0
+print(Result::Ok(10).unwrap_or(0))               // 10
+print(Result::Err("fail").unwrap_or(0))          // 0
 
 // map — transform the Ok payload, pass Err through
-print(map(Result::Ok(5), fn(n) { return n * n }))     // Result::Ok(25)
-print(map(Result::Err("x"), fn(n) { return n * n }))  // Result::Err("x")
+print(Result::Ok(5).map(fn(n) { return n * n }))      // Result::Ok(25)
+print(Result::Err("x").map(fn(n) { return n * n }))   // Result::Err("x")
 
 // and_then — monadic bind (for chaining fallible steps)
 fn halve(x) {
   if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
   return Result::Err("odd")
 }
-print(and_then(and_then(Result::Ok(8), halve), halve))   // Result::Ok(2)
-print(and_then(Result::Ok(7), halve))                     // Result::Err("odd")
+print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+print(Result::Ok(7).and_then(halve))                    // Result::Err("odd")
 ```
 
-Available: `is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `and_then`.
+Available: `is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `and_then`. See [Methods → Result](reference/methods.md#result-methods--result) for the full reference.
 
-`unwrap` and `expect` raise a runtime error on `Err` — use sparingly, and prefer `try` / pattern matching in production code.
+`unwrap()` and `expect(msg)` raise a runtime error on `Err` — use sparingly, and prefer `try` or pattern matching in production code.
 
 ## When to use which
 
 | Situation | Use |
 |-----------|-----|
 | Writing a fallible function | Return `Result::Ok(v)` / `Result::Err(e)` |
-| Chaining several fallible calls | `try` inside a fn, or `and_then` |
+| Chaining several fallible calls | `try` inside a fn, or `r.and_then(f)` |
 | Running user-supplied code with a safety net | `try_call(fn() { ... })` |
 | Handling every `Err` case explicitly | `match` |
-| You know it's `Ok` and want the value | `unwrap()` / `expect("...")` (sparingly) |
-| Supplying a default on `Err` | `unwrap_or(r, default)` |
+| You know it's `Ok` and want the value | `r.unwrap()` / `r.expect("...")` (sparingly) |
+| Supplying a default on `Err` | `r.unwrap_or(default)` |
 
 ## Fatal vs non-fatal
 

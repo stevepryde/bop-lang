@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f7770b37.js";
+            window.path_to_searchindex_js = "searchindex-7add6b7f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c7edef4c.js"></script>
+        <script src="toc-4a0c6a8e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -183,7 +183,7 @@
 <li><code>try</code> — unwrap an <code>Ok(v)</code> or propagate an <code>Err(e)</code> up to the enclosing function.</li>
 <li><code>try_call(f)</code> — run a zero-arg callable, catch any runtime error, and return the outcome as a <code>Result</code>.</li>
 </ul>
-<p>Both <code>Result</code> and <code>RuntimeError</code> are <strong>engine built-ins</strong> — always in scope, never need <code>use std.result</code> to exist. (The <code>std.result</code> module exists for combinators, not for the types.)</p>
+<p>Both <code>Result</code> and <code>RuntimeError</code> are <strong>engine built-ins</strong> — always in scope, no import required. The combinators (<code>is_ok</code>, <code>unwrap</code>, <code>map</code>, <code>and_then</code>, …) are <a href="reference/methods.html#result-methods--result">methods on the <code>Result</code> type</a>, also always available.</p>
 <h2 id="the-result-type"><a class="header" href="#the-result-type">The <code>Result</code> type</a></h2>
 <pre><code>enum Result {
   Ok(value),
@@ -240,31 +240,29 @@ print(match r {
 }
 </code></pre>
 <p>You can construct one explicitly (it’s a regular struct), but most of the time you’ll see them as the payload inside <code>Result::Err(...)</code> returned from <code>try_call</code>.</p>
-<h2 id="combinators--stdresult"><a class="header" href="#combinators--stdresult">Combinators — <code>std.result</code></a></h2>
-<p>The <code>std.result</code> module provides the usual Result helpers. All take a <code>Result</code> and don’t panic on <code>Err</code>:</p>
-<pre><code class="language-bop">use std.result
-
-print(is_ok(Result::Ok(1)))                  // true
-print(is_err(Result::Err("oops")))            // true
+<h2 id="combinators--methods-on-result"><a class="header" href="#combinators--methods-on-result">Combinators — methods on <code>Result</code></a></h2>
+<p>Every <code>Result</code> value has a small set of always-available methods. No import needed — <code>Result</code> is a built-in type and its combinators are engine-level methods.</p>
+<pre><code class="language-bop">print(Result::Ok(1).is_ok())                     // true
+print(Result::Err("oops").is_err())              // true
 
 // unwrap_or — default on Err
-print(unwrap_or(Result::Ok(10), 0))          // 10
-print(unwrap_or(Result::Err("fail"), 0))     // 0
+print(Result::Ok(10).unwrap_or(0))               // 10
+print(Result::Err("fail").unwrap_or(0))          // 0
 
 // map — transform the Ok payload, pass Err through
-print(map(Result::Ok(5), fn(n) { return n * n }))     // Result::Ok(25)
-print(map(Result::Err("x"), fn(n) { return n * n }))  // Result::Err("x")
+print(Result::Ok(5).map(fn(n) { return n * n }))      // Result::Ok(25)
+print(Result::Err("x").map(fn(n) { return n * n }))   // Result::Err("x")
 
 // and_then — monadic bind (for chaining fallible steps)
 fn halve(x) {
   if x % 2 == 0 { return Result::Ok((x / 2).to_int()) }
   return Result::Err("odd")
 }
-print(and_then(and_then(Result::Ok(8), halve), halve))   // Result::Ok(2)
-print(and_then(Result::Ok(7), halve))                     // Result::Err("odd")
+print(Result::Ok(8).and_then(halve).and_then(halve))   // Result::Ok(2)
+print(Result::Ok(7).and_then(halve))                    // Result::Err("odd")
 </code></pre>
-<p>Available: <code>is_ok</code>, <code>is_err</code>, <code>unwrap</code>, <code>expect</code>, <code>unwrap_or</code>, <code>map</code>, <code>map_err</code>, <code>and_then</code>.</p>
-<p><code>unwrap</code> and <code>expect</code> raise a runtime error on <code>Err</code> — use sparingly, and prefer <code>try</code> / pattern matching in production code.</p>
+<p>Available: <code>is_ok</code>, <code>is_err</code>, <code>unwrap</code>, <code>expect</code>, <code>unwrap_or</code>, <code>map</code>, <code>map_err</code>, <code>and_then</code>. See <a href="reference/methods.html#result-methods--result">Methods → Result</a> for the full reference.</p>
+<p><code>unwrap()</code> and <code>expect(msg)</code> raise a runtime error on <code>Err</code> — use sparingly, and prefer <code>try</code> or pattern matching in production code.</p>
 <h2 id="when-to-use-which"><a class="header" href="#when-to-use-which">When to use which</a></h2>
 <div class="table-wrapper">
 <table>
@@ -273,11 +271,11 @@ print(and_then(Result::Ok(7), halve))                     // Result::Err("odd")
 </thead>
 <tbody>
 <tr><td>Writing a fallible function</td><td>Return <code>Result::Ok(v)</code> / <code>Result::Err(e)</code></td></tr>
-<tr><td>Chaining several fallible calls</td><td><code>try</code> inside a fn, or <code>and_then</code></td></tr>
+<tr><td>Chaining several fallible calls</td><td><code>try</code> inside a fn, or <code>r.and_then(f)</code></td></tr>
 <tr><td>Running user-supplied code with a safety net</td><td><code>try_call(fn() { ... })</code></td></tr>
 <tr><td>Handling every <code>Err</code> case explicitly</td><td><code>match</code></td></tr>
-<tr><td>You know it’s <code>Ok</code> and want the value</td><td><code>unwrap()</code> / <code>expect("...")</code> (sparingly)</td></tr>
-<tr><td>Supplying a default on <code>Err</code></td><td><code>unwrap_or(r, default)</code></td></tr>
+<tr><td>You know it’s <code>Ok</code> and want the value</td><td><code>r.unwrap()</code> / <code>r.expect("...")</code> (sparingly)</td></tr>
+<tr><td>Supplying a default on <code>Err</code></td><td><code>r.unwrap_or(default)</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -323,6 +321,22 @@ print(and_then(Result::Ok(7), halve))                     // Result::Err("odd")
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
+        <!-- Livereload script (if served using the cli tool) -->
+        <script>
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
+            const socket = new WebSocket(wsAddress);
+            socket.onmessage = function (event) {
+                if (event.data === "reload") {
+                    socket.close();
+                    location.reload();
+                }
+            };
+
+            window.onbeforeunload = function() {
+                socket.close();
+            }
+        </script>
 
 
         <script>

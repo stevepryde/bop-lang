@@ -1687,6 +1687,25 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 }
 
+                // Callable-taking Result methods — `r.map(f)`,
+                // `r.map_err(f)`, `r.and_then(f)`. These need the
+                // evaluator's call primitive to invoke `f`, which
+                // `call_method` doesn't have access to, so they
+                // dispatch inline before the pure `call_method`
+                // fall-through. Receiver must be the built-in
+                // Result; user enums named `Result` don't qualify.
+                if methods::is_builtin_result(&obj_val) {
+                    if let Some(kind) = methods::is_result_callable_method(method) {
+                        return self.call_result_callable_method(
+                            &obj_val,
+                            kind,
+                            method,
+                            eval_args,
+                            expr.line,
+                        );
+                    }
+                }
+
                 let (ret, mutated) = self.call_method(&obj_val, method, &eval_args, expr.line)?;
 
                 if methods::is_mutating_method(method) {
@@ -2334,6 +2353,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         if let Some(result) = methods::common_method(obj, method, args, line)? {
             return Ok(result);
         }
+        // Built-in Result combinators (`is_ok`, `is_err`,
+        // `unwrap`, `expect`, `unwrap_or`). Callable-taking
+        // variants (`map`, `map_err`, `and_then`) are dispatched
+        // one level up in the MethodCall arm so they can invoke
+        // the user callable via `call_value`.
+        if methods::is_builtin_result(obj) {
+            if let Some(v) = methods::result_method(obj, method, args, line)? {
+                return Ok((v, None));
+            }
+        }
         match obj {
             Value::Array(arr) => methods::array_method(arr, method, args, line),
             Value::Str(s) => methods::string_method(s, method, args, line),
@@ -2346,6 +2375,72 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 line,
                 crate::error_messages::no_such_method(obj.type_name(), method),
             )),
+        }
+    }
+
+    /// Handle `r.map(f)`, `r.map_err(f)`, `r.and_then(f)` for a
+    /// built-in `Result` receiver. Factored out of the
+    /// `MethodCall` arm so the evaluator / VM / AOT can keep the
+    /// same shape.
+    fn call_result_callable_method(
+        &mut self,
+        receiver: &Value,
+        kind: methods::ResultCallableKind,
+        method: &str,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Value, BopError> {
+        use crate::builtins::expect_args;
+        use methods::{make_result_err, make_result_ok, ResultCallableKind};
+        expect_args(method, &args, 1, line)?;
+        let callable = args.into_iter().next().expect("expect_args ensured len = 1");
+        let variant_info = match receiver {
+            Value::EnumVariant(e) => e,
+            _ => return Err(error(line, "Result method called on non-Result")),
+        };
+        let payload = match variant_info.payload() {
+            crate::value::EnumPayload::Tuple(items) if items.len() == 1 => items[0].clone(),
+            // Unreachable for the built-in shape, but keep the
+            // error clean rather than panicking.
+            _ => {
+                return Err(error(
+                    line,
+                    format!("malformed Result::{} payload", variant_info.variant()),
+                ));
+            }
+        };
+        let is_ok = variant_info.variant() == "Ok";
+        match kind {
+            ResultCallableKind::Map => {
+                if is_ok {
+                    let new_value = self.call_value(callable, vec![payload], line, Some(method))?;
+                    Ok(make_result_ok(new_value))
+                } else {
+                    // Err passes through unchanged. Rebuild it so
+                    // the caller sees the same type identity —
+                    // matches the pure-Bop combinator's behaviour.
+                    Ok(make_result_err(payload))
+                }
+            }
+            ResultCallableKind::MapErr => {
+                if !is_ok {
+                    let new_value = self.call_value(callable, vec![payload], line, Some(method))?;
+                    Ok(make_result_err(new_value))
+                } else {
+                    Ok(make_result_ok(payload))
+                }
+            }
+            ResultCallableKind::AndThen => {
+                if is_ok {
+                    // `f` is expected to return a Result; we
+                    // surface whatever it returns verbatim. A
+                    // match on the returned shape at the call
+                    // site catches misuse.
+                    self.call_value(callable, vec![payload], line, Some(method))
+                } else {
+                    Ok(make_result_err(payload))
+                }
+            }
         }
     }
 }
