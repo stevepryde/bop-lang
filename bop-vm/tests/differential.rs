@@ -2065,6 +2065,37 @@ fn error_unknown_function() {
 }
 
 #[test]
+fn panic_builtin_raises_with_message() {
+    // `panic(msg)` is the stdlib's shared error-signalling
+    // primitive; both engines have to surface the message
+    // verbatim so `unwrap` / `assert_eq` / `assert_raises`
+    // (and any user code) see the same string.
+    let msg = run_err(r#"panic("deliberate")"#);
+    assert!(
+        msg.contains("deliberate"),
+        "expected panic message to appear in error surface: {}",
+        msg
+    );
+}
+
+#[test]
+fn panic_catches_through_try_call() {
+    // The outcome of `try_call(fn() { panic(...) })` must match
+    // in walker and VM — both should produce
+    // `Result::Err(RuntimeError { message: "x", .. })` with
+    // identical printed output. `say` runs both and asserts
+    // identical output itself, so a return of "x" is enough.
+    let out = say(
+        r#"let r = try_call(fn() { panic("x") })
+print(match r {
+    Result::Ok(_)  => "ok?",
+    Result::Err(e) => e.message,
+})"#,
+    );
+    assert_eq!(out, "x");
+}
+
+#[test]
 fn error_infinite_loop_protection() {
     let msg = run_err("while true { }");
     assert!(msg.contains("too many steps"));

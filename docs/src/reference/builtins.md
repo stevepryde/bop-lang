@@ -2,7 +2,7 @@
 
 Bop ships a very small set of built-in functions that are always in scope. They can't be shadowed by user-defined fns. Host-backed builtins (I/O, time) are provided separately by the embedding host — see `bop-sys`'s `StandardHost` for the reference implementation.
 
-Anything math- or conversion-shaped lives as a [method on a value](methods.md), not as a global — `(-5).abs()`, `"42".to_int()`, `[1, 2, 3].len()`. The global list is deliberately short: only things that are variadic (`print`), constructor-shaped (`range`), session-stateful (`rand`), or that take a callable (`try_call`).
+Anything math- or conversion-shaped lives as a [method on a value](methods.md), not as a global — `(-5).abs()`, `"42".to_int()`, `[1, 2, 3].len()`. The global list is deliberately short: variadic (`print`), constructor-shaped (`range`), session-stateful (`rand`), callable-taking (`try_call`), and the shared error-signalling primitive (`panic`).
 
 ## `print(args...)`
 
@@ -61,6 +61,33 @@ print(match r {
 On success returns `Result::Ok(value)`; on a non-fatal error returns `Result::Err(RuntimeError { message, line })`. Fatal errors (step-limit / memory-limit / fn-call-depth) are *not* caught — they propagate past `try_call` unchanged so the sandbox invariant holds.
 
 See [Error Handling](../errors.md) for the full story on `try`, `try_call`, `Result`, and `RuntimeError`.
+
+## `panic(message)`
+
+Raise a non-fatal runtime error carrying `message`. Useful inside stdlib helpers (`unwrap`, `expect`, `assert_eq`, …) and user code that needs to bail with a readable error from an expression position where a plain `return` isn't enough.
+
+```bop
+fn take_positive(n) {
+  if n <= 0 { panic("n must be positive, got {n}") }
+  return n * 2
+}
+
+print(take_positive(3))                           // 6
+// print(take_positive(-1))                       // runtime error: n must be positive, got -1
+```
+
+Non-fatal, so `try_call` catches it:
+
+```bop
+let r = try_call(fn() { panic("deliberate") })
+print(match r {
+  Result::Ok(_)  => "ok?",
+  Result::Err(e) => e.message,
+})
+// deliberate
+```
+
+Non-string arguments are stringified via Display, so `panic(42)` or `panic(RuntimeError { message: "x", line: 0 })` also works without an explicit `.to_str()`.
 
 ## Everything else lives on a value
 

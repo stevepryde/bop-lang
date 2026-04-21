@@ -293,10 +293,8 @@ fn is_digit(c) {
 }
 
 // Raise a runtime error tagged with the JSON parse position.
-// We can't `raise` directly, so we provoke one by indexing
-// `none` — the engine error carries `detail` in the crash
-// trace so `try_call` can surface it.
+// Delegates to the `panic` builtin so the message surfaces
+// verbatim in `try_call` / engine diagnostics.
 fn panic_json(message, pos) {
-    let detail = "json: " + message + " at position " + pos.to_str()
-    let _ = none[detail]
+    panic("json: " + message + " at position " + pos.to_str())
 }

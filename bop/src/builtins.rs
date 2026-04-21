@@ -126,6 +126,26 @@ pub fn finite_to_int_or_number(n: f64) -> Value {
     }
 }
 
+/// `panic(message)` — raise a non-fatal runtime error carrying
+/// `message`. Useful for stdlib helpers (`unwrap`, `expect`,
+/// `assert_*`) that need to bail with a readable message from an
+/// expression position where a plain `return` isn't enough.
+///
+/// Non-fatal, so `try_call` catches it — same contract as any
+/// other runtime error the program raises.
+pub fn builtin_panic(args: &[Value], line: u32) -> Result<Value, BopError> {
+    expect_args("panic", args, 1, line)?;
+    let message = match &args[0] {
+        Value::Str(s) => s.as_str().to_string(),
+        // Non-string arguments are stringified via Display so a
+        // caller that hands us a struct or int still gets a
+        // useful trace — cheaper than rejecting and forcing the
+        // caller to add `.to_str()`.
+        other => format!("{}", other),
+    };
+    Err(error(line, message))
+}
+
 pub fn builtin_rand(args: &[Value], line: u32, rand_state: &mut u64) -> Result<Value, BopError> {
     expect_args("rand", args, 1, line)?;
     let n = expect_int("rand", &args[0], line)?;

@@ -557,6 +557,17 @@ print(if [] { "t" } else { "f" })"#,
         r#"print("a" - 1)"#,
     ),
     ("error_unknown_fn", "nope()"),
+    (
+        // `panic` is a builtin; in walker / VM / AOT it has to
+        // produce the same `Err` payload when caught by
+        // `try_call`, matching down to the error message.
+        "builtin_panic_via_try_call",
+        r#"let r = try_call(fn() { panic("nope") })
+print(match r {
+    Result::Ok(_)  => "ok?",
+    Result::Err(e) => e.message,
+})"#,
+    ),
     // NOTE: `print(nope)` — an undefined identifier — is *not*
     // included: the walker raises "Variable `nope` not found" at
     // runtime, but the AOT emits `nope.clone()` which rustc
@@ -564,6 +575,7 @@ print(if [] { "t" } else { "f" })"#,
     // with a useful error; the three-way harness just can't
     // phrase the assertion as "same message text".
     ("error_array_oob", "let a = [1]\nprint(a[5])"),
+    ("error_bare_panic", "panic(\"top level\")"),
     // ─── Closures / first-class fns (phase 1) ─────────────────
     (
         "closure_basic_lambda",

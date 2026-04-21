@@ -2573,6 +2573,11 @@ impl Emitter {
                 build_arg_array(&arg_names),
                 line
             ),
+            "panic" => format!(
+                "::bop::builtins::builtin_panic(&{}, {})?",
+                build_arg_array(&arg_names),
+                line
+            ),
             "try_call" => {
                 // `try_call(f)` takes a single callable and
                 // dispatches through the preamble's

@@ -24,6 +24,7 @@ pub const CORE_CALLABLE_BUILTINS: &[&str] = &[
     "rand",
     "print",
     "try_call",
+    "panic",
 ];
 
 /// Methods every numeric receiver exposes. Produced as

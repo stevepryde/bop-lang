@@ -2,7 +2,7 @@
 
 Minimal assertion toolkit for sanity checks in Bop scripts.
 
-This isn't an xUnit clone — just the assertion primitives you'll reach for when writing quick tests. On failure the program halts with a runtime error; print-based reporting is intentionally out of scope (wrap the assertion in `try_call` if you need "report and continue").
+This isn't an xUnit clone — just the assertion primitives you'll reach for when writing quick tests. Assertions fail by routing through the [`panic`](../reference/builtins.md#panicmessage) builtin, so the failure detail is surfaced verbatim in `Err(e).message` when caught by `try_call`. Print-based reporting is intentionally out of scope — wrap the assertion in `try_call` if you need "report and continue".
 
 ## Import
 

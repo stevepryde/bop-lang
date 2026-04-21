@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
+            window.path_to_searchindex_js = "../searchindex-f7770b37.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c7edef4c.js"></script>
@@ -179,7 +179,7 @@
                     <main>
                         <h1 id="built-in-functions"><a class="header" href="#built-in-functions">Built-in Functions</a></h1>
 <p>Bop ships a very small set of built-in functions that are always in scope. They can’t be shadowed by user-defined fns. Host-backed builtins (I/O, time) are provided separately by the embedding host — see <code>bop-sys</code>’s <code>StandardHost</code> for the reference implementation.</p>
-<p>Anything math- or conversion-shaped lives as a <a href="methods.html">method on a value</a>, not as a global — <code>(-5).abs()</code>, <code>"42".to_int()</code>, <code>[1, 2, 3].len()</code>. The global list is deliberately short: only things that are variadic (<code>print</code>), constructor-shaped (<code>range</code>), session-stateful (<code>rand</code>), or that take a callable (<code>try_call</code>).</p>
+<p>Anything math- or conversion-shaped lives as a <a href="methods.html">method on a value</a>, not as a global — <code>(-5).abs()</code>, <code>"42".to_int()</code>, <code>[1, 2, 3].len()</code>. The global list is deliberately short: variadic (<code>print</code>), constructor-shaped (<code>range</code>), session-stateful (<code>rand</code>), callable-taking (<code>try_call</code>), and the shared error-signalling primitive (<code>panic</code>).</p>
 <h2 id="printargs"><a class="header" href="#printargs"><code>print(args...)</code></a></h2>
 <p>Prints values to the host’s stdout, separated by spaces. Returns <code>none</code>.</p>
 <pre><code class="language-bop">print("hello")           // hello
@@ -219,6 +219,25 @@ print(match r {
 </code></pre>
 <p>On success returns <code>Result::Ok(value)</code>; on a non-fatal error returns <code>Result::Err(RuntimeError { message, line })</code>. Fatal errors (step-limit / memory-limit / fn-call-depth) are <em>not</em> caught — they propagate past <code>try_call</code> unchanged so the sandbox invariant holds.</p>
 <p>See <a href="../errors.html">Error Handling</a> for the full story on <code>try</code>, <code>try_call</code>, <code>Result</code>, and <code>RuntimeError</code>.</p>
+<h2 id="panicmessage"><a class="header" href="#panicmessage"><code>panic(message)</code></a></h2>
+<p>Raise a non-fatal runtime error carrying <code>message</code>. Useful inside stdlib helpers (<code>unwrap</code>, <code>expect</code>, <code>assert_eq</code>, …) and user code that needs to bail with a readable error from an expression position where a plain <code>return</code> isn’t enough.</p>
+<pre><code class="language-bop">fn take_positive(n) {
+  if n &lt;= 0 { panic("n must be positive, got {n}") }
+  return n * 2
+}
+
+print(take_positive(3))                           // 6
+// print(take_positive(-1))                       // runtime error: n must be positive, got -1
+</code></pre>
+<p>Non-fatal, so <code>try_call</code> catches it:</p>
+<pre><code class="language-bop">let r = try_call(fn() { panic("deliberate") })
+print(match r {
+  Result::Ok(_)  =&gt; "ok?",
+  Result::Err(e) =&gt; e.message,
+})
+// deliberate
+</code></pre>
+<p>Non-string arguments are stringified via Display, so <code>panic(42)</code> or <code>panic(RuntimeError { message: "x", line: 0 })</code> also works without an explicit <code>.to_str()</code>.</p>
 <h2 id="everything-else-lives-on-a-value"><a class="header" href="#everything-else-lives-on-a-value">Everything else lives on a value</a></h2>
 <div class="table-wrapper">
 <table>

@@ -1286,6 +1286,15 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 return Ok(Next::Continue);
             }
             "try_call" => return self.builtin_try_call(args, line),
+            "panic" => {
+                // `builtin_panic` always returns `Err`; the `Ok`
+                // arm is unreachable, but matching keeps the
+                // compiler happy and keeps this branch symmetric
+                // with the other builtins.
+                let v = builtins::builtin_panic(&args, line)?;
+                self.push_value(v);
+                return Ok(Next::Continue);
+            }
             _ => {}
         }
 

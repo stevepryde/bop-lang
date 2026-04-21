@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-59ed6ef3.js";
+            window.path_to_searchindex_js = "searchindex-f7770b37.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c7edef4c.js"></script>
@@ -1823,7 +1823,7 @@ print("hello".upper())   // "HELLO"
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="built-in-functions"><a class="header" href="#built-in-functions">Built-in Functions</a></h1>
 <p>Bop ships a very small set of built-in functions that are always in scope. They can’t be shadowed by user-defined fns. Host-backed builtins (I/O, time) are provided separately by the embedding host — see <code>bop-sys</code>’s <code>StandardHost</code> for the reference implementation.</p>
-<p>Anything math- or conversion-shaped lives as a <a href="#methods-4">method on a value</a>, not as a global — <code>(-5).abs()</code>, <code>"42".to_int()</code>, <code>[1, 2, 3].len()</code>. The global list is deliberately short: only things that are variadic (<code>print</code>), constructor-shaped (<code>range</code>), session-stateful (<code>rand</code>), or that take a callable (<code>try_call</code>).</p>
+<p>Anything math- or conversion-shaped lives as a <a href="#methods-4">method on a value</a>, not as a global — <code>(-5).abs()</code>, <code>"42".to_int()</code>, <code>[1, 2, 3].len()</code>. The global list is deliberately short: variadic (<code>print</code>), constructor-shaped (<code>range</code>), session-stateful (<code>rand</code>), callable-taking (<code>try_call</code>), and the shared error-signalling primitive (<code>panic</code>).</p>
 <h2 id="printargs"><a class="header" href="#printargs"><code>print(args...)</code></a></h2>
 <p>Prints values to the host’s stdout, separated by spaces. Returns <code>none</code>.</p>
 <pre><code class="language-bop">print("hello")           // hello
@@ -1863,6 +1863,25 @@ print(match r {
 </code></pre>
 <p>On success returns <code>Result::Ok(value)</code>; on a non-fatal error returns <code>Result::Err(RuntimeError { message, line })</code>. Fatal errors (step-limit / memory-limit / fn-call-depth) are <em>not</em> caught — they propagate past <code>try_call</code> unchanged so the sandbox invariant holds.</p>
 <p>See <a href="#error-handling">Error Handling</a> for the full story on <code>try</code>, <code>try_call</code>, <code>Result</code>, and <code>RuntimeError</code>.</p>
+<h2 id="panicmessage"><a class="header" href="#panicmessage"><code>panic(message)</code></a></h2>
+<p>Raise a non-fatal runtime error carrying <code>message</code>. Useful inside stdlib helpers (<code>unwrap</code>, <code>expect</code>, <code>assert_eq</code>, …) and user code that needs to bail with a readable error from an expression position where a plain <code>return</code> isn’t enough.</p>
+<pre><code class="language-bop">fn take_positive(n) {
+  if n &lt;= 0 { panic("n must be positive, got {n}") }
+  return n * 2
+}
+
+print(take_positive(3))                           // 6
+// print(take_positive(-1))                       // runtime error: n must be positive, got -1
+</code></pre>
+<p>Non-fatal, so <code>try_call</code> catches it:</p>
+<pre><code class="language-bop">let r = try_call(fn() { panic("deliberate") })
+print(match r {
+  Result::Ok(_)  =&gt; "ok?",
+  Result::Err(e) =&gt; e.message,
+})
+// deliberate
+</code></pre>
+<p>Non-string arguments are stringified via Display, so <code>panic(42)</code> or <code>panic(RuntimeError { message: "x", line: 0 })</code> also works without an explicit <code>.to_str()</code>.</p>
 <h2 id="everything-else-lives-on-a-value"><a class="header" href="#everything-else-lives-on-a-value">Everything else lives on a value</a></h2>
 <div class="table-wrapper">
 <table>
@@ -2042,6 +2061,7 @@ true false none
 <tr><td><code>range(n)</code> / <code>range(s, e)</code> / <code>range(s, e, step)</code></td><td>array</td><td>Integer range</td></tr>
 <tr><td><code>rand(n)</code></td><td>int</td><td>Pseudo-random <code>0..n</code></td></tr>
 <tr><td><code>try_call(f)</code></td><td>Result</td><td>Run <code>f</code>, return <code>Ok(v)</code> or <code>Err(RuntimeError)</code></td></tr>
+<tr><td><code>panic(message)</code></td><td>never returns</td><td>Raise a non-fatal runtime error carrying <code>message</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -2528,10 +2548,10 @@ print(is_err(Result::Err("oops"))) // true
 </code></pre>
 <h2 id="unwrapping"><a class="header" href="#unwrapping">Unwrapping</a></h2>
 <h3 id="unwrapr"><a class="header" href="#unwrapr"><code>unwrap(r)</code></a></h3>
-<p>Return the <code>Ok</code> payload; raise a runtime error on <code>Err</code>. Use sparingly — prefer <code>try</code> or pattern matching in production code.</p>
+<p>Return the <code>Ok</code> payload; raise a runtime error on <code>Err</code> (via the <a href="#panicmessage"><code>panic</code></a> builtin — <code>Err(...).inspect()</code> shows up verbatim in <code>e.message</code>). Use sparingly — prefer <code>try</code> or pattern matching in production code.</p>
 <pre><code class="language-bop">use std.result.{unwrap}
 print(unwrap(Result::Ok(42)))     // 42
-// unwrap(Result::Err("bad"))     // runtime error
+// unwrap(Result::Err("bad"))     // runtime error: unwrap on Err: "bad"
 </code></pre>
 <h3 id="expectr-message"><a class="header" href="#expectr-message"><code>expect(r, message)</code></a></h3>
 <p>Like <code>unwrap</code>, but raises with a caller-supplied message on <code>Err</code>.</p>
@@ -2654,7 +2674,7 @@ match r {
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="stdtest"><a class="header" href="#stdtest">std.test</a></h1>
 <p>Minimal assertion toolkit for sanity checks in Bop scripts.</p>
-<p>This isn’t an xUnit clone — just the assertion primitives you’ll reach for when writing quick tests. On failure the program halts with a runtime error; print-based reporting is intentionally out of scope (wrap the assertion in <code>try_call</code> if you need “report and continue”).</p>
+<p>This isn’t an xUnit clone — just the assertion primitives you’ll reach for when writing quick tests. Assertions fail by routing through the <a href="#panicmessage"><code>panic</code></a> builtin, so the failure detail is surfaced verbatim in <code>Err(e).message</code> when caught by <code>try_call</code>. Print-based reporting is intentionally out of scope — wrap the assertion in <code>try_call</code> if you need “report and continue”.</p>
 <h2 id="import-6"><a class="header" href="#import-6">Import</a></h2>
 <pre><code class="language-bop">use std.test                                // glob
 use std.test.{assert_eq, assert_near}       // selective

@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
+            window.path_to_searchindex_js = "../searchindex-f7770b37.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c7edef4c.js"></script>
@@ -198,6 +198,7 @@ true false none
 <tr><td><code>range(n)</code> / <code>range(s, e)</code> / <code>range(s, e, step)</code></td><td>array</td><td>Integer range</td></tr>
 <tr><td><code>rand(n)</code></td><td>int</td><td>Pseudo-random <code>0..n</code></td></tr>
 <tr><td><code>try_call(f)</code></td><td>Result</td><td>Run <code>f</code>, return <code>Ok(v)</code> or <code>Err(RuntimeError)</code></td></tr>
+<tr><td><code>panic(message)</code></td><td>never returns</td><td>Raise a non-fatal runtime error carrying <code>message</code></td></tr>
 </tbody>
 </table>
 </div>

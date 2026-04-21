@@ -26,12 +26,12 @@ print(is_err(Result::Err("oops"))) // true
 
 ### `unwrap(r)`
 
-Return the `Ok` payload; raise a runtime error on `Err`. Use sparingly — prefer `try` or pattern matching in production code.
+Return the `Ok` payload; raise a runtime error on `Err` (via the [`panic`](../reference/builtins.md#panicmessage) builtin — `Err(...).inspect()` shows up verbatim in `e.message`). Use sparingly — prefer `try` or pattern matching in production code.
 
 ```bop
 use std.result.{unwrap}
 print(unwrap(Result::Ok(42)))     // 42
-// unwrap(Result::Err("bad"))     // runtime error
+// unwrap(Result::Err("bad"))     // runtime error: unwrap on Err: "bad"
 ```
 
 ### `expect(r, message)`

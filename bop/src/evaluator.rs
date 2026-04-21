@@ -2270,6 +2270,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 return Ok(Value::None);
             }
             "try_call" => return self.builtin_try_call(args, line),
+            "panic" => return builtins::builtin_panic(&args, line),
             _ => {}
         }
 

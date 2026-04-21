@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
+            window.path_to_searchindex_js = "../searchindex-f7770b37.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c7edef4c.js"></script>
@@ -179,7 +179,7 @@
                     <main>
                         <h1 id="stdtest"><a class="header" href="#stdtest">std.test</a></h1>
 <p>Minimal assertion toolkit for sanity checks in Bop scripts.</p>
-<p>This isn’t an xUnit clone — just the assertion primitives you’ll reach for when writing quick tests. On failure the program halts with a runtime error; print-based reporting is intentionally out of scope (wrap the assertion in <code>try_call</code> if you need “report and continue”).</p>
+<p>This isn’t an xUnit clone — just the assertion primitives you’ll reach for when writing quick tests. Assertions fail by routing through the <a href="../reference/builtins.html#panicmessage"><code>panic</code></a> builtin, so the failure detail is surfaced verbatim in <code>Err(e).message</code> when caught by <code>try_call</code>. Print-based reporting is intentionally out of scope — wrap the assertion in <code>try_call</code> if you need “report and continue”.</p>
 <h2 id="import"><a class="header" href="#import">Import</a></h2>
 <pre><code class="language-bop">use std.test                                // glob
 use std.test.{assert_eq, assert_near}       // selective

@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-59ed6ef3.js";
+            window.path_to_searchindex_js = "../searchindex-f7770b37.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-c7edef4c.js"></script>
@@ -195,10 +195,10 @@ print(is_err(Result::Err("oops"))) // true
 </code></pre>
 <h2 id="unwrapping"><a class="header" href="#unwrapping">Unwrapping</a></h2>
 <h3 id="unwrapr"><a class="header" href="#unwrapr"><code>unwrap(r)</code></a></h3>
-<p>Return the <code>Ok</code> payload; raise a runtime error on <code>Err</code>. Use sparingly — prefer <code>try</code> or pattern matching in production code.</p>
+<p>Return the <code>Ok</code> payload; raise a runtime error on <code>Err</code> (via the <a href="../reference/builtins.html#panicmessage"><code>panic</code></a> builtin — <code>Err(...).inspect()</code> shows up verbatim in <code>e.message</code>). Use sparingly — prefer <code>try</code> or pattern matching in production code.</p>
 <pre><code class="language-bop">use std.result.{unwrap}
 print(unwrap(Result::Ok(42)))     // 42
-// unwrap(Result::Err("bad"))     // runtime error
+// unwrap(Result::Err("bad"))     // runtime error: unwrap on Err: "bad"
 </code></pre>
 <h3 id="expectr-message"><a class="header" href="#expectr-message"><code>expect(r, message)</code></a></h3>
 <p>Like <code>unwrap</code>, but raises with a caller-supplied message on <code>Err</code>.</p>

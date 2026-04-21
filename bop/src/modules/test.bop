@@ -2,19 +2,16 @@
 //
 // This isn't a xUnit clone — just the assertion primitives
 // you'll reach for when writing quick sanity checks in Bop
-// scripts. When a check fails the program halts with an
-// unwinding error; print-based reporting is intentionally out
-// of scope (callers can wrap in `try_call` if they want to
-// report + continue).
+// scripts. When a check fails the program halts with a
+// runtime error carrying the failure detail; print-based
+// reporting is intentionally out of scope (callers can wrap
+// in `try_call` if they want to report + continue).
 
 // Assert that `cond` is truthy. On failure, raises a runtime
-// error with an optional message for context.
+// error with the caller's `message` for context.
 fn assert(cond, message) {
     if !cond {
-        // Deliberate type error carries `message` in the crash
-        // trace for the engine's diagnostic. Not elegant, but
-        // keeps stdlib free of any "raise" primitive.
-        let _ = none[message]
+        panic(message)
     }
 }
 
@@ -23,8 +20,7 @@ fn assert(cond, message) {
 // in the crash log.
 fn assert_eq(actual, expected) {
     if actual != expected {
-        let detail = "assert_eq failed: " + actual.inspect() + " != " + expected.inspect()
-        let _ = none[detail]
+        panic("assert_eq failed: " + actual.inspect() + " != " + expected.inspect())
     }
 }
 
@@ -35,8 +31,7 @@ fn assert_near(actual, expected, tolerance) {
     let diff = actual - expected
     if diff < 0 { diff = -diff }
     if diff > tolerance {
-        let detail = "assert_near failed: " + actual.inspect() + " not within " + tolerance.inspect() + " of " + expected.inspect()
-        let _ = none[detail]
+        panic("assert_near failed: " + actual.inspect() + " not within " + tolerance.inspect() + " of " + expected.inspect())
     }
 }
 
@@ -56,7 +51,6 @@ fn assert_raises(body) {
         Result::Err(_) => true,
     }
     if !raised {
-        let detail = "assert_raises: body did not raise"
-        let _ = none[detail]
+        panic("assert_raises: body did not raise")
     }
 }

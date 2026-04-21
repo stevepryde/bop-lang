@@ -23,6 +23,7 @@ Always in scope; can't be shadowed by user fns. See [Built-in Functions](builtin
 | `range(n)` / `range(s, e)` / `range(s, e, step)` | array | Integer range |
 | `rand(n)` | int | Pseudo-random `0..n` |
 | `try_call(f)` | Result | Run `f`, return `Ok(v)` or `Err(RuntimeError)` |
+| `panic(message)` | never returns | Raise a non-fatal runtime error carrying `message` |
 
 All math and conversion operations are [methods on values](methods.md): `x.type()`, `x.to_str()`, `x.to_int()`, `x.to_float()`, `x.abs()`, `a.min(b)`, `x.sqrt()`, `x.len()`, etc.
 

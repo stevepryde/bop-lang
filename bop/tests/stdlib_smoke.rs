@@ -113,6 +113,85 @@ print(match bad { Result::Ok(_) => "ok?", Result::Err(e) => e })"#,
     assert_eq!(host.prints.borrow().clone(), vec!["2", "odd"]);
 }
 
+#[test]
+fn result_unwrap_on_err_raises_with_message() {
+    // `unwrap` / `expect` call the `panic` builtin. The resulting
+    // runtime error has to carry the caller's message (via
+    // `try_call`) so users can see *why* the unwrap failed
+    // instead of the pre-`panic` "Function `panic` not found"
+    // surface.
+    let host = run(
+        r#"use std.result
+let r = try_call(fn() { return unwrap(Result::Err("boom")) })
+print(match r {
+    Result::Ok(_)  => "unexpected ok",
+    Result::Err(e) => e.message,
+})
+let r2 = try_call(fn() { return expect(Result::Err("bad"), "custom message") })
+print(match r2 {
+    Result::Ok(_)  => "unexpected ok",
+    Result::Err(e) => e.message,
+})"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["unwrap on Err: \"boom\"", "custom message"],
+    );
+}
+
+// ─── panic builtin ─────────────────────────────────────────────
+
+#[test]
+fn panic_raises_non_fatal_runtime_error() {
+    // Bare `panic(msg)` raises with the message verbatim, and the
+    // resulting error is non-fatal so `try_call` catches it.
+    let host = run(
+        r#"let r = try_call(fn() { panic("deliberate") })
+print(match r {
+    Result::Ok(_)  => "unexpected ok",
+    Result::Err(e) => e.message,
+})"#,
+    );
+    assert_eq!(host.prints.borrow().clone(), vec!["deliberate"]);
+}
+
+#[test]
+fn panic_propagates_when_not_caught() {
+    // Outside of `try_call`, a `panic` should bubble up as a
+    // top-level program error. The `run` helper's `unwrap_or_else`
+    // would blow up on success, so we reach for `bop::run`
+    // directly and assert on the error surface.
+    let mut host = BufHost::new();
+    let err = bop::run("panic(\"top-level\")", &mut host, &BopLimits::standard())
+        .expect_err("expected panic to surface as an error");
+    assert!(
+        err.to_string().contains("top-level"),
+        "panic message should appear verbatim in the error: {}",
+        err
+    );
+}
+
+// ─── std.test — exercises the assertion surface directly ──────
+
+#[test]
+fn test_assert_eq_failure_carries_inspected_values() {
+    // `assert_eq` (and siblings) now route through `panic` so
+    // the user sees a readable message in `Err(e).message`
+    // rather than "Can't index none with string".
+    let host = run(
+        r#"use std.test
+let r = try_call(fn() { assert_eq(1, 2) })
+print(match r {
+    Result::Ok(_)  => "unexpected ok",
+    Result::Err(e) => e.message,
+})"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["assert_eq failed: 1 != 2"],
+    );
+}
+
 // ─── std.math ──────────────────────────────────────────────────
 
 #[test]
