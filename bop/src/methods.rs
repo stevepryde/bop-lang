@@ -336,6 +336,27 @@ pub fn common_method(
             crate::builtins::expect_args("inspect", args, 0, line)?;
             Ok(Some((Value::new_str(receiver.inspect()), None)))
         }
+        // `.is_none()` / `.is_some()` — dynamic-typing's answer
+        // to `Option`. Any variable can hold `none` (missing
+        // dict key, explicit `return none`, unset optional
+        // field), so the check works on every value rather than
+        // only on an Option-typed receiver. Equivalent to
+        // `x == none` / `x != none` but reads more intention-
+        // ally at the call site and composes with method chains.
+        "is_none" => {
+            crate::builtins::expect_args("is_none", args, 0, line)?;
+            Ok(Some((
+                Value::Bool(matches!(receiver, Value::None)),
+                None,
+            )))
+        }
+        "is_some" => {
+            crate::builtins::expect_args("is_some", args, 0, line)?;
+            Ok(Some((
+                Value::Bool(!matches!(receiver, Value::None)),
+                None,
+            )))
+        }
         _ => Ok(None),
     }
 }

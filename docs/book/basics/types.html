@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-49dea4a1.js";
+            window.path_to_searchindex_js = "../searchindex-403bd645.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-4a0c6a8e.js"></script>
@@ -279,12 +279,24 @@ if found {
 }
 </code></pre>
 <h2 id="none"><a class="header" href="#none">None</a></h2>
-<p><code>none</code> represents the absence of a value. Functions that don’t explicitly return a value return <code>none</code>. It’s also what you get when looking up a missing dictionary key:</p>
-<pre><code class="language-bop">let stats = {"hp": 10}
-let missing = stats["armor"]
-print(missing)    // none
+<p><code>none</code> represents the absence of a value. Functions that don’t explicitly return a value return <code>none</code>. It’s also what you get from any operation designed to signal “no value here” (e.g. <code>first_or_none</code> helpers, optional return values):</p>
+<pre><code class="language-bop">fn first_or_none(arr) {
+  if arr.len() == 0 { return none }
+  return arr[0]
+}
+
+let r = first_or_none([])
+print(r)           // none
 </code></pre>
-<p><code>none</code> is falsy in conditions; every other value except <code>false</code> is truthy.</p>
+<h3 id="checking-for-none"><a class="header" href="#checking-for-none">Checking for <code>none</code></a></h3>
+<p>Two equivalent ways:</p>
+<pre><code class="language-bop">if r.is_none() { print("empty") }
+if r == none    { print("empty") }      // same thing
+
+if r.is_some() { print("got one") }     // inverse — every non-none value is "some"
+</code></pre>
+<p><code>.is_none()</code> / <code>.is_some()</code> are <a href="../reference/methods.html#methods-on-every-value">universal methods</a> — they work on any value, not just optional-shaped ones. In a dynamically-typed language every variable can hold <code>none</code>, so the check is always available.</p>
+<p>Don’t confuse falsy-ness with none-ness: <code>false</code>, <code>0</code>, <code>""</code>, <code>[]</code>, and <code>{}</code> are all falsy in <code>if</code> conditions but they’re <strong>not</strong> <code>none</code>. <code>none.is_none()</code> is <code>true</code>; <code>false.is_none()</code> is <code>false</code>.</p>
 <h2 id="user-defined-types"><a class="header" href="#user-defined-types">User-defined types</a></h2>
 <p>Bop also lets you declare your own struct and enum types with methods — see <a href="../data/structs-and-enums.html">Structs &amp; Enums</a>.</p>
 

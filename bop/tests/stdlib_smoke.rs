@@ -169,6 +169,82 @@ print(Result::Err("x").is_err())"#,
     );
 }
 
+// ─── is_none / is_some universal methods ──────────────────────
+//
+// Any value can be checked for `none`-ness via `.is_none()` /
+// `.is_some()`. They're common methods (alongside `.type()` /
+// `.to_str()` / `.inspect()`) because every variable, regardless
+// of declared shape, can hold `none` in a dynamically-typed
+// language — not just `Option`-shaped receivers.
+
+#[test]
+fn is_none_detects_only_the_none_value() {
+    // Truthy / falsy values *other* than `none` are not none.
+    // `is_none()` is specifically "is this the Value::None
+    // variant?", not "is this falsy?".
+    let host = run(
+        r#"print(none.is_none())
+print((42).is_none())
+print("".is_none())
+print([].is_none())
+print({}.is_none())
+print(false.is_none())
+print((0).is_none())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["true", "false", "false", "false", "false", "false", "false"],
+    );
+}
+
+#[test]
+fn is_some_is_the_inverse_of_is_none() {
+    let host = run(
+        r#"print(none.is_some())
+print((0).is_some())
+print("".is_some())
+print(false.is_some())"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["false", "true", "true", "true"],
+    );
+}
+
+#[test]
+fn is_none_works_on_optional_return_values() {
+    // Motivating use case: a helper that returns `none` for
+    // "nothing found" composes cleanly with `.is_none()` at
+    // the call site without a `== none` detour.
+    let host = run(
+        r#"fn first_or_none(arr) {
+    if arr.len() == 0 { return none }
+    return arr[0]
+}
+let a = first_or_none([])
+let b = first_or_none([10, 20])
+if a.is_none() { print("empty") }
+if b.is_some() { print("got: " + b.to_str()) }"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["empty", "got: 10"],
+    );
+}
+
+#[test]
+fn is_none_equivalent_to_equality_check() {
+    // `.is_none()` and `== none` must agree on every value.
+    let host = run(
+        r#"let vs = [none, 0, "", [], false, 42]
+for v in vs { print(v.is_none() == (v == none)) }"#,
+    );
+    assert_eq!(
+        host.prints.borrow().clone(),
+        vec!["true", "true", "true", "true", "true", "true"],
+    );
+}
+
 // ─── Ok / Err shorthand ────────────────────────────────────────
 //
 // `Ok(x)` / `Err(e)` are parser-level sugar for

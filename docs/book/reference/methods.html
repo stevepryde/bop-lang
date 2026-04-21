@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-49dea4a1.js";
+            window.path_to_searchindex_js = "../searchindex-403bd645.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-4a0c6a8e.js"></script>
@@ -190,6 +190,8 @@
 <tr><td><code>x.type()</code></td><td>string</td><td>One of <code>"int"</code>, <code>"number"</code>, <code>"string"</code>, <code>"bool"</code>, <code>"none"</code>, <code>"array"</code>, <code>"dict"</code>, <code>"fn"</code>, <code>"struct"</code>, <code>"enum"</code>, <code>"module"</code>, <code>"iter"</code></td></tr>
 <tr><td><code>x.to_str()</code></td><td>string</td><td>Display repr — same as what <code>print(x)</code> would emit for a single arg</td></tr>
 <tr><td><code>x.inspect()</code></td><td>string</td><td>Debug repr — strings are wrapped in <code>"..."</code>, nested strings stay quoted inside arrays / dicts</td></tr>
+<tr><td><code>x.is_none()</code></td><td>bool</td><td><code>true</code> iff <code>x</code> is the <code>none</code> value. Equivalent to <code>x == none</code>.</td></tr>
+<tr><td><code>x.is_some()</code></td><td>bool</td><td>Inverse of <code>.is_none()</code> — <code>true</code> for every value except <code>none</code>.</td></tr>
 </tbody>
 </table>
 </div>
@@ -197,7 +199,14 @@
 print("hi".to_str())               // "hi"
 print("hi".inspect())              // "hi"   (quoted)
 print([1, "two"].inspect())        // [1, "two"]
+
+print(none.is_none())              // true
+print((0).is_none())               // false — `0` is falsy but not `none`
+print(first_result().is_some())    // check an optional return without `== none`
 </code></pre>
+<blockquote>
+<p><code>.is_none()</code> / <code>.is_some()</code> cover Bop’s “any variable can be <code>none</code>” story — they work on every receiver, not just <code>Option</code>-shaped ones (Bop doesn’t have <code>Option</code>). Equivalent to <code>x == none</code> / <code>x != none</code>, but reads better in method chains.</p>
+</blockquote>
 <h3 id="parens-around-numeric-literals"><a class="header" href="#parens-around-numeric-literals">Parens around numeric literals</a></h3>
 <p>Number literals need parens before a method call because <code>.</code> is otherwise a decimal point:</p>
 <pre><code class="language-bop">// print(42.type())   // parse error — `42.t…` looks like a decimal

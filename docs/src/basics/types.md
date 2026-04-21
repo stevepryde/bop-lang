@@ -141,15 +141,32 @@ if found {
 
 ## None
 
-`none` represents the absence of a value. Functions that don't explicitly return a value return `none`. It's also what you get when looking up a missing dictionary key:
+`none` represents the absence of a value. Functions that don't explicitly return a value return `none`. It's also what you get from any operation designed to signal "no value here" (e.g. `first_or_none` helpers, optional return values):
 
 ```bop
-let stats = {"hp": 10}
-let missing = stats["armor"]
-print(missing)    // none
+fn first_or_none(arr) {
+  if arr.len() == 0 { return none }
+  return arr[0]
+}
+
+let r = first_or_none([])
+print(r)           // none
 ```
 
-`none` is falsy in conditions; every other value except `false` is truthy.
+### Checking for `none`
+
+Two equivalent ways:
+
+```bop
+if r.is_none() { print("empty") }
+if r == none    { print("empty") }      // same thing
+
+if r.is_some() { print("got one") }     // inverse — every non-none value is "some"
+```
+
+`.is_none()` / `.is_some()` are [universal methods](../reference/methods.md#methods-on-every-value) — they work on any value, not just optional-shaped ones. In a dynamically-typed language every variable can hold `none`, so the check is always available.
+
+Don't confuse falsy-ness with none-ness: `false`, `0`, `""`, `[]`, and `{}` are all falsy in `if` conditions but they're **not** `none`. `none.is_none()` is `true`; `false.is_none()` is `false`.
 
 ## User-defined types
 

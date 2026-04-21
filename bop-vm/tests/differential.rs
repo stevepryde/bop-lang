@@ -2082,6 +2082,40 @@ fn error_unknown_function() {
 }
 
 #[test]
+fn is_none_is_some_universal_methods_diff() {
+    // Works on every value shape and matches `== none` exactly.
+    // Walker and VM must agree for any receiver.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"print(none.is_none())
+print((0).is_some())
+print("".is_none())
+print([].is_some())"#),
+        "true"
+    );
+}
+
+#[test]
+fn is_none_in_match_and_if_diff() {
+    // Guard clauses, conditional branches, and optional return
+    // values all need to agree between walker and VM.
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"fn maybe(n) {
+    if n < 0 { return none }
+    return n * 2
+}
+let out = ""
+for x in [-1, 5, -3, 8] {
+    let r = maybe(x)
+    if r.is_some() { out = out + r.to_str() + "," } else { out = out + "_," }
+}
+print(out)"#),
+        "_,10,_,16,"
+    );
+}
+
+#[test]
 fn ok_err_sugar_matches_result_construction_diff() {
     // `Ok(x)` / `Err(e)` are parser-level sugar — walker and VM
     // must see identical AST, so the printed values should be

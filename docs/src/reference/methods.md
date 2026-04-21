@@ -11,13 +11,21 @@ Three methods work on any value — introspection + stringification. They're dis
 | `x.type()` | string | One of `"int"`, `"number"`, `"string"`, `"bool"`, `"none"`, `"array"`, `"dict"`, `"fn"`, `"struct"`, `"enum"`, `"module"`, `"iter"` |
 | `x.to_str()` | string | Display repr — same as what `print(x)` would emit for a single arg |
 | `x.inspect()` | string | Debug repr — strings are wrapped in `"..."`, nested strings stay quoted inside arrays / dicts |
+| `x.is_none()` | bool | `true` iff `x` is the `none` value. Equivalent to `x == none`. |
+| `x.is_some()` | bool | Inverse of `.is_none()` — `true` for every value except `none`. |
 
 ```bop
 print((42).type())                 // "int"
 print("hi".to_str())               // "hi"
 print("hi".inspect())              // "hi"   (quoted)
 print([1, "two"].inspect())        // [1, "two"]
+
+print(none.is_none())              // true
+print((0).is_none())               // false — `0` is falsy but not `none`
+print(first_result().is_some())    // check an optional return without `== none`
 ```
+
+> `.is_none()` / `.is_some()` cover Bop's "any variable can be `none`" story — they work on every receiver, not just `Option`-shaped ones (Bop doesn't have `Option`). Equivalent to `x == none` / `x != none`, but reads better in method chains.
 
 ### Parens around numeric literals
 

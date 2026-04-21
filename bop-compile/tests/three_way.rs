@@ -1094,6 +1094,32 @@ let r = Result::Ok(8).and_then(halve).and_then(halve)
 print(match r { Result::Ok(v) => v, Result::Err(_) => -1 })"#,
         &[],
     ),
+    // ─── is_none / is_some universal methods ─────────────────
+    (
+        "is_none_basic_dispatch",
+        // Has to work uniformly across every receiver shape so
+        // walker / VM / AOT must agree per-type.
+        r#"print(none.is_none())
+print((0).is_none())
+print("".is_none())
+print([].is_none())
+print(false.is_none())
+print(none.is_some())
+print((42).is_some())"#,
+        &[],
+    ),
+    (
+        "is_none_with_optional_return",
+        r#"fn maybe(n) {
+    if n < 0 { return none }
+    return n
+}
+let a = maybe(-1)
+let b = maybe(7)
+if a.is_none() { print("a is none") }
+if b.is_some() { print("b = " + b.to_str()) }"#,
+        &[],
+    ),
     // ─── Ok / Err shorthand ───────────────────────────────────
     (
         "ok_err_shorthand_expression",
