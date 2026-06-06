@@ -3137,6 +3137,34 @@ impl ReplSession {
         result
     }
 
+    /// Call a Bop closure value inside this session's current module state.
+    ///
+    /// Embedders that retain closure values from an earlier evaluation can use
+    /// this to invoke them later while preserving the same functions, imports,
+    /// type bindings, and module aliases that normal in-language calls see.
+    pub fn call_fn<H: BopHost>(
+        &mut self,
+        func: Value,
+        args: Vec<Value>,
+        host: &mut H,
+        limits: &BopLimits,
+    ) -> Result<Value, BopError> {
+        let func = match &func {
+            Value::Fn(f) => Rc::clone(f),
+            other => {
+                return Err(error(
+                    0,
+                    format!("expected function, got {}", other.type_name()),
+                ));
+            }
+        };
+
+        let mut eval = self.take_evaluator(host, limits.clone());
+        let result = eval.call_bop_fn(&func, args, 0);
+        self.put_evaluator(eval);
+        result
+    }
+
     /// Internal: move the session's state into a fresh
     /// Evaluator. `host` and `limits` are the ephemeral
     /// per-run bits.
