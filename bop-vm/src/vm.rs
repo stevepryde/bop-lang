@@ -2550,6 +2550,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
     fn define_struct(&mut self, idx: StructIdx, line: u32) -> Result<(), BopError> {
         let def = self.current_chunk().struct_def(idx).clone();
+        let mut seen = BTreeSet::new();
+        for field in &def.fields {
+            if !seen.insert(field.clone()) {
+                return Err(error(
+                    line,
+                    format!(
+                        "Struct `{}` has duplicate field `{}`",
+                        def.name, field
+                    ),
+                ));
+            }
+        }
         // Type identity is `(current_module, def.name)`. Two
         // different modules declaring the same name coexist at
         // distinct registry keys; same-module redecl is a no-op
@@ -2587,6 +2599,35 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 line,
                 format!("Enum `{}` is already declared", def.name),
             ));
+        }
+        let mut seen_variants = BTreeSet::new();
+        for (variant, shape) in &variants {
+            if !seen_variants.insert(variant.clone()) {
+                return Err(error(
+                    line,
+                    format!(
+                        "Enum `{}` has duplicate variant `{}`",
+                        def.name, variant
+                    ),
+                ));
+            }
+            let fields = match shape {
+                EnumVariantShape::Unit => continue,
+                EnumVariantShape::Tuple(fields)
+                | EnumVariantShape::Struct(fields) => fields,
+            };
+            let mut seen_fields = BTreeSet::new();
+            for field in fields {
+                if !seen_fields.insert(field.clone()) {
+                    return Err(error(
+                        line,
+                        format!(
+                            "Enum variant `{}::{}` has duplicate field `{}`",
+                            def.name, variant, field
+                        ),
+                    ));
+                }
+            }
         }
         self.enum_defs.insert(key, variants);
         self.bind_local_type(&def.name);

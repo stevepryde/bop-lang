@@ -35,7 +35,7 @@ use bop::error::BopError;
 use bop::lexer::StringPart;
 use bop::parser::{
     AssignOp, AssignTarget, BinOp, Expr, ExprKind, MatchArm, Stmt, StmtKind, UnaryOp, VariantKind,
-    VariantPayload,
+    VariantDecl, VariantPayload,
 };
 
 use crate::Options;
@@ -54,35 +54,65 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
 
 // ─── Type / method registry ────────────────────────────────────────
 //
-// User-defined types and methods are collected across the root
-// program and every transitively-imported module at pre-pass time,
-// then flattened into a single registry. The AOT emits a single
-// Rust definition per type, so two modules that declare types with
-// the *same name and shape* fold together (matching the walker's
-// idempotent re-import behaviour), while *different-shape* clashes
-// surface as a transpile-time error pointing at both decl sites.
-//
-// Per-module scoping of types would require renaming every type
-// reference in the emitted Rust — possible, but much more
-// intrusive. Detecting clashes up front and erroring is the
-// walker's behaviour anyway, so matching it here keeps the two
-// engines consistent.
+// The pre-pass catalogues every user-defined type declaration site across the
+// root program and transitively imported modules. It never folds sites or
+// diagnoses clashes: generated code registers a site's static descriptor only
+// when execution reaches that declaration. Methods remain direct-list
+// metadata until their separate source-order publication work in #86.
 
 pub(crate) struct TypeRegistry {
-    /// Struct types keyed by full identity `(module_path,
-    /// type_name)`. Two modules that declare a struct with the
-    /// same name coexist at distinct keys — no forced merge, no
-    /// clash unless the same module genuinely declares it twice.
-    pub structs: HashMap<(String, String), Vec<String>>,
-    /// Enum types, same `(module_path, type_name)` keying.
-    /// Variants are stored as bare-name → payload shape.
-    pub enums: HashMap<(String, String), HashMap<String, VariantKind>>,
+    /// Every syntactic struct declaration, including sites nested in
+    /// control flow, callables, and lambda bodies. Sites deliberately do not
+    /// fold by `(module, name)`: declaration compatibility is a runtime
+    /// property because only executed sites participate.
+    pub struct_sites: Vec<StructSite>,
+    /// Ordered enum declaration sites. Variant order and struct-payload field
+    /// order are part of the runtime shape; tuple payload names are not.
+    pub enum_sites: Vec<EnumSite>,
+    /// Lexically module-top-level declarations only. Lifted callables are
+    /// emitted ahead of source execution and may resolve these names, but must
+    /// never inherit declarations owned by a block or another callable.
+    top_level_types: HashMap<String, BTreeSet<String>>,
     /// User methods, keyed by the *full receiver-type identity*
     /// `(module_path, type_name, method_name)`. A method
     /// declared for `paint.Color` doesn't fire on
     /// `other.Color`; dispatch threads the receiver's own
     /// module path into the lookup.
     pub methods: HashMap<(String, String, String), MethodEntry>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StructSite {
+    pub module_path: String,
+    pub name: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct EnumSite {
+    pub module_path: String,
+    pub name: String,
+}
+
+impl TypeRegistry {
+    fn has_type(&self, module_path: &str, name: &str) -> bool {
+        self.struct_sites
+            .iter()
+            .any(|site| site.module_path == module_path && site.name == name)
+            || self
+                .enum_sites
+                .iter()
+                .any(|site| site.module_path == module_path && site.name == name)
+    }
+
+    fn module_has_type_sites(&self, module_path: &str) -> bool {
+        self.struct_sites
+            .iter()
+            .any(|site| site.module_path == module_path)
+            || self
+                .enum_sites
+                .iter()
+                .any(|site| site.module_path == module_path)
+    }
 }
 
 #[derive(Clone)]
@@ -94,32 +124,16 @@ pub(crate) struct MethodEntry {
     pub module_prefix: String,
 }
 
-/// Where a struct / enum was first declared — threaded through
-/// the registry so clash errors can point at the *original*
-/// declaration site. Path is the dot-joined module name, or
-/// `<root>` for the top-level program.
-#[derive(Clone)]
-struct DeclOrigin {
-    path: String,
-    /// Line in that module's source. Matches the usual
-    /// 1-indexed Bop line numbering.
-    line: u32,
-}
-
 fn collect_type_registry(
     root: &[Stmt],
     modules: &ModuleGraph,
 ) -> Result<TypeRegistry, BopError> {
     let mut reg = TypeRegistry {
-        structs: HashMap::new(),
-        enums: HashMap::new(),
+        struct_sites: Vec::new(),
+        enum_sites: Vec::new(),
+        top_level_types: HashMap::new(),
         methods: HashMap::new(),
     };
-    // Parallel "where was this first declared?" tables so
-    // clash diagnostics can name both sites. Keyed by full
-    // identity.
-    let mut struct_origins: HashMap<(String, String), DeclOrigin> = HashMap::new();
-    let mut enum_origins: HashMap<(String, String), DeclOrigin> = HashMap::new();
 
     // Engine-wide builtins (`Result`, `RuntimeError`) go into
     // the registry before any user source is inspected, keyed
@@ -127,57 +141,21 @@ fn collect_type_registry(
     // at the program root lives under `<root>.Result` instead
     // and the two coexist without clashing.
     let builtin_mp = bop::value::BUILTIN_MODULE_PATH.to_string();
-    reg.structs.insert(
-        (builtin_mp.clone(), String::from("RuntimeError")),
-        bop::builtins::builtin_runtime_error_fields(),
-    );
-    struct_origins.insert(
-        (builtin_mp.clone(), String::from("RuntimeError")),
-        DeclOrigin {
-            path: "<builtin>".to_string(),
-            line: 0,
-        },
-    );
-    let result_variants: HashMap<String, VariantKind> = bop::builtins::builtin_result_variants()
-        .into_iter()
-        .map(|v| (v.name, v.kind))
-        .collect();
-    reg.enums.insert(
-        (builtin_mp.clone(), String::from("Result")),
-        result_variants,
-    );
-    enum_origins.insert(
-        (builtin_mp.clone(), String::from("Result")),
-        DeclOrigin {
-            path: "<builtin>".to_string(),
-            line: 0,
-        },
-    );
-    let iter_variants: HashMap<String, VariantKind> = bop::builtins::builtin_iter_variants()
-        .into_iter()
-        .map(|v| (v.name, v.kind))
-        .collect();
-    reg.enums.insert(
-        (builtin_mp.clone(), String::from("Iter")),
-        iter_variants,
-    );
-    enum_origins.insert(
-        (builtin_mp.clone(), String::from("Iter")),
-        DeclOrigin {
-            path: "<builtin>".to_string(),
-            line: 0,
-        },
-    );
+    reg.struct_sites.push(StructSite {
+        module_path: builtin_mp.clone(),
+        name: String::from("RuntimeError"),
+    });
+    reg.enum_sites.push(EnumSite {
+        module_path: builtin_mp.clone(),
+        name: String::from("Result"),
+    });
+    reg.enum_sites.push(EnumSite {
+        module_path: builtin_mp.clone(),
+        name: String::from("Iter"),
+    });
 
     // Root program contributes under `<root>`.
-    collect_types_from_stmts(
-        root,
-        "",
-        bop::value::ROOT_MODULE_PATH,
-        &mut reg,
-        &mut struct_origins,
-        &mut enum_origins,
-    )?;
+    collect_types_from_stmts(root, "", bop::value::ROOT_MODULE_PATH, &mut reg);
     // Then every module's AST. The function prefix uses the same
     // injective component encoding as the emitter. The source `name`
     // is still what shows up in errors and at runtime as the module's
@@ -185,54 +163,10 @@ fn collect_type_registry(
     for name in &modules.order {
         if let Some(entry) = modules.modules.get(name) {
             let prefix = module_fn_prefix(name);
-            collect_types_from_stmts(
-                &entry.ast,
-                &prefix,
-                name,
-                &mut reg,
-                &mut struct_origins,
-                &mut enum_origins,
-            )?;
+            collect_types_from_stmts(&entry.ast, &prefix, name, &mut reg);
         }
     }
     Ok(reg)
-}
-
-/// Shape-equivalence check for two enum variant maps. Looser than
-/// `PartialEq`: tuple variants compare by arity only (payload
-/// field names are positional stubs with no runtime meaning),
-/// struct variants still require matching field names. Same rule
-/// the walker (`variants_equivalent` in `bop::evaluator`) and VM
-/// (`shapes_match` in `bop_vm::vm`) use, so a program that
-/// compiles under one engine compiles under all three.
-fn enum_variants_equivalent(
-    a: &HashMap<String, VariantKind>,
-    b: &HashMap<String, VariantKind>,
-) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    for (name, va) in a {
-        let vb = match b.get(name) {
-            Some(v) => v,
-            None => return false,
-        };
-        match (va, vb) {
-            (VariantKind::Unit, VariantKind::Unit) => {}
-            (VariantKind::Tuple(fa), VariantKind::Tuple(fb)) => {
-                if fa.len() != fb.len() {
-                    return false;
-                }
-            }
-            (VariantKind::Struct(fa), VariantKind::Struct(fb)) => {
-                if fa != fb {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-    }
-    true
 }
 
 fn collect_types_from_stmts(
@@ -240,80 +174,33 @@ fn collect_types_from_stmts(
     prefix: &str,
     module_path: &str,
     reg: &mut TypeRegistry,
-    struct_origins: &mut HashMap<(String, String), DeclOrigin>,
-    enum_origins: &mut HashMap<(String, String), DeclOrigin>,
-) -> Result<(), BopError> {
+) {
+    visit_type_declaration_sites(
+        stmts,
+        &mut |name, _fields, _line| {
+            reg.struct_sites.push(StructSite {
+                module_path: module_path.to_string(),
+                name: name.to_string(),
+            });
+        },
+        &mut |name, _variants, _line| {
+            reg.enum_sites.push(EnumSite {
+                module_path: module_path.to_string(),
+                name: name.to_string(),
+            });
+        },
+    );
+
+    // #86 will make method publication source-ordered. Until then preserve
+    // the existing direct-list collection; recursive type discovery must not
+    // accidentally hoist methods from dead branches or nested callables.
     for stmt in stmts {
         match &stmt.kind {
-            StmtKind::StructDecl { name, fields } => {
-                // Identity is `(module_path, name)` — two
-                // modules declaring the same bare name now live
-                // at distinct keys. Same-identity re-insertion
-                // is a no-op on matching shape, an error on
-                // mismatch (would mean the same module got
-                // loaded twice with different source).
-                let key = (module_path.to_string(), name.clone());
-                if let Some(existing) = reg.structs.get(&key) {
-                    if existing == fields {
-                        continue;
-                    }
-                    let origin = struct_origins
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or(DeclOrigin {
-                            path: "<unknown>".to_string(),
-                            line: 0,
-                        });
-                    return Err(BopError::runtime(
-                        format!(
-                            "struct `{}` declared with different fields in `{}` (line {}) and `{}` (line {})",
-                            name, origin.path, origin.line, module_path, stmt.line
-                        ),
-                        stmt.line,
-                    ));
-                }
-                reg.structs.insert(key.clone(), fields.clone());
-                struct_origins.insert(
-                    key,
-                    DeclOrigin {
-                        path: module_path.to_string(),
-                        line: stmt.line,
-                    },
-                );
-            }
-            StmtKind::EnumDecl { name, variants } => {
-                let mut v_map = HashMap::new();
-                for v in variants {
-                    v_map.insert(v.name.clone(), v.kind.clone());
-                }
-                let key = (module_path.to_string(), name.clone());
-                if let Some(existing) = reg.enums.get(&key) {
-                    if enum_variants_equivalent(existing, &v_map) {
-                        continue;
-                    }
-                    let origin = enum_origins
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or(DeclOrigin {
-                            path: "<unknown>".to_string(),
-                            line: 0,
-                        });
-                    return Err(BopError::runtime(
-                        format!(
-                            "enum `{}` declared with different variants in `{}` (line {}) and `{}` (line {})",
-                            name, origin.path, origin.line, module_path, stmt.line
-                        ),
-                        stmt.line,
-                    ));
-                }
-                reg.enums.insert(key.clone(), v_map);
-                enum_origins.insert(
-                    key,
-                    DeclOrigin {
-                        path: module_path.to_string(),
-                        line: stmt.line,
-                    },
-                );
+            StmtKind::StructDecl { name, .. } | StmtKind::EnumDecl { name, .. } => {
+                reg.top_level_types
+                    .entry(module_path.to_string())
+                    .or_default()
+                    .insert(name.clone());
             }
             StmtKind::MethodDecl {
                 type_name,
@@ -340,15 +227,181 @@ fn collect_types_from_stmts(
                     },
                 );
             }
-            // Type decls inside control-flow bodies are legal in
-            // the walker, but the emitter treats them as top-level
-            // for registry purposes. Nested fn decls get skipped —
-            // their inner struct/enum decls (if any) aren't
-            // reachable from outside the fn anyway.
             _ => {}
         }
     }
-    Ok(())
+}
+
+/// Walk every expression-bearing edge in the AST and report declaration
+/// sites in source order. Keeping this independent from method collection is
+/// intentional: #86 can reuse the traversal when method publication becomes
+/// runtime-driven without #85 hoisting nested methods today.
+fn visit_type_declaration_sites(
+    stmts: &[Stmt],
+    on_struct: &mut dyn FnMut(&str, &[String], u32),
+    on_enum: &mut dyn FnMut(&str, &[VariantDecl], u32),
+) {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::StructDecl { name, fields } => on_struct(name, fields, stmt.line),
+            StmtKind::EnumDecl { name, variants } => on_enum(name, variants, stmt.line),
+            StmtKind::Let { value, .. } => {
+                visit_type_declaration_sites_in_expr(value, on_struct, on_enum)
+            }
+            StmtKind::Assign { target, value, .. } => {
+                visit_type_declaration_sites_in_target(target, on_struct, on_enum);
+                visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+            }
+            StmtKind::If {
+                condition,
+                body,
+                else_ifs,
+                else_body,
+            } => {
+                visit_type_declaration_sites_in_expr(condition, on_struct, on_enum);
+                visit_type_declaration_sites(body, on_struct, on_enum);
+                for (condition, body) in else_ifs {
+                    visit_type_declaration_sites_in_expr(condition, on_struct, on_enum);
+                    visit_type_declaration_sites(body, on_struct, on_enum);
+                }
+                if let Some(body) = else_body {
+                    visit_type_declaration_sites(body, on_struct, on_enum);
+                }
+            }
+            StmtKind::While { condition, body } => {
+                visit_type_declaration_sites_in_expr(condition, on_struct, on_enum);
+                visit_type_declaration_sites(body, on_struct, on_enum);
+            }
+            StmtKind::Repeat { count, body } => {
+                visit_type_declaration_sites_in_expr(count, on_struct, on_enum);
+                visit_type_declaration_sites(body, on_struct, on_enum);
+            }
+            StmtKind::ForIn { iterable, body, .. } => {
+                visit_type_declaration_sites_in_expr(iterable, on_struct, on_enum);
+                visit_type_declaration_sites(body, on_struct, on_enum);
+            }
+            StmtKind::FnDecl { body, .. } | StmtKind::MethodDecl { body, .. } => {
+                visit_type_declaration_sites(body, on_struct, on_enum);
+            }
+            StmtKind::Return { value } => {
+                if let Some(value) = value {
+                    visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                }
+            }
+            StmtKind::ExprStmt(expr) => {
+                visit_type_declaration_sites_in_expr(expr, on_struct, on_enum)
+            }
+            StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
+        }
+    }
+}
+
+fn visit_type_declaration_sites_in_target(
+    target: &AssignTarget,
+    on_struct: &mut dyn FnMut(&str, &[String], u32),
+    on_enum: &mut dyn FnMut(&str, &[VariantDecl], u32),
+) {
+    match target {
+        AssignTarget::Variable(_) => {}
+        AssignTarget::Index { object, index } => {
+            visit_type_declaration_sites_in_expr(object, on_struct, on_enum);
+            visit_type_declaration_sites_in_expr(index, on_struct, on_enum);
+        }
+        AssignTarget::Field { object, .. } => {
+            visit_type_declaration_sites_in_expr(object, on_struct, on_enum)
+        }
+    }
+}
+
+fn visit_type_declaration_sites_in_expr(
+    expr: &Expr,
+    on_struct: &mut dyn FnMut(&str, &[String], u32),
+    on_enum: &mut dyn FnMut(&str, &[VariantDecl], u32),
+) {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::StringInterp(_)
+        | ExprKind::Bool(_)
+        | ExprKind::None
+        | ExprKind::Ident(_) => {}
+        ExprKind::BinaryOp { left, right, .. } => {
+            visit_type_declaration_sites_in_expr(left, on_struct, on_enum);
+            visit_type_declaration_sites_in_expr(right, on_struct, on_enum);
+        }
+        ExprKind::UnaryOp { expr, .. } | ExprKind::Try(expr) => {
+            visit_type_declaration_sites_in_expr(expr, on_struct, on_enum)
+        }
+        ExprKind::Call { callee, args } => {
+            visit_type_declaration_sites_in_expr(callee, on_struct, on_enum);
+            for arg in args {
+                visit_type_declaration_sites_in_expr(arg, on_struct, on_enum);
+            }
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            visit_type_declaration_sites_in_expr(object, on_struct, on_enum);
+            for arg in args {
+                visit_type_declaration_sites_in_expr(arg, on_struct, on_enum);
+            }
+        }
+        ExprKind::FieldAccess { object, .. } => {
+            visit_type_declaration_sites_in_expr(object, on_struct, on_enum)
+        }
+        ExprKind::StructConstruct { fields, .. } => {
+            for (_, value) in fields {
+                visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+            }
+        }
+        ExprKind::EnumConstruct { payload, .. } => match payload {
+            VariantPayload::Unit => {}
+            VariantPayload::Tuple(values) => {
+                for value in values {
+                    visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                }
+            }
+            VariantPayload::Struct(fields) => {
+                for (_, value) in fields {
+                    visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                }
+            }
+        },
+        ExprKind::Index { object, index } => {
+            visit_type_declaration_sites_in_expr(object, on_struct, on_enum);
+            visit_type_declaration_sites_in_expr(index, on_struct, on_enum);
+        }
+        ExprKind::Array(values) => {
+            for value in values {
+                visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+            }
+        }
+        ExprKind::Dict(entries) => {
+            for (_, value) in entries {
+                visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+            }
+        }
+        ExprKind::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            visit_type_declaration_sites_in_expr(condition, on_struct, on_enum);
+            visit_type_declaration_sites_in_expr(then_expr, on_struct, on_enum);
+            visit_type_declaration_sites_in_expr(else_expr, on_struct, on_enum);
+        }
+        ExprKind::Lambda { body, .. } => {
+            visit_type_declaration_sites(body, on_struct, on_enum)
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            visit_type_declaration_sites_in_expr(scrutinee, on_struct, on_enum);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    visit_type_declaration_sites_in_expr(guard, on_struct, on_enum);
+                }
+                visit_type_declaration_sites_in_expr(&arm.body, on_struct, on_enum);
+            }
+        }
+    }
 }
 
 // ─── Module graph ──────────────────────────────────────────────────
@@ -1148,6 +1201,9 @@ struct Emitter {
     /// the start of each fn / top-level program so the names stay
     /// short.
     tmp_counter: usize,
+    /// Unique suffix for block-local static type descriptors. Declaration
+    /// sites may execute repeatedly, but their shape lives in read-only data.
+    type_site_counter: usize,
     /// Non-empty while emitting an imported module's body — the
     /// collision-free prefix is applied to every user fn name so
     /// modules can't collide on function identifiers.
@@ -1253,6 +1309,7 @@ impl Emitter {
             modules,
             types,
             tmp_counter: 0,
+            type_site_counter: 0,
             module_prefix: String::new(),
             current_module: String::from(bop::value::ROOT_MODULE_PATH),
             type_bindings: vec![builtin_frame],
@@ -1297,10 +1354,7 @@ impl Emitter {
             for frame in self.module_aliases.iter().rev() {
                 if let Some(binding) = frame.get(ns) {
                     if let Some(origin) = binding.exposed_types.get(type_name) {
-                        let key = (origin.clone(), type_name.to_string());
-                        if self.types.structs.contains_key(&key)
-                            || self.types.enums.contains_key(&key)
-                        {
+                        if self.types.has_type(origin, type_name) {
                             return Some(origin.clone());
                         }
                     }
@@ -1827,25 +1881,18 @@ impl Emitter {
         }
     }
 
-    /// Pre-seed the current `type_bindings` frame with every
-    /// type registered at `module_path`. Called before methods
+    /// Pre-seed the current `type_bindings` frame with module-top-level
+    /// declarations only. Called before methods
     /// and top-level fns get emitted so their bodies can
     /// resolve bare `MyType { ... }` even though the AST walk
     /// hasn't reached the `struct MyType` decl yet.
     fn seed_types_for_module(&mut self, module_path: &str) {
-        let mut names: Vec<String> = Vec::new();
-        for (mp, tn) in self.types.structs.keys() {
-            if mp == module_path {
-                names.push(tn.clone());
-            }
-        }
-        for (mp, tn) in self.types.enums.keys() {
-            if mp == module_path {
-                names.push(tn.clone());
-            }
-        }
-        names.sort();
-        names.dedup();
+        let names = self
+            .types
+            .top_level_types
+            .get(module_path)
+            .cloned()
+            .unwrap_or_default();
         for n in names {
             self.bind_type(&n, module_path);
         }
@@ -2257,6 +2304,7 @@ impl Emitter {
         name: &str,
         entry: &ModuleEntry,
     ) -> Result<(), BopError> {
+        let has_type_sites = self.types.module_has_type_sites(name);
         let load = module_load_fn_name(name);
         let exports = module_exports_type_name(name);
         writeln!(
@@ -2289,6 +2337,12 @@ impl Emitter {
         self.line("        return Ok(loaded.clone());");
         self.line("    }");
         self.line("}");
+        if has_type_sites {
+            self.line(&format!(
+                "let __saved_type_defs = __bop_take_module_type_defs(ctx, {});",
+                rust_string_literal(name)
+            ));
+        }
         self.line(&format!(
             r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__ModuleLoading));"#,
             key = name
@@ -2380,6 +2434,16 @@ impl Emitter {
         self.line("})();");
         self.line("if __load_result.is_err() {");
         self.indent += 1;
+        if has_type_sites {
+            self.line(&format!(
+                "__bop_clear_module_type_defs(ctx, {});",
+                rust_string_literal(name)
+            ));
+            self.line(&format!(
+                "__bop_restore_module_type_defs(ctx, {}, __saved_type_defs);",
+                rust_string_literal(name)
+            ));
+        }
         self.line(&format!(
             "ctx.module_cache.remove({});",
             rust_string_literal(name)
@@ -2925,11 +2989,23 @@ impl Emitter {
                 self.emit_use_stmt(path, items, alias, line)?;
             }
 
-            StmtKind::StructDecl { name, .. }
-            | StmtKind::EnumDecl { name, .. } => {
-                // The whole-program registry owns static shape metadata, while
-                // this runtime transition controls source-ordered availability.
+            StmtKind::StructDecl { name, fields } => {
+                let site = self.type_site_counter;
+                self.type_site_counter += 1;
+                let descriptor = fields
+                    .iter()
+                    .map(|field| rust_string_literal(field))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(&format!(
+                    "const __BOP_STRUCT_SITE_{site}: &'static [&'static str] = &[{descriptor}];"
+                ));
                 let mp = self.current_module.clone();
+                self.line(&format!(
+                    "__bop_register_struct(ctx, {}, {}, __BOP_STRUCT_SITE_{site}, {line})?;",
+                    rust_string_literal(&mp),
+                    rust_string_literal(name),
+                ));
                 self.line(&format!(
                     "__bop_bind_type(&mut __bop_type_bindings, {}, {});",
                     rust_string_literal(name),
@@ -2937,7 +3013,52 @@ impl Emitter {
                 ));
                 self.bind_type(name, &mp);
                 self.emit_type_context_publish();
-                let _ = line;
+            }
+            StmtKind::EnumDecl { name, variants } => {
+                let site = self.type_site_counter;
+                self.type_site_counter += 1;
+                let descriptor = variants
+                    .iter()
+                    .map(|variant| {
+                        let shape = match &variant.kind {
+                            VariantKind::Unit => "__BopDynamicVariantShape::Unit".to_string(),
+                            VariantKind::Tuple(fields) => format!(
+                                "__BopDynamicVariantShape::Tuple(&[{}])",
+                                fields
+                                    .iter()
+                                    .map(|field| rust_string_literal(field))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            VariantKind::Struct(fields) => format!(
+                                "__BopDynamicVariantShape::Struct(&[{}])",
+                                fields
+                                    .iter()
+                                    .map(|field| rust_string_literal(field))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        };
+                        format!("({}, {shape})", rust_string_literal(&variant.name))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(&format!(
+                    "const __BOP_ENUM_SITE_{site}: &'static [(&'static str, __BopDynamicVariantShape)] = &[{descriptor}];"
+                ));
+                let mp = self.current_module.clone();
+                self.line(&format!(
+                    "__bop_register_enum(ctx, {}, {}, __BOP_ENUM_SITE_{site}, {line})?;",
+                    rust_string_literal(&mp),
+                    rust_string_literal(name),
+                ));
+                self.line(&format!(
+                    "__bop_bind_type(&mut __bop_type_bindings, {}, {});",
+                    rust_string_literal(name),
+                    rust_string_literal(&mp),
+                ));
+                self.bind_type(name, &mp);
+                self.emit_type_context_publish();
             }
             StmtKind::MethodDecl { .. } => {
                 // Methods are compile-time only too — the
@@ -3950,12 +4071,6 @@ impl Emitter {
                 line,
             );
         }
-        // Resolve the source-level type reference to its full
-        // identity `(module_path, type_name)`. This is what
-        // drives both the compile-time shape lookup *and* the
-        // module_path literal emitted into the Value::new_struct
-        // call, so two modules declaring `Color` with different
-        // fields end up producing distinct runtime types.
         let module_path = self
             .resolve_type_module(namespace, type_name)
             .ok_or_else(|| {
@@ -3964,109 +4079,21 @@ impl Emitter {
                     line,
                 )
             })?;
-        let key = (module_path.clone(), type_name.to_string());
-        let decl = self.types.structs.get(&key).cloned().ok_or_else(|| {
-            BopError::runtime(
-                bop::error_messages::struct_not_declared(type_name),
-                line,
-            )
-        })?;
-        // Namespaced path (`m.Entity { ... }`) — still validate
-        // at runtime that `m` is in fact a Module exporting the
-        // type, so a shadowed-value surface error (`let m = 3`
-        // after `use foo as m`) surfaces with a clear runtime
-        // message instead of compiling fine but panicking.
-        let ns_check = match namespace {
-            Some(ns) => {
-                if self.is_local(ns) {
-                    format!(
-                        "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
-                        ns_ident = rust_user_ident(ns),
-                        ns_lit = rust_string_literal(ns),
-                        ty_lit = rust_string_literal(type_name),
-                    )
-                } else {
-                    let value = if let Some(value) =
-                        self.declaration_alias_namespace_src(ns, line)
-                    {
-                        value
-                    } else {
-                        self.ident_value_src(ns, line)?
-                    };
-                    let tmp = self.fresh_tmp();
-                    format!(
-                        "let {tmp} = {value}; __bop_validate_namespace_type(&{tmp}, {ns_lit}, {ty_lit}, {line})?; ",
-                        ns_lit = rust_string_literal(ns),
-                        ty_lit = rust_string_literal(type_name),
-                    )
-                }
-            }
-            None => String::new(),
+        let ns = namespace.expect("namespaced branch");
+        let namespace_value = if self.is_local(ns) {
+            rust_user_ident(ns)
+        } else if let Some(value) = self.declaration_alias_namespace_src(ns, line) {
+            value
+        } else {
+            self.ident_value_src(ns, line)?
         };
-        // Compile-time validation: set matches exactly, no dups.
-        let mut seen = HashSet::new();
-        for (fname, _) in fields {
-            if !seen.insert(fname.clone()) {
-                return Err(BopError::runtime(
-                    format!(
-                        "Field `{}` specified twice in `{}` construction",
-                        fname, type_name
-                    ),
-                    line,
-                ));
-            }
-            if !decl.iter().any(|d| d == fname) {
-                let mut err = BopError::runtime(
-                    bop::error_messages::struct_has_no_field(type_name, fname),
-                    line,
-                );
-                if let Some(hint) = bop::suggest::did_you_mean(
-                    fname,
-                    decl.iter().map(|s| s.as_str()),
-                ) {
-                    err.friendly_hint = Some(hint);
-                }
-                return Err(err);
-            }
-        }
-        for declared in &decl {
-            if !seen.contains(declared) {
-                return Err(BopError::runtime(
-                    format!(
-                        "Missing field `{}` in `{}` construction",
-                        declared, type_name
-                    ),
-                    line,
-                ));
-            }
-        }
-        // Emit field bindings in provided order so any side
-        // effects in sub-expressions happen source-order, then
-        // assemble the fields vec in declaration order.
-        let mut lets = String::new();
-        let mut provided_tmps: HashMap<String, String> = HashMap::new();
-        for (fname, fexpr) in fields {
-            let src = self.expr_src(fexpr)?;
-            let tmp = self.fresh_tmp();
-            write!(lets, "let {} = {}; ", tmp, src).unwrap();
-            provided_tmps.insert(fname.clone(), tmp);
-        }
-        let ordered: Vec<String> = decl
-            .iter()
-            .map(|name| {
-                let tmp = provided_tmps.remove(name).unwrap();
-                format!("({}.to_string(), {})", rust_string_literal(name), tmp)
-            })
-            .collect();
-        Ok(format!(
-            "{{ {ns_check}{lets}::bop::value::Value::try_new_struct({mp}.to_string(), {tn}.to_string(), vec![{fields}], {line})? }}",
-            ns_check = ns_check,
-            lets = lets,
-            mp = rust_string_literal(&module_path),
-            tn = rust_string_literal(type_name),
-            fields = ordered.join(", "),
-            line = line,
-        ))
+        let module_path_src = format!(
+            "{{ __bop_validate_namespace_type(&{namespace_value}, {alias}, {type_name}, {line})?; {module_path}.to_string() }}",
+            alias = rust_string_literal(ns),
+            type_name = rust_string_literal(type_name),
+            module_path = rust_string_literal(&module_path),
+        );
+        self.runtime_struct_construct_src(&module_path_src, type_name, fields, line)
     }
 
     fn runtime_struct_construct_src(
@@ -4076,37 +4103,6 @@ impl Emitter {
         fields: &[(String, Expr)],
         line: u32,
     ) -> Result<String, BopError> {
-        let mut candidates: Vec<(&String, &Vec<String>)> = self
-            .types
-            .structs
-            .iter()
-            .filter_map(|((module, candidate), fields)| {
-                (candidate == type_name).then_some((module, fields))
-            })
-            .collect();
-        candidates.sort_by(|a, b| a.0.cmp(b.0));
-        if candidates.is_empty() {
-            return Err(BopError::runtime(
-                bop::error_messages::struct_not_declared(type_name),
-                line,
-            ));
-        }
-
-        let mut shape_arms = String::new();
-        for (module, declared) in candidates {
-            let fields = declared
-                .iter()
-                .map(|field| rust_string_literal(field))
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(
-                shape_arms,
-                "{} => &[{}],",
-                rust_string_literal(module),
-                fields
-            )
-            .unwrap();
-        }
         let provided_names = fields
             .iter()
             .map(|(name, _)| rust_string_literal(name))
@@ -4126,14 +4122,13 @@ impl Emitter {
         }
         Ok(format!(
             "{{ let __module_path = {module_path_src}; \
-                let __declared_fields: &'static [&'static str] = match __module_path.as_str() {{ {shape_arms} _ => return Err(::bop::error::BopError::runtime(::bop::error_messages::struct_not_declared({type_name}), {line})), }}; \
+                let __declared_fields = __bop_struct_fields(ctx, &__module_path, {type_name}, {line})?; \
                 __bop_validate_named_fields(__declared_fields, &[{provided_names}], {type_name}, ::std::option::Option::None, {line})?; \
                 {lets}let __provided = vec![{provided}]; \
                 let __ordered = __bop_order_named_fields(__declared_fields, __provided); \
                 ::bop::value::Value::try_new_struct(__module_path, {type_name}.to_string(), __ordered, {line})? }}",
             module_path_src = module_path_src,
             type_name = rust_string_literal(type_name),
-            shape_arms = shape_arms,
             provided_names = provided_names,
             lets = lets,
             provided = provided.join(", "),
@@ -4187,10 +4182,6 @@ impl Emitter {
                 line,
             );
         }
-        // Resolve the source-level reference to its declaring
-        // module so the resulting `Value::EnumVariant` is tagged
-        // with the right identity. Two modules declaring the
-        // same enum shape produce distinct values.
         let module_path = self
             .resolve_type_module(namespace, type_name)
             .ok_or_else(|| {
@@ -4199,189 +4190,21 @@ impl Emitter {
                     line,
                 )
             })?;
-        let key = (module_path.clone(), type_name.to_string());
-        let variants = self
-            .types
-            .enums
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| {
-                BopError::runtime(
-                    bop::error_messages::enum_not_declared(type_name),
-                    line,
-                )
-            })?;
-        let declared = variants.get(variant).cloned().ok_or_else(|| {
-            let mut err = BopError::runtime(
-                bop::error_messages::enum_has_no_variant(type_name, variant),
-                line,
-            );
-            if let Some(hint) = bop::suggest::did_you_mean(
-                variant,
-                variants.keys().map(|s| s.as_str()),
-            ) {
-                err.friendly_hint = Some(hint);
-            }
-            err
-        })?;
-        let tn_lit = rust_string_literal(type_name);
-        let vn_lit = rust_string_literal(variant);
-        // Namespaced path (`m.Result::Ok(v)`) — validate at runtime
-        // that `m` is a Module actually exporting this type. The
-        // variant itself resolves through the global type registry
-        // same as a bare construct, so the check is purely a guard
-        // matching walker + VM semantics.
-        let ns_check = match namespace {
-            Some(ns) => {
-                if self.is_local(ns) {
-                    format!(
-                        "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
-                        ns_ident = rust_user_ident(ns),
-                        ns_lit = rust_string_literal(ns),
-                        ty_lit = rust_string_literal(type_name),
-                    )
-                } else {
-                    let value = if let Some(value) =
-                        self.declaration_alias_namespace_src(ns, line)
-                    {
-                        value
-                    } else {
-                        self.ident_value_src(ns, line)?
-                    };
-                    let tmp = self.fresh_tmp();
-                    format!(
-                        "let {tmp} = {value}; __bop_validate_namespace_type(&{tmp}, {ns_lit}, {ty_lit}, {line})?; ",
-                        ns_lit = rust_string_literal(ns),
-                        ty_lit = rust_string_literal(type_name),
-                    )
-                }
-            }
-            None => String::new(),
+        let ns = namespace.expect("namespaced branch");
+        let namespace_value = if self.is_local(ns) {
+            rust_user_ident(ns)
+        } else if let Some(value) = self.declaration_alias_namespace_src(ns, line) {
+            value
+        } else {
+            self.ident_value_src(ns, line)?
         };
-        let mp_lit = rust_string_literal(&module_path);
-        match (&declared, payload) {
-            (VariantKind::Unit, VariantPayload::Unit) => Ok(format!(
-                "{{ {ns_check}::bop::value::Value::new_enum_unit({mp}.to_string(), {tn}.to_string(), {vn}.to_string()) }}",
-                ns_check = ns_check,
-                mp = mp_lit,
-                tn = tn_lit,
-                vn = vn_lit
-            )),
-            (VariantKind::Tuple(decl_fields), VariantPayload::Tuple(args)) => {
-                if decl_fields.len() != args.len() {
-                    return Err(BopError::runtime(
-                        format!(
-                            "`{}::{}` expects {} argument{}, but got {}",
-                            type_name,
-                            variant,
-                            decl_fields.len(),
-                            if decl_fields.len() == 1 { "" } else { "s" },
-                            args.len()
-                        ),
-                        line,
-                    ));
-                }
-                let mut lets = String::new();
-                let mut names = Vec::with_capacity(args.len());
-                for a in args {
-                    let src = self.expr_src(a)?;
-                    let tmp = self.fresh_tmp();
-                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
-                    names.push(tmp);
-                }
-                Ok(format!(
-                    "{{ {ns_check}{lets}::bop::value::Value::try_new_enum_tuple({mp}.to_string(), {tn}.to_string(), {vn}.to_string(), vec![{items}], {line})? }}",
-                    ns_check = ns_check,
-                    lets = lets,
-                    mp = mp_lit,
-                    tn = tn_lit,
-                    vn = vn_lit,
-                    items = names.join(", "),
-                    line = line,
-                ))
-            }
-            (VariantKind::Struct(decl_fields), VariantPayload::Struct(provided)) => {
-                let mut seen = HashSet::new();
-                for (fname, _) in provided {
-                    if !seen.insert(fname.clone()) {
-                        return Err(BopError::runtime(
-                            format!(
-                                "Field `{}` specified twice in `{}::{}`",
-                                fname, type_name, variant
-                            ),
-                            line,
-                        ));
-                    }
-                    if !decl_fields.iter().any(|d| d == fname) {
-                        return Err(BopError::runtime(
-                            format!(
-                                "Variant `{}::{}` has no field `{}`",
-                                type_name, variant, fname
-                            ),
-                            line,
-                        ));
-                    }
-                }
-                for declared in decl_fields {
-                    if !seen.contains(declared) {
-                        return Err(BopError::runtime(
-                            format!(
-                                "Missing field `{}` in `{}::{}` construction",
-                                declared, type_name, variant
-                            ),
-                            line,
-                        ));
-                    }
-                }
-                let mut lets = String::new();
-                let mut provided_tmps: HashMap<String, String> = HashMap::new();
-                for (fname, fexpr) in provided {
-                    let src = self.expr_src(fexpr)?;
-                    let tmp = self.fresh_tmp();
-                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
-                    provided_tmps.insert(fname.clone(), tmp);
-                }
-                let ordered: Vec<String> = decl_fields
-                    .iter()
-                    .map(|name| {
-                        let tmp = provided_tmps.remove(name).unwrap();
-                        format!(
-                            "({}.to_string(), {})",
-                            rust_string_literal(name),
-                            tmp
-                        )
-                    })
-                    .collect();
-                Ok(format!(
-                    "{{ {ns_check}{lets}::bop::value::Value::try_new_enum_struct({mp}.to_string(), {tn}.to_string(), {vn}.to_string(), vec![{items}], {line})? }}",
-                    ns_check = ns_check,
-                    lets = lets,
-                    mp = mp_lit,
-                    tn = tn_lit,
-                    vn = vn_lit,
-                    items = ordered.join(", "),
-                    line = line,
-                ))
-            }
-            (VariantKind::Unit, _) => Err(BopError::runtime(
-                format!("Variant `{}::{}` takes no payload", type_name, variant),
-                line,
-            )),
-            (VariantKind::Tuple(_), _) => Err(BopError::runtime(
-                format!(
-                    "Variant `{}::{}` expects positional arguments `(…)`",
-                    type_name, variant
-                ),
-                line,
-            )),
-            (VariantKind::Struct(_), _) => Err(BopError::runtime(
-                format!(
-                    "Variant `{}::{}` expects named fields `{{ … }}`",
-                    type_name, variant
-                ),
-                line,
-            )),
-        }
+        let module_path_src = format!(
+            "{{ __bop_validate_namespace_type(&{namespace_value}, {alias}, {type_name}, {line})?; {module_path}.to_string() }}",
+            alias = rust_string_literal(ns),
+            type_name = rust_string_literal(type_name),
+            module_path = rust_string_literal(&module_path),
+        );
+        self.runtime_enum_construct_src(&module_path_src, type_name, variant, payload, line)
     }
 
     fn runtime_enum_construct_src(
@@ -4392,59 +4215,12 @@ impl Emitter {
         payload: &VariantPayload,
         line: u32,
     ) -> Result<String, BopError> {
-        let mut candidates: Vec<(&String, &HashMap<String, VariantKind>)> = self
-            .types
-            .enums
-            .iter()
-            .filter_map(|((module, candidate), variants)| {
-                (candidate == type_name).then_some((module, variants))
-            })
-            .collect();
-        candidates.sort_by(|a, b| a.0.cmp(b.0));
-        if candidates.is_empty() {
-            return Err(BopError::runtime(
-                bop::error_messages::enum_not_declared(type_name),
-                line,
-            ));
-        }
-
-        let mut shape_arms = String::new();
-        for (module, variants) in candidates {
-            let shape = match variants.get(variant) {
-                Some(VariantKind::Unit) => "__BopDynamicVariantShape::Unit".to_string(),
-                Some(VariantKind::Tuple(fields)) => {
-                    format!("__BopDynamicVariantShape::Tuple({})", fields.len())
-                }
-                Some(VariantKind::Struct(fields)) => {
-                    let fields = fields
-                        .iter()
-                        .map(|field| rust_string_literal(field))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("__BopDynamicVariantShape::Struct(&[{}])", fields)
-                }
-                None => format!(
-                    "return Err(::bop::error::BopError::runtime(::bop::error_messages::enum_has_no_variant({}, {}), {}))",
-                    rust_string_literal(type_name),
-                    rust_string_literal(variant),
-                    line
-                ),
-            };
-            writeln!(
-                shape_arms,
-                "{} => {},",
-                rust_string_literal(module),
-                shape
-            )
-            .unwrap();
-        }
-
         let namespace_check = format!(
             "let __module_path = {}; \
-             let __variant_shape = match __module_path.as_str() {{ {} _ => return Err(::bop::error::BopError::runtime(::bop::error_messages::enum_not_declared({}), {})), }}; ",
+             let __variant_shape = __bop_enum_variant_shape(ctx, &__module_path, {}, {}, {})?; ",
             module_path_src,
-            shape_arms,
             rust_string_literal(type_name),
+            rust_string_literal(variant),
             line,
         );
         let type_lit = rust_string_literal(type_name);
@@ -4469,8 +4245,8 @@ impl Emitter {
                 Ok(format!(
                     "{{ {namespace_check}match __variant_shape {{ \
                         __BopDynamicVariantShape::Unit => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` takes no payload\", {type_lit}, {variant_lit}), {line})), \
-                        __BopDynamicVariantShape::Tuple(__expected) if __expected == {actual} => {{}}, \
-                        __BopDynamicVariantShape::Tuple(__expected) => return Err(::bop::error::BopError::runtime(format!(\"`{{}}::{{}}` expects {{}} argument{{}}, but got {{}}\", {type_lit}, {variant_lit}, __expected, if __expected == 1 {{ \"\" }} else {{ \"s\" }}, {actual}), {line})), \
+                        __BopDynamicVariantShape::Tuple(__fields) if __fields.len() == {actual} => {{}}, \
+                        __BopDynamicVariantShape::Tuple(__fields) => return Err(::bop::error::BopError::runtime(format!(\"`{{}}::{{}}` expects {{}} argument{{}}, but got {{}}\", {type_lit}, {variant_lit}, __fields.len(), if __fields.len() == 1 {{ \"\" }} else {{ \"s\" }}, {actual}), {line})), \
                         __BopDynamicVariantShape::Struct(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects named fields `{{{{ … }}}}`\", {type_lit}, {variant_lit}), {line})), \
                     }} {lets}::bop::value::Value::try_new_enum_tuple(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), vec![{values}], {line})? }}",
                     actual = args.len(),
@@ -5737,6 +5513,17 @@ const CTX_BASE: &str = r#"pub struct Ctx<'h> {
         ::std::string::String,
         ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
     >,
+    pub struct_defs: ::std::collections::HashMap<
+        ::std::string::String,
+        ::std::collections::HashMap<::std::string::String, &'static [&'static str]>,
+    >,
+    pub enum_defs: ::std::collections::HashMap<
+        ::std::string::String,
+        ::std::collections::HashMap<
+            ::std::string::String,
+            &'static [(&'static str, __BopDynamicVariantShape)],
+        >,
+    >,
 }
 
 "#;
@@ -5764,6 +5551,17 @@ const CTX_SANDBOX: &str = r#"pub struct Ctx<'h> {
     pub module_type_bindings: ::std::collections::HashMap<
         ::std::string::String,
         ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
+    >,
+    pub struct_defs: ::std::collections::HashMap<
+        ::std::string::String,
+        ::std::collections::HashMap<::std::string::String, &'static [&'static str]>,
+    >,
+    pub enum_defs: ::std::collections::HashMap<
+        ::std::string::String,
+        ::std::collections::HashMap<
+            ::std::string::String,
+            &'static [(&'static str, __BopDynamicVariantShape)],
+        >,
     >,
 }
 
@@ -5888,10 +5686,227 @@ struct __BopDeclarationAliasBinding {
     cached: ::std::option::Option<::bop::value::Value>,
 }
 
-enum __BopDynamicVariantShape {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum __BopDynamicVariantShape {
     Unit,
-    Tuple(usize),
+    Tuple(&'static [&'static str]),
     Struct(&'static [&'static str]),
+}
+
+fn __bop_register_struct(
+    ctx: &mut Ctx<'_>,
+    module: &str,
+    type_name: &str,
+    fields: &'static [&'static str],
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    for (index, field) in fields.iter().enumerate() {
+        if fields[..index].contains(field) {
+            return Err(::bop::error::BopError::runtime(
+                format!("Struct `{}` has duplicate field `{}`", type_name, field),
+                line,
+            ));
+        }
+    }
+    if let ::std::option::Option::Some(existing) = ctx
+        .struct_defs
+        .get(module)
+        .and_then(|defs| defs.get(type_name))
+        .copied()
+    {
+        if existing == fields {
+            return Ok(());
+        }
+        return Err(::bop::error::BopError::runtime(
+            format!("Struct `{}` is already declared", type_name),
+            line,
+        ));
+    }
+    ctx.struct_defs
+        .entry(module.to_string())
+        .or_default()
+        .insert(type_name.to_string(), fields);
+    Ok(())
+}
+
+fn __bop_enum_shapes_match(
+    left: &[(&str, __BopDynamicVariantShape)],
+    right: &[(&str, __BopDynamicVariantShape)],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|((left_name, left_shape), (right_name, right_shape))| {
+            if left_name != right_name {
+                return false;
+            }
+            match (left_shape, right_shape) {
+                (__BopDynamicVariantShape::Unit, __BopDynamicVariantShape::Unit) => true,
+                (__BopDynamicVariantShape::Tuple(left_fields), __BopDynamicVariantShape::Tuple(right_fields)) => {
+                    left_fields.len() == right_fields.len()
+                }
+                (__BopDynamicVariantShape::Struct(left_fields), __BopDynamicVariantShape::Struct(right_fields)) => {
+                    left_fields == right_fields
+                }
+                _ => false,
+            }
+        })
+}
+
+fn __bop_register_enum(
+    ctx: &mut Ctx<'_>,
+    module: &str,
+    type_name: &str,
+    variants: &'static [(&'static str, __BopDynamicVariantShape)],
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    if let ::std::option::Option::Some(existing) = ctx
+        .enum_defs
+        .get(module)
+        .and_then(|defs| defs.get(type_name))
+        .copied()
+    {
+        if __bop_enum_shapes_match(existing, variants) {
+            return Ok(());
+        }
+        return Err(::bop::error::BopError::runtime(
+            format!("Enum `{}` is already declared", type_name),
+            line,
+        ));
+    }
+    for (variant_index, (variant, shape)) in variants.iter().enumerate() {
+        if variants[..variant_index]
+            .iter()
+            .any(|(seen, _)| seen == variant)
+        {
+            return Err(::bop::error::BopError::runtime(
+                format!("Enum `{}` has duplicate variant `{}`", type_name, variant),
+                line,
+            ));
+        }
+        let fields = match shape {
+            __BopDynamicVariantShape::Unit => continue,
+            __BopDynamicVariantShape::Tuple(fields)
+            | __BopDynamicVariantShape::Struct(fields) => *fields,
+        };
+        for (field_index, field) in fields.iter().enumerate() {
+            if fields[..field_index].contains(field) {
+                return Err(::bop::error::BopError::runtime(
+                    format!(
+                        "Enum variant `{}::{}` has duplicate field `{}`",
+                        type_name, variant, field
+                    ),
+                    line,
+                ));
+            }
+        }
+    }
+    ctx.enum_defs
+        .entry(module.to_string())
+        .or_default()
+        .insert(type_name.to_string(), variants);
+    Ok(())
+}
+
+fn __bop_struct_fields(
+    ctx: &Ctx<'_>,
+    module: &str,
+    type_name: &str,
+    line: u32,
+) -> Result<&'static [&'static str], ::bop::error::BopError> {
+    ctx.struct_defs
+        .get(module)
+        .and_then(|defs| defs.get(type_name))
+        .copied()
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::struct_not_declared(type_name),
+            line,
+        ))
+}
+
+fn __bop_enum_variant_shape(
+    ctx: &Ctx<'_>,
+    module: &str,
+    type_name: &str,
+    variant: &str,
+    line: u32,
+) -> Result<__BopDynamicVariantShape, ::bop::error::BopError> {
+    let variants = ctx
+        .enum_defs
+        .get(module)
+        .and_then(|defs| defs.get(type_name))
+        .copied()
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::enum_not_declared(type_name),
+            line,
+        ))?;
+    variants
+        .iter()
+        .find_map(|(name, shape)| (*name == variant).then_some(*shape))
+        .ok_or_else(|| {
+            let mut error = ::bop::error::BopError::runtime(
+                ::bop::error_messages::enum_has_no_variant(type_name, variant),
+                line,
+            );
+            if let ::std::option::Option::Some(hint) = ::bop::suggest::did_you_mean(
+                variant,
+                variants.iter().map(|(name, _)| *name),
+            ) {
+                error.friendly_hint = ::std::option::Option::Some(hint);
+            }
+            error
+        })
+}
+
+fn __bop_seed_builtin_type_defs(ctx: &mut Ctx<'_>) -> Result<(), ::bop::error::BopError> {
+    const RUNTIME_ERROR: &'static [&'static str] = &["message", "line"];
+    const RESULT: &'static [(&'static str, __BopDynamicVariantShape)] = &[
+        ("Ok", __BopDynamicVariantShape::Tuple(&["value"])),
+        ("Err", __BopDynamicVariantShape::Tuple(&["error"])),
+    ];
+    const ITER: &'static [(&'static str, __BopDynamicVariantShape)] = &[
+        ("Next", __BopDynamicVariantShape::Tuple(&["value"])),
+        ("Done", __BopDynamicVariantShape::Unit),
+    ];
+    __bop_register_struct(ctx, "<builtin>", "RuntimeError", RUNTIME_ERROR, 0)?;
+    __bop_register_enum(ctx, "<builtin>", "Result", RESULT, 0)?;
+    __bop_register_enum(ctx, "<builtin>", "Iter", ITER, 0)?;
+    Ok(())
+}
+
+fn __bop_clear_module_type_defs(ctx: &mut Ctx<'_>, module: &str) {
+    ctx.struct_defs.remove(module);
+    ctx.enum_defs.remove(module);
+}
+
+struct __BopModuleTypeDefs {
+    structs: ::std::option::Option<
+        ::std::collections::HashMap<::std::string::String, &'static [&'static str]>,
+    >,
+    enums: ::std::option::Option<
+        ::std::collections::HashMap<
+            ::std::string::String,
+            &'static [(&'static str, __BopDynamicVariantShape)],
+        >,
+    >,
+}
+
+fn __bop_take_module_type_defs(ctx: &mut Ctx<'_>, module: &str) -> __BopModuleTypeDefs {
+    __BopModuleTypeDefs {
+        structs: ctx.struct_defs.remove(module),
+        enums: ctx.enum_defs.remove(module),
+    }
+}
+
+fn __bop_restore_module_type_defs(
+    ctx: &mut Ctx<'_>,
+    module: &str,
+    saved: __BopModuleTypeDefs,
+) {
+    if let ::std::option::Option::Some(defs) = saved.structs {
+        ctx.struct_defs.insert(module.to_string(), defs);
+    }
+    if let ::std::option::Option::Some(defs) = saved.enums {
+        ctx.enum_defs.insert(module.to_string(), defs);
+    }
 }
 
 fn __bop_declaration_alias_optional(
@@ -6346,7 +6361,16 @@ fn __bop_validate_named_fields(
                     ::bop::error_messages::struct_has_no_field(type_name, field)
                 }
             };
-            return Err(::bop::error::BopError::runtime(message, line));
+            let mut error = ::bop::error::BopError::runtime(message, line);
+            if variant.is_none() {
+                if let ::std::option::Option::Some(hint) = ::bop::suggest::did_you_mean(
+                    field,
+                    declared.iter().copied(),
+                ) {
+                    error.friendly_hint = ::std::option::Option::Some(hint);
+                }
+            }
+            return Err(error);
         }
     }
     for field in declared {
@@ -6637,7 +6661,10 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
         module_type_bindings: ::std::collections::HashMap::new(),
+        struct_defs: ::std::collections::HashMap::new(),
+        enum_defs: ::std::collections::HashMap::new(),
     };
+    __bop_seed_builtin_type_defs(&mut ctx)?;
     run_program(&mut ctx)
 }
 
@@ -6684,7 +6711,10 @@ pub fn run<H: ::bop::BopHost>(
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
         module_type_bindings: ::std::collections::HashMap::new(),
+        struct_defs: ::std::collections::HashMap::new(),
+        enum_defs: ::std::collections::HashMap::new(),
     };
+    __bop_seed_builtin_type_defs(&mut ctx)?;
     run_program(&mut ctx)
 }
 

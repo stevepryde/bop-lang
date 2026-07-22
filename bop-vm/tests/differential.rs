@@ -1307,6 +1307,54 @@ let p = P { x: 1 }"#);
     assert!(msg.contains("Missing field"), "got: {}", msg);
 }
 
+#[test]
+fn runtime_type_declaration_validation_matches_walker_diff() {
+    let errors = [
+        (
+            "struct P { value, value }",
+            "Struct `P` has duplicate field `value`",
+        ),
+        (
+            "enum E { A, A }",
+            "Enum `E` has duplicate variant `A`",
+        ),
+        (
+            "enum E { Pair(value, value) }",
+            "Enum variant `E::Pair` has duplicate field `value`",
+        ),
+        (
+            "enum E { Named { value, value } }",
+            "Enum variant `E::Named` has duplicate field `value`",
+        ),
+        (
+            "struct P { value }\nstruct P { value, value }",
+            "Struct `P` has duplicate field `value`",
+        ),
+        (
+            "struct P { left, right }\nstruct P { right, left }",
+            "Struct `P` is already declared",
+        ),
+        (
+            "enum E { First, Second }\nenum E { Second, First }",
+            "Enum `E` is already declared",
+        ),
+    ];
+    for (source, expected) in errors {
+        assert_eq!(run_err(source), expected, "source: {source}");
+    }
+
+    let dead = run_both(
+        r#"if false {
+    struct P { value, value }
+    enum E { A, A, Pair(value, value), Named { item, item } }
+}
+print("ok")"#,
+        &standard(),
+    );
+    assert!(dead.is_ok(), "unexpected error: {:?}", dead.error);
+    assert_eq!(dead.prints, ["ok"]);
+}
+
 // ─── Enums ─────────────────────────────────────────────────────────
 
 #[test]
