@@ -70,7 +70,7 @@ pub fn add(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
             check_array_concat_memory(a.len(), b.len(), line)?;
             let mut result = a.to_vec();
             result.extend(b.to_vec());
-            Ok(Value::new_array(result))
+            Value::try_new_array(result, line)
         }
         _ => Err(error(
             line,
@@ -375,13 +375,11 @@ pub fn index_set(
                     format!("Index {} is out of bounds (array has {} items)", i, len),
                 ));
             }
-            arr.set(actual, val);
-            Ok(())
+            arr.try_set(actual, val, line)
         }
         Value::Dict(entries) => match idx {
             Value::Str(key) => {
-                entries.set_key(key, val);
-                Ok(())
+                entries.try_set_key(key, val, line)
             }
             _ => Err(error(line, "Can't set index with these types")),
         },

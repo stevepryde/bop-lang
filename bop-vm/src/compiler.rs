@@ -12,7 +12,7 @@ use crate::chunk::{
     EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx,
     PatternIdx, SlotIdx, StructDef, StructIdx,
 };
-use bop::parser::{MatchArm, Pattern, VariantKind};
+use bop::parser::{ArrayRest, MatchArm, Pattern, VariantKind, VariantPatternPayload};
 
 // ─── Local slot resolver ───────────────────────────────────────────
 //
@@ -131,6 +131,11 @@ struct Compiler {
     /// `None` at module top-level where there's nothing to
     /// capture into.
     free_vars: Option<Vec<String>>,
+    /// Names installed dynamically in the frame's scope rather than in local
+    /// slots. Match-pattern bindings use this path. Keeping them separate
+    /// prevents a nested lambda from propagating a pattern-local name into
+    /// the enclosing lambda's capture list.
+    runtime_bindings: Vec<Vec<String>>,
 }
 
 struct LoopCtx {
@@ -149,6 +154,7 @@ impl Compiler {
             loops: Vec::new(),
             resolvers: Vec::new(),
             free_vars: None,
+            runtime_bindings: Vec::new(),
         }
     }
 
@@ -167,6 +173,14 @@ impl Compiler {
     /// something reachable only at runtime (named fn, import).
     /// No-op at module top-level.
     fn note_free_var(&mut self, name: &str) {
+        if self
+            .runtime_bindings
+            .iter()
+            .rev()
+            .any(|scope| scope.iter().any(|bound| bound == name))
+        {
+            return;
+        }
         if let Some(list) = self.free_vars.as_mut() {
             if !list.iter().any(|n| n == name) {
                 list.push(name.to_string());
@@ -891,6 +905,11 @@ impl Compiler {
             }
 
             ExprKind::StringInterp(parts) => {
+                for part in parts {
+                    if let bop::lexer::StringPart::Variable(name) = part {
+                        self.note_free_var(name);
+                    }
+                }
                 let recipe = InterpRecipe { parts: parts.clone() };
                 let idx = self.add_interp(recipe);
                 self.emit(Instr::StringInterp(idx), line);
@@ -1214,6 +1233,9 @@ impl Compiler {
 
         for arm in arms {
             let arm_line = arm.line;
+            let mut runtime_bindings = Vec::new();
+            collect_pattern_bindings(&arm.pattern, &mut runtime_bindings);
+            self.runtime_bindings.push(runtime_bindings);
             self.emit(Instr::PushScope, arm_line);
             self.emit(Instr::Dup, arm_line);
             let pat_idx = self.add_pattern(arm.pattern.clone());
@@ -1239,6 +1261,7 @@ impl Compiler {
             // body, unwind the arm scope, jump past the rest.
             self.emit(Instr::Pop, arm_line);
             self.compile_expr(&arm.body)?;
+            self.runtime_bindings.pop();
             self.emit(Instr::PopScope, arm_line);
             let end_jump = self.emit(Instr::Jump(CodeOffset(0)), arm_line);
             end_patches.push(end_jump);
@@ -1359,6 +1382,7 @@ impl Compiler {
         let saved_chunk = core::mem::take(&mut self.chunk);
         let saved_loops = core::mem::take(&mut self.loops);
         let saved_free = self.free_vars.take();
+        let saved_runtime_bindings = core::mem::take(&mut self.runtime_bindings);
 
         // Enter the new function: push a resolver + start a
         // fresh free-var collector.
@@ -1380,6 +1404,7 @@ impl Compiler {
         let mut chunk = core::mem::replace(&mut self.chunk, saved_chunk);
         self.loops = saved_loops;
         self.free_vars = saved_free;
+        self.runtime_bindings = saved_runtime_bindings;
 
         result?;
 
@@ -1434,6 +1459,50 @@ impl Compiler {
             capture_names,
             capture_sources,
         })
+    }
+}
+
+fn collect_pattern_bindings(pattern: &Pattern, names: &mut Vec<String>) {
+    match pattern {
+        Pattern::Binding(name) => {
+            if !names.iter().any(|existing| existing == name) {
+                names.push(name.clone());
+            }
+        }
+        Pattern::EnumVariant { payload, .. } => match payload {
+            VariantPatternPayload::Unit => {}
+            VariantPatternPayload::Tuple(patterns) => {
+                for pattern in patterns {
+                    collect_pattern_bindings(pattern, names);
+                }
+            }
+            VariantPatternPayload::Struct { fields, .. } => {
+                for (_, pattern) in fields {
+                    collect_pattern_bindings(pattern, names);
+                }
+            }
+        },
+        Pattern::Struct { fields, .. } => {
+            for (_, pattern) in fields {
+                collect_pattern_bindings(pattern, names);
+            }
+        }
+        Pattern::Array { elements, rest } => {
+            for pattern in elements {
+                collect_pattern_bindings(pattern, names);
+            }
+            if let Some(ArrayRest::Named(name)) = rest {
+                if !names.iter().any(|existing| existing == name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        Pattern::Or(alternatives) => {
+            for pattern in alternatives {
+                collect_pattern_bindings(pattern, names);
+            }
+        }
+        Pattern::Literal(_) | Pattern::Wildcard => {}
     }
 }
 

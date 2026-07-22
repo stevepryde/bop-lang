@@ -151,13 +151,13 @@ enum FrameWrap {
     /// and pushes `Result::Err(RuntimeError { … })` instead.
     /// Fatal errors still bypass the trap — see
     /// `BopError::is_fatal`.
-    TryCall,
+    TryCall { line: u32 },
     /// `r.map(f)` landing pad: wrap the clean return in
     /// `Result::Ok(v)`. Errors in `f` propagate unchanged.
-    ResultOk,
+    ResultOk { line: u32 },
     /// `r.map_err(f)` landing pad: wrap the clean return in
     /// `Result::Err(v)`. Errors in `f` propagate unchanged.
-    ResultErr,
+    ResultErr { line: u32 },
     /// `MakeIter` landing pad for user-typed iterables: the
     /// frame ran the user's `.iter()` method; its return value
     /// should become a `Slot::IterObject` on the caller's
@@ -765,12 +765,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         .map(|entry| (entry.params.clone(), entry.chunk.clone()));
                     if let Some((params, chunk_rc)) = fn_parts {
                         let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-                        let v = Value::new_compiled_fn(
+                        let v = Value::try_new_compiled_fn(
                             params,
                             Vec::new(),
                             body,
                             Some(name.to_string()),
-                        );
+                            0,
+                            line,
+                        )?;
                         self.push_value(v);
                     } else {
                         // "did you mean?" first, else the generic
@@ -1005,7 +1007,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // ─── Collections ──────────────────────────────────────
             Instr::MakeArray(n) => {
                 let items = self.pop_n_values(n as usize, line)?;
-                self.push_value(Value::new_array(items));
+                self.push_value(Value::try_new_array(items, line)?);
             }
             Instr::MakeDict(n) => {
                 let flat = self.pop_n_values((n as usize) * 2, line)?;
@@ -1024,7 +1026,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     drop(key);
                     entries.push((key_str, val));
                 }
-                self.push_value(Value::new_dict(entries));
+                self.push_value(Value::try_new_dict(entries, line)?);
             }
 
             // ─── Calls ────────────────────────────────────────────
@@ -1047,7 +1049,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 self.define_fn(idx);
             }
             Instr::MakeLambda(idx) => {
-                self.make_lambda(idx);
+                self.make_lambda(idx, line)?;
             }
             Instr::Return => {
                 let v = self.pop_value(line)?;
@@ -1959,7 +1961,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
             }
         }
-        self.push_value(Value::new_struct(module_path, type_name_s, fields));
+        self.push_value(Value::try_new_struct(module_path, type_name_s, fields, line)?);
         Ok(())
     }
 
@@ -2030,7 +2032,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     ));
                 }
                 let items = self.pop_n_values(argc as usize, line)?;
-                self.push_value(Value::new_enum_tuple(module_path, type_name_s, variant_s, items));
+                self.push_value(Value::try_new_enum_tuple(
+                    module_path,
+                    type_name_s,
+                    variant_s,
+                    items,
+                    line,
+                )?);
             }
             (EnumVariantShape::Struct(decl_fields), EnumConstructShape::Struct(count)) => {
                 let flat = self.pop_n_values(count as usize * 2, line)?;
@@ -2084,7 +2092,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         }
                     }
                 }
-                self.push_value(Value::new_enum_struct(module_path, type_name_s, variant_s, fields));
+                self.push_value(Value::try_new_enum_struct(
+                    module_path,
+                    type_name_s,
+                    variant_s,
+                    fields,
+                    line,
+                )?);
             }
             (EnumVariantShape::Unit, _) => {
                 return Err(error(
@@ -2173,7 +2187,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         match &mut obj {
             Value::Struct(boxed) => {
                 let type_name = boxed.type_name().to_string();
-                if !boxed.set_field(field, value) {
+                if !boxed.try_set_field(field, value, line)? {
                     return Err(error(
                         line,
                         bop::error_messages::struct_has_no_field(&type_name, field),
@@ -2312,12 +2326,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// where to read the captured value from the enclosing frame
     /// — no "flatten every binding in sight" pass, and no
     /// over-capture of out-of-scope slots.
-    fn make_lambda(&mut self, idx: FnIdx) {
+    fn make_lambda(&mut self, idx: FnIdx, line: u32) -> Result<(), BopError> {
         let fn_def = self.current_chunk().function(idx).clone();
         let captures = self.snapshot_captures_for(&fn_def);
         let body: Rc<dyn core::any::Any + 'static> = Rc::new(fn_def.chunk);
-        let value = Value::new_compiled_fn(fn_def.params, captures, body, None);
+        let value = Value::try_new_compiled_fn(fn_def.params, captures, body, None, 0, line)?;
         self.push_value(value);
+        Ok(())
     }
 
     /// Package the captures for a lambda according to its
@@ -2552,12 +2567,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
         for (name, entry) in &artifacts.fn_decls {
             let chunk_rc: Rc<Chunk> = entry.chunk.clone();
             let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-            let value = Value::new_compiled_fn(
+            let value = Value::try_new_compiled_fn(
                 entry.params.clone(),
                 Vec::new(),
                 body,
                 Some(name.clone()),
-            );
+                0,
+                line,
+            )?;
             exports.push((name.clone(), value));
             fn_entries.push((name.clone(), entry.clone()));
         }
@@ -2568,7 +2585,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // Selective filter: ensure every listed name exists, then
         // retain only the listed exports.
         if let Some(list) = items {
-            let available: std::collections::BTreeSet<&str> =
+            let available: BTreeSet<&str> =
                 exports.iter().map(|(k, _)| k.as_str()).collect();
             for wanted in list {
                 if !available.contains(wanted.as_str())
@@ -2590,7 +2607,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     ));
                 }
             }
-            let listed: std::collections::BTreeSet<String> =
+            let listed: BTreeSet<String> =
                 list.iter().cloned().collect();
             exports.retain(|(k, _)| listed.contains(k));
             fn_entries.retain(|(k, _)| listed.contains(k));
@@ -2644,11 +2661,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     self.functions.insert(name, entry);
                 }
             }
-            let module_rc = Rc::new(bop::value::BopModule {
-                path: path.to_string(),
-                bindings: exports,
-                types: exposed_types,
-            });
+            let module_rc = bop::value::BopModule::try_new(
+                path.to_string(),
+                exports,
+                exposed_types,
+                line,
+            )?;
             // Bind the alias three ways:
             //   1. as Value::Module in the current value scope
             //      (immediate `m.helper(x)` at the use site);
@@ -3050,9 +3068,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // value through untouched.
         let final_value = match frame.wrap {
             FrameWrap::None => value,
-            FrameWrap::TryCall => builtins::make_try_call_ok(value),
-            FrameWrap::ResultOk => methods::make_result_ok(value),
-            FrameWrap::ResultErr => methods::make_result_err(value),
+            FrameWrap::TryCall { line } => builtins::make_try_call_ok(value, line)?,
+            FrameWrap::ResultOk { line } => methods::make_result_ok(value, line)?,
+            FrameWrap::ResultErr { line } => methods::make_result_err(value, line)?,
             FrameWrap::IterStart | FrameWrap::IterAdvance(_) => {
                 unreachable!("handled above")
             }
@@ -3107,7 +3125,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // The frame we just pushed is the one that should
         // participate in the try_call wrap/catch dance.
         if let Some(frame) = self.frames.last_mut() {
-            frame.wrap = FrameWrap::TryCall;
+            frame.wrap = FrameWrap::TryCall { line };
         }
         Ok(Next::Continue)
     }
@@ -3249,7 +3267,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             ResultCallableKind::Map => {
                 if !is_ok {
                     // Err passes through unchanged — no closure call.
-                    self.push_value(make_result_err(payload));
+                    self.push_value(make_result_err(payload, line)?);
                     return Ok(Next::Continue);
                 }
                 let func = match &callable {
@@ -3264,13 +3282,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 drop(callable);
                 self.call_closure(&func, vec![payload], line)?;
                 if let Some(frame) = self.frames.last_mut() {
-                    frame.wrap = FrameWrap::ResultOk;
+                    frame.wrap = FrameWrap::ResultOk { line };
                 }
                 Ok(Next::Continue)
             }
             ResultCallableKind::MapErr => {
                 if is_ok {
-                    self.push_value(make_result_ok(payload));
+                    self.push_value(make_result_ok(payload, line)?);
                     return Ok(Next::Continue);
                 }
                 let func = match &callable {
@@ -3288,13 +3306,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 drop(callable);
                 self.call_closure(&func, vec![payload], line)?;
                 if let Some(frame) = self.frames.last_mut() {
-                    frame.wrap = FrameWrap::ResultErr;
+                    frame.wrap = FrameWrap::ResultErr { line };
                 }
                 Ok(Next::Continue)
             }
             ResultCallableKind::AndThen => {
                 if !is_ok {
-                    self.push_value(make_result_err(payload));
+                    self.push_value(make_result_err(payload, line)?);
                     return Ok(Next::Continue);
                 }
                 let func = match &callable {
@@ -3335,7 +3353,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let wrap_idx = match self
             .frames
             .iter()
-            .rposition(|f| f.wrap == FrameWrap::TryCall)
+            .rposition(|f| matches!(f.wrap, FrameWrap::TryCall { .. }))
         {
             Some(i) => i,
             None => return Err(err),
