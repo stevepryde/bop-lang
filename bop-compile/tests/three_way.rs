@@ -1539,6 +1539,252 @@ use m
 print(x)"#,
         &[("m", "let x = 42")],
     ),
+    (
+        "import_plain_glob_idempotency_is_lexical",
+        r#"if true {
+    use m
+    print(x)
+}
+if true {
+    use m
+    print(x)
+}
+use m
+print(x)"#,
+        &[("m", "let x = 42")],
+    ),
+    (
+        "import_alias_shadow_restores_outer",
+        r#"use first as t
+if true {
+    use second as t
+    print(t.Point { second: 2 }.second)
+}
+print(t.Point { first: 1 }.first)"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+        ],
+    ),
+    (
+        "import_selective_function_preserves_named_fn",
+        r#"fn pick() { return 1 }
+use dep.{pick}
+print(pick())"#,
+        &[("dep", "fn pick() { return 42 }")],
+    ),
+    (
+        "import_glob_function_preserves_named_fn",
+        r#"fn pick() { return 1 }
+use dep
+print(pick())"#,
+        &[("dep", "fn pick() { return 42 }")],
+    ),
+    (
+        "import_local_callable_shadows_then_restores",
+        r#"use outer
+fn local() {
+    use inner.{helper}
+    return helper()
+}
+print(local())
+print(helper())"#,
+        &[
+            ("outer", "fn helper() { return 1 }"),
+            ("inner", "fn helper() { return 2 }"),
+        ],
+    ),
+    (
+        "import_local_callable_shadows_named_function",
+        r#"fn helper() { return 1 }
+fn local() {
+    use inner.{helper}
+    return helper()
+}
+print(local())
+print(helper())"#,
+        &[("inner", "fn helper() { return 2 }")],
+    ),
+    (
+        "import_function_local_callable_does_not_leak",
+        r#"fn seed() {
+    use inner.{helper}
+    return helper()
+}
+seed()
+print(helper())"#,
+        &[("inner", "fn helper() { return 2 }")],
+    ),
+    (
+        "import_nested_every_runtime_body",
+        r#"fn function_use() {
+    use nested_shared as unused_alias
+    use nested_shared.{inc}
+    return inc(1)
+}
+fn branch_use(which) {
+    if which == 1 {
+        use nested_shared
+        return inc(2)
+    } else if which == 2 {
+        use nested_shared.{inc}
+        return inc(3)
+    } else {
+        use nested_shared
+        return inc(4)
+    }
+}
+fn loop_uses() {
+    let total = 0
+    while total == 0 {
+        use nested_shared
+        total = inc(4)
+    }
+    repeat 1 {
+        use nested_shared.{inc}
+        total += inc(5)
+    }
+    for item in [6] {
+        use nested_shared
+        total += inc(item)
+    }
+    return total
+}
+struct Holder { value }
+fn Holder.load(self) {
+    use nested_shared
+    return inc(self.value)
+}
+let lambda_use = fn() {
+    use nested_shared.{inc}
+    return inc(7)
+}
+let match_lambda_use = match 1 {
+    1 => fn() {
+        use nested_shared
+        return inc(8)
+    },
+    _ => fn() { return 0 },
+}
+print(function_use())
+print(branch_use(1), branch_use(2), branch_use(3))
+print(loop_uses())
+print(Holder { value: 6 }.load())
+print(lambda_use(), match_lambda_use())"#,
+        &[("nested_shared", "fn inc(n) { return n + 1 }")],
+    ),
+    (
+        "import_nested_inside_imported_module",
+        r#"use wrapper as wrapper_module
+print(wrapper_module.run())"#,
+        &[
+            (
+                "wrapper",
+                "fn run() { use leaf.{value}; return value }",
+            ),
+            ("leaf", "let value = 42"),
+        ],
+    ),
+    (
+        "import_nested_alias_type_construction",
+        r#"fn build_and_read() {
+    use nested_types as types
+    let point = types.Point { value: 41 }
+    return match point {
+        types.Point { value } => value + 1,
+        _ => 0,
+    }
+}
+print(build_and_read())"#,
+        &[("nested_types", "struct Point { value }")],
+    ),
+    (
+        "import_nested_alias_shadows_outer_alias",
+        r#"use first_types as types
+if true {
+    use second_types as types
+    let point = types.Point { second: 42 }
+    print(point.second)
+}"#,
+        &[
+            ("first_types", "struct Point { first }"),
+            ("second_types", "struct Point { second }"),
+        ],
+    ),
+    (
+        "import_selective_value_shadowing_is_lexical_and_first_win",
+        r#"let value = 1
+if true {
+    use shadow_values.{value}
+    print(value)
+}
+if true {
+    let value = 10
+    use shadow_values.{value}
+    print(value)
+}"#,
+        &[("shadow_values", "let value = 2")],
+    ),
+    (
+        "import_glob_value_shadowing_is_lexical_and_first_win",
+        r#"let value = 1
+if true {
+    use shadow_values
+    print(value)
+}
+if true {
+    let value = 10
+    use shadow_values
+    print(value)
+}"#,
+        &[("shadow_values", "let value = 2")],
+    ),
+    (
+        "import_bare_type_conflicts_are_first_win_per_scope",
+        r#"if true {
+    use first_types.{Point}
+    use second_types.{Point}
+    let selected = Point { first: 41 }
+    print(selected.first + 1)
+}
+if true {
+    use first_types
+    use second_types
+    let globbed = Point { first: 40 }
+    print(globbed.first + 2)
+}"#,
+        &[
+            ("first_types", "struct Point { first }"),
+            ("second_types", "struct Point { second }"),
+        ],
+    ),
+    (
+        "import_selective_alias_pattern_excludes_unselected_type",
+        r#"use alias_types as all
+use alias_types.{A} as narrowed
+let value = all.B { value: 1 }
+print(match value {
+    narrowed.B { value } => "matched",
+    _ => "missed",
+})"#,
+        &[(
+            "alias_types",
+            "struct A { value }\nstruct B { value }",
+        )],
+    ),
+    (
+        "import_lazy_edge_is_not_eager_cycle",
+        r#"use lazy_a as a
+print(a.value)
+print(a.load())"#,
+        &[
+            (
+                "lazy_a",
+                "let value = 10\nfn load() { use lazy_b; return answer() }",
+            ),
+            ("lazy_b", "use lazy_a as parent\nfn answer() { return 32 }"),
+        ],
+    ),
     // ─── Result methods (engine-level, no `use` required) ────
     (
         "result_method_helpers",

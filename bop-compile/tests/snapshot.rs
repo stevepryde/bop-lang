@@ -846,12 +846,20 @@ fn compile_with_modules(
     )
 }
 
-fn module_export_fields(generated: &str, module: &str) -> Vec<String> {
-    let slug: String = module
+fn module_slug(module: &str) -> String {
+    module
         .as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect();
+        .collect()
+}
+
+fn module_load_marker(module: &str) -> String {
+    format!("fn __mod_{}_load(", module_slug(module))
+}
+
+fn module_export_fields(generated: &str, module: &str) -> Vec<String> {
+    let slug = module_slug(module);
     let marker = format!("struct BopModule{slug}Exports {{");
     let body = generated
         .split_once(&marker)
@@ -868,6 +876,310 @@ fn module_export_fields(generated: &str, module: &str) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+#[test]
+fn nested_import_discovery_reaches_every_statement_body_and_lambda_expression() {
+    let source = r#"fn exercise() {
+    use fn_dep as fn_module
+    if true {
+        use if_dep as if_module
+    } else if false {
+        use else_if_dep as else_if_module
+    } else {
+        use else_dep as else_module
+    }
+    while false {
+        use while_dep as while_module
+    }
+    repeat 0 {
+        use repeat_dep as repeat_module
+    }
+    for item in [] {
+        use for_dep as for_module
+    }
+}
+struct Holder { value }
+fn Holder.exercise(self) {
+    use method_dep as method_module
+}
+let direct = fn() {
+    use lambda_dep as lambda_module
+    return none
+}
+let from_match = match 1 {
+    1 => fn() {
+        use match_lambda_dep as match_module
+        return none
+    },
+    _ => fn() { return none },
+}"#;
+    let modules = [
+        "fn_dep",
+        "if_dep",
+        "else_if_dep",
+        "else_dep",
+        "while_dep",
+        "repeat_dep",
+        "for_dep",
+        "method_dep",
+        "lambda_dep",
+        "match_lambda_dep",
+    ]
+    .map(|name| (name, "let value = 1"));
+
+    let out = compile_with_modules(source, &modules).expect("discover every nested import");
+    for (module, _) in modules {
+        let marker = module_load_marker(module);
+        assert!(
+            out.contains(&marker),
+            "missing nested module `{module}` ({marker}) in generated output"
+        );
+    }
+}
+
+#[test]
+fn repeated_nested_imports_resolve_once_but_emit_per_runtime_scope() {
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(0_u32));
+    let resolver_calls = std::rc::Rc::clone(&calls);
+    let resolver: bop_compile::ModuleResolver = std::rc::Rc::new(std::cell::RefCell::new(
+        move |name: &str| {
+            if name == "shared" {
+                *resolver_calls.borrow_mut() += 1;
+                Some(Ok("fn helper(n) { return n + 10 }".to_string()))
+            } else {
+                None
+            }
+        },
+    ));
+    let source = r#"fn one() { use shared; return helper(1) }
+fn two() { use shared; return helper(2) }"#;
+    let out = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            module_resolver: Some(resolver),
+            ..Options::default()
+        },
+    )
+    .expect("transpile two function-local imports");
+
+    assert_eq!(*calls.borrow(), 1, "resolver must run once per module path");
+    let load_site = format!("= __mod_{}_load(ctx)?;", module_slug("shared"));
+    assert_eq!(
+        out.matches(&load_site).count(),
+        2,
+        "each function still needs its own runtime binding site:\n{out}"
+    );
+}
+
+#[test]
+fn nested_imports_do_not_become_module_re_exports() {
+    let out = compile_with_modules(
+        "use wrapper as wrapper_module",
+        &[
+            ("dep", "let value = 41\nlet hidden = 99"),
+            (
+                "wrapper",
+                r#"fn load() {
+    use dep.{value} as chosen
+    return chosen.value + 1
+}
+let own = 7"#,
+            ),
+        ],
+    )
+    .expect("transpile a module with a function-local selective alias");
+
+    assert!(out.contains(&module_load_marker("dep")));
+    assert_eq!(
+        module_export_fields(&out, "wrapper"),
+        ["__bop_user_value_6f776e", "__bop_user_value_6c6f6164"]
+    );
+}
+
+#[test]
+fn function_local_module_alias_does_not_leak_into_a_sibling_function() {
+    let error = compile_with_modules(
+        r#"fn seed_alias() {
+    use types as t
+    return none
+}
+fn lacks_import() {
+    return t.Point { value: 42 }
+}"#,
+        &[("types", "struct Point { value }")],
+    )
+    .expect_err("a function-local module alias must not reach a sibling function");
+
+    assert_eq!(error.message, "Struct `Point` is not declared");
+    assert_eq!(error.line, Some(6));
+}
+
+#[test]
+fn module_alias_conflicting_with_named_function_is_rejected() {
+    let error = compile_with_modules(
+        r#"fn dep() { return 1 }
+use dep as dep"#,
+        &[("dep", "let value = 42")],
+    )
+    .expect_err("a module alias must not replace a named function");
+
+    assert!(error.message.contains("would shadow an existing binding"));
+    assert_eq!(error.line, Some(2));
+}
+
+#[test]
+fn block_local_module_alias_does_not_leak_into_the_enclosing_scope() {
+    let error = compile_with_modules(
+        r#"if true {
+    use types as t
+}
+let leaked = t.Point { value: 42 }"#,
+        &[("types", "struct Point { value }")],
+    )
+    .expect_err("a block-local module alias must not reach its enclosing scope");
+
+    assert_eq!(error.message, "Struct `Point` is not declared");
+    assert_eq!(error.line, Some(4));
+}
+
+#[test]
+fn lambda_local_module_alias_does_not_leak_into_a_sibling_lambda() {
+    let error = compile_with_modules(
+        r#"let seed_alias = fn() {
+    use types as t
+    return none
+}
+let lacks_import = fn() {
+    return t.Point { value: 42 }
+}"#,
+        &[("types", "struct Point { value }")],
+    )
+    .expect_err("a lambda-local module alias must not reach a sibling lambda");
+
+    assert_eq!(error.message, "Struct `Point` is not declared");
+    assert_eq!(error.line, Some(6));
+}
+
+#[test]
+fn nested_import_bindings_shadow_outer_frames_but_not_the_current_frame() {
+    let out = compile_with_modules(
+        r#"use first as types
+let selected = 1
+let globbed = 1
+if true {
+    use second as types
+    use values.{selected}
+    use values
+    let point = types.Point { second: selected + globbed }
+}
+if true {
+    let selected = 10
+    use values.{selected}
+    let globbed = 20
+    use values
+}"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+            ("values", "let selected = 2\nlet globbed = 3"),
+        ],
+    )
+    .expect("nested imports may shadow outer frames and keep current-frame bindings");
+
+    assert!(out.contains("\"second\".to_string(), \"Point\".to_string()"));
+}
+
+#[test]
+fn same_scope_type_imports_are_first_win_for_selective_and_glob_forms() {
+    compile_with_modules(
+        r#"if true {
+    use first.{Point}
+    use second.{Point}
+    let selected = Point { first: 1 }
+}
+if true {
+    use first
+    use second
+    let globbed = Point { first: 2 }
+}"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+        ],
+    )
+    .expect("the first type import in each frame must retain the bare name");
+}
+
+#[test]
+fn selective_alias_type_shape_limits_construction_and_pattern_resolution() {
+    let construction_error = compile_with_modules(
+        "use types.{A} as narrowed\nlet bad = narrowed.B { value: 1 }",
+        &[(
+            "types",
+            "struct A { value }\nstruct B { value }",
+        )],
+    )
+    .expect_err("an unselected type must not resolve through a selective alias");
+    assert_eq!(construction_error.message, "Struct `B` is not declared");
+    assert_eq!(construction_error.line, Some(2));
+
+    let out = compile_with_modules(
+        r#"use types as all
+use types.{A} as narrowed
+let value = all.B { value: 1 }
+let result = match value {
+    narrowed.B { value } => "matched",
+    _ => "missed",
+}"#,
+        &[(
+            "types",
+            "struct A { value }\nstruct B { value }",
+        )],
+    )
+    .expect("an unselected pattern type remains a legal non-matching pattern");
+
+    assert!(out.contains("Option::Some(\"narrowed\"), \"A\""));
+    assert!(!out.contains("Option::Some(\"narrowed\"), \"B\""));
+}
+
+#[test]
+fn lazy_import_edges_do_not_create_false_cycles() {
+    let out = compile_with_modules(
+        "use a as root_a",
+        &[
+            (
+                "a",
+                "let value = 10\nfn load() { use b as nested_b; return nested_b.value }",
+            ),
+            ("b", "use a as parent\nlet value = 32"),
+        ],
+    )
+    .expect("a lazy a -> b edge must not form an eager b -> a cycle");
+
+    assert!(out.contains(&module_load_marker("a")));
+    assert!(out.contains(&module_load_marker("b")));
+}
+
+#[test]
+fn nested_import_missing_and_eager_cycle_diagnostics_keep_source_lines() {
+    let missing = compile_with_modules(
+        "fn run() {\n    let before = 1\n    use absent\n}",
+        &[],
+    )
+    .expect_err("nested missing module must fail during graph discovery");
+    assert_eq!(missing.message, "Module `absent` not found");
+    assert_eq!(missing.line, Some(3));
+
+    let cycle = compile_with_modules(
+        "fn run() {\n    use a\n}",
+        &[("a", "use b"), ("b", "use a")],
+    )
+    .expect_err("top-level module imports still form an eager cycle");
+    assert_eq!(cycle.message, "Circular import: module `a`");
+    assert_eq!(cycle.line, Some(1));
 }
 
 #[test]

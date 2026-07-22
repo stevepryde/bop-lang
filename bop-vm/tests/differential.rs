@@ -2578,6 +2578,140 @@ print(x)"#),
 }
 
 #[test]
+fn block_local_module_alias_does_not_leak_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let error = run_err(
+        r#"if true {
+    use types as t
+}
+print(t.Point { value: 42 })"#,
+    );
+    assert!(error.contains("isn't a module alias in scope"), "got: {error}");
+}
+
+#[test]
+fn function_and_lambda_local_module_aliases_do_not_leak_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    for source in [
+        r#"fn seed() {
+    use types as t
+}
+seed()
+print(t.Point { value: 42 })"#,
+        r#"let seed = fn() {
+    use types as t
+}
+seed()
+print(t.Point { value: 42 })"#,
+    ] {
+        let error = run_err(source);
+        assert!(error.contains("isn't a module alias in scope"), "got: {error}");
+    }
+}
+
+#[test]
+fn named_function_does_not_dynamically_inherit_caller_alias_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let error = run_err(
+        r#"fn build() { return t.Point { value: 42 } }
+if true {
+    use types as t
+    print(build())
+}"#,
+    );
+    assert!(error.contains("isn't a module alias in scope"), "got: {error}");
+}
+
+#[test]
+fn inner_module_alias_shadow_restores_outer_alias_diff() {
+    set_modules(&[
+        ("first", "struct Point { first }"),
+        ("second", "struct Point { second }"),
+    ]);
+    let outcome = run_both(
+        r#"use first as t
+if true {
+    use second as t
+    print(t.Point { second: 2 }.second)
+}
+print(t.Point { first: 1 }.first)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["2", "1"]);
+}
+
+#[test]
+fn module_alias_conflicting_with_named_function_is_rejected_diff() {
+    set_modules(&[("dep", "let value = 42")]);
+    let error = run_err(
+        r#"fn dep() { return 1 }
+use dep as dep"#,
+    );
+    assert!(error.contains("already bound"), "got: {error}");
+}
+
+#[test]
+fn selective_and_glob_function_imports_preserve_existing_named_fn_diff() {
+    set_modules(&[("dep", "fn pick() { return 42 }")]);
+    for import in ["use dep.{pick}", "use dep"] {
+        let source = format!("fn pick() {{ return 1 }}\n{import}\nprint(pick())");
+        assert_eq!(say(&source), "1");
+    }
+}
+
+#[test]
+fn plain_glob_idempotency_is_lexical_across_siblings_and_root_diff() {
+    set_modules(&[("dep", "let value = 42")]);
+    let outcome = run_both(
+        r#"if true {
+    use dep
+    print(value)
+}
+if true {
+    use dep
+    print(value)
+}
+use dep
+print(value)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["42", "42", "42"]);
+}
+
+#[test]
+fn local_imported_callable_shadows_then_restores_and_does_not_leak_diff() {
+    set_modules(&[
+        ("outer", "fn helper() { return 1 }"),
+        ("inner", "fn helper() { return 2 }"),
+    ]);
+    let outcome = run_both(
+        r#"use outer
+fn local() {
+    use inner.{helper}
+    return helper()
+}
+print(local())
+print(helper())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["2", "1"]);
+
+    set_modules(&[("inner", "fn helper() { return 2 }")]);
+    let error = run_err(
+        r#"fn seed() {
+    use inner.{helper}
+    return helper()
+}
+seed()
+print(helper())"#,
+    );
+    assert!(error.contains("Function `helper` not found"), "got: {error}");
+}
+
+#[test]
 fn aliased_module_functions_keep_private_sibling_scope_without_bare_leaks() {
     set_modules(&[(
         "internal",

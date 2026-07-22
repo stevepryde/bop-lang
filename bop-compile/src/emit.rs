@@ -354,9 +354,11 @@ fn collect_types_from_stmts(
 // ─── Module graph ──────────────────────────────────────────────────
 
 /// Transitively-resolved modules, keyed by dot-joined path and
-/// ordered so each module comes after the ones it imports
-/// (topological / leaves-first). Produced once per transpile and
-/// handed to the emitter.
+/// ordered so each module comes after its eager top-level imports
+/// (topological / leaves-first). Lazy imports in nested runtime
+/// bodies are included in the graph without imposing an eager
+/// ordering edge. Produced once per transpile and handed to the
+/// emitter.
 pub(crate) struct ModuleGraph {
     pub order: Vec<String>,
     pub modules: HashMap<String, ModuleEntry>,
@@ -415,17 +417,35 @@ fn build_module_graph(
         }
     };
 
+    // Discovery and eager-dependency analysis are deliberately
+    // separate. A `use` inside a fn/block/lambda must make its
+    // module available to codegen, but it neither runs while the
+    // containing module loads nor contributes re-exports. Treating
+    // that lazy edge like a top-level edge would also report false
+    // cycles for harmless patterns such as `fn f() { use self }`.
+    let mut resolved: HashMap<String, Vec<Stmt>> = HashMap::new();
+    let mut discovery_order: Vec<(String, u32)> = Vec::new();
+    for import in &root_imports {
+        resolve_module_tree(
+            &import.path,
+            import.line,
+            &resolver,
+            &mut resolved,
+            &mut discovery_order,
+        )?;
+    }
+
     let mut graph = ModuleGraph {
         order: Vec::new(),
         modules: HashMap::new(),
     };
     let mut visiting: BTreeSet<String> = BTreeSet::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();
-    for import in &root_imports {
-        visit_module(
-            &import.path,
-            import.line,
-            &resolver,
+    for (name, line) in discovery_order {
+        analyze_module(
+            &name,
+            line,
+            &resolved,
             &mut graph,
             &mut visiting,
             &mut visited,
@@ -434,10 +454,62 @@ fn build_module_graph(
     Ok(graph)
 }
 
-fn visit_module(
+/// Resolve and parse every module reachable through any runtime
+/// statement body. The AST is cached before following imports so a
+/// lazy self/mutual reference is discovery-idempotent rather than a
+/// compile-time cycle. Real load-time cycles are checked later from
+/// top-level edges only.
+fn resolve_module_tree(
     name: &str,
     line: u32,
     resolver: &crate::ModuleResolver,
+    resolved: &mut HashMap<String, Vec<Stmt>>,
+    discovery_order: &mut Vec<(String, u32)>,
+) -> Result<(), BopError> {
+    if resolved.contains_key(name) {
+        return Ok(());
+    }
+
+    let source = {
+        let mut r = resolver.borrow_mut();
+        match r(name) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(BopError::runtime(
+                    format!("Module `{}` not found", name),
+                    line,
+                ));
+            }
+        }
+    };
+    let ast = bop::parse(&source)?;
+    let imports = collect_imports_in_stmts(&ast);
+
+    // Insert before recursion: this is both the resolver-work cache
+    // and the guard against false cycles through lazy import sites.
+    resolved.insert(name.to_string(), ast);
+    discovery_order.push((name.to_string(), line));
+    for import in &imports {
+        resolve_module_tree(
+            &import.path,
+            import.line,
+            resolver,
+            resolved,
+            discovery_order,
+        )?;
+    }
+    Ok(())
+}
+
+/// Compute load order and effective exports from eager (module
+/// top-level) imports. Nested imports were resolved in the discovery
+/// phase, but are intentionally absent here because their bindings
+/// are local to the runtime body that executes them.
+fn analyze_module(
+    name: &str,
+    line: u32,
+    resolved: &HashMap<String, Vec<Stmt>>,
     graph: &mut ModuleGraph,
     visiting: &mut BTreeSet<String>,
     visited: &mut BTreeSet<String>,
@@ -453,30 +525,19 @@ fn visit_module(
     }
     visiting.insert(name.to_string());
 
-    // Resolve + parse.
-    let source = {
-        let mut r = resolver.borrow_mut();
-        match r(name) {
-            Some(Ok(s)) => s,
-            Some(Err(e)) => return Err(e),
-            None => {
-                return Err(BopError::runtime(
-                    format!("Module `{}` not found", name),
-                    line,
-                ));
-            }
-        }
-    };
-    let ast = bop::parse(&source)?;
+    let ast = resolved
+        .get(name)
+        .cloned()
+        .expect("discovered module has a parsed AST");
 
-    // Collect this module's direct imports and visit them first so
-    // `effective_exports` is ready when we pack ours.
-    let direct_imports = collect_imports_in_stmts(&ast);
+    // Only top-level imports execute as part of module loading and
+    // can contribute bindings/types to this module's exports.
+    let direct_imports = collect_top_level_imports(&ast);
     for import in &direct_imports {
-        visit_module(
+        analyze_module(
             &import.path,
             import.line,
-            resolver,
+            resolved,
             graph,
             visiting,
             visited,
@@ -587,16 +648,182 @@ fn push_unique(names: &mut Vec<String>, seen: &mut BTreeSet<String>, name: &str)
 fn collect_imports_in_stmts(stmts: &[Stmt]) -> Vec<ModuleImport> {
     let mut out = Vec::new();
     for stmt in stmts {
-        if let StmtKind::Use { path, items, alias } = &stmt.kind {
-            out.push(ModuleImport {
-                path: path.clone(),
-                items: items.clone(),
-                alias: alias.clone(),
-                line: stmt.line,
-            });
-        }
+        collect_imports_in_stmt(stmt, &mut out);
     }
     out
+}
+
+fn collect_top_level_imports(stmts: &[Stmt]) -> Vec<ModuleImport> {
+    stmts
+        .iter()
+        .filter_map(module_import_from_stmt)
+        .collect()
+}
+
+fn module_import_from_stmt(stmt: &Stmt) -> Option<ModuleImport> {
+    let StmtKind::Use { path, items, alias } = &stmt.kind else {
+        return None;
+    };
+    Some(ModuleImport {
+        path: path.clone(),
+        items: items.clone(),
+        alias: alias.clone(),
+        line: stmt.line,
+    })
+}
+
+fn collect_imports_in_stmt(stmt: &Stmt, out: &mut Vec<ModuleImport>) {
+    match &stmt.kind {
+        StmtKind::Use { .. } => {
+            out.push(module_import_from_stmt(stmt).expect("matched use statement"));
+        }
+        StmtKind::Let { value, .. } => collect_imports_in_expr(value, out),
+        StmtKind::Assign { target, value, .. } => {
+            collect_imports_in_assign_target(target, out);
+            collect_imports_in_expr(value, out);
+        }
+        StmtKind::If {
+            condition,
+            body,
+            else_ifs,
+            else_body,
+        } => {
+            collect_imports_in_expr(condition, out);
+            collect_imports_in_stmts_into(body, out);
+            for (condition, body) in else_ifs {
+                collect_imports_in_expr(condition, out);
+                collect_imports_in_stmts_into(body, out);
+            }
+            if let Some(body) = else_body {
+                collect_imports_in_stmts_into(body, out);
+            }
+        }
+        StmtKind::While { condition, body } => {
+            collect_imports_in_expr(condition, out);
+            collect_imports_in_stmts_into(body, out);
+        }
+        StmtKind::Repeat { count, body } => {
+            collect_imports_in_expr(count, out);
+            collect_imports_in_stmts_into(body, out);
+        }
+        StmtKind::ForIn { iterable, body, .. } => {
+            collect_imports_in_expr(iterable, out);
+            collect_imports_in_stmts_into(body, out);
+        }
+        StmtKind::FnDecl { body, .. } | StmtKind::MethodDecl { body, .. } => {
+            collect_imports_in_stmts_into(body, out);
+        }
+        StmtKind::Return { value } => {
+            if let Some(value) = value {
+                collect_imports_in_expr(value, out);
+            }
+        }
+        StmtKind::ExprStmt(expr) => collect_imports_in_expr(expr, out),
+        StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::StructDecl { .. }
+        | StmtKind::EnumDecl { .. } => {}
+    }
+}
+
+fn collect_imports_in_stmts_into(stmts: &[Stmt], out: &mut Vec<ModuleImport>) {
+    for stmt in stmts {
+        collect_imports_in_stmt(stmt, out);
+    }
+}
+
+fn collect_imports_in_assign_target(target: &AssignTarget, out: &mut Vec<ModuleImport>) {
+    match target {
+        AssignTarget::Variable(_) => {}
+        AssignTarget::Index { object, index } => {
+            collect_imports_in_expr(object, out);
+            collect_imports_in_expr(index, out);
+        }
+        AssignTarget::Field { object, .. } => collect_imports_in_expr(object, out),
+    }
+}
+
+fn collect_imports_in_expr(expr: &Expr, out: &mut Vec<ModuleImport>) {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::StringInterp(_)
+        | ExprKind::Bool(_)
+        | ExprKind::None
+        | ExprKind::Ident(_) => {}
+        ExprKind::BinaryOp { left, right, .. } => {
+            collect_imports_in_expr(left, out);
+            collect_imports_in_expr(right, out);
+        }
+        ExprKind::UnaryOp { expr, .. } | ExprKind::Try(expr) => {
+            collect_imports_in_expr(expr, out);
+        }
+        ExprKind::Call { callee, args } => {
+            collect_imports_in_expr(callee, out);
+            for arg in args {
+                collect_imports_in_expr(arg, out);
+            }
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            collect_imports_in_expr(object, out);
+            for arg in args {
+                collect_imports_in_expr(arg, out);
+            }
+        }
+        ExprKind::FieldAccess { object, .. } => collect_imports_in_expr(object, out),
+        ExprKind::StructConstruct { fields, .. } => {
+            for (_, value) in fields {
+                collect_imports_in_expr(value, out);
+            }
+        }
+        ExprKind::EnumConstruct { payload, .. } => match payload {
+            VariantPayload::Unit => {}
+            VariantPayload::Tuple(values) => {
+                for value in values {
+                    collect_imports_in_expr(value, out);
+                }
+            }
+            VariantPayload::Struct(fields) => {
+                for (_, value) in fields {
+                    collect_imports_in_expr(value, out);
+                }
+            }
+        },
+        ExprKind::Index { object, index } => {
+            collect_imports_in_expr(object, out);
+            collect_imports_in_expr(index, out);
+        }
+        ExprKind::Array(values) => {
+            for value in values {
+                collect_imports_in_expr(value, out);
+            }
+        }
+        ExprKind::Dict(entries) => {
+            for (_, value) in entries {
+                collect_imports_in_expr(value, out);
+            }
+        }
+        ExprKind::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_imports_in_expr(condition, out);
+            collect_imports_in_expr(then_expr, out);
+            collect_imports_in_expr(else_expr, out);
+        }
+        ExprKind::Lambda { body, .. } => collect_imports_in_stmts_into(body, out),
+        ExprKind::Match { scrutinee, arms } => {
+            collect_imports_in_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_imports_in_expr(guard, out);
+                }
+                collect_imports_in_expr(&arm.body, out);
+            }
+        }
+    }
 }
 
 fn collect_top_level_lets(stmts: &[Stmt]) -> Vec<String> {
@@ -706,6 +933,12 @@ struct EmissionScope {
     plain_glob_imports: HashSet<String>,
 }
 
+#[derive(Clone)]
+struct ModuleAliasBinding {
+    module_path: String,
+    exposed_types: BTreeSet<String>,
+}
+
 struct Emitter {
     out: String,
     indent: usize,
@@ -737,11 +970,13 @@ struct Emitter {
     /// stack to produce the correct module path literal in the
     /// emitted Rust.
     type_bindings: Vec<HashMap<String, String>>,
-    /// Module-alias map: `alias → module_path`. Populated at
-    /// emit time by aliased `use` statements; consulted when
-    /// a namespaced reference (`m.Color`) needs to be resolved
-    /// to a module path for construction or pattern matching.
-    module_aliases: HashMap<String, String>,
+    /// Per-scope maps of module aliases. Each binding retains both
+    /// the module path and the type surface selected by the `use`
+    /// statement, so `use shapes.{Circle} as s` cannot resolve
+    /// `s.Square` during construction or pattern matching. Kept in
+    /// lockstep with `type_bindings` so aliases introduced in a fn,
+    /// lambda, or block cannot leak into sibling/enclosing scopes.
+    module_aliases: Vec<HashMap<String, ModuleAliasBinding>>,
     /// Stack of generated Rust scopes. Each frame owns both its
     /// `let`-bound Bop names and the plain-glob imports that emitted
     /// those bindings. Keeping them together prevents an import in
@@ -764,6 +999,10 @@ struct Emitter {
     /// arm should propagate via `return Ok(...)` (fn body) or
     /// raise a real error (top-level program).
     in_top_level: bool,
+    /// True while emitting a named function, method, or lambda body. Combined
+    /// with `scope_stack` depth to distinguish a module's direct use-site from
+    /// a nested lexical import when applying named-function first-win rules.
+    in_callable_body: bool,
 }
 
 impl Emitter {
@@ -802,21 +1041,26 @@ impl Emitter {
             module_prefix: String::new(),
             current_module: String::from(bop::value::ROOT_MODULE_PATH),
             type_bindings: vec![builtin_frame],
-            module_aliases: HashMap::new(),
+            module_aliases: vec![HashMap::new()],
             scope_stack: Vec::new(),
             in_top_level: false,
+            in_callable_body: false,
         }
     }
 
     fn push_scope(&mut self) {
         self.scope_stack.push(EmissionScope::default());
         self.type_bindings.push(HashMap::new());
+        self.module_aliases.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scope_stack.pop();
         if self.type_bindings.len() > 1 {
             self.type_bindings.pop();
+        }
+        if self.module_aliases.len() > 1 {
+            self.module_aliases.pop();
         }
     }
 
@@ -831,14 +1075,22 @@ impl Emitter {
         type_name: &str,
     ) -> Option<String> {
         if let Some(ns) = namespace {
-            if let Some(mp) = self.module_aliases.get(ns) {
-                // Verify the alias actually exports this type.
-                if self.types.structs.contains_key(&(mp.clone(), type_name.to_string()))
-                    || self.types.enums.contains_key(&(mp.clone(), type_name.to_string()))
-                {
-                    return Some(mp.clone());
+            for frame in self.module_aliases.iter().rev() {
+                if let Some(binding) = frame.get(ns) {
+                    // Verify the alias actually exports this type.
+                    if binding.exposed_types.contains(type_name)
+                        && (self.types.structs.contains_key(&(
+                            binding.module_path.clone(),
+                            type_name.to_string(),
+                        )) || self.types.enums.contains_key(&(
+                            binding.module_path.clone(),
+                            type_name.to_string(),
+                        )))
+                    {
+                        return Some(binding.module_path.clone());
+                    }
+                    return None;
                 }
-                return None;
             }
             return None;
         }
@@ -857,6 +1109,33 @@ impl Emitter {
     fn bind_type(&mut self, name: &str, module_path: &str) {
         if let Some(frame) = self.type_bindings.last_mut() {
             frame.insert(name.to_string(), module_path.to_string());
+        }
+    }
+
+    /// Imported types are first-win within one lexical frame. A
+    /// new inner frame remains free to shadow an outer binding.
+    fn bind_imported_type(&mut self, name: &str, module_path: &str) {
+        if let Some(frame) = self.type_bindings.last_mut() {
+            frame
+                .entry(name.to_string())
+                .or_insert_with(|| module_path.to_string());
+        }
+    }
+
+    fn bind_module_alias(
+        &mut self,
+        alias: &str,
+        module_path: &str,
+        exposed_types: &[String],
+    ) {
+        if let Some(frame) = self.module_aliases.last_mut() {
+            frame.insert(
+                alias.to_string(),
+                ModuleAliasBinding {
+                    module_path: module_path.to_string(),
+                    exposed_types: exposed_types.iter().cloned().collect(),
+                },
+            );
         }
     }
 
@@ -893,28 +1172,32 @@ impl Emitter {
         // module). Cross-reference the TypeRegistry to enumerate
         // the types each alias's module actually exports.
         let mut alias_arms = String::new();
-        let mut aliases: Vec<(&String, &String)> = self.module_aliases.iter().collect();
-        aliases.sort();
-        for (alias, mp) in aliases {
-            let mut exported: Vec<String> = Vec::new();
-            for (key, _) in &self.types.structs {
-                if &key.0 == mp {
-                    exported.push(key.1.clone());
+        let mut aliases: Vec<(&String, &ModuleAliasBinding)> = Vec::new();
+        let mut seen_aliases: HashSet<String> = HashSet::new();
+        for frame in self.module_aliases.iter().rev() {
+            let mut frame_aliases: Vec<(&String, &ModuleAliasBinding)> =
+                frame.iter().collect();
+            frame_aliases.sort_by(|a, b| a.0.cmp(b.0));
+            for (alias, binding) in frame_aliases {
+                if seen_aliases.insert(alias.clone()) {
+                    aliases.push((alias, binding));
                 }
             }
-            for (key, _) in &self.types.enums {
-                if &key.0 == mp {
-                    exported.push(key.1.clone());
+        }
+        aliases.sort_by(|a, b| a.0.cmp(b.0));
+        for (alias, binding) in aliases {
+            for tn in &binding.exposed_types {
+                let key = (binding.module_path.clone(), tn.clone());
+                if !self.types.structs.contains_key(&key)
+                    && !self.types.enums.contains_key(&key)
+                {
+                    continue;
                 }
-            }
-            exported.sort();
-            exported.dedup();
-            for tn in exported {
                 alias_arms.push_str(&format!(
                     "                        (::std::option::Option::Some({alias_lit}), {tn}) => ::std::option::Option::Some({mp}.to_string()),\n",
                     alias_lit = rust_string_literal(alias),
-                    tn = rust_string_literal(&tn),
-                    mp = rust_string_literal(mp),
+                    tn = rust_string_literal(tn),
+                    mp = rust_string_literal(&binding.module_path),
                 ));
             }
         }
@@ -942,6 +1225,16 @@ impl Emitter {
             .any(|scope| scope.locals.contains(name))
     }
 
+    fn is_local_in_current_scope(&self, name: &str) -> bool {
+        self.scope_stack
+            .last()
+            .is_some_and(|scope| scope.locals.contains(name))
+    }
+
+    fn is_module_top_scope(&self) -> bool {
+        !self.in_callable_body && self.scope_stack.len() == 1
+    }
+
     fn rust_fn_name(&self, name: &str) -> String {
         rust_fn_name_with(&self.module_prefix, name)
     }
@@ -964,49 +1257,41 @@ impl Emitter {
     fn seed_uses(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             if let StmtKind::Use { path, items, alias } = &stmt.kind {
-                match (items, alias) {
-                    (_, Some(a)) => {
-                        self.module_aliases.insert(a.clone(), path.clone());
-                    }
-                    (Some(list), None) => {
-                        // Selective imports introduce each listed
-                        // type by bare name.
-                        for name in list {
-                            if self.is_type_in_module(path, name) {
-                                self.bind_type(name, path);
-                            }
-                        }
-                    }
-                    (None, None) => {
-                        // Glob: bring every public type across
-                        // by bare name. Collect into a temp to
-                        // avoid holding an immutable borrow of
-                        // `self.types` across the `bind_type`
-                        // mutation.
-                        let mut glob_types: Vec<String> = Vec::new();
-                        for (mp, tn) in self.types.structs.keys() {
-                            if mp == path && !tn.starts_with('_') {
-                                glob_types.push(tn.clone());
-                            }
-                        }
-                        for (mp, tn) in self.types.enums.keys() {
-                            if mp == path && !tn.starts_with('_') {
-                                glob_types.push(tn.clone());
-                            }
-                        }
-                        for tn in glob_types {
-                            self.bind_type(&tn, path);
-                        }
+                let exposed_types =
+                    self.imported_type_names(path, items.as_deref(), alias.is_some());
+                if let Some(alias_name) = alias {
+                    self.bind_module_alias(alias_name, path, &exposed_types);
+                } else {
+                    for name in exposed_types {
+                        self.bind_imported_type(&name, path);
                     }
                 }
             }
         }
     }
 
-    fn is_type_in_module(&self, module_path: &str, type_name: &str) -> bool {
-        let key = (module_path.to_string(), type_name.to_string());
-        self.types.structs.contains_key(&key)
-            || self.types.enums.contains_key(&key)
+    fn imported_type_names(
+        &self,
+        module_path: &str,
+        items: Option<&[String]>,
+        aliased: bool,
+    ) -> Vec<String> {
+        let Some(entry) = self.modules.modules.get(module_path) else {
+            return Vec::new();
+        };
+        match items {
+            Some(items) => items
+                .iter()
+                .filter(|name| entry.effective_types.iter().any(|ty| ty == *name))
+                .cloned()
+                .collect(),
+            None => entry
+                .effective_types
+                .iter()
+                .filter(|name| aliased || !name.starts_with('_'))
+                .cloned()
+                .collect(),
+        }
     }
 
     /// Pre-seed the current `type_bindings` frame with every
@@ -1048,9 +1333,9 @@ impl Emitter {
         // are visible to the fn bodies we're about to emit.
         self.seed_types_for_module(bop::value::ROOT_MODULE_PATH);
         self.seed_uses(stmts);
-        // Imported modules emit first (topo-ordered — leaves
-        // first) so their fns, exports, and load fns exist by
-        // the time the root program's code references them.
+        // Imported modules emit first. Eager top-level edges are
+        // topo-ordered leaves-first; lazy nested edges need no Rust
+        // item ordering but are present in the same resolved graph.
         self.emit_imported_modules()?;
         // Top-level fn declarations move out of `run_program`'s
         // body to module scope. That way the `__bop_user_fn_value_*`
@@ -1131,8 +1416,10 @@ impl Emitter {
         );
         let saved_bindings =
             std::mem::replace(&mut self.type_bindings, vec![module_frame]);
-        let saved_aliases =
-            std::mem::take(&mut self.module_aliases);
+        let saved_aliases = std::mem::replace(
+            &mut self.module_aliases,
+            vec![HashMap::new()],
+        );
         // Seed this module's types too — see
         // `seed_types_for_module` for why this matters. Methods
         // inside the module need to resolve bare type names
@@ -1305,7 +1592,9 @@ impl Emitter {
                     .map(|t| format!("{}.to_string()", rust_string_literal(t)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if self.is_local(alias_name) {
+                if self.is_local_in_current_scope(alias_name)
+                    || self.fn_info.all_fns.contains_key(alias_name)
+                {
                     return Err(BopError::runtime(
                         format!(
                             "Alias `{}` in `use {} as {}` would shadow an existing binding",
@@ -1328,8 +1617,7 @@ impl Emitter {
                 // time resolution is sufficient here because
                 // the AOT bakes module_path literals directly
                 // into construction + match sites.
-                self.module_aliases
-                    .insert(alias_name.to_string(), path.to_string());
+                self.bind_module_alias(alias_name, path, &expose_types);
             }
             None => {
                 // Non-aliased: inject each binding as a local.
@@ -1339,25 +1627,15 @@ impl Emitter {
                 // construction + pattern sites can resolve
                 // the bare name to the right module path.
                 for name in &expose_bindings {
-                    if self.is_local(name) {
-                        if items.is_some() {
-                            // Explicit: an explicit conflict is a
-                            // hard error.
-                            return Err(BopError::runtime(
-                                format!(
-                                    "Use of `{}` from `{}` would shadow an existing binding",
-                                    name, path
-                                ),
-                                line,
-                            ));
-                        } else {
-                            // Glob: first-win, skip silently to
-                            // match the walker's warn-and-keep
-                            // behaviour. (We don't surface the
-                            // warning through AOT; the walker is
-                            // the canonical source for that.)
-                            continue;
-                        }
+                    // Every non-aliased import form is first-win in
+                    // the current frame. An outer-frame binding is
+                    // not a clash: this new Rust block should shadow
+                    // it just like the walker and VM value scopes.
+                    if self.is_local_in_current_scope(name)
+                        || (self.is_module_top_scope()
+                            && self.fn_info.all_fns.contains_key(name))
+                    {
+                        continue;
                     }
                     self.line(&format!(
                         "let mut {ident}: ::bop::value::Value = {tmp}.{ident}.clone();",
@@ -1367,8 +1645,7 @@ impl Emitter {
                     self.bind_local(name);
                 }
                 for tn in &expose_types {
-                    let mp = path.to_string();
-                    self.bind_type(tn, &mp);
+                    self.bind_imported_type(tn, path);
                 }
                 if items.is_none() {
                     self.scope_stack
@@ -2184,6 +2461,8 @@ impl Emitter {
         // real error.
         let saved_top_level = self.in_top_level;
         self.in_top_level = false;
+        let saved_callable_body = self.in_callable_body;
+        self.in_callable_body = true;
         // Function-entry checkpoint — matches the plan's "step-count
         // checks at loop backedges / function entry". No-op outside
         // sandbox mode.
@@ -2209,6 +2488,7 @@ impl Emitter {
         self.line("Ok(::bop::value::Value::None)");
         self.tmp_counter = saved_tmp;
         self.in_top_level = saved_top_level;
+        self.in_callable_body = saved_callable_body;
         self.close_block();
         Ok(())
     }
@@ -3352,9 +3632,11 @@ impl Emitter {
         let saved_indent = self.indent;
         let saved_tmp = self.tmp_counter;
         let saved_top_level = self.in_top_level;
+        let saved_callable_body = self.in_callable_body;
         self.indent = 0;
         self.tmp_counter = 0;
         self.in_top_level = false;
+        self.in_callable_body = true;
         for s in body {
             self.emit_stmt(s)?;
         }
@@ -3362,6 +3644,7 @@ impl Emitter {
         self.indent = saved_indent;
         self.tmp_counter = saved_tmp;
         self.in_top_level = saved_top_level;
+        self.in_callable_body = saved_callable_body;
 
         self.pop_scope();
         self.scope_stack = saved_scope_stack;
@@ -3549,9 +3832,8 @@ fn scan_free_vars_stmt(
         }
         StmtKind::Break | StmtKind::Continue => {}
         StmtKind::Use { .. } => {
-            // Imports inside lambda bodies are already rejected at
-            // emit time for the AOT — leave the scan a no-op
-            // rather than inventing phantom captures.
+            // Import bindings are created when the lambda executes,
+            // so the use site itself does not capture an outer value.
         }
         StmtKind::StructDecl { .. } => {
             // Struct declarations don't reference any identifiers

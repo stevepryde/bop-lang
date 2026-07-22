@@ -140,6 +140,9 @@ struct Frame {
     /// Function exit truncates back to the caller depth so an early return
     /// cannot leak type scopes whose `PopScope` was skipped.
     type_scope_base: usize,
+    /// Protected depth of the VM-wide module-alias/imported-callable stacks at
+    /// frame entry. Function lookup sees frame zero plus frames at/above it.
+    alias_scope_base: usize,
     stack_base: usize,
     is_function: bool,
     /// Defining module for named-function and module-exported closure bodies.
@@ -161,6 +164,7 @@ impl Frame {
             scopes,
             // The builtin type-binding map is the top frame's protected base.
             type_scope_base: 1,
+            alias_scope_base: 1,
             stack_base: 0,
             is_function: false,
             function_module: None,
@@ -173,6 +177,7 @@ impl Frame {
         slots: Vec<Value>,
         scopes: Vec<BTreeMap<String, Value>>,
         type_scope_base: usize,
+        alias_scope_base: usize,
         stack_base: usize,
         function_module: Option<String>,
         wrap: FrameWrap,
@@ -184,6 +189,7 @@ impl Frame {
             scope_base: scopes.len(),
             scopes,
             type_scope_base,
+            alias_scope_base,
             stack_base,
             is_function: true,
             function_module,
@@ -414,7 +420,7 @@ pub struct Vm<'h, H: BopHost> {
     step_budget: u64,
     rand_state: u64,
     imports: ImportCache,
-    imported_here: BTreeSet<String>,
+    imported_here: Vec<BTreeSet<String>>,
     limits: BopLimits,
     /// Module this VM is running — tags newly declared types
     /// with their full identity so two modules declaring the
@@ -445,7 +451,9 @@ pub struct Vm<'h, H: BopHost> {
     /// across function boundaries so namespaced references
     /// inside fn bodies (`p.Color::Red` in a pattern) can still
     /// resolve to the aliased module.
-    module_aliases: BTreeMap<String, Rc<bop::value::BopModule>>,
+    module_aliases: Vec<BTreeMap<String, Rc<bop::value::BopModule>>>,
+    /// Non-aliased imported callables, paired with lexical scope frames.
+    imported_functions: Vec<BTreeMap<String, Rc<FnEntry>>>,
     /// Freelist of cleared slot vecs from popped frames. Every
     /// fn call needs a fresh `Vec<Value>` sized to `slot_count`
     /// — allocating a new one per call was ~500k small heap
@@ -489,14 +497,15 @@ impl<'h, H: BopHost> Vm<'h, H> {
             step_budget,
             rand_state: 0,
             imports,
-            imported_here: BTreeSet::new(),
+            imported_here: vec![BTreeSet::new()],
             limits,
             current_module,
             struct_defs,
             enum_defs,
             user_methods: BTreeMap::new(),
             type_bindings: vec![builtin_bindings],
-            module_aliases: BTreeMap::new(),
+            module_aliases: vec![BTreeMap::new()],
+            imported_functions: vec![BTreeMap::new()],
             slots_freelist: Vec::new(),
         }
     }
@@ -677,6 +686,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // decls inside a block vanish on block exit, same rule
         // the walker applies.
         self.type_bindings.push(BTreeMap::new());
+        self.module_aliases.push(BTreeMap::new());
+        self.imported_functions.push(BTreeMap::new());
+        self.imported_here.push(BTreeSet::new());
     }
 
     fn pop_scope(&mut self) {
@@ -701,6 +713,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             );
             if self.type_bindings.len() > type_scope_base {
                 self.type_bindings.pop();
+                self.module_aliases.pop();
+                self.imported_functions.pop();
+                self.imported_here.pop();
             }
         }
     }
@@ -718,16 +733,45 @@ impl<'h, H: BopHost> Vm<'h, H> {
         wrap: FrameWrap,
     ) {
         let type_scope_base = self.type_bindings.len() + 1;
+        let alias_scope_base = self.module_aliases.len();
+        self.module_aliases.push(BTreeMap::new());
+        self.imported_functions.push(BTreeMap::new());
+        self.imported_here.push(BTreeSet::new());
         self.frames.push(Frame::function(
             chunk,
             slots,
             scopes,
             type_scope_base,
+            alias_scope_base,
             stack_base,
             function_module,
             wrap,
         ));
         self.type_bindings.push(BTreeMap::new());
+    }
+
+    fn module_alias(&self, name: &str) -> Option<&Rc<bop::value::BopModule>> {
+        let floor = self.frames.last().filter(|frame| frame.is_function).map(|frame| frame.alias_scope_base);
+        self.module_aliases
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .find_map(|(_, frame)| frame.get(name))
+    }
+
+    fn imported_function(&self, name: &str) -> Option<&Rc<FnEntry>> {
+        let floor = self.frames.last().filter(|frame| frame.is_function).map(|frame| frame.alias_scope_base);
+        self.imported_functions
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .find_map(|(_, frame)| frame.get(name))
+    }
+
+    fn is_module_top_scope(&self) -> bool {
+        self.frames.last().is_some_and(|frame| !frame.is_function && frame.scopes.len() == frame.scope_base)
     }
 
     fn define_local(&mut self, name: String, value: Value) {
@@ -863,7 +907,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
             }
         }
-        self.functions.get(name).cloned()
+        self.imported_function(name)
+            .cloned()
+            .or_else(|| self.functions.get(name).cloned())
     }
 
     // ─── Dispatch ────────────────────────────────────────────────
@@ -2605,8 +2651,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let frame_scopes = &frame.scopes;
         let type_bindings = &self.type_bindings;
         let module_aliases = &self.module_aliases;
+        let alias_scope_floor = frame.is_function.then_some(frame.alias_scope_base);
         let resolver = |ns: Option<&str>, tn: &str| -> Option<String> {
-            bop::resolve_type_in(frame_scopes, type_bindings, module_aliases, ns, tn)
+            bop::resolve_type_in_scoped(
+                frame_scopes,
+                type_bindings,
+                module_aliases,
+                alias_scope_floor,
+                ns,
+                tn,
+            )
         };
         let matched = bop::pattern_matches(&pat, &value, &mut bindings, &resolver);
         if matched {
@@ -2860,7 +2914,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let alias = spec.alias.as_deref();
 
         let is_plain_glob = items.is_none() && alias.is_none();
-        if is_plain_glob && self.imported_here.contains(path) {
+        if is_plain_glob
+            && self.imported_here.last().is_some_and(|imports| imports.contains(path))
+        {
             return Ok(());
         }
         let artifacts = self.load_module(path, line)?;
@@ -3001,7 +3057,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 .and_then(|f| f.scopes.last())
                 .map(|s| s.contains_key(alias_name))
                 .unwrap_or(false);
-            if frame_has || self.functions.contains_key(alias_name) {
+            let imported_function_has = self
+                .imported_functions
+                .last()
+                .is_some_and(|functions| functions.contains_key(alias_name));
+            if frame_has || self.functions.contains_key(alias_name) || imported_function_has {
                 return Err(error(
                     line,
                     format!(
@@ -3030,6 +3090,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
             }
             self.module_aliases
+                .last_mut()
+                .expect("module alias scope")
                 .insert(alias_name.to_string(), Rc::clone(&module_rc));
             if let Some(scope) = self.type_bindings.last_mut() {
                 scope.insert(alias_name.to_string(), path.to_string());
@@ -3039,6 +3101,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // `_`-prefixed names (privacy); selective doesn't
             // (the user explicitly asked).
             let skip_private = items.is_none();
+            let module_top_scope = self.is_module_top_scope();
+            let mut blocked_function_values = BTreeSet::new();
             for (name, entry) in fn_entries {
                 if skip_private && bop::naming::is_private(&name) {
                     continue;
@@ -3049,14 +3113,21 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     .and_then(|f| f.scopes.last())
                     .map(|s| s.contains_key(&name))
                     .unwrap_or(false)
-                    || self.functions.contains_key(&name);
+                    || (module_top_scope && self.functions.contains_key(&name));
                 if clashes {
+                    blocked_function_values.insert(name);
                     continue;
                 }
-                self.functions.insert(name, entry);
+                self.imported_functions
+                    .last_mut()
+                    .expect("imported function scope")
+                    .insert(name, entry);
             }
             for (name, value) in exports {
                 if skip_private && bop::naming::is_private(&name) {
+                    continue;
+                }
+                if blocked_function_values.contains(&name) {
                     continue;
                 }
                 let clashes = self
@@ -3094,7 +3165,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
 
         if is_plain_glob {
-            self.imported_here.insert(path.to_string());
+            self.imported_here
+                .last_mut()
+                .expect("import scope")
+                .insert(path.to_string());
         }
         Ok(())
     }
@@ -3144,7 +3218,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 return Ok(());
             }
         }
-        if let Some(module) = self.module_aliases.get(ns) {
+        if let Some(module) = self.module_alias(ns) {
             if !module.types.iter().any(|t| t == type_name) {
                 return Err(error(
                     line,
@@ -3177,7 +3251,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     return None;
                 }
             }
-            if let Some(m) = self.module_aliases.get(ns) {
+            if let Some(m) = self.module_alias(ns) {
                 if m.types.iter().any(|t| t == type_name) {
                     return Some(m.path.clone());
                 }
@@ -3346,6 +3420,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // builtin map while discarding any open runtime scopes.
         self.type_bindings
             .truncate(frame.caller_type_scope_depth());
+        self.module_aliases.truncate(frame.alias_scope_base);
+        self.imported_functions.truncate(frame.alias_scope_base);
+        self.imported_here.truncate(frame.alias_scope_base);
         // Recycle the slot vec so the next call can reuse its
         // allocation. Dropping it here would drop every `Value`
         // slot in place, which is still cheap for `Int`/`Bool`
@@ -3710,6 +3787,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
             let frame = self.frames.pop().expect("frame present");
             self.type_bindings
                 .truncate(frame.caller_type_scope_depth());
+            self.module_aliases.truncate(frame.alias_scope_base);
+            self.imported_functions.truncate(frame.alias_scope_base);
+            self.imported_here.truncate(frame.alias_scope_base);
             if !frame.slots.is_empty() {
                 self.return_slots(frame.slots);
             }
