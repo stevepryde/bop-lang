@@ -804,7 +804,7 @@ assert_eq(1, 2)"#,
         &BopLimits::standard(),
     )
     .expect_err("assert_eq should raise");
-    assert!(err.message.len() > 0, "got empty error message");
+    assert!(!err.message.is_empty(), "got empty error message");
 }
 
 #[test]

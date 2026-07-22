@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn float() {
-        assert_eq!(toks("3.14"), vec![Token::Number(3.14)]);
+        assert_eq!(toks("3.125"), vec![Token::Number(3.125)]);
     }
 
     #[test]

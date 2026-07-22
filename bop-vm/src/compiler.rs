@@ -410,7 +410,7 @@ impl Compiler {
         // target with `mark_jump_target` before emitting its instructions.
         self.protect_jump_target(target);
         let idx = site.0 as usize;
-        self.chunk.code[idx] = match self.chunk.code[idx].clone() {
+        self.chunk.code[idx] = match self.chunk.code[idx] {
             Instr::Jump(_) => Instr::Jump(target),
             Instr::JumpIfFalse(_) => Instr::JumpIfFalse(target),
             Instr::JumpIfFalsePeek(_) => Instr::JumpIfFalsePeek(target),
@@ -1425,7 +1425,7 @@ impl Compiler {
     fn patch_match_fail(&mut self, site: CodeOffset, target: CodeOffset) {
         self.protect_jump_target(target);
         let idx = site.0 as usize;
-        self.chunk.code[idx] = match self.chunk.code[idx].clone() {
+        self.chunk.code[idx] = match self.chunk.code[idx] {
             Instr::MatchFail { pattern, .. } => Instr::MatchFail {
                 pattern,
                 on_fail: target,

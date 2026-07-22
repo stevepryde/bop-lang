@@ -1066,7 +1066,7 @@ impl Emitter {
 
     /// Resolve a source-level type reference to its declaring
     /// module path, using the emitter's per-scope type_bindings
-    /// + module_aliases state. Returns `None` if the name isn't
+    /// and module_aliases state. Returns `None` if the name isn't
     /// in scope — callers treat that as a type-not-declared
     /// error at emit time.
     fn resolve_type_module(
@@ -1142,7 +1142,7 @@ impl Emitter {
     /// Emit Rust source for a `__resolver` closure that turns
     /// `(namespace, type_name)` pairs into the declaring
     /// module's path, baked from the emitter's current
-    /// `type_bindings` + `module_aliases` state. Inlined at
+    /// `type_bindings` and `module_aliases` state. Inlined at
     /// every `pattern_matches` call site so the matcher can
     /// compare the value's full identity against what the
     /// source-level reference resolves to *at that point in
@@ -2838,7 +2838,7 @@ impl Emitter {
             line
         ));
         src.push_str("    }\n");
-        src.push_str("}");
+        src.push('}');
 
         Ok(src)
     }

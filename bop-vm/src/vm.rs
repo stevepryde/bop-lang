@@ -301,6 +301,15 @@ fn shapes_match(
     })
 }
 
+type TypeKey = (String, String);
+type RuntimeEnumVariants = Vec<(String, EnumVariantShape)>;
+type StructTypeTable = BTreeMap<TypeKey, Vec<String>>;
+type EnumTypeTable = BTreeMap<TypeKey, RuntimeEnumVariants>;
+type BuiltinTypeTables = (StructTypeTable, EnumTypeTable, BTreeMap<String, String>);
+type ModuleStructDef = (TypeKey, Vec<String>);
+type ModuleEnumDef = (TypeKey, RuntimeEnumVariants);
+type ModuleMethodDef = (TypeKey, String, Rc<FnEntry>);
+
 /// Seed a VM's type tables with the engine-wide builtin shapes
 /// (`Result`, `RuntimeError`). Same source of truth as the walker
 /// — both engines read `bop::builtins::builtin_*` so they can
@@ -313,11 +322,7 @@ fn shapes_match(
 /// - an outer-scope type_bindings map pointing each builtin's
 ///   bare name at `<builtin>` so user code resolves `Result::Ok`
 ///   without an explicit `use`.
-fn seed_builtin_types() -> (
-    BTreeMap<(String, String), Vec<String>>,
-    BTreeMap<(String, String), Vec<(String, EnumVariantShape)>>,
-    BTreeMap<String, String>,
-) {
+fn seed_builtin_types() -> BuiltinTypeTables {
     use bop::parser::VariantKind;
     let builtin_mp = bop::value::BUILTIN_MODULE_PATH.to_string();
     let mut struct_defs: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
@@ -381,13 +386,13 @@ struct ModuleArtifacts {
     fn_decls: Vec<(String, Rc<FnEntry>)>,
     /// Struct-type declarations introduced by the module,
     /// keyed by their full identity `(module_path, type_name)`.
-    struct_defs: Vec<((String, String), Vec<String>)>,
+    struct_defs: Vec<ModuleStructDef>,
     /// Enum-type declarations introduced by the module, same
     /// keying as `struct_defs`.
-    enum_defs: Vec<((String, String), Vec<(String, EnumVariantShape)>)>,
+    enum_defs: Vec<ModuleEnumDef>,
     /// `((module_path, type_name), method_name, FnEntry)` for
     /// every method the module declared on its own types.
-    methods: Vec<((String, String), String, Rc<FnEntry>)>,
+    methods: Vec<ModuleMethodDef>,
 }
 
 /// Import cache shared across nested VMs so recursive imports
@@ -537,11 +542,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
     pub fn run(mut self) -> Result<(), BopError> {
         let mut last_line: u32 = 0;
-        loop {
-            let (instr, line) = match self.fetch() {
-                Some(x) => x,
-                None => break,
-            };
+        while let Some((instr, line)) = self.fetch() {
             last_line = line;
             // Tick errors (resource-limit violations) are always
             // fatal, so `unwind_to_try_call` will short-circuit
@@ -3361,17 +3362,17 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // module path) are already seeded in the importer, so
         // we filter them out to avoid duplicating the entries.
         let builtin_mp = bop::value::BUILTIN_MODULE_PATH;
-        let struct_defs: Vec<((String, String), Vec<String>)> = sub
+        let struct_defs: Vec<ModuleStructDef> = sub
             .struct_defs
             .into_iter()
             .filter(|((mp, _), _)| mp != builtin_mp)
             .collect();
-        let enum_defs: Vec<((String, String), Vec<(String, EnumVariantShape)>)> = sub
+        let enum_defs: Vec<ModuleEnumDef> = sub
             .enum_defs
             .into_iter()
             .filter(|((mp, _), _)| mp != builtin_mp)
             .collect();
-        let mut methods: Vec<((String, String), String, Rc<FnEntry>)> = Vec::new();
+        let mut methods: Vec<ModuleMethodDef> = Vec::new();
         for (type_key, by_method) in sub.user_methods {
             for (method_name, entry) in by_method {
                 methods.push((type_key.clone(), method_name, entry));
@@ -3390,11 +3391,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// caller can inspect the module's final state. Used by
     /// `evaluate_module`.
     fn run_internal(&mut self) -> Result<(), BopError> {
-        loop {
-            let (instr, line) = match self.fetch() {
-                Some(x) => x,
-                None => break,
-            };
+        while let Some((instr, line)) = self.fetch() {
             if let Err(err) = self.tick(line) {
                 self.unwind_to_try_call(err)?;
                 continue;

@@ -332,11 +332,7 @@ fn parse_envelope(stdout: &str) -> Vec<(String, Outcome)> {
         };
         let mut prints = Vec::new();
         let mut error = None;
-        loop {
-            let next = match lines.next() {
-                Some(l) => l,
-                None => break,
-            };
+        for next in lines.by_ref() {
             if let Some(p) = next.strip_prefix("<<PRINT>>") {
                 let p = p.strip_suffix("<<END>>").unwrap_or(p);
                 prints.push(p.to_string());
@@ -1396,7 +1392,9 @@ print(match r {
 /// pairs source with a module map the walker, VM, and AOT all
 /// resolve against. AOT's compile-time resolver is seeded from
 /// this same map via `modules_from_map`.
-const IMPORTS_CORPUS: &[(&str, &str, &[(&str, &str)])] = &[
+type ImportCase = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
+
+const IMPORTS_CORPUS: &[ImportCase] = &[
     (
         "import_basic_let",
         r#"use math

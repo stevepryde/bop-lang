@@ -11,6 +11,7 @@ use alloc::{
     format,
     rc::Rc,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 
@@ -603,11 +604,13 @@ enum BopIterKind {
     Dict { keys: Vec<String>, pos: usize },
 }
 
-impl BopIter {
+impl Iterator for BopIter {
+    type Item = Value;
+
     /// Advance by one and return the next item, or `None` when
     /// the iterator is exhausted. Caller wraps the result in
     /// `Iter::Next(v)` / `Iter::Done` for user code.
-    pub fn next(&mut self) -> Option<Value> {
+    fn next(&mut self) -> Option<Self::Item> {
         match &mut self.kind {
             BopIterKind::Array { items, pos } => {
                 if *pos < items.len() {
@@ -1066,12 +1069,10 @@ impl Clone for Value {
 
 impl Drop for Value {
     fn drop(&mut self) {
-        match self {
-            Value::Str(s) => bop_dealloc(s.0.capacity()),
-            // Composite values, fns, modules, and iterators release an `Rc`.
-            // Their owned backing storage accounts for itself exactly once
-            // when the final handle drops.
-            _ => {}
+        // Composite values, fns, modules, and iterators release an `Rc` whose
+        // backing storage accounts for itself when the final handle drops.
+        if let Value::Str(s) = self {
+            bop_dealloc(s.0.capacity());
         }
     }
 }
@@ -1083,7 +1084,7 @@ impl core::fmt::Display for Value {
         match self {
             Value::Int(n) => write!(f, "{}", n),
             Value::Number(n) => {
-                if *n == (*n as i64 as f64) && *n - *n == 0.0 {
+                if n.is_finite() && *n == (*n as i64 as f64) {
                     write!(f, "{}", *n as i64)
                 } else {
                     write!(f, "{}", n)
@@ -1402,8 +1403,7 @@ impl BopArray {
         // position`, then apply that permutation to values and cached depths
         // together. This preserves stable sort semantics without re-reading a
         // potentially borrowed iterator's depth.
-        let mut target = Vec::with_capacity(order.len());
-        target.resize(order.len(), 0usize);
+        let mut target = vec![0usize; order.len()];
         for (new_position, old_position) in order.into_iter().enumerate() {
             target[old_position] = new_position;
         }
@@ -1642,6 +1642,26 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                 }
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn number_display_preserves_integral_and_non_finite_forms() {
+        assert_eq!(format!("{}", Value::Number(1.0)), "1");
+        assert_eq!(format!("{}", Value::Number(-0.0)), "0");
+        assert_eq!(format!("{}", Value::Number(f64::NAN)), "NaN");
+        assert_eq!(format!("{}", Value::Number(f64::INFINITY)), "inf");
+        assert_eq!(format!("{}", Value::Number(f64::NEG_INFINITY)), "-inf");
+    }
+
+    #[test]
+    fn builtin_iter_is_a_standard_rust_iterator() {
+        fn assert_iterator<I: Iterator<Item = Value>>() {}
+        assert_iterator::<BopIter>();
     }
 }
 

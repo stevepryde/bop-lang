@@ -83,8 +83,7 @@ pub fn builtin_iter_variants() -> Vec<VariantDecl> {
 /// caller's pattern against `Iter::Next(v)` fires regardless of
 /// which module the iterator's `.next()` was declared in.
 pub fn make_iter_next(value: Value, line: u32) -> Result<Value, BopError> {
-    let mut items: Vec<Value> = Vec::with_capacity(1);
-    items.push(value);
+    let items: Vec<Value> = alloc_import::vec![value];
     Value::try_new_enum_tuple(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Iter"),
@@ -439,8 +438,7 @@ pub fn error_fatal(line: u32, message: impl Into<String>) -> BopError {
 /// matches it via `Result::Ok(v)` resolves `Result` to the same
 /// builtin in its own type-binding scope.
 pub fn make_try_call_ok(value: Value, line: u32) -> Result<Value, BopError> {
-    let mut items: Vec<Value> = Vec::with_capacity(1);
-    items.push(value);
+    let items: Vec<Value> = alloc_import::vec![value];
     Value::try_new_enum_tuple(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
@@ -459,16 +457,16 @@ pub fn make_try_call_err(err: &BopError) -> Value {
     // Line numbers are integers — use Int now that phase 6
     // distinguishes them from floats.
     let line = Value::Int(err.line.unwrap_or(0) as i64);
-    let mut fields: Vec<(String, Value)> = Vec::with_capacity(2);
-    fields.push((String::from("message"), message));
-    fields.push((String::from("line"), line));
+    let fields: Vec<(String, Value)> = alloc_import::vec![
+        (String::from("message"), message),
+        (String::from("line"), line),
+    ];
     let rt_err = Value::new_struct(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("RuntimeError"),
         fields,
     );
-    let mut items: Vec<Value> = Vec::with_capacity(1);
-    items.push(rt_err);
+    let items: Vec<Value> = alloc_import::vec![rt_err];
     Value::new_enum_tuple(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
