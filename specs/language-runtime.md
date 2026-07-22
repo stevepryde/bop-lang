@@ -76,6 +76,11 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   Array, Dict, and Struct writes rooted at constants with the canonical
   constant diagnostic and hint, including grouped/nested targets, while the
   corresponding mutable-binding programs still execute identically.
+- **AC-RUN-008:** Reserved-word binding diagnostics derive from the lexer's
+  current keyword vocabulary, including `const`, while keyword-shaped text in
+  strings and comments remains ordinary source content. The compatibility
+  `precheck::check` API retains its narrow `let` / named-`fn` contract without
+  maintaining a second keyword list.
 
 ## Design notes
 

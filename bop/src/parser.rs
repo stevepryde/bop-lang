@@ -731,6 +731,8 @@ impl Parser {
         if let Token::Ident(name) = self.peek().clone() {
             self.advance();
             Ok((name, line))
+        } else if let Some(keyword) = self.peek().keyword_name() {
+            Err(BopError::reserved_word(keyword, line, self.peek_column()))
         } else {
             Err(self.error(
                 line,
@@ -805,7 +807,12 @@ impl Parser {
             // `fn name(...)` is a declaration; `fn(...)` is a
             // lambda expression at statement position — delegate
             // to the expression parser so it becomes an `ExprStmt`.
-            Token::Fn if matches!(self.peek_at(1), Token::Ident(_)) => self.parse_fn_decl(),
+            Token::Fn
+                if matches!(self.peek_at(1), Token::Ident(_))
+                    || self.peek_at(1).keyword_name().is_some() =>
+            {
+                self.parse_fn_decl()
+            }
             Token::Return => self.parse_return(),
             Token::Break => {
                 self.advance();
@@ -2068,10 +2075,16 @@ impl Parser {
                     Ok(Pattern::Binding(name))
                 }
             }
-            other => Err(self.error(
-                line,
-                format!("Expected a pattern, got `{}`", fmt_token(&other)),
-            )),
+            other => {
+                if let Some(keyword) = other.keyword_name() {
+                    Err(BopError::reserved_word(keyword, line, self.peek_column()))
+                } else {
+                    Err(self.error(
+                        line,
+                        format!("Expected a pattern, got `{}`", fmt_token(&other)),
+                    ))
+                }
+            }
         }
     }
 
@@ -2089,7 +2102,17 @@ impl Parser {
                             self.advance();
                             ArrayRest::Named(n)
                         }
-                        _ => ArrayRest::Ignored,
+                        other => {
+                            if let Some(keyword) = other.keyword_name() {
+                                let (line, _column) = self.peek_pos();
+                                return Err(BopError::reserved_word(
+                                    keyword,
+                                    line,
+                                    self.peek_column(),
+                                ));
+                            }
+                            ArrayRest::Ignored
+                        }
                     };
                     rest = Some(captured);
                     // `..` must be the last element in the array
@@ -2402,32 +2425,15 @@ fn const_assignment_error(name: &str, line: u32) -> BopError {
 }
 
 pub fn fmt_token(token: &Token) -> &'static str {
+    if let Some(keyword) = token.keyword_name() {
+        return keyword;
+    }
+
     match token {
         Token::Int(_) => "an integer",
         Token::Number(_) => "a number",
         Token::Str(_) | Token::StringInterp(_) => "a string",
-        Token::True => "true",
-        Token::False => "false",
-        Token::None => "none",
         Token::Ident(_) => "a name",
-        Token::Let => "let",
-        Token::Const => "const",
-        Token::Fn => "fn",
-        Token::Return => "return",
-        Token::If => "if",
-        Token::Else => "else",
-        Token::While => "while",
-        Token::For => "for",
-        Token::In => "in",
-        Token::Repeat => "repeat",
-        Token::Break => "break",
-        Token::Continue => "continue",
-        Token::Use => "use",
-        Token::As => "as",
-        Token::Struct => "struct",
-        Token::Enum => "enum",
-        Token::Match => "match",
-        Token::Try => "try",
         Token::ColonColon => "::",
         Token::DotDot => "..",
         Token::FatArrow => "=>",
@@ -2464,6 +2470,27 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Semicolon => ";",
         Token::Newline => "newline",
         Token::Eof => "end of code",
+        Token::Let
+        | Token::Const
+        | Token::Fn
+        | Token::Return
+        | Token::If
+        | Token::Else
+        | Token::While
+        | Token::For
+        | Token::In
+        | Token::Repeat
+        | Token::Break
+        | Token::Continue
+        | Token::Use
+        | Token::As
+        | Token::Struct
+        | Token::Enum
+        | Token::Match
+        | Token::Try
+        | Token::True
+        | Token::False
+        | Token::None => unreachable!("keyword tokens return before punctuation formatting"),
     }
 }
 
