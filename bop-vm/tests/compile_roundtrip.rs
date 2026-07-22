@@ -8,6 +8,7 @@
 //! diff.
 
 use bop::parse;
+use bop_vm::chunk::SlotIdx;
 use bop_vm::{Instr, LoopStateKind, compile, disassemble};
 
 fn disasm(source: &str) -> String {
@@ -678,6 +679,121 @@ fn plain_add(a, b) { return a + b }
             function.chunk.code
         );
     }
+}
+
+#[test]
+fn store_local_fuses_small_integer_direct_and_compound_updates() {
+    let ast = parse(
+        r#"
+fn update(value) {
+    value = value + 1
+    value += 2
+    value = value - 3
+    value -= 4
+    return value
+}
+"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let function = chunk
+        .functions
+        .iter()
+        .find(|function| function.name == "update")
+        .expect("update function");
+
+    assert_eq!(
+        &function.chunk.code[..4],
+        &[
+            Instr::IncLocalInt(SlotIdx(0), 1),
+            Instr::IncLocalInt(SlotIdx(0), 2),
+            Instr::IncLocalInt(SlotIdx(0), -3),
+            Instr::IncLocalInt(SlotIdx(0), -4),
+        ]
+    );
+    let output = disassemble(&chunk);
+    for delta in [1, 2, -3, -4] {
+        assert!(
+            output.contains(&format!("IncLocalInt @0, {delta}")),
+            "missing fused delta {delta}:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn store_local_fusion_requires_the_same_slot_and_an_i32_delta() {
+    let ast = parse(
+        r#"
+fn update(source, target) {
+    target = source + 1
+    target = target + 2147483648
+    return target
+}
+"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let function = chunk
+        .functions
+        .iter()
+        .find(|function| function.name == "update")
+        .expect("update function");
+
+    assert!(matches!(
+        function.chunk.code.as_slice(),
+        [
+            Instr::LoadLocalAddInt(SlotIdx(0), 1),
+            Instr::StoreLocal(SlotIdx(1)),
+            Instr::LoadLocal(SlotIdx(1)),
+            Instr::LoadConst(_),
+            Instr::Add,
+            Instr::StoreLocal(SlotIdx(1)),
+            Instr::LoadLocal(SlotIdx(1)),
+            Instr::Return,
+            Instr::ReturnNone,
+        ]
+    ));
+}
+
+#[test]
+fn store_local_fusion_does_not_consume_an_if_expression_end_target() {
+    let ast = parse(
+        r#"
+fn update(condition, value) {
+    value = if condition { value + 1 } else { value + 2 }
+    value += 3
+    return value
+}
+"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let function = chunk
+        .functions
+        .iter()
+        .find(|function| function.name == "update")
+        .expect("update function");
+    let code = &function.chunk.code;
+    let end_target = code
+        .iter()
+        .find_map(|instr| match instr {
+            Instr::Jump(target) => Some(target.0 as usize),
+            _ => None,
+        })
+        .expect("if-expression end jump");
+
+    assert_eq!(
+        code[end_target],
+        Instr::StoreLocal(SlotIdx(1)),
+        "the end jump must still land on the standalone assignment store"
+    );
+    assert_eq!(
+        code.iter()
+            .filter(|instr| matches!(instr, Instr::IncLocalInt(SlotIdx(1), 3)))
+            .count(),
+        1,
+        "fusion should resume immediately after the protected store: {code:?}"
+    );
 }
 
 #[test]

@@ -747,6 +747,52 @@ print(nested(false, true, 10, 20, 30))
     );
 }
 
+#[test]
+fn inc_local_int_matches_direct_compound_and_control_flow_semantics_diff() {
+    let outcome = run_both(
+        r#"
+fn direct(value) {
+    value = value + 3
+    value = value - 1
+    return value
+}
+fn compound(value) {
+    value += 7
+    value -= 2
+    return value
+}
+fn branch(condition, value) {
+    value = if condition { value + 1 } else { value + 2 }
+    value += 4
+    return value
+}
+fn large(value) {
+    value = value + 2147483648
+    return value
+}
+fn generic(value) {
+    value += 1
+    return value
+}
+
+print(direct(10))
+print(compound(10))
+print(branch(true, 10))
+print(branch(false, 10))
+print(large(1))
+print(generic(1.5))
+print(generic("v"))
+"#,
+        &standard(),
+    );
+
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        ["12", "15", "15", "16", "2147483649", "2.5", "v1"]
+    );
+}
+
 // ─── While ────────────────────────────────────────────────────────
 
 #[test]

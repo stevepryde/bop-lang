@@ -73,8 +73,9 @@ pub enum Instr {
     /// `LoadLocal(a) + LoadLocal(b) + Lt`. Same
     /// Int-fast-path / generic-fallback split as `AddLocals`.
     LtLocals(SlotIdx, SlotIdx),
-    /// `frame.slots[slot] += k` for a small `i32` `k`, fuses
-    /// `LoadLocal(slot) + LoadConst(k) + Add + StoreLocal(slot)`.
+    /// `frame.slots[slot] += k` for a small `i32` `k`. The final store
+    /// peephole fuses `LoadLocalAddInt(slot, k) + StoreLocal(slot)`, which
+    /// represents `LoadLocal(slot) + LoadConst(k) + Add + StoreLocal(slot)`.
     /// Specialised for `Int` slots — the `i = i + 1` and
     /// `total = total + small_k` idioms in tight loops. If the
     /// slot isn't an `Int`, falls back to generic add via the
