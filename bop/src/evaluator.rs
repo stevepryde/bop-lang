@@ -125,12 +125,6 @@ fn put_live_environment(
             continue;
         }
         if let Some(value) = environment.remove(binding) {
-            // Keep the compatibility snapshot in the facade environment while
-            // the authoritative handle lives in its declaring module. Taking
-            // this environment for execution replaces the snapshot by moving
-            // that handle back, so in-place mutation does not retain a second
-            // facade-owned handle across the mutation.
-            environment.insert(binding.clone(), value.clone());
             environments
                 .entry(origin_module.clone())
                 .or_default()
@@ -153,6 +147,60 @@ fn restore_failed_module_environment(
     // failed module's own partial state must not become cacheable.
     environments.borrow_mut().remove(module_path);
     live_origins.borrow_mut().remove(module_path);
+}
+
+fn snapshot_module_bindings(
+    top_scope: &BTreeMap<String, Value>,
+    binding_origins: &BTreeMap<String, BindingOrigin>,
+    module_path: &str,
+    imports: &ImportCache,
+    line: u32,
+) -> Result<Vec<(String, Value)>, BopError> {
+    // Re-exported value bindings can reuse their origin's already-external
+    // snapshot. Named functions are intentionally absent from `bindings`
+    // (their callable metadata lives in `fn_decls`), so those are snapshot
+    // locally with the module's own values instead.
+    let forwarded: BTreeMap<String, Value> = {
+        let imports = imports.borrow();
+        top_scope
+            .keys()
+            .filter_map(|name| {
+                let origin = binding_origins.get(name)?;
+                if origin.0 == module_path && origin.1 == *name {
+                    return None;
+                }
+                let ImportSlot::Loaded(origin_module) = imports.get(&origin.0)? else {
+                    return None;
+                };
+                origin_module
+                    .bindings
+                    .iter()
+                    .find(|(origin_name, _)| origin_name == &origin.1)
+                    .map(|(_, value)| (name.clone(), value.clone()))
+            })
+            .collect()
+    };
+    let local: BTreeMap<String, Value> = top_scope
+        .iter()
+        .filter(|(name, _)| !forwarded.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let mut local_snapshots: BTreeMap<String, Value> =
+        Value::__compatibility_snapshot_bindings(&local, line)?
+            .into_iter()
+            .collect();
+
+    top_scope
+        .keys()
+        .map(|name| {
+            let value = forwarded
+                .get(name)
+                .cloned()
+                .or_else(|| local_snapshots.remove(name))
+                .ok_or_else(|| error(line, format!("Missing compatibility snapshot for `{name}`")))?;
+            Ok((name.clone(), value))
+        })
+        .collect()
 }
 
 const MAX_CALL_DEPTH: usize = 64;
@@ -817,6 +865,34 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             .or_else(|| self.module_alias(name).map(|module| Value::Module(Rc::clone(module))))
     }
 
+    fn live_origin_value(&self, origin: &BindingOrigin) -> Option<Value> {
+        if self.active_value_module == origin.0 {
+            if let Some(value) = self
+                .scopes
+                .first()
+                .and_then(|environment| environment.get(&origin.1))
+            {
+                return Some(value.clone());
+            }
+        }
+        if let Some(binding) = self.binding_origins.iter().find_map(|(binding, candidate)| {
+            (candidate == origin).then_some(binding)
+        }) {
+            if let Some(value) = self
+                .scopes
+                .first()
+                .and_then(|environment| environment.get(binding))
+            {
+                return Some(value.clone());
+            }
+        }
+        self.live_value_environments
+            .borrow()
+            .get(&origin.0)
+            .and_then(|environment| environment.get(&origin.1))
+            .cloned()
+    }
+
     fn module_binding(&self, module: &crate::value::BopModule, name: &str) -> Option<Value> {
         if module.path == self.active_value_module {
             if let Some(value) = self
@@ -1430,7 +1506,38 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             return Ok(());
         }
 
-        let bindings = self.load_module(path, line)?;
+        // A lazily evaluated dependency may import the module currently
+        // executing this `use`. Park that active environment in the shared
+        // registry so the nested evaluator moves the one authoritative value
+        // set instead of consulting cached compatibility snapshots.
+        let active_module = self.active_value_module.clone();
+        let active_origins = self.binding_origins.clone();
+        let active_environment = self
+            .scopes
+            .first_mut()
+            .map(core::mem::take)
+            .unwrap_or_default();
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(active_module.clone(), active_origins.clone());
+        put_live_environment(
+            &self.live_value_environments,
+            &active_module,
+            active_environment,
+            &active_origins,
+        );
+        let loaded = self.load_module(path, line);
+        let restored_environment = take_live_environment(
+            &self.live_value_environments,
+            &active_module,
+            &active_origins,
+        );
+        if let Some(scope) = self.scopes.first_mut() {
+            *scope = restored_environment;
+        } else {
+            self.scopes.push(restored_environment);
+        }
+        let bindings = loaded?;
 
         // Types always register under their *full identity*
         // `(module_path, type_name)`. That means two modules
@@ -1693,6 +1800,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             value = authoritative;
                         }
                     }
+                } else {
+                    let origin = bindings.binding_origins
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| (path.to_string(), name.clone()));
+                    if let Some(current) = self.live_origin_value(&origin) {
+                        value = current;
+                    }
                 }
                 self.define(name.clone(), value);
                 if let Some(module) = module {
@@ -1872,11 +1987,31 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // one remaining scope. Fns are handled separately so
         // the importer can register them in `self.functions`
         // as well as in the scope (see `exec_import`).
-        let top_scope = sub.scopes.into_iter().next().unwrap_or_default();
-        let bindings: Vec<(String, Value)> = top_scope
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
+        let top_scope = sub
+            .scopes
+            .first_mut()
+            .map(core::mem::take)
+            .unwrap_or_default();
+        let bindings = match snapshot_module_bindings(
+            &top_scope,
+            &sub.binding_origins,
+            module_path,
+            &self.imports,
+            0,
+        ) {
+            Ok(bindings) => bindings,
+            Err(snapshot_error) => {
+                put_live_environment(
+                    &self.live_value_environments,
+                    module_path,
+                    top_scope,
+                    &sub.binding_origins,
+                );
+                self.live_value_environments.borrow_mut().remove(module_path);
+                self.live_binding_origins.borrow_mut().remove(module_path);
+                return Err(snapshot_error);
+            }
+        };
         let binding_origins = sub.binding_origins;
         put_live_environment(
             &self.live_value_environments,
@@ -4488,6 +4623,78 @@ mod array_mutation_tests {
 
         assert!(Rc::ptr_eq(&context, &evaluator.root_lexical_context));
         assert_eq!(Rc::strong_count(&context), 2);
+    }
+
+    struct FanoutHost {
+        modules: BTreeMap<String, String>,
+    }
+
+    impl BopHost for FanoutHost {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            None
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn facade_fanout_reuses_the_origin_compatibility_snapshot() {
+        const FACADES: usize = 8;
+        let items = (0..256)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut modules = BTreeMap::from([(
+            "leaf".to_string(),
+            format!("let items = [{items}]\nfn size() {{ return items.len() }}"),
+        )]);
+        let mut source = String::new();
+        for index in 0..FACADES {
+            modules.insert(format!("facade{index}"), "use leaf".to_string());
+            source.push_str(&format!("use facade{index} as f{index}\n"));
+            source.push_str(&format!("let size{index} = f{index}.size()\n"));
+        }
+        let statements = crate::parse(&source).unwrap();
+        let mut host = FanoutHost { modules };
+        let mut evaluator = Evaluator::new(&mut host, crate::BopLimits::standard());
+        evaluator.exec_block(&statements).unwrap();
+        for index in 0..FACADES {
+            assert!(matches!(
+                evaluator.scopes[0].get(&format!("size{index}")),
+                Some(Value::Int(256))
+            ));
+        }
+
+        let imports = evaluator.imports.borrow();
+        let ImportSlot::Loaded(leaf) = imports.get("leaf").unwrap() else {
+            panic!("leaf should be loaded")
+        };
+        let leaf_items = &leaf
+            .bindings
+            .iter()
+            .find(|(name, _)| name == "items")
+            .unwrap()
+            .1;
+        for index in 0..FACADES {
+            let ImportSlot::Loaded(facade) = imports.get(&format!("facade{index}")).unwrap()
+            else {
+                panic!("facade should be loaded")
+            };
+            let facade_items = &facade
+                .bindings
+                .iter()
+                .find(|(name, _)| name == "items")
+                .unwrap()
+                .1;
+            assert!(leaf_items.__shares_backing_with(facade_items));
+        }
     }
 
     #[test]

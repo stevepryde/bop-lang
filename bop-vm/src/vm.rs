@@ -444,6 +444,60 @@ struct ModuleLexicalContext {
 type ImportCache = Rc<RefCell<BTreeMap<String, ImportSlot>>>;
 type LiveValueEnvironments = Rc<RefCell<BTreeMap<String, BTreeMap<String, Value>>>>;
 type BindingOrigin = (String, String);
+
+fn snapshot_module_bindings(
+    top_scope: &BTreeMap<String, Value>,
+    binding_origins: &BTreeMap<String, BindingOrigin>,
+    module_path: &str,
+    imports: &ImportCache,
+    line: u32,
+) -> Result<Vec<(String, Value)>, BopError> {
+    // Re-exported value bindings can reuse their origin's already-external
+    // snapshot. Named functions are intentionally absent from `bindings`
+    // (their callable metadata lives in `fn_decls`), so those are snapshot
+    // locally with the module's own values instead.
+    let forwarded: BTreeMap<String, Value> = {
+        let imports = imports.borrow();
+        top_scope
+            .keys()
+            .filter_map(|name| {
+                let origin = binding_origins.get(name)?;
+                if origin.0 == module_path && origin.1 == *name {
+                    return None;
+                }
+                let ImportSlot::Loaded(origin_module) = imports.get(&origin.0)? else {
+                    return None;
+                };
+                origin_module
+                    .bindings
+                    .iter()
+                    .find(|(origin_name, _)| origin_name == &origin.1)
+                    .map(|(_, value)| (name.clone(), value.clone()))
+            })
+            .collect()
+    };
+    let local: BTreeMap<String, Value> = top_scope
+        .iter()
+        .filter(|(name, _)| !forwarded.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let mut local_snapshots: BTreeMap<String, Value> =
+        Value::__compatibility_snapshot_bindings(&local, line)?
+            .into_iter()
+            .collect();
+
+    top_scope
+        .keys()
+        .map(|name| {
+            let value = forwarded
+                .get(name)
+                .cloned()
+                .or_else(|| local_snapshots.remove(name))
+                .ok_or_else(|| error(line, format!("Missing compatibility snapshot for `{name}`")))?;
+            Ok((name.clone(), value))
+        })
+        .collect()
+}
 type LiveBindingOrigins = Rc<RefCell<BTreeMap<String, BTreeMap<String, BindingOrigin>>>>;
 
 #[derive(Clone)]
@@ -496,7 +550,6 @@ fn put_live_environment(
             continue;
         }
         if let Some(value) = environment.remove(binding) {
-            environment.insert(binding.clone(), value.clone());
             environments
                 .entry(origin_module.clone())
                 .or_default()
@@ -4026,7 +4079,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         {
             return Ok(());
         }
-        let artifacts = self.load_module(path, line)?;
+        // A lazily evaluated dependency may import the module that is
+        // currently executing. Move that active environment into the shared
+        // registry for the duration of loading so the nested VM observes and
+        // updates the one authoritative handle rather than a cached snapshot.
+        self.park_active_defining_environment();
+        let loaded = self.load_module(path, line);
+        self.restore_active_defining_environment();
+        let artifacts = loaded?;
 
         // Types always register under their *full identity*
         // `(module_path, type_name)`. Two modules declaring the
@@ -4543,14 +4603,40 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
         // Collect top-level lets from the module frame's one
         // remaining scope…
-        let mut bindings: Vec<(String, Value)> = Vec::new();
-        if let Some(frame) = sub.frames.first() {
-            if let Some(scope) = frame.scopes.first() {
-                for (k, v) in scope {
-                    bindings.push((k.clone(), v.clone()));
-                }
+        let bindings = match sub
+            .frames
+            .first()
+            .and_then(|frame| frame.scopes.first())
+            .map(|scope| {
+                snapshot_module_bindings(
+                    scope,
+                    &sub.binding_origins,
+                    module_path,
+                    &sub.imports,
+                    0,
+                )
+            })
+            .transpose()
+        {
+            Ok(bindings) => bindings.unwrap_or_default(),
+            Err(snapshot_error) => {
+                let failed_environment = sub
+                    .frames
+                    .first_mut()
+                    .and_then(|frame| frame.scopes.first_mut())
+                    .map(core::mem::take)
+                    .unwrap_or_default();
+                put_live_environment(
+                    &sub.live_value_environments,
+                    module_path,
+                    failed_environment,
+                    &sub.binding_origins,
+                );
+                sub.live_value_environments.borrow_mut().remove(module_path);
+                sub.live_binding_origins.borrow_mut().remove(module_path);
+                return Err(snapshot_error);
             }
-        }
+        };
         let live_environment = sub
             .frames
             .first_mut()
@@ -5333,6 +5419,7 @@ pub fn run<H: BopHost>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     struct SilentHost;
 
@@ -5535,5 +5622,384 @@ let read = fn() { return [missing, present] }"#,
         assert_eq!(captures.len(), 1, "missing bindings must not be invented");
         assert_eq!(captures[0].0, "present");
         assert!(matches!(captures[0].1, Value::None));
+    }
+
+    struct RetainingHost {
+        retained: Option<Value>,
+    }
+
+    impl BopHost for RetainingHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            if name != "retain_large" {
+                return None;
+            }
+            self.retained = Some(Value::new_str("x".repeat(16 * 1024)));
+            Some(Ok(Value::None))
+        }
+    }
+
+    #[test]
+    fn instance_suspends_host_allocations_and_checks_final_returns() {
+        let limits = BopLimits { max_steps: 100, max_memory: 32 };
+        let mut host = RetainingHost { retained: None };
+        let mut instance = BopInstance::load(
+            "pub fn host_only() { retain_large() }\npub fn too_large() { return \"abcdefghijklmnopqrstuvwxyz0123456789\" }",
+            &mut host,
+            &limits,
+        )
+        .unwrap();
+        instance.call("host_only", &[], &mut host).unwrap();
+        assert!(host.retained.is_some());
+        assert_eq!(instance.memory.__used(), 0);
+        let error = instance.call("too_large", &[], &mut host).unwrap_err();
+        assert!(error.is_fatal);
+        assert!(error.message.contains("Memory limit"));
+    }
+
+    struct ExternalValueHost {
+        value: Option<Value>,
+    }
+
+    impl BopHost for ExternalValueHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            (name == "take_external").then(|| Ok(self.value.take().unwrap_or(Value::None)))
+        }
+    }
+
+    #[test]
+    fn external_values_are_free_until_detach_and_memory_poison_is_fail_fast() {
+        let external = {
+            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
+            Value::new_array((0..256).map(Value::Int).collect())
+        };
+        let limits = BopLimits { max_steps: 100, max_memory: 64 };
+        let mut host = ExternalValueHost { value: Some(external) };
+        let mut instance = BopInstance::load(
+            "let stored = none\npub fn keep() { stored = take_external() }\npub fn mutate() { stored.push(256) }\npub fn harmless() { return 1 }",
+            &mut host,
+            &limits,
+        )
+        .unwrap();
+
+        instance.call("keep", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.__used(), 0);
+        let mutation_error = instance.call("mutate", &[], &mut host).unwrap_err();
+        assert!(mutation_error.is_fatal);
+        assert!(instance.memory.__used() > limits.max_memory);
+        let poisoned = instance.call("harmless", &[], &mut host).unwrap_err();
+        assert!(poisoned.is_fatal);
+        assert!(poisoned.message.contains("Memory limit"));
+    }
+
+    #[test]
+    fn returned_receipts_release_on_last_drop_and_instances_do_not_cross_charge() {
+        let mut host = SilentHost;
+        let source = "pub fn make(x) { return [x, x, x, x] }\npub fn harmless() { return none }";
+        let limits = BopLimits::standard();
+        let mut first = BopInstance::load(source, &mut host, &limits).unwrap();
+        let mut second = BopInstance::load(source, &mut host, &limits).unwrap();
+
+        let first_value = first.call("make", &[Value::Int(1)], &mut host).unwrap();
+        let first_bytes = first.memory.__used();
+        assert!(first_bytes > 0);
+        assert_eq!(second.memory.__used(), 0);
+        first.call("harmless", &[], &mut host).unwrap();
+        assert_eq!(first.memory.__used(), first_bytes);
+
+        let first_clone = first_value.clone();
+        drop(first_value);
+        assert_eq!(first.memory.__used(), first_bytes);
+        let second_value = second.call("make", &[Value::Int(2)], &mut host).unwrap();
+        let second_bytes = second.memory.__used();
+        assert!(second_bytes > 0);
+        assert_eq!(first.memory.__used(), first_bytes);
+        drop(first_clone);
+        assert_eq!(first.memory.__used(), 0);
+        assert_eq!(second.memory.__used(), second_bytes);
+        drop(second_value);
+        assert_eq!(second.memory.__used(), 0);
+    }
+
+    struct HookAllocatingHost {
+        retained: RefCell<Vec<Value>>,
+    }
+
+    impl HookAllocatingHost {
+        fn retain_large(&self) {
+            self.retained
+                .borrow_mut()
+                .push(Value::new_str("x".repeat(16 * 1024)));
+        }
+    }
+
+    impl BopHost for HookAllocatingHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            self.retain_large();
+            (name == "host_value").then_some(Ok(Value::None))
+        }
+
+        fn on_print(&mut self, _message: &str) {
+            self.retain_large();
+        }
+
+        fn function_hint(&self) -> &str {
+            self.retain_large();
+            "host hint"
+        }
+
+        fn on_tick(&mut self) -> Result<(), BopError> {
+            self.retain_large();
+            Ok(())
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.retain_large();
+            (name == "hook").then(|| Ok(String::new()))
+        }
+    }
+
+    #[test]
+    fn every_instance_host_hook_runs_with_accounting_suspended() {
+        let limits = BopLimits { max_steps: 100, max_memory: 64 };
+        let mut host = HookAllocatingHost { retained: RefCell::new(Vec::new()) };
+        let mut instance = BopInstance::load(
+            "use hook\npub fn print_it() { print(\"ok\") }\npub fn host_it() { host_value() }\npub fn hint_it() { missing() }",
+            &mut host,
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(instance.memory.__used(), 0);
+        instance.call("print_it", &[], &mut host).unwrap();
+        instance.call("host_it", &[], &mut host).unwrap();
+        let error = instance.call("hint_it", &[], &mut host).unwrap_err();
+        assert!(!error.is_fatal);
+        assert!(error
+            .friendly_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("host hint")));
+        assert_eq!(instance.memory.__used(), 0);
+        assert!(host.retained.borrow().len() >= 8);
+    }
+
+    #[test]
+    fn same_instance_reentry_rejection_precedes_target_and_arity_checks() {
+        let mut host = SilentHost;
+        let mut instance = BopInstance::load(
+            "pub fn entry() {}",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        instance.in_operation.set(true);
+        let error = instance
+            .call("missing", &[Value::None], &mut host)
+            .unwrap_err();
+        instance.in_operation.set(false);
+        assert_eq!(error.line, Some(0));
+        assert!(error.message.contains("cannot be re-entered"));
+    }
+
+    struct MapModuleHost {
+        modules: BTreeMap<String, String>,
+    }
+
+    impl BopHost for MapModuleHost {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            None
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn module_compatibility_snapshots_do_not_force_named_cow_detaches() {
+        let mut host = MapModuleHost {
+            modules: BTreeMap::from([
+                (
+                    "leaf".to_string(),
+                    "let items = [1, 2, 3]\nfn pop() { items.pop() }".to_string(),
+                ),
+                (
+                    "facade".to_string(),
+                    "use leaf\nfn pop() { items.pop() }".to_string(),
+                ),
+            ]),
+        };
+        let mut instance = BopInstance::load(
+            "use leaf as leaf\nuse facade as facade\npub fn facade_pop() { facade.pop() }\npub fn direct_pop() { leaf.pop() }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        let loaded_bytes = instance.memory.__used();
+        assert!(loaded_bytes > 0);
+
+        instance.call("facade_pop", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.__used(), loaded_bytes);
+        instance.call("direct_pop", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.__used(), loaded_bytes);
+    }
+
+    #[test]
+    fn facade_fanout_reuses_the_origin_compatibility_snapshot() {
+        const FACADES: usize = 8;
+        let items = (0..256)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut modules = BTreeMap::from([(
+            "leaf".to_string(),
+            format!("let items = [{items}]\nfn size() {{ return items.len() }}"),
+        )]);
+        let mut source = String::new();
+        for index in 0..FACADES {
+            modules.insert(format!("facade{index}"), "use leaf".to_string());
+            source.push_str(&format!("use facade{index} as f{index}\n"));
+            source.push_str(&format!("let size{index} = f{index}.size()\n"));
+        }
+        let mut host = MapModuleHost { modules };
+        let instance = BopInstance::load(&source, &mut host, &BopLimits::standard()).unwrap();
+
+        let imports = instance.state.as_ref().unwrap().imports.borrow();
+        let ImportSlot::Loaded(leaf) = imports.get("leaf").unwrap() else {
+            panic!("leaf should be loaded")
+        };
+        let leaf_items = &leaf
+            .bindings
+            .iter()
+            .find(|(name, _)| name == "items")
+            .unwrap()
+            .1;
+        for index in 0..FACADES {
+            let ImportSlot::Loaded(facade) = imports.get(&format!("facade{index}")).unwrap()
+            else {
+                panic!("facade should be loaded")
+            };
+            let facade_items = &facade
+                .bindings
+                .iter()
+                .find(|(name, _)| name == "items")
+                .unwrap()
+                .1;
+            assert!(leaf_items.__shares_backing_with(facade_items));
+        }
+    }
+
+    #[test]
+    fn recursive_module_snapshots_do_not_retain_replaced_instance_receipts() {
+        let mut host = MapModuleHost {
+            modules: BTreeMap::from([(
+                "leaf".to_string(),
+                "let items = [[\"abcdefghijklmnopqrstuvwxyz0123456789\"]]\nlet captured = \"zyxwvutsrqponmlkjihgfedcba9876543210\"\nlet callback = fn() { return captured }\nfn clear() { items = []; captured = none; callback = none }"
+                    .to_string(),
+            )]),
+        };
+        let mut instance = BopInstance::load(
+            "use leaf as leaf\npub fn clear() { leaf.clear() }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        let loaded_bytes = instance.memory.__used();
+        assert!(loaded_bytes > 0);
+
+        instance.call("clear", &[], &mut host).unwrap();
+        let cleared_bytes = instance.memory.__used();
+        assert!(cleared_bytes < loaded_bytes);
+
+        let mut empty_host = MapModuleHost {
+            modules: BTreeMap::from([(
+                "leaf".to_string(),
+                "let items = []\nlet captured = none\nlet callback = none\nfn clear() { items = []; captured = none; callback = none }"
+                    .to_string(),
+            )]),
+        };
+        let empty = BopInstance::load(
+            "use leaf as leaf\npub fn clear() { leaf.clear() }",
+            &mut empty_host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(cleared_bytes, empty.memory.__used());
+    }
+
+    struct WrappingModuleHost {
+        modules: BTreeMap<String, String>,
+    }
+
+    impl BopHost for WrappingModuleHost {
+        fn call(
+            &mut self,
+            name: &str,
+            args: &[Value],
+            line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            if name != "wrap" {
+                return None;
+            }
+            Some(
+                bop::value::BopModule::try_new(
+                    "host.wrapper".to_string(),
+                    vec![("child".to_string(), args[0].clone())],
+                    Vec::new(),
+                    line,
+                )
+                .map(Value::Module),
+            )
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn module_snapshots_externalize_host_module_binding_graphs() {
+        let root = "use leaf as leaf\npub fn clear() { leaf.clear() }";
+        let mut host = WrappingModuleHost {
+            modules: BTreeMap::from([(
+                "leaf".to_string(),
+                "let child = [\"abcdefghijklmnopqrstuvwxyz0123456789\"]\nlet wrapped = wrap(child)\nfn clear() { child = none; wrapped = none }"
+                    .to_string(),
+            )]),
+        };
+        let mut instance = BopInstance::load(root, &mut host, &BopLimits::standard()).unwrap();
+        let loaded_bytes = instance.memory.__used();
+        assert!(loaded_bytes > 0);
+        instance.call("clear", &[], &mut host).unwrap();
+        let cleared_bytes = instance.memory.__used();
+        assert!(cleared_bytes < loaded_bytes);
+
+        let mut empty_host = WrappingModuleHost {
+            modules: BTreeMap::from([(
+                "leaf".to_string(),
+                "let child = none\nlet wrapped = none\nfn clear() { child = none; wrapped = none }"
+                    .to_string(),
+            )]),
+        };
+        let empty = BopInstance::load(root, &mut empty_host, &BopLimits::standard()).unwrap();
+        assert_eq!(cleared_bytes, empty.memory.__used());
     }
 }

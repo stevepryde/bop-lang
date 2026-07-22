@@ -336,6 +336,165 @@ mod tests {
     }
 
     #[test]
+    fn module_compatibility_snapshots_do_not_force_named_cow_detaches() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "leaf".to_string(),
+            "let items = [1, 2, 3]\nfn pop() { items.pop() }".to_string(),
+        );
+        modules.insert(
+            "facade".to_string(),
+            "use leaf\nfn pop() { items.pop() }".to_string(),
+        );
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "use leaf as leaf\nuse facade as facade\npub fn facade_pop() { facade.pop() }\npub fn direct_pop() { leaf.pop() }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        let loaded_bytes = instance.memory.used();
+        assert!(loaded_bytes > 0);
+
+        instance.call("facade_pop", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.used(), loaded_bytes);
+        instance.call("direct_pop", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.used(), loaded_bytes);
+    }
+
+    #[test]
+    fn recursive_module_snapshots_do_not_retain_replaced_instance_receipts() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "leaf".to_string(),
+            "let items = [[\"abcdefghijklmnopqrstuvwxyz0123456789\"]]\nlet captured = \"zyxwvutsrqponmlkjihgfedcba9876543210\"\nlet callback = fn() { return captured }\nfn clear() { items = []; captured = none; callback = none }"
+                .to_string(),
+        );
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "use leaf as leaf\npub fn clear() { leaf.clear() }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        let loaded_bytes = instance.memory.used();
+        assert!(loaded_bytes > 0);
+
+        instance.call("clear", &[], &mut host).unwrap();
+        let cleared_bytes = instance.memory.used();
+        assert!(cleared_bytes < loaded_bytes);
+
+        let mut empty_modules = BTreeMap::new();
+        empty_modules.insert(
+            "leaf".to_string(),
+            "let items = []\nlet captured = none\nlet callback = none\nfn clear() { items = []; captured = none; callback = none }"
+                .to_string(),
+        );
+        let mut empty_host = ModuleHost { modules: empty_modules };
+        let empty = BopInstance::load(
+            "use leaf as leaf\npub fn clear() { leaf.clear() }",
+            &mut empty_host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(cleared_bytes, empty.memory.used());
+    }
+
+    #[test]
+    fn lazy_modules_borrow_the_currently_active_origin_on_success_and_error() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "a".to_string(),
+            "let count = 0\nlet items = [0]\nfn load_b() { count += 1; items.push(1); use b; return [count, items] }\nfn load_bad() { count += 1; items.push(2); use bad }\nfn read() { return [count, items] }"
+                .to_string(),
+        );
+        modules.insert(
+            "b".to_string(),
+            "use a\ncount += 10\nitems.push(10)".to_string(),
+        );
+        modules.insert(
+            "bad".to_string(),
+            "use a.{count, items}\ncount += 100\nitems.push(100)\npanic(\"bad lazy module\")"
+                .to_string(),
+        );
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "use a as a\npub fn load_b() { return a.load_b() }\npub fn load_bad() { return a.load_bad() }\npub fn read() { return a.read() }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            instance.call("load_b", &[], &mut host).unwrap().inspect(),
+            "[11, [0, 1, 10]]"
+        );
+        assert!(instance.call("load_bad", &[], &mut host).is_err());
+        assert_eq!(
+            instance.call("read", &[], &mut host).unwrap().inspect(),
+            "[112, [0, 1, 10, 2, 100]]"
+        );
+    }
+
+    struct WrappingModuleHost {
+        modules: BTreeMap<String, String>,
+    }
+
+    impl BopHost for WrappingModuleHost {
+        fn call(
+            &mut self,
+            name: &str,
+            args: &[Value],
+            line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            if name != "wrap" {
+                return None;
+            }
+            Some(
+                crate::value::BopModule::try_new(
+                    "host.wrapper".to_string(),
+                    vec![("child".to_string(), args[0].clone())],
+                    Vec::new(),
+                    line,
+                )
+                .map(Value::Module),
+            )
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn module_snapshots_externalize_host_module_binding_graphs() {
+        let root = "use leaf as leaf\npub fn clear() { leaf.clear() }";
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "leaf".to_string(),
+            "let child = [\"abcdefghijklmnopqrstuvwxyz0123456789\"]\nlet wrapped = wrap(child)\nfn clear() { child = none; wrapped = none }"
+                .to_string(),
+        );
+        let mut host = WrappingModuleHost { modules };
+        let mut instance = BopInstance::load(root, &mut host, &BopLimits::standard()).unwrap();
+        let loaded_bytes = instance.memory.used();
+        assert!(loaded_bytes > 0);
+        instance.call("clear", &[], &mut host).unwrap();
+        let cleared_bytes = instance.memory.used();
+        assert!(cleared_bytes < loaded_bytes);
+
+        let mut empty_modules = BTreeMap::new();
+        empty_modules.insert(
+            "leaf".to_string(),
+            "let child = none\nlet wrapped = none\nfn clear() { child = none; wrapped = none }"
+                .to_string(),
+        );
+        let mut empty_host = WrappingModuleHost { modules: empty_modules };
+        let empty = BopInstance::load(root, &mut empty_host, &BopLimits::standard()).unwrap();
+        assert_eq!(cleared_bytes, empty.memory.used());
+    }
+
+    #[test]
     fn callbacks_keep_module_globals_live_instead_of_capturing_snapshots() {
         let mut host = Host;
         let mut instance = BopInstance::load(

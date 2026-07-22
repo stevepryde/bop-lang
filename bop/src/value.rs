@@ -1327,6 +1327,269 @@ impl Clone for Value {
     }
 }
 
+impl Value {
+    /// Clone an engine-facing compatibility snapshot of the inspectable Value
+    /// graph without retaining its instance-owned allocation receipts. Module
+    /// export metadata is immutable, but its public `bindings` field must
+    /// neither raise an authoritative CoW refcount nor keep replaced nested
+    /// values charged to the instance. AST and VM chunk function bodies are
+    /// receipt-free; arbitrary opaque compiled bodies are immutable code and
+    /// are shared without introspection.
+    /// Shared DAG nodes remain shared in the snapshot; Bop's public
+    /// constructors and circular-import rejection make owned Value graphs
+    /// acyclic, so completed-node memoization is sufficient.
+    #[doc(hidden)]
+    pub fn __compatibility_snapshot(&self, line: u32) -> Result<Self, BopError> {
+        let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
+        self.compatibility_snapshot_inner(&mut BTreeMap::new(), line)
+    }
+
+    #[doc(hidden)]
+    pub fn __compatibility_snapshot_bindings(
+        bindings: &BTreeMap<String, Value>,
+        line: u32,
+    ) -> Result<Vec<(String, Value)>, BopError> {
+        let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
+        let mut memo = BTreeMap::new();
+        bindings
+            .iter()
+            .map(|(name, value)| {
+                value
+                    .compatibility_snapshot_inner(&mut memo, line)
+                    .map(|value| (name.clone(), value))
+            })
+            .collect()
+    }
+
+    /// Whether two engine compatibility values reuse the same reference-counted
+    /// backing. This is an internal diagnostic used to guard against facade
+    /// fanout accidentally deep-copying an origin module's public snapshot.
+    #[doc(hidden)]
+    pub fn __shares_backing_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Str(left), Self::Str(right)) => Rc::ptr_eq(&left.0, &right.0),
+            (Self::Array(left), Self::Array(right)) => Rc::ptr_eq(&left.0, &right.0),
+            (Self::Dict(left), Self::Dict(right)) => Rc::ptr_eq(&left.0, &right.0),
+            (Self::Struct(left), Self::Struct(right)) => Rc::ptr_eq(&left.0, &right.0),
+            (Self::EnumVariant(left), Self::EnumVariant(right)) => {
+                Rc::ptr_eq(&left.0, &right.0)
+            }
+            (Self::Iter(left), Self::Iter(right)) => Rc::ptr_eq(left, right),
+            (Self::Fn(left), Self::Fn(right)) => Rc::ptr_eq(left, right),
+            (Self::Module(left), Self::Module(right)) => Rc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+
+    fn compatibility_snapshot_key(&self) -> Option<(u8, usize)> {
+        match self {
+            Value::Str(value) => Some((0, Rc::as_ptr(&value.0) as usize)),
+            Value::Array(value) => Some((1, Rc::as_ptr(&value.0) as usize)),
+            Value::Dict(value) => Some((2, Rc::as_ptr(&value.0) as usize)),
+            Value::Struct(value) => Some((3, Rc::as_ptr(&value.0) as usize)),
+            Value::EnumVariant(value) => Some((4, Rc::as_ptr(&value.0) as usize)),
+            Value::Iter(value) => Some((5, Rc::as_ptr(value) as usize)),
+            Value::Fn(value) => Some((6, Rc::as_ptr(value) as usize)),
+            Value::Module(value) => Some((7, Rc::as_ptr(value) as usize)),
+            Value::Int(_) | Value::Number(_) | Value::Bool(_) | Value::None => None,
+        }
+    }
+
+    fn compatibility_snapshot_inner(
+        &self,
+        memo: &mut BTreeMap<(u8, usize), Value>,
+        line: u32,
+    ) -> Result<Self, BopError> {
+        let key = self.compatibility_snapshot_key();
+        if let Some(snapshot) = key.as_ref().and_then(|key| memo.get(key)) {
+            return Ok(snapshot.clone());
+        }
+        let snapshot = match self {
+            Value::Int(value) => Value::Int(*value),
+            Value::Number(value) => Value::Number(*value),
+            Value::Bool(value) => Value::Bool(*value),
+            Value::None => Value::None,
+            Value::Str(value) => {
+                let text = value.0.text.clone();
+                let bytes = text.capacity();
+                Value::Str(BopStr(Rc::new(BopStrData {
+                    text,
+                    _receipt: MemoryReceipt::new(bytes),
+                })))
+            }
+            Value::Array(value) => {
+                let items = value
+                    .0
+                    .items
+                    .iter()
+                    .map(|value| value.compatibility_snapshot_inner(memo, line))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut data = ArrayData {
+                    items,
+                    depth: value.0.depth,
+                    depth_counts: value.0.depth_counts.clone(),
+                    receipt: MemoryReceipt::new(0),
+                };
+                data.receipt.resize(data.tracked_bytes());
+                Value::Array(BopArray(Rc::new(data)))
+            }
+            Value::Dict(value) => {
+                let entries = value
+                    .0
+                    .entries
+                    .iter()
+                    .map(|(key, value)| {
+                        value
+                            .compatibility_snapshot_inner(memo, line)
+                            .map(|value| (key.clone(), value))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut data = DictData {
+                    entries,
+                    depth: value.0.depth,
+                    receipt: MemoryReceipt::new(0),
+                };
+                data.receipt.resize(data.tracked_bytes());
+                Value::Dict(BopDict(Rc::new(data)))
+            }
+            Value::Struct(value) => {
+                let fields = value
+                    .0
+                    .fields
+                    .iter()
+                    .map(|(name, value)| {
+                        value
+                            .compatibility_snapshot_inner(memo, line)
+                            .map(|value| (name.clone(), value))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut data = StructData {
+                    module_path: value.0.module_path.clone(),
+                    type_name: value.0.type_name.clone(),
+                    fields,
+                    depth: value.0.depth,
+                    receipt: MemoryReceipt::new(0),
+                };
+                data.receipt.resize(data.tracked_bytes());
+                Value::Struct(BopStruct(Rc::new(data)))
+            }
+            Value::EnumVariant(value) => {
+                let payload = match &value.0.payload {
+                    EnumPayload::Unit => EnumPayload::Unit,
+                    EnumPayload::Tuple(items) => EnumPayload::Tuple(
+                        items
+                            .iter()
+                            .map(|value| value.compatibility_snapshot_inner(memo, line))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                    EnumPayload::Struct(fields) => EnumPayload::Struct(
+                        fields
+                            .iter()
+                            .map(|(name, value)| {
+                                value
+                                    .compatibility_snapshot_inner(memo, line)
+                                    .map(|value| (name.clone(), value))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                };
+                let mut data = EnumVariantData {
+                    module_path: value.0.module_path.clone(),
+                    type_name: value.0.type_name.clone(),
+                    variant: value.0.variant.clone(),
+                    payload,
+                    depth: value.0.depth,
+                    receipt: MemoryReceipt::new(0),
+                };
+                data.receipt.resize(data.tracked_bytes());
+                Value::EnumVariant(BopEnumVariant(Rc::new(data)))
+            }
+            Value::Iter(value) => {
+                let iter = value.try_borrow().map_err(|_| {
+                    BopError::runtime(
+                        "Cannot snapshot a module iterator while it is borrowed",
+                        line,
+                    )
+                })?;
+                let (kind, bytes) = match &iter.kind {
+                    BopIterKind::Array { items, pos } => {
+                        let items: Vec<Value> = items
+                            .iter()
+                            .map(|value| value.compatibility_snapshot_inner(memo, line))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let bytes = items.capacity() * core::mem::size_of::<Value>();
+                        (BopIterKind::Array { items, pos: *pos }, bytes)
+                    }
+                    BopIterKind::String { chars, pos } => {
+                        let chars = chars.clone();
+                        let bytes = chars.capacity() * core::mem::size_of::<char>();
+                        (BopIterKind::String { chars, pos: *pos }, bytes)
+                    }
+                    BopIterKind::Dict { keys, pos } => {
+                        let keys = keys.clone();
+                        let key_bytes: usize = keys.iter().map(|key| key.capacity()).sum();
+                        let bytes = keys.capacity() * core::mem::size_of::<String>() + key_bytes;
+                        (BopIterKind::Dict { keys, pos: *pos }, bytes)
+                    }
+                };
+                Value::Iter(Rc::new(RefCell::new(BopIter {
+                    kind,
+                    depth: iter.depth,
+                    _receipt: MemoryReceipt::new(bytes),
+                })))
+            }
+            Value::Fn(value) => {
+                let body = match &value.body {
+                    FnBody::Ast(statements) => FnBody::Ast(statements.clone()),
+                    FnBody::Compiled(body) => FnBody::Compiled(Rc::clone(body)),
+                };
+                let captures = value
+                    .captures
+                    .iter()
+                    .map(|(name, value)| {
+                        value
+                            .compatibility_snapshot_inner(memo, line)
+                            .map(|value| (name.clone(), value))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Value::Fn(Rc::new(BopFn {
+                    params: value.params.clone(),
+                    captures,
+                    body,
+                    self_name: value.self_name.clone(),
+                    module_path: value.module_path.clone(),
+                    origin: value.origin.clone(),
+                    depth: value.depth,
+                }))
+            }
+            Value::Module(value) => {
+                let bindings = value
+                    .bindings
+                    .iter()
+                    .map(|(name, value)| {
+                        value
+                            .compatibility_snapshot_inner(memo, line)
+                            .map(|value| (name.clone(), value))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Value::Module(Rc::new(BopModule {
+                    path: value.path.clone(),
+                    bindings,
+                    types: value.types.clone(),
+                    type_exports: value.type_exports.clone(),
+                    live_environments: None,
+                    live_bindings: BTreeMap::new(),
+                    depth: value.depth,
+                }))
+            }
+        };
+        if let Some(key) = key {
+            memo.insert(key, snapshot.clone());
+        }
+        Ok(snapshot)
+    }
+}
+
 // ─── Drop (tracks deallocations) ───────────────────────────────────────────
 
 // ─── Display ───────────────────────────────────────────────────────────────
@@ -2033,6 +2296,55 @@ mod depth_tests {
 
         assert_depth_error(Value::try_new_array(vec![value], 19), 19);
         drop(cloned);
+    }
+
+    #[test]
+    fn compatibility_snapshots_preserve_shared_dags_without_retaining_receipts() {
+        bop_memory_init(usize::MAX);
+        let mut value = Value::Int(0);
+        for _ in 0..50 {
+            value = Value::new_array(vec![value.clone(), value]);
+        }
+        let authoritative_bytes = bop_memory_used();
+        assert!(authoritative_bytes > 0);
+
+        let bindings = BTreeMap::from([
+            ("first".to_string(), value.clone()),
+            ("second".to_string(), value.clone()),
+        ]);
+        let snapshots = Value::__compatibility_snapshot_bindings(&bindings, 0).unwrap();
+        let Value::Array(first_root) = &snapshots[0].1 else {
+            panic!("expected first root array")
+        };
+        let Value::Array(second_root) = &snapshots[1].1 else {
+            panic!("expected second root array")
+        };
+        assert!(Rc::ptr_eq(&first_root.0, &second_root.0));
+        let snapshot = snapshots[0].1.clone();
+        assert_eq!(bop_memory_used(), authoritative_bytes);
+        drop(bindings);
+        drop(value);
+        assert_eq!(bop_memory_used(), 0);
+
+        let mut cursor = &snapshot;
+        for remaining in (1..=50).rev() {
+            let Value::Array(array) = cursor else {
+                panic!("expected shared array DAG")
+            };
+            assert_eq!(array.len(), 2);
+            if remaining > 1 {
+                let Value::Array(left) = &array[0] else {
+                    panic!("expected left array child")
+                };
+                let Value::Array(right) = &array[1] else {
+                    panic!("expected right array child")
+                };
+                assert!(Rc::ptr_eq(&left.0, &right.0));
+            } else {
+                assert!(array.iter().all(|value| matches!(value, Value::Int(0))));
+            }
+            cursor = &array[0];
+        }
     }
 
     #[test]

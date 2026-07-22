@@ -353,3 +353,191 @@ fn recursive_and_cross_module_calls_restore_authoritative_environments_in_order(
     assert_eq!(instance.call("recurse", &[], &mut host).unwrap().inspect(), "114");
     assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[114, 110]");
 }
+
+#[test]
+fn lazy_modules_borrow_the_currently_active_origin_on_success_and_error() {
+    let mut modules = BTreeMap::new();
+    modules.insert(
+        "a".to_string(),
+        "let count = 0\nlet items = [0]\nfn load_b() { count += 1; items.push(1); use b; return [count, items] }\nfn load_bad() { count += 1; items.push(2); use bad }\nfn read() { return [count, items] }"
+            .to_string(),
+    );
+    modules.insert(
+        "b".to_string(),
+        "use a\ncount += 10\nitems.push(10)".to_string(),
+    );
+    modules.insert(
+        "bad".to_string(),
+        "use a.{count, items}\ncount += 100\nitems.push(100)\npanic(\"bad lazy module\")"
+            .to_string(),
+    );
+    let mut host = ModuleHost { modules };
+    let mut instance = BopInstance::load(
+        "use a as a\npub fn load_b() { return a.load_b() }\npub fn load_bad() { return a.load_bad() }\npub fn read() { return a.read() }",
+        &mut host,
+        &BopLimits::standard(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        instance.call("load_b", &[], &mut host).unwrap().inspect(),
+        "[11, [0, 1, 10]]"
+    );
+    assert!(instance.call("load_bad", &[], &mut host).is_err());
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "[112, [0, 1, 10, 2, 100]]"
+    );
+}
+
+#[test]
+fn fatal_step_and_call_depth_errors_leave_the_instance_reusable() {
+    let mut host = Host;
+    let step_limits = BopLimits { max_steps: 20, max_memory: 1024 * 1024 };
+    let mut step_instance = BopInstance::load(
+        "pub fn spin() { while true {} }\npub fn ok() { return 7 }",
+        &mut host,
+        &step_limits,
+    )
+    .unwrap();
+    let step_error = step_instance.call("spin", &[], &mut host).unwrap_err();
+    assert!(step_error.is_fatal);
+    assert_eq!(step_instance.call("ok", &[], &mut host).unwrap().inspect(), "7");
+
+    let mut depth_instance = BopInstance::load(
+        "pub fn dive() { return dive() }\npub fn ok() { return 8 }",
+        &mut host,
+        &BopLimits { max_steps: 1_000_000, max_memory: 1024 * 1024 },
+    )
+    .unwrap();
+    let depth_error = depth_instance.call("dive", &[], &mut host).unwrap_err();
+    assert!(depth_error.message.contains("Too many nested function calls"));
+    assert_eq!(depth_instance.call("ok", &[], &mut host).unwrap().inspect(), "8");
+}
+
+struct CountingModuleHost {
+    modules: BTreeMap<String, String>,
+    resolutions: usize,
+}
+
+impl BopHost for CountingModuleHost {
+    fn call(
+        &mut self,
+        _name: &str,
+        _args: &[Value],
+        _line: u32,
+    ) -> Option<Result<Value, BopError>> {
+        None
+    }
+
+    fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+        self.resolutions += 1;
+        self.modules.get(name).cloned().map(Ok)
+    }
+}
+
+#[test]
+fn lazy_imports_are_cached_even_when_a_later_host_changes_source() {
+    let mut host = CountingModuleHost {
+        modules: BTreeMap::from([(
+            "dynamic".to_string(),
+            "struct Item { value }\nfn Item.double(self) { return self.value * 2 }\nfn make() { return Item { value: 1 } }\nlet value = 1"
+                .to_string(),
+        )]),
+        resolutions: 0,
+    };
+    let mut instance = BopInstance::load(
+        "pub fn read() { use dynamic as dynamic; return dynamic.value }\npub fn method() { use dynamic as dynamic; return dynamic.make().double() }",
+        &mut host,
+        &BopLimits::standard(),
+    )
+    .unwrap();
+    assert_eq!(host.resolutions, 0);
+    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(host.resolutions, 1);
+
+    host.modules
+        .insert("dynamic".to_string(), "let value = 2".to_string());
+    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(instance.call("method", &[], &mut host).unwrap().inspect(), "2");
+    assert_eq!(host.resolutions, 1);
+}
+
+#[test]
+fn retained_types_methods_rng_and_cow_values_survive_across_calls() {
+    let mut host = Host;
+    let source = "struct Counter { value }\nfn Counter.inc(self) { return Counter { value: self.value + 1 } }\nlet stored = Counter { value: 3 }\nlet items = [1]\npub fn method() { stored = stored.inc(); return stored.value }\npub fn take(value) { value.push(2); return value }\npub fn get() { return items }\npub fn push() { items.push(3); return items }\npub fn random() { return rand(1000000) }\npub fn random_pair() { return [rand(1000000), rand(1000000)] }";
+    let mut instance = BopInstance::load(source, &mut host, &BopLimits::standard()).unwrap();
+    assert_eq!(instance.call("method", &[], &mut host).unwrap().inspect(), "4");
+    assert_eq!(instance.call("method", &[], &mut host).unwrap().inspect(), "5");
+
+    let original = Value::new_array(vec![Value::Int(1)]);
+    assert_eq!(
+        instance
+            .call("take", std::slice::from_ref(&original), &mut host)
+            .unwrap()
+            .inspect(),
+        "[1, 2]"
+    );
+    assert_eq!(original.inspect(), "[1]");
+
+    let returned = instance.call("get", &[], &mut host).unwrap();
+    let Value::Array(mut external) = returned else {
+        panic!("expected array")
+    };
+    external.try_push(Value::Int(2), 0).unwrap();
+    assert_eq!(external.len(), 2);
+    assert_eq!(instance.call("get", &[], &mut host).unwrap().inspect(), "[1]");
+    assert_eq!(instance.call("push", &[], &mut host).unwrap().inspect(), "[1, 3]");
+    assert_eq!(external.len(), 2);
+
+    let first = instance.call("random", &[], &mut host).unwrap();
+    let second = instance.call("random", &[], &mut host).unwrap();
+    let mut comparison = BopInstance::load(source, &mut host, &BopLimits::standard()).unwrap();
+    assert_eq!(
+        comparison.call("random_pair", &[], &mut host).unwrap().inspect(),
+        format!("[{}, {}]", first.inspect(), second.inspect())
+    );
+}
+
+struct NestedInstanceHost {
+    nested: Option<BopInstance>,
+}
+
+impl BopHost for NestedInstanceHost {
+    fn call(
+        &mut self,
+        name: &str,
+        _args: &[Value],
+        _line: u32,
+    ) -> Option<Result<Value, BopError>> {
+        if name != "nested_call" {
+            return None;
+        }
+        let mut nested = self.nested.take().expect("nested instance present");
+        let result = nested.call("next", &[], self);
+        self.nested = Some(nested);
+        Some(result)
+    }
+}
+
+#[test]
+fn host_calls_may_nest_a_different_instance_without_crossing_state() {
+    let mut plain_host = Host;
+    let nested = BopInstance::load(
+        "let count = 0\npub fn next() { count += 1; return count }",
+        &mut plain_host,
+        &BopLimits::standard(),
+    )
+    .unwrap();
+    let mut host = NestedInstanceHost { nested: Some(nested) };
+    let mut outer = BopInstance::load(
+        "pub fn invoke() { return nested_call() }",
+        &mut host,
+        &BopLimits::standard(),
+    )
+    .unwrap();
+
+    assert_eq!(outer.call("invoke", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(outer.call("invoke", &[], &mut host).unwrap().inspect(), "2");
+}

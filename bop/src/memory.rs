@@ -44,9 +44,14 @@ impl MemoryAccount {
         self.used.get().saturating_add(bytes) > self.limit
     }
 
+    #[doc(hidden)]
+    pub fn __used(&self) -> usize {
+        self.used.get()
+    }
+
     #[cfg(test)]
     pub(crate) fn used(&self) -> usize {
-        self.used.get()
+        self.__used()
     }
 }
 
