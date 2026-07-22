@@ -376,13 +376,29 @@ pub(crate) struct ModuleEntry {
     /// Every exposed type name and its declaration module. Facades retain the
     /// origin rather than rebinding imported types to their own path.
     pub effective_types: BTreeMap<String, String>,
-    // Kept during analysis for potential future use (e.g. more
-    // precise `let` vs `fn` handling in exports packing), but not
-    // currently read by the emitter.
+    /// Names whose final exported representation is a runtime local rather
+    /// than an otherwise same-named lifted function wrapper.
+    effective_value_exports: BTreeSet<String>,
+    /// Exported value bindings that are module namespaces. Descriptors are
+    /// static codegen evidence only; generated loaders publish the live Value.
+    effective_module_exports: BTreeMap<String, ModuleValueExport>,
+    /// Any module-valued binding visible while the module body executes. This
+    /// lets lifted callables compile without publishing future runtime state.
+    module_alias_candidates: BTreeMap<String, ModuleValueExport>,
+    // Kept as analysis metadata for consumers that need the module's
+    // syntactic top-level declarations; the emitter currently uses the
+    // source-order-aware `effective_value_exports` set instead.
     #[allow(dead_code)]
     pub own_lets: Vec<String>,
     #[allow(dead_code)]
     pub direct_imports: Vec<String>,
+}
+
+#[derive(Clone)]
+struct ModuleValueExport {
+    module_path: String,
+    exposed_bindings: Vec<String>,
+    exposed_types: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -622,6 +638,9 @@ fn analyze_module(
         type_exports.insert(ty.clone(), name.to_string());
     }
 
+    let (module_value_exports, module_alias_candidates, effective_value_exports) =
+        effective_module_value_exports(&ast, &graph.modules);
+
     graph.modules.insert(
         name.to_string(),
         ModuleEntry {
@@ -631,12 +650,152 @@ fn analyze_module(
             direct_imports: direct_imports.into_iter().map(|import| import.path).collect(),
             effective_exports: exports,
             effective_types: type_exports,
+            effective_value_exports,
+            effective_module_exports: module_value_exports,
+            module_alias_candidates,
         },
     );
     graph.order.push(name.to_string());
     visiting.remove(name);
     visited.insert(name.to_string());
     Ok(())
+}
+
+fn effective_module_value_exports(
+    stmts: &[Stmt],
+    modules: &HashMap<String, ModuleEntry>,
+) -> (
+    BTreeMap<String, ModuleValueExport>,
+    BTreeMap<String, ModuleValueExport>,
+    BTreeSet<String>,
+) {
+    let mut value_bindings = BTreeSet::new();
+    let mut module_exports = BTreeMap::new();
+    let mut candidates = BTreeMap::new();
+    let mut functions = BTreeSet::new();
+
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Use { path, items, alias } => {
+                let Some(module) = modules.get(path) else {
+                    continue;
+                };
+                if let Some(alias_name) = alias {
+                    if value_bindings.contains(alias_name) || functions.contains(alias_name) {
+                        continue;
+                    }
+                    let exposed_bindings = match items {
+                        Some(items) => items
+                            .iter()
+                            .filter(|name| module.effective_exports.iter().any(|item| item == *name))
+                            .cloned()
+                            .collect(),
+                        None => module.effective_exports.clone(),
+                    };
+                    let exposed_types = match items {
+                        Some(items) => items
+                            .iter()
+                            .filter_map(|name| {
+                                module
+                                    .effective_types
+                                    .get(name)
+                                    .map(|origin| (name.clone(), origin.clone()))
+                            })
+                            .collect(),
+                        None => module.effective_types.clone(),
+                    };
+                    value_bindings.insert(alias_name.clone());
+                    let descriptor = ModuleValueExport {
+                        module_path: path.clone(),
+                        exposed_bindings,
+                        exposed_types,
+                    };
+                    module_exports.insert(alias_name.clone(), descriptor.clone());
+                    candidates.insert(alias_name.clone(), descriptor);
+                    continue;
+                }
+
+                let exposed_names: Vec<&String> = match items {
+                    Some(items) => items
+                        .iter()
+                        .filter(|name| module.effective_exports.iter().any(|item| item == *name))
+                        .collect(),
+                    None => module
+                        .effective_exports
+                        .iter()
+                        .filter(|name| !name.starts_with('_'))
+                        .collect(),
+                };
+                for name in exposed_names {
+                    if value_bindings.contains(name) || functions.contains(name) {
+                        continue;
+                    }
+                    value_bindings.insert(name.clone());
+                    if let Some(module_export) = module.effective_module_exports.get(name) {
+                        module_exports.insert(name.clone(), module_export.clone());
+                        candidates.insert(name.clone(), module_export.clone());
+                    }
+                }
+            }
+            StmtKind::Let { name, value, .. } => {
+                value_bindings.insert(name.clone());
+                if let ExprKind::Ident(source) = &value.kind {
+                    if let Some(module_export) = module_exports.get(source).cloned() {
+                        module_exports.insert(name.clone(), module_export.clone());
+                        candidates.insert(name.clone(), module_export);
+                    } else {
+                        module_exports.remove(name);
+                    }
+                } else {
+                    module_exports.remove(name);
+                }
+            }
+            StmtKind::FnDecl { name, .. } => {
+                functions.insert(name.clone());
+            }
+            StmtKind::Assign {
+                target: AssignTarget::Variable(name),
+                value,
+                ..
+            } => {
+                if let ExprKind::Ident(source) = &value.kind {
+                    if let Some(module_export) = module_exports.get(source).cloned() {
+                        module_exports.insert(name.clone(), module_export.clone());
+                        candidates.insert(name.clone(), module_export);
+                    } else {
+                        module_exports.remove(name);
+                    }
+                } else {
+                    module_exports.remove(name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (module_exports, candidates, value_bindings)
+}
+
+fn module_imports_from_exports(
+    exports: &BTreeMap<String, ModuleValueExport>,
+) -> Vec<ModuleImport> {
+    exports
+        .iter()
+        .map(|(alias, export)| {
+            let mut items = export.exposed_bindings.clone();
+            for type_name in export.exposed_types.keys() {
+                if !items.contains(type_name) {
+                    items.push(type_name.clone());
+                }
+            }
+            ModuleImport {
+                path: export.module_path.clone(),
+                items: Some(items),
+                alias: Some(alias.clone()),
+                line: 0,
+            }
+        })
+        .collect()
 }
 
 fn push_unique(names: &mut Vec<String>, seen: &mut BTreeSet<String>, name: &str) {
@@ -1193,6 +1352,24 @@ impl Emitter {
         }
     }
 
+    fn bind_module_export(&mut self, name: &str, export: &ModuleValueExport) {
+        if let Some(frame) = self.module_aliases.last_mut() {
+            frame.insert(
+                name.to_string(),
+                ModuleAliasBinding {
+                    exposed_types: export.exposed_types.clone(),
+                },
+            );
+        }
+    }
+
+    fn has_module_alias_candidate(&self, name: &str) -> bool {
+        self.module_aliases
+            .iter()
+            .rev()
+            .any(|aliases| aliases.contains_key(name))
+    }
+
     /// Emit Rust source for a `__resolver` closure that turns
     /// `(namespace, type_name)` pairs into the declaring
     /// module's path, baked from the emitter's current
@@ -1301,6 +1478,18 @@ impl Emitter {
         if let Some(top) = self.scope_stack.last_mut() {
             top.locals.insert(name.to_string());
         }
+    }
+
+    fn emit_module_alias_context_sync(&mut self, name: &str) {
+        if !self.is_module_top_scope() {
+            return;
+        }
+        self.line(&format!(
+            "if matches!(&{value}, ::bop::value::Value::Module(_)) {{ ctx.module_aliases.insert(({module}.to_string(), {name}.to_string()), {value}.clone()); }} else {{ ctx.module_aliases.remove(&({module}.to_string(), {name}.to_string())); }}",
+            value = rust_user_ident(name),
+            module = rust_string_literal(&self.current_module),
+            name = rust_string_literal(name),
+        ));
     }
 
     fn is_local(&self, name: &str) -> bool {
@@ -1459,6 +1648,18 @@ impl Emitter {
         }
     }
 
+    fn seed_module_alias_candidates(
+        &mut self,
+        candidates: &BTreeMap<String, ModuleValueExport>,
+    ) {
+        if let Some(frame) = self.module_aliases.last_mut() {
+            frame.clear();
+        }
+        for (name, export) in candidates {
+            self.bind_module_export(name, export);
+        }
+    }
+
     fn declaration_aliases_for_callable(
         &self,
         params: &[String],
@@ -1572,10 +1773,9 @@ impl Emitter {
         }
         self.emit_header();
         self.emit_runtime_preamble();
-        self.root_declaration_aliases = collect_top_level_imports(stmts)
-            .into_iter()
-            .filter(|import| import.alias.is_some())
-            .collect();
+        let (_, root_alias_candidates, _) =
+            effective_module_value_exports(stmts, &self.modules.modules);
+        self.root_declaration_aliases = module_imports_from_exports(&root_alias_candidates);
         self.declaration_aliases = self.root_declaration_aliases.clone();
         // Seed the outermost type_bindings frame with the
         // root program's declared types so methods + top-level
@@ -1585,6 +1785,7 @@ impl Emitter {
         // are visible to the fn bodies we're about to emit.
         self.seed_types_for_module(bop::value::ROOT_MODULE_PATH);
         self.seed_uses(stmts);
+        self.seed_module_alias_candidates(&root_alias_candidates);
         // Imported modules emit first. Eager top-level edges are
         // topo-ordered leaves-first; lazy nested edges need no Rust
         // item ordering but are present in the same resolved graph.
@@ -1674,10 +1875,7 @@ impl Emitter {
         );
         let saved_declaration_aliases = std::mem::replace(
             &mut self.declaration_aliases,
-            collect_top_level_imports(&entry.ast)
-                .into_iter()
-                .filter(|import| import.alias.is_some())
-                .collect(),
+            module_imports_from_exports(&entry.module_alias_candidates),
         );
         // Seed this module's types too — see
         // `seed_types_for_module` for why this matters. Methods
@@ -1686,6 +1884,7 @@ impl Emitter {
         // for the module's own `use` statements.
         self.seed_types_for_module(name);
         self.seed_uses(&entry.ast);
+        self.seed_module_alias_candidates(&entry.module_alias_candidates);
 
         self.emit_top_level_fn_decls(&entry.ast)?;
         self.emit_fn_value_wrappers();
@@ -1864,7 +2063,8 @@ impl Emitter {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if self.is_local_in_current_scope(alias_name)
-                    || self.fn_info.all_fns.contains_key(alias_name)
+                    || (self.fn_info.all_fns.contains_key(alias_name)
+                        && !self.has_module_alias_candidate(alias_name))
                 {
                     return Err(BopError::runtime(
                         format!(
@@ -1917,7 +2117,8 @@ impl Emitter {
                     // it just like the walker and VM value scopes.
                     if self.is_local_in_current_scope(name)
                         || (self.is_module_top_scope()
-                            && self.fn_info.all_fns.contains_key(name))
+                            && self.fn_info.all_fns.contains_key(name)
+                            && !self.has_module_alias_candidate(name))
                     {
                         continue;
                     }
@@ -1927,6 +2128,17 @@ impl Emitter {
                         tmp = tmp
                     ));
                     self.bind_local(name);
+                    if let Some(module_export) = entry.effective_module_exports.get(name) {
+                        self.bind_module_export(name, module_export);
+                        self.scope_stack
+                            .last_mut()
+                            .expect("use emission has a scope")
+                            .module_alias_locals
+                            .insert(name.clone());
+                        if module_top_scope {
+                            self.emit_module_alias_context_sync(name);
+                        }
+                    }
                 }
                 for (type_name, origin) in &expose_types {
                     self.bind_imported_type(type_name, origin);
@@ -2030,7 +2242,9 @@ impl Emitter {
         .unwrap();
         for export in &entry.effective_exports {
             self.pad();
-            if entry.own_fns.contains_key(export) {
+            if entry.own_fns.contains_key(export)
+                && !entry.effective_value_exports.contains(export)
+            {
                 writeln!(
                     self.out,
                     "    {ident}: {wrapper}(0)?,",
@@ -2194,13 +2408,13 @@ impl Emitter {
             let saved_module_context = if module_path == bop::value::ROOT_MODULE_PATH {
                 None
             } else {
-                let module_ast = self
+                let module_entry = self
                     .modules
                     .modules
                     .get(module_path)
                     .expect("method's declaring module must be in the module graph")
-                    .ast
                     .clone();
+                let module_ast = module_entry.ast.clone();
                 let saved_module = std::mem::replace(
                     &mut self.current_module,
                     module_path.clone(),
@@ -2222,13 +2436,11 @@ impl Emitter {
                 );
                 let saved_declaration_aliases = std::mem::replace(
                     &mut self.declaration_aliases,
-                    collect_top_level_imports(&module_ast)
-                        .into_iter()
-                        .filter(|import| import.alias.is_some())
-                        .collect(),
+                    module_imports_from_exports(&module_entry.module_alias_candidates),
                 );
                 self.seed_types_for_module(module_path);
                 self.seed_uses(&module_ast);
+                self.seed_module_alias_candidates(&module_entry.module_alias_candidates);
                 Some((
                     saved_module,
                     saved_type_bindings,
@@ -2466,10 +2678,17 @@ impl Emitter {
                 let ident = rust_user_ident(name);
                 self.line(&format!("let mut {}: ::bop::value::Value = {};", ident, rhs));
                 self.bind_local(name);
+                if let Some(scope) = self.scope_stack.last_mut() {
+                    scope.module_alias_locals.remove(name);
+                }
+                self.emit_module_alias_context_sync(name);
             }
 
             StmtKind::Assign { target, op, value } => {
                 self.emit_assign(target, op, value, line)?;
+                if let AssignTarget::Variable(name) = target {
+                    self.emit_module_alias_context_sync(name);
+                }
             }
 
             StmtKind::If {

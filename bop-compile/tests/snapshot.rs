@@ -1079,6 +1079,57 @@ fn module_loader_clears_declaration_alias_context_after_failure() {
 }
 
 #[test]
+fn flat_module_reexport_publishes_live_context_for_lifted_callables() {
+    let output = compile_with_modules(
+        r#"use wrapper
+fn build() { return api.Point { value: 42 } }
+let value = build()"#,
+        &[
+            ("types", "struct Point { value }"),
+            ("wrapper", "use types as api"),
+        ],
+    )
+    .expect("transpile a flat module-valued re-export");
+
+    contains_all(
+        &output,
+        &[
+            "ctx.module_aliases.insert((\"wrapper\".to_string(), \"api\".to_string())",
+            "ctx.module_aliases.insert((\"<root>\".to_string(), \"api\".to_string())",
+            "__bop_declaration_alias_namespace(ctx, &mut __bop_declaration_alias_",
+            "\"<root>\", \"api\"",
+        ],
+    );
+}
+
+#[test]
+fn module_alias_copy_and_assignment_sync_generated_context() {
+    let output = compile_with_modules(
+        r#"use first as api
+use second as other
+let copy = api
+api = other
+fn from_copy() { return copy.First { value: 1 } }
+fn from_api() { return api.Second { value: 2 } }"#,
+        &[
+            ("first", "struct First { value }"),
+            ("second", "struct Second { value }"),
+        ],
+    )
+    .expect("transpile module alias copy and reassignment");
+
+    contains_all(
+        &output,
+        &[
+            "matches!(&__bop_user_value_636f7079, ::bop::value::Value::Module(_))",
+            "(\"<root>\".to_string(), \"copy\".to_string())",
+            "matches!(&__bop_user_value_617069, ::bop::value::Value::Module(_))",
+            "ctx.module_aliases.remove(&(\"<root>\".to_string(), \"api\".to_string()))",
+        ],
+    );
+}
+
+#[test]
 fn block_local_module_alias_does_not_leak_into_the_enclosing_scope() {
     let error = compile_with_modules(
         r#"if true {

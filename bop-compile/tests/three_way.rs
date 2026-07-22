@@ -1496,6 +1496,112 @@ print(aliased.bump(), calls.alias_matcher()(aliased))"#,
         ],
     ),
     (
+        "reexported_module_aliases_surface_and_callable_context",
+        r#"use top
+fn root_build(value) { return api.Point { value: value } }
+let point = build(4)
+let runner = Runner { offset: 2 }
+let unit = api.Signal::Idle
+let tuple = api.Signal::Count(3)
+let named = api.Signal::Named { value: 5 }
+print(point.value, matcher()(point), runner.run(6).value, root_build(7).value)
+print(match unit { api.Signal::Idle => "idle", _ => "bad" })
+print(match tuple { api.Signal::Count(value) => value, _ => 0 })
+print(match named { api.Signal::Named { value } => value, _ => 0 })
+print(try_call(fn() { return api.hidden() }).is_err())"#,
+        &[
+            (
+                "dep",
+                "struct Point { value }\nenum Signal { Idle, Count(value), Named { value } }\nfn make(value) { return Point { value: value } }\nfn hidden() { return 99 }",
+            ),
+            ("wrapper", "use dep.{Point, Signal, make} as api"),
+            ("middle", "use wrapper"),
+            (
+                "top",
+                "use middle.{api}\nstruct Runner { offset }\nfn Runner.run(self, value) { return api.make(value + self.offset) }\nfn build(value) { let point = api.Point { value: value }; return match point { api.Point { value: found } => api.make(found + 1), _ => none } }\nfn matcher() { return fn(value) { return match value { api.Point { value: found } => found, _ => 0 } } }",
+            ),
+        ],
+    ),
+    (
+        "reexported_module_aliases_same_name_isolation",
+        "use wa.{make_a}\nuse wb.{make_b}\nprint(make_a(2).a, make_b(3).b)",
+        &[
+            ("a", "struct Point { a }\nfn make(value) { return Point { a: value } }"),
+            ("b", "struct Point { b }\nfn make(value) { return Point { b: value } }"),
+            ("wa", "use a as api\nfn make_a(value) { return api.make(value) }"),
+            ("wb", "use b as api\nfn make_b(value) { return api.make(value) }"),
+        ],
+    ),
+    (
+        "reexported_module_aliases_timing_and_fn_winner",
+        r#"use timing
+use alias_before_fn
+print(before.is_err(), after.is_ok(), after.unwrap().value)
+print(build().value, api.Point { value: 8 }.value)"#,
+        &[
+            ("dep", "struct Point { value }"),
+            ("wrapper", "use dep as api"),
+            (
+                "timing",
+                "fn timed() { return api.Point { value: 9 } }\nlet before = try_call(timed)\nuse wrapper\nlet after = try_call(timed)",
+            ),
+            (
+                "alias_before_fn",
+                "use dep as api\nfn api() { return 99 }\nfn build() { return api.Point { value: 7 } }",
+            ),
+        ],
+    ),
+    (
+        "reexported_module_aliases_copy_assignment_and_flat_fn_order",
+        r#"use copies.{from_copy, from_reassigned}
+use flat_fn_first.{result} as first
+use flat_module_first.{result} as second
+print(from_copy(1).value, from_reassigned(2).value)
+print(first.result(), second.result().value)
+use module_fn_then_value.{api} as final_value
+print(final_value.api)"#,
+        &[
+            ("a", "struct Point { value }"),
+            ("b", "struct Other { value }"),
+            ("wrapper", "use a as api"),
+            (
+                "copies",
+                "use a as api\nuse b as other\nlet copy = api\napi = other\nfn from_copy(value) { return copy.Point { value: value } }\nfn from_reassigned(value) { return api.Other { value: value } }",
+            ),
+            (
+                "flat_fn_first",
+                "fn api() { return 21 }\nuse wrapper\nfn result() { return api() }",
+            ),
+            (
+                "flat_module_first",
+                "use wrapper\nfn api() { return 22 }\nfn result() { return api.Point { value: 23 } }",
+            ),
+            (
+                "module_fn_then_value",
+                "use a as api\nfn api() { return 24 }\nlet api = 25",
+            ),
+        ],
+    ),
+    (
+        "reexported_module_aliases_private_and_first_win",
+        r#"use private_selected.{_api}
+use module_first.{make}
+use value_first.{api} as value_holder
+print(_api.Point { value: 3 }.value, make().value, value_holder.api)"#,
+        &[
+            ("dep", "struct Point { value }"),
+            ("wrapper", "use dep as api"),
+            ("private", "use dep as _api"),
+            ("private_selected", "use private.{_api}"),
+            ("values", "let api = 11"),
+            (
+                "module_first",
+                "use wrapper\nuse values\nfn make() { return api.Point { value: 4 } }",
+            ),
+            ("value_first", "use values\nuse wrapper"),
+        ],
+    ),
+    (
         "root_named_fn_declaration_alias_context",
         r#"use types as t
 fn build(value) {
