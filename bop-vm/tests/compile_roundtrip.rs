@@ -8,7 +8,7 @@
 //! diff.
 
 use bop::parse;
-use bop_vm::{compile, disassemble};
+use bop_vm::{LoopStateKind, compile, disassemble};
 
 fn disasm(source: &str) -> String {
     let ast = parse(source).expect("parse");
@@ -240,6 +240,56 @@ fn for_over_array() {
         11: Jump -> 4
         12: Halt
         "#,
+    );
+}
+
+#[test]
+fn break_discards_only_the_broken_loops_sidecar() {
+    let ast = parse(
+        r#"for outer in [1] {
+    while true { break }
+    break
+}
+repeat 2 {
+    if true { break }
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let cleanups: Vec<LoopStateKind> = chunk
+        .code
+        .iter()
+        .filter_map(|instr| match instr {
+            bop_vm::Instr::PopLoopState(kind) => Some(*kind),
+            _ => None,
+        })
+        .collect();
+
+    // The inner while owns no stack sidecar, so its break must not consume
+    // the enclosing for iterator. The outer for and repeat each clean up
+    // exactly their own state, including the repeat break nested in `if`.
+    assert_eq!(cleanups, [LoopStateKind::Iterator, LoopStateKind::Repeat]);
+}
+
+#[test]
+fn continue_preserves_loop_sidecars() {
+    let d = disasm("for x in [1] { continue }\nrepeat 1 { continue }");
+    assert!(
+        !d.contains("PopLoopState"),
+        "continue must preserve loop state:\n{d}"
+    );
+}
+
+#[test]
+fn broken_for_and_repeat_emit_typed_cleanup() {
+    let d = disasm("for x in [1] { break }\nrepeat 1 { break }");
+    assert!(
+        d.contains("PopLoopState iterator"),
+        "for break missing iterator cleanup:\n{d}"
+    );
+    assert!(
+        d.contains("PopLoopState repeat"),
+        "repeat break missing counter cleanup:\n{d}"
     );
 }
 

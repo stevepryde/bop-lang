@@ -66,6 +66,7 @@
 //! ## Iteration and repeat
 //! - `MakeIter` + `IterNext { target }` — iterate over the top value.
 //! - `MakeRepeatCount` + `RepeatNext { target }` — counted loop.
+//! - `PopLoopState(kind)` — discard a loop-owned iterator/counter on `break`.
 //!
 //! ## Control flow (absolute offsets within the chunk)
 //! - `Jump(t)`, `JumpIfFalse(t)`, `JumpIfFalsePeek(t)`, `JumpIfTruePeek(t)`.
@@ -94,7 +95,8 @@ pub mod vm;
 
 pub use chunk::{
     Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx, EnumVariantDef,
-    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx, StructDef, StructIdx,
+    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, LoopStateKind, NameIdx,
+    StructDef, StructIdx,
 };
 pub use compiler::compile;
 pub use disasm::disassemble;
