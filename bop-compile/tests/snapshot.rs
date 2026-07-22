@@ -820,14 +820,10 @@ fn options_without_main_skip_entry_point() {
     );
 }
 
-// ─── Cross-module type clashes (tech debt #3) ─────────────────────
+// ─── Cross-module type identity ───────────────────────────────────
 //
-// The AOT folds struct / enum decls into a single flat registry
-// (see `collect_type_registry` in `emit.rs`). Prior to the
-// tech-debt-3 refactor, two modules that declared types with the
-// same name would silently overwrite each other — the last one
-// seen won. Walker and VM raise on conflicting imports; now AOT
-// does too.
+// Runtime registries are nested by declaration module and type name, so
+// same-named types in different modules coexist without shape folding.
 
 fn compile_with_modules(
     code: &str,
@@ -1135,6 +1131,7 @@ fn type_free_callables_and_loops_do_not_clone_runtime_type_context() {
     repeat n { total += 1 }
     return match total { 0 => 0, value => value }
 }
+
 let closure = fn(n) {
     let total = 0
     repeat n { total += 1 }
@@ -1149,6 +1146,83 @@ print(hot(3), closure(2))"#,
     assert!(!output.contains(
         "let mut __bop_type_bindings = __bop_type_bindings.clone()"
     ));
+}
+
+#[test]
+fn nested_type_sites_emit_static_descriptors_and_o1_runtime_lookup() {
+    let output = compile(
+        r#"if true {
+    struct Point { x, y }
+    enum Signal { Idle, Pair(left, right), Named { value } }
+    print(Point { x: 1, y: 2 }.x)
+    print(Signal::Pair(3, 4))
+}"#,
+    );
+
+    contains_all(
+        &output,
+        &[
+            "const __BOP_STRUCT_SITE_0: &'static [&'static str] = &[\"x\", \"y\"]",
+            "const __BOP_ENUM_SITE_1: &'static [(&'static str, __BopDynamicVariantShape)]",
+            "__BopDynamicVariantShape::Tuple(&[\"left\", \"right\"])",
+            "__bop_register_struct(ctx, \"<root>\", \"Point\", __BOP_STRUCT_SITE_0",
+            "__bop_register_enum(ctx, \"<root>\", \"Signal\", __BOP_ENUM_SITE_1",
+            ".get(module)\n        .and_then(|defs| defs.get(type_name))",
+            "__bop_struct_fields(ctx, &__module_path, \"Point\"",
+            "__bop_enum_variant_shape(ctx, &__module_path, \"Signal\", \"Pair\"",
+        ],
+    );
+    assert!(!output.contains("match __module_path.as_str()"));
+    assert!(!output.contains("let __declared_fields: &'static"));
+}
+
+#[test]
+fn recursive_type_catalogue_reaches_lambdas_through_expression_edges() {
+    let output = compile(
+        r#"let maker = ({"callable": [fn() {
+    let before = try_call(fn() { return Deep { value: 1 } })
+    struct Deep { value }
+    enum Nested { Value(item) }
+    return match Nested::Value(Deep { value: 2 }) {
+        Nested::Value(item) => item,
+        _ => none,
+    }
+}]}["callable"])[0]
+print(maker().value)"#,
+    );
+
+    contains_all(
+        &output,
+        &[
+            "const __BOP_STRUCT_SITE_0",
+            "const __BOP_ENUM_SITE_1",
+            "__bop_register_struct(ctx, \"<root>\", \"Deep\"",
+            "__bop_register_enum(ctx, \"<root>\", \"Nested\"",
+        ],
+    );
+}
+
+#[test]
+fn typed_module_failure_emits_own_registry_snapshot_and_restore() {
+    let output = compile_with_modules(
+        "fn retry() { use bad }",
+        &[(
+            "bad",
+            "struct Own { value }\nenum OwnSignal { Value(item) }\nlet boom = 1 / 0",
+        )],
+    )
+    .expect("transpile typed failing module");
+
+    contains_all(
+        &output,
+        &[
+            "let __saved_type_defs = __bop_take_module_type_defs(ctx, \"bad\")",
+            "__bop_clear_module_type_defs(ctx, \"bad\")",
+            "__bop_restore_module_type_defs(ctx, \"bad\", __saved_type_defs)",
+            "structs: ctx.struct_defs.remove(module)",
+            "enums: ctx.enum_defs.remove(module)",
+        ],
+    );
 }
 
 #[test]
@@ -1261,7 +1335,11 @@ if true {
     )
     .expect("nested imports may shadow outer frames and keep current-frame bindings");
 
-    assert!(out.contains("\"second\".to_string(), \"Point\".to_string()"));
+    assert!(out.contains("__bop_validate_namespace_type(&__bop_user_value_7479706573"));
+    assert!(out.contains("\"types\", \"Point\", 8)?; \"second\".to_string()"));
+    assert!(out.contains(
+        "let __declared_fields = __bop_struct_fields(ctx, &__module_path, \"Point\", 8)?;"
+    ));
 }
 
 #[test]

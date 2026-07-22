@@ -621,6 +621,141 @@ print(match Signal::Pair(7, 8) { Signal::Pair(left, right) => left + right, _ =>
 print(match (Signal::Named { value: 9 }) { Signal::Named { value } => value, _ => 0 })"#,
     ),
     (
+        "nested_type_declarations_execute_and_do_not_leak",
+        r#"if true {
+    struct Branch { value }
+    enum Flag { On, Pair(left, right), Named { value } }
+    print(Branch { value: 3 }.value)
+    print(match Flag::Pair(4, 5) { Flag::Pair(left, right) => left + right, _ => 0 })
+}
+if false {
+    struct DeadBad { value, value }
+    enum DeadWorse { Pair(value, value) }
+}
+print(try_call(fn() { return Branch { value: 9 } }).is_err())
+print(try_call(fn() { return Flag::On }).is_err())"#,
+    ),
+    (
+        "callable_and_lambda_type_declarations_are_runtime_sites",
+        r#"fn build(value) {
+    struct Local { value }
+    enum Wrapped { Value(item) }
+    let wrapped = Wrapped::Value(Local { value: value })
+    return match wrapped { Wrapped::Value(item) => item, _ => none }
+}
+let make = fn(value) {
+    struct LambdaLocal { value }
+    enum LambdaWrapped { Value(item) }
+    return match LambdaWrapped::Value(LambdaLocal { value: value }) {
+        LambdaWrapped::Value(item) => item,
+        _ => none,
+    }
+}
+print(build(2).value, build(3).value)
+print(make(4).value, make(5).value)
+print(try_call(fn() { return Local { value: 0 } }).is_err())
+print(try_call(fn() { return LambdaWrapped::Value(0) }).is_err())"#,
+    ),
+    (
+        "conditional_type_alternatives_register_only_executed_site",
+        r#"let choose_left = true
+if choose_left {
+    struct Choice { left }
+    enum Signal { Left(value) }
+    print(Choice { left: 7 }.left)
+    print(match Signal::Left(8) { Signal::Left(value) => value, _ => 0 })
+} else {
+    struct Choice { right }
+    enum Signal { Right { value } }
+    print(Choice { right: 9 }.right)
+}"#,
+    ),
+    (
+        "conditional_type_alternative_other_shape",
+        r#"if false {
+    struct Choice { left }
+    enum Signal { Left(value) }
+} else {
+    struct Choice { right }
+    enum Signal { Right { value } }
+    print(Choice { right: 9 }.right)
+    print(match (Signal::Right { value: 10 }) { Signal::Right { value } => value, _ => 0 })
+}"#,
+    ),
+    (
+        "loop_nested_type_declaration_sites",
+        r#"let once = true
+while once {
+    struct WhileType { value }
+    print(WhileType { value: 1 }.value)
+    once = false
+}
+repeat 2 {
+    struct RepeatType { value }
+    enum RepeatSignal { Value(item) }
+    print(match RepeatSignal::Value(RepeatType { value: 2 }) {
+        RepeatSignal::Value(item) => item.value,
+        _ => 0,
+    })
+}
+for value in [3, 4] {
+    struct ForType { value }
+    print(ForType { value: value }.value)
+}"#,
+    ),
+    (
+        "struct_and_enum_names_use_separate_runtime_registries",
+        r#"struct Dual { value }
+enum Dual { Value(item) }
+print(Dual { value: 5 }.value)
+print(match Dual::Value(6) { Dual::Value(item) => item, _ => 0 })"#,
+    ),
+    (
+        "failed_call_preserves_definition_but_unwinds_binding",
+        r#"fn fail() {
+    struct Persist { value }
+    let boom = 1 / 0
+    return none
+}
+print(try_call(fail).is_err())
+print(try_call(fn() { return Persist { value: 1 } }).is_err())
+fn recover() {
+    struct Persist { value }
+    return Persist { value: 2 }
+}
+print(recover().value)"#,
+    ),
+    (
+        "block_type_definition_persists_without_lexical_binding_leak",
+        r#"if true { struct Hidden { value } }
+fn build() { return Hidden { value: 1 } }
+print(try_call(build).is_err())"#,
+    ),
+    (
+        "executed_conflicting_type_sites_error_at_second_execution",
+        r#"let turn = 0
+repeat 2 {
+    if turn == 0 { struct Flip { left } }
+    else { struct Flip { right } }
+    turn += 1
+}"#,
+    ),
+    (
+        "enum_tuple_names_are_validated_but_not_identity",
+        r#"enum Item { Value(first) }
+enum Item { Value(second) }
+print(match Item::Value(6) { Item::Value(value) => value, _ => 0 })"#,
+    ),
+    (
+        "executed_duplicate_tuple_field_is_rejected",
+        "enum Invalid { Pair(value, value) }",
+    ),
+    (
+        "enum_variant_order_is_runtime_shape",
+        r#"enum Ordered { First, Second }
+enum Ordered { Second, First }"#,
+    ),
+    (
         "while_loop",
         "let i = 0\nwhile i < 5 { i += 1 }\nprint(i)",
     ),
@@ -2751,6 +2886,41 @@ print(try_call(bare).is_err(), try_call(qualified).is_err())
 use dep.{P}
 use dep as api
 print(try_call(bare).is_ok(), try_call(qualified).is_ok())
+let boom = 1 / 0"#,
+            ),
+        ],
+    ),
+    (
+        "module_callable_nested_types_execute_without_exporting",
+        r#"use maker
+print(build(12).value, build(13).value)
+print(try_call(fn() { return Hidden { value: 0 } }).is_err())"#,
+        &[(
+            "maker",
+            r#"fn build(value) {
+    struct Hidden { value }
+    enum Wrapped { Value(item) }
+    return match Wrapped::Value(Hidden { value: value }) {
+        Wrapped::Value(item) => item,
+        _ => none,
+    }
+}"#,
+        )],
+    ),
+    (
+        "failed_module_load_rolls_back_own_type_defs_only",
+        r#"fn load_bad() { use bad }
+print(try_call(load_bad).is_err())
+print(try_call(load_bad).is_err())
+use dep
+print(Shared { value: 14 }.value)"#,
+        &[
+            ("dep", "struct Shared { value }"),
+            (
+                "bad",
+                r#"use dep
+struct Own { value }
+enum OwnSignal { Value(item) }
 let boom = 1 / 0"#,
             ),
         ],
