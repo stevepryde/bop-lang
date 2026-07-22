@@ -3118,12 +3118,12 @@ impl Emitter {
 
         // A mutating method on a bare identifier is the one shape where the
         // language writes the receiver back. Arrays are owned values, so the
-        // binding itself can be mutated without violating copy semantics: any
-        // earlier assignment / argument pass has already made its independent
-        // deep copy. Crucially, do this only after all argument temporaries
-        // above have evaluated. Besides matching the walker, that makes nested
-        // calls such as `a.push(a.pop())` observe the current post-argument
-        // binding.
+        // binding itself can be mutated without violating value semantics:
+        // copy-on-write detaches only when an earlier assignment / argument
+        // still shares the backing store. Crucially, do this only after all
+        // argument temporaries above have evaluated. Besides matching the
+        // walker, that makes nested calls such as `a.push(a.pop())` observe the
+        // current post-argument binding.
         //
         // The receiver is dynamically typed. A struct may define a user method
         // named `push`, so non-arrays still clone once and go through the full
@@ -4444,9 +4444,8 @@ fn __bop_validate_namespace_type(
     }
 }
 
-/// Write a struct field in place (on the owned Value), returning
-/// the modified struct. Mirrors the walker's clone-mutate-store
-/// pattern.
+/// Write a struct field on the owned live-binding value and return it.
+/// Moving the value into this helper keeps a unique CoW backing store unique.
 #[inline]
 fn __bop_field_set(
     mut obj: ::bop::value::Value,

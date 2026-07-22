@@ -240,13 +240,12 @@ idiomatic mutation is `c = c.bump()`, not in-place.
 Walker, VM, and AOT all implement the same semantics:
 
 - Walker: `struct_defs`, `enum_defs`, `methods` BTreeMaps on
-  `Evaluator`; `Value::Struct(Box<BopStruct>)` and
-  `Value::EnumVariant(Box<BopEnumVariant>)` with boxed payloads
-  so the enum stays compact (important for deep recursion —
-  otherwise per-call stack frames overflow before the call-depth
-  counter kicks in).
+  `Evaluator`; `Value::Struct(BopStruct)` and
+  `Value::EnumVariant(BopEnumVariant)` use compact `Rc`-backed
+  copy-on-write payloads, keeping the enum small while making
+  pass/assign/return constant-time.
 - VM: new `DefineStruct` / `DefineEnum` / `DefineMethod` /
-  `ConstructStruct` / `ConstructEnum` / `FieldGet` / `FieldSet`
+  `ConstructStruct` / `ConstructEnum` / `FieldGet` / `FieldSetInPlace`
   opcodes; `chunk.struct_defs` / `chunk.enum_defs` pools;
   `vm.user_methods` registry; `CallMethod` checks user methods
   before the built-in dispatch.

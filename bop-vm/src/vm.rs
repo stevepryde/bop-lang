@@ -1005,6 +1005,48 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 ops::index_set(&mut obj, &idx, val, line)?;
                 self.push_value(obj);
             }
+            Instr::SetIndexInPlace { target, op } => {
+                let idx = self.pop_value(line)?;
+                let rhs = self.pop_value(line)?;
+                match target {
+                    crate::chunk::AssignBack::Slot(slot) => {
+                        let value = self
+                            .frames
+                            .last_mut()
+                            .expect("frame present")
+                            .slots
+                            .get_mut(slot.0 as usize)
+                            .ok_or_else(|| error(line, "VM: local slot out of range"))?;
+                        let val = apply_in_place_assign(
+                            op,
+                            rhs,
+                            line,
+                            || ops::index_get(value, &idx, line),
+                        )?;
+                        ops::index_set(value, &idx, val, line)?;
+                    }
+                    crate::chunk::AssignBack::Name(name_idx) => {
+                        let name = self.current_chunk().name(name_idx).to_string();
+                        let Some(value) = self.lookup_var_mut_by_idx(name_idx) else {
+                            let hint = self.value_candidates_hint(&name).unwrap_or_else(|| {
+                                "Did you forget to create it with `let`?".to_string()
+                            });
+                            return Err(error_with_hint(
+                                line,
+                                bop::error_messages::variable_not_found(&name),
+                                hint,
+                            ));
+                        };
+                        let val = apply_in_place_assign(
+                            op,
+                            rhs,
+                            line,
+                            || ops::index_get(value, &idx, line),
+                        )?;
+                        ops::index_set(value, &idx, val, line)?;
+                    }
+                }
+            }
 
             // ─── String interpolation ────────────────────────────
             Instr::StringInterp(idx) => {
@@ -1293,6 +1335,67 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 let val = self.pop_value(line)?;
                 let obj = self.pop_value(line)?;
                 self.push_value(self.field_set(obj, &field, val, line)?);
+            }
+            Instr::FieldSetInPlace { target, field, op } => {
+                let field = self.current_chunk().name(field).to_string();
+                let rhs = self.pop_value(line)?;
+
+                let value = match target {
+                    crate::chunk::AssignBack::Slot(slot) => self
+                        .frames
+                        .last_mut()
+                        .expect("frame present")
+                        .slots
+                        .get_mut(slot.0 as usize)
+                        .ok_or_else(|| error(line, "VM: local slot out of range"))?,
+                    crate::chunk::AssignBack::Name(name_idx) => {
+                        let name = self.current_chunk().name(name_idx).to_string();
+                        let Some(value) = self.lookup_var_mut_by_idx(name_idx) else {
+                            let hint = self.value_candidates_hint(&name).unwrap_or_else(|| {
+                                "Did you forget to create it with `let`?".to_string()
+                            });
+                            return Err(error_with_hint(
+                                line,
+                                bop::error_messages::variable_not_found(&name),
+                                hint,
+                            ));
+                        };
+                        value
+                    }
+                };
+                match value {
+                    Value::Struct(structure) => {
+                        let type_name = structure.type_name().to_string();
+                        let val = apply_in_place_assign(
+                            op,
+                            rhs,
+                            line,
+                            || {
+                                structure.field(&field).cloned().ok_or_else(|| {
+                                    error(
+                                        line,
+                                        bop::error_messages::struct_has_no_field(
+                                            &type_name,
+                                            &field,
+                                        ),
+                                    )
+                                })
+                            },
+                        )?;
+                        if !structure.try_set_field(&field, val, line)? {
+                            return Err(error(
+                                line,
+                                bop::error_messages::struct_has_no_field(&type_name, &field),
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(error(
+                            line,
+                            bop::error_messages::cant_assign_field(&field, other.type_name()),
+                        ));
+                    }
+                }
             }
 
             // ─── Pattern matching ───────────────────────────────
@@ -2278,10 +2381,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
         value: Value,
         line: u32,
     ) -> Result<Value, BopError> {
-        // Mutate in place — `Value::Struct` wraps a `Box` but
-        // we already own `obj`, so `set_field` on the inner
-        // `BopStruct` does the update and we hand the same
-        // `Value` back.
+        // Mutate the owned value and return it to the generic opcode caller.
+        // Named-field assignment uses `FieldSetInPlace` instead so its
+        // receiver stays off the stack and cannot spuriously trigger a detach.
         match &mut obj {
             Value::Struct(boxed) => {
                 let type_name = boxed.type_name().to_string();
@@ -3471,6 +3573,31 @@ impl<'h, H: BopHost> Vm<'h, H> {
         self.stack.truncate(wrapper_stack_base);
         self.push_value(builtins::make_try_call_err(&err));
         Ok(())
+    }
+}
+
+fn apply_in_place_assign<F>(
+    op: crate::chunk::InPlaceAssignOp,
+    rhs: Value,
+    line: u32,
+    current: F,
+) -> Result<Value, BopError>
+where
+    F: FnOnce() -> Result<Value, BopError>,
+{
+    use crate::chunk::InPlaceAssignOp;
+
+    if op == InPlaceAssignOp::Eq {
+        return Ok(rhs);
+    }
+    let left = current()?;
+    match op {
+        InPlaceAssignOp::Eq => unreachable!(),
+        InPlaceAssignOp::Add => ops::add(&left, &rhs, line),
+        InPlaceAssignOp::Sub => ops::sub(&left, &rhs, line),
+        InPlaceAssignOp::Mul => ops::mul(&left, &rhs, line),
+        InPlaceAssignOp::Div => ops::div(&left, &rhs, line),
+        InPlaceAssignOp::Rem => ops::rem(&left, &rhs, line),
     }
 }
 

@@ -407,6 +407,20 @@ x %= 3
 print(x)"#,
     ),
     (
+        "named_container_assignment_order",
+        r#"let values = [1, 2]
+values[0] += values.remove(0)
+print(values)
+let dict = {"n": 4}
+dict["n"] += 6
+dict["extra"] = 8
+print(dict)
+struct Counter { n }
+let counter = Counter { n: 3 }
+counter.n *= 4
+print(counter.n)"#,
+    ),
+    (
         "if_else_if",
         r#"let x = 2
 if x == 1 { print("one") } else if x == 2 { print("two") } else { print("other") }"#,

@@ -1704,20 +1704,35 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let val_to_set = match op {
                     AssignOp::Eq => new_val,
                     _ => {
-                        let obj = self.eval_expr(object)?;
-                        let current = ops::index_get(&obj, &idx, line)?;
+                        let name = match &object.kind {
+                            ExprKind::Ident(name) => name,
+                            _ => {
+                                return Err(error(
+                                    line,
+                                    "Can only assign to indexed variables (like `arr[0] = val`)",
+                                ));
+                            }
+                        };
+                        let current = if let Some(obj) = self.get_var(name) {
+                            ops::index_get(obj, &idx, line)?
+                        } else {
+                            // Preserve the identifier evaluator's existing
+                            // not-found hint / named-function fallback on the
+                            // error path without cloning ordinary receivers.
+                            let obj = self.eval_expr(object)?;
+                            ops::index_get(&obj, &idx, line)?
+                        };
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };
                 if let ExprKind::Ident(name) = &object.kind {
-                    let mut obj = self
-                        .get_var(name)
-                        .ok_or_else(|| {
-                            error(line, format!("Variable `{}` doesn't exist", name))
-                        })?
-                        .clone();
-                    ops::index_set(&mut obj, &idx, val_to_set, line)?;
-                    self.set_var(name, obj);
+                    let obj = self.get_var_mut(name).ok_or_else(|| {
+                        error(line, format!("Variable `{}` doesn't exist", name))
+                    })?;
+                    // Mutate through the live binding. Cloning the receiver
+                    // first would temporarily raise its CoW refcount and force
+                    // an otherwise-unnecessary full backing-store detach.
+                    ops::index_set(obj, &idx, val_to_set, line)?;
                     Ok(())
                 } else {
                     Err(error(
@@ -1741,16 +1756,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                 };
-                let mut obj = self
-                    .get_var(&name)
-                    .ok_or_else(|| {
-                        error(line, format!("Variable `{}` doesn't exist", name))
-                    })?
-                    .clone();
                 let val_to_set = match op {
                     AssignOp::Eq => new_val,
                     _ => {
-                        let current = match &obj {
+                        let obj = self.get_var(&name).ok_or_else(|| {
+                            error(line, format!("Variable `{}` doesn't exist", name))
+                        })?;
+                        let current = match obj {
                             Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
                                 error(
                                     line,
@@ -1773,7 +1785,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };
-                match &mut obj {
+                let obj = self.get_var_mut(&name).ok_or_else(|| {
+                    error(line, format!("Variable `{}` doesn't exist", name))
+                })?;
+                match obj {
                     Value::Struct(s) => {
                         let struct_type = s.type_name().to_string();
                         if !s.try_set_field(field, val_to_set, line)? {
@@ -1793,7 +1808,6 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                 }
-                self.set_var(&name, obj);
                 Ok(())
             }
         }

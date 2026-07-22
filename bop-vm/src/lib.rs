@@ -35,6 +35,8 @@
 //! ## Indexing
 //! - `GetIndex` — `[obj, idx]` → `[obj[idx]]`.
 //! - `SetIndex` — `[obj, idx, val]` → `[obj']` with `obj'[idx] = val`.
+//! - `SetIndexInPlace { target, op }` — consumes RHS + index and applies the
+//!   assignment through the live named binding without a receiver clone.
 //!
 //! ## Collections
 //! - `MakeArray(n)` — pop `n` items, push an array.
@@ -55,7 +57,7 @@
 //!   `arr.push(x)` etc.).
 //! - `CallMethodInPlace { target, method, argc }` — mutating method on
 //!   a named receiver. Arguments are evaluated first, then an array binding is
-//!   mutated directly without deep-cloning its buffer.
+//!   mutated directly without forcing a copy-on-write detach.
 //!
 //! ## Functions
 //! - `DefineFn(idx)` — register the compiled function at `idx`.
