@@ -171,6 +171,7 @@ struct Frame {
     /// How this frame's return value should be transformed
     /// before being pushed for the caller. See [`FrameWrap`].
     wrap: FrameWrap,
+    defining_environment_module: Option<String>,
 }
 
 impl Frame {
@@ -191,6 +192,7 @@ impl Frame {
             function_module: None,
             lexical_context,
             wrap: FrameWrap::None,
+            defining_environment_module: None,
         }
     }
 
@@ -216,6 +218,7 @@ impl Frame {
             function_module: context.function_module,
             lexical_context: context.lexical_context,
             wrap,
+            defining_environment_module: None,
         }
     }
 
@@ -401,6 +404,10 @@ struct ModuleArtifacts {
     /// in `fn_decls` instead so the importer can register them
     /// in `self.functions` for cross-fn call resolution.
     bindings: Vec<(String, Value)>,
+    /// Declaring module and binding for every exported value. Facades retain
+    /// this provenance so their live execution environment can borrow the
+    /// authoritative handle rather than cloning a stale snapshot.
+    binding_origins: BTreeMap<String, BindingOrigin>,
     /// Top-level `fn` declarations. The importer copies each
     /// into its own `self.functions` table AND pushes a
     /// `Value::Fn` into the current scope so first-class use
@@ -435,6 +442,69 @@ struct ModuleLexicalContext {
 /// Import cache shared across nested VMs so recursive imports
 /// resolve exactly once per top-level run.
 type ImportCache = Rc<RefCell<BTreeMap<String, ImportSlot>>>;
+type LiveValueEnvironments = Rc<RefCell<BTreeMap<String, BTreeMap<String, Value>>>>;
+type BindingOrigin = (String, String);
+type LiveBindingOrigins = Rc<RefCell<BTreeMap<String, BTreeMap<String, BindingOrigin>>>>;
+
+#[derive(Clone)]
+struct ModuleRuntime {
+    imports: ImportCache,
+    environments: LiveValueEnvironments,
+    origins: LiveBindingOrigins,
+}
+
+impl ModuleRuntime {
+    fn empty() -> Self {
+        Self {
+            imports: Rc::new(RefCell::new(BTreeMap::new())),
+            environments: Rc::new(RefCell::new(BTreeMap::new())),
+            origins: Rc::new(RefCell::new(BTreeMap::new())),
+        }
+    }
+}
+
+fn take_live_environment(
+    environments: &LiveValueEnvironments,
+    module_path: &str,
+    origins: &BTreeMap<String, BindingOrigin>,
+) -> BTreeMap<String, Value> {
+    let mut environments = environments.borrow_mut();
+    let mut environment = environments.remove(module_path).unwrap_or_default();
+    for (binding, (origin_module, origin_binding)) in origins {
+        if origin_module == module_path && origin_binding == binding {
+            continue;
+        }
+        if let Some(value) = environments
+            .get_mut(origin_module)
+            .and_then(|origin| origin.remove(origin_binding))
+        {
+            environment.insert(binding.clone(), value);
+        }
+    }
+    environment
+}
+
+fn put_live_environment(
+    environments: &LiveValueEnvironments,
+    module_path: &str,
+    mut environment: BTreeMap<String, Value>,
+    origins: &BTreeMap<String, BindingOrigin>,
+) {
+    let mut environments = environments.borrow_mut();
+    for (binding, (origin_module, origin_binding)) in origins {
+        if origin_module == module_path && origin_binding == binding {
+            continue;
+        }
+        if let Some(value) = environment.remove(binding) {
+            environment.insert(binding.clone(), value.clone());
+            environments
+                .entry(origin_module.clone())
+                .or_default()
+                .insert(origin_binding.clone(), value);
+        }
+    }
+    environments.insert(module_path.to_string(), environment);
+}
 
 // ─── Next action ───────────────────────────────────────────────────
 
@@ -511,6 +581,9 @@ pub struct Vm<'h, H: BopHost + ?Sized> {
     abi_declarations: Vec<(String, Rc<FnEntry>)>,
     function_origin: BopFnOrigin,
     operation_memory: Option<Rc<bop::memory::MemoryAccount>>,
+    live_value_environments: LiveValueEnvironments,
+    binding_origins: BTreeMap<String, BindingOrigin>,
+    live_binding_origins: LiveBindingOrigins,
 }
 
 struct VmState {
@@ -533,6 +606,9 @@ struct VmState {
     root_function_visibility: BTreeMap<u32, Visibility>,
     abi_declarations: Vec<(String, Rc<FnEntry>)>,
     function_origin: BopFnOrigin,
+    live_value_environments: LiveValueEnvironments,
+    binding_origins: BTreeMap<String, BindingOrigin>,
+    live_binding_origins: LiveBindingOrigins,
 }
 
 /// A loaded bytecode program whose globals and module state survive calls.
@@ -555,7 +631,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             chunk,
             host,
             limits,
-            Rc::new(RefCell::new(BTreeMap::new())),
+            ModuleRuntime::empty(),
             String::from(bop::value::ROOT_MODULE_PATH),
             BTreeMap::new(),
             BopFnOrigin::__instance("vm"),
@@ -568,7 +644,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         chunk: Chunk,
         host: &'h mut H,
         limits: BopLimits,
-        imports: ImportCache,
+        module_runtime: ModuleRuntime,
         current_module: String,
         root_function_visibility: BTreeMap<u32, Visibility>,
         function_origin: BopFnOrigin,
@@ -589,7 +665,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             steps: 0,
             step_budget,
             rand_state: 0,
-            imports,
+            imports: module_runtime.imports,
             imported_here: vec![BTreeSet::new()],
             limits,
             current_module,
@@ -606,6 +682,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             abi_declarations: Vec::new(),
             function_origin,
             operation_memory: None,
+            live_value_environments: module_runtime.environments,
+            binding_origins: BTreeMap::new(),
+            live_binding_origins: module_runtime.origins,
         }
     }
 
@@ -630,6 +709,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             root_function_visibility: self.root_function_visibility,
             abi_declarations: self.abi_declarations,
             function_origin: self.function_origin,
+            live_value_environments: self.live_value_environments,
+            binding_origins: self.binding_origins,
+            live_binding_origins: self.live_binding_origins,
         }
     }
 
@@ -659,16 +741,21 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             abi_declarations: state.abi_declarations,
             function_origin: state.function_origin,
             operation_memory: None,
+            live_value_environments: state.live_value_environments,
+            binding_origins: state.binding_origins,
+            live_binding_origins: state.live_binding_origins,
         }
     }
 
     fn restore_instance_baseline(&mut self) {
         while self.frames.len() > 1 {
-            let frame = self.frames.pop().expect("frame present");
+            let mut frame = self.frames.pop().expect("frame present");
+            self.store_frame_defining_environment(&mut frame);
             if !frame.slots.is_empty() {
                 self.return_slots(frame.slots);
             }
         }
+        self.restore_active_defining_environment();
         self.stack.clear();
         if let Some(root) = self.frames.first_mut() {
             root.scopes.truncate(root.scope_base);
@@ -904,6 +991,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         function_module: Option<String>,
         wrap: FrameWrap,
     ) {
+        self.park_active_defining_environment();
+        let defining_environment = function_module.as_ref().map(|module| {
+            let origins = self.binding_origins_for(module);
+            take_live_environment(&self.live_value_environments, module, &origins)
+        });
+        let mut scopes = scopes;
+        if let Some(environment) = defining_environment {
+            scopes.insert(0, environment);
+            // Runtime declarations/imports belong to the call, never to the
+            // defining module environment parked below it.
+            scopes.push(BTreeMap::new());
+        }
         let lexical_context = function_module
             .as_deref()
             .map(|module| self.module_lexical_context(module))
@@ -913,7 +1012,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         self.module_aliases.push(BTreeMap::new());
         self.imported_functions.push(BTreeMap::new());
         self.imported_here.push(BTreeSet::new());
-        self.frames.push(Frame::function(
+        let mut frame = Frame::function(
             chunk,
             slots,
             scopes,
@@ -927,8 +1026,86 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 lexical_context,
             },
             wrap,
-        ));
+        );
+        frame.defining_environment_module = frame.function_module.clone();
+        self.frames.push(frame);
         self.type_bindings.push(BTreeMap::new());
+    }
+
+    fn park_active_defining_environment(&mut self) {
+        let active_module = self.frames.last().and_then(|frame| {
+            frame
+                .defining_environment_module
+                .clone()
+                .or_else(|| (!frame.is_function).then(|| self.current_module.clone()))
+        });
+        let Some(module) = active_module else {
+            return;
+        };
+        let environment = self
+            .frames
+            .last_mut()
+            .and_then(|frame| frame.scopes.first_mut())
+            .map(core::mem::take)
+            .unwrap_or_default();
+        let origins = self.binding_origins_for(&module);
+        put_live_environment(
+            &self.live_value_environments,
+            &module,
+            environment,
+            &origins,
+        );
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(module, origins);
+    }
+
+    fn store_frame_defining_environment(&mut self, frame: &mut Frame) {
+        let Some(module) = frame.defining_environment_module.as_ref() else {
+            return;
+        };
+        let origins = self.binding_origins_for(module);
+        if !self.live_value_environments.borrow().contains_key(module) {
+            let environment = frame
+                .scopes
+                .first_mut()
+                .map(core::mem::take)
+                .unwrap_or_default();
+            put_live_environment(
+                &self.live_value_environments,
+                module,
+                environment,
+                &origins,
+            );
+        }
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(module.clone(), origins);
+    }
+
+    fn restore_active_defining_environment(&mut self) {
+        let active_module = self.frames.last().and_then(|frame| {
+            frame
+                .defining_environment_module
+                .clone()
+                .or_else(|| (!frame.is_function).then(|| self.current_module.clone()))
+        });
+        let Some(module) = active_module else {
+            return;
+        };
+        if !self.live_value_environments.borrow().contains_key(&module) {
+            return;
+        }
+        let origins = self.binding_origins_for(&module);
+        let environment =
+            take_live_environment(&self.live_value_environments, &module, &origins);
+        if let Some(scope) = self
+            .frames
+            .last_mut()
+            .and_then(|frame| frame.scopes.first_mut())
+        {
+            *scope = environment;
+        }
     }
 
     fn module_alias(&self, name: &str) -> Option<&Rc<bop::value::BopModule>> {
@@ -944,6 +1121,80 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .last()
                     .and_then(|frame| frame.lexical_context.module_aliases.get(name))
             })
+    }
+
+    fn module_binding(&self, module: &bop::value::BopModule, name: &str) -> Option<Value> {
+        if let Some((active_module, environment)) = self.frames.last().and_then(|frame| {
+            let active_module = frame
+                .defining_environment_module
+                .as_deref()
+                .or_else(|| (!frame.is_function).then_some(self.current_module.as_str()))?;
+            Some((active_module, frame.scopes.first()?))
+        }) {
+            if module.path == active_module {
+                if let Some(value) = environment.get(name) {
+                    return Some(value.clone());
+                }
+            }
+            let (origin_module, origin_binding) = module.__binding_origin(name);
+            if origin_module == active_module {
+                if let Some(value) = environment.get(&origin_binding) {
+                    return Some(value.clone());
+                }
+            }
+            let active_origins = self.binding_origins_for(active_module);
+            if let Some(active_binding) = active_origins.iter().find_map(
+                |(active_binding, active_origin)| {
+                    (active_origin.0 == origin_module && active_origin.1 == origin_binding)
+                        .then_some(active_binding)
+                },
+            ) {
+                if let Some(value) = environment.get(active_binding) {
+                    return Some(value.clone());
+                }
+            }
+        }
+        module.__binding(name)
+    }
+
+    fn binding_origins_for(&self, module: &str) -> BTreeMap<String, BindingOrigin> {
+        if module == self.current_module {
+            return self.binding_origins.clone();
+        }
+        self.live_binding_origins
+            .borrow()
+            .get(module)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn live_origin_value(&self, origin: &BindingOrigin) -> Option<Value> {
+        if let Some((active_module, environment)) = self.frames.last().and_then(|frame| {
+            let active_module = frame
+                .defining_environment_module
+                .as_deref()
+                .or_else(|| (!frame.is_function).then_some(self.current_module.as_str()))?;
+            Some((active_module, frame.scopes.first()?))
+        }) {
+            if active_module == origin.0 {
+                if let Some(value) = environment.get(&origin.1) {
+                    return Some(value.clone());
+                }
+            }
+            let active_origins = self.binding_origins_for(active_module);
+            if let Some(binding) = active_origins.iter().find_map(|(binding, candidate)| {
+                (candidate == origin).then_some(binding)
+            }) {
+                if let Some(value) = environment.get(binding) {
+                    return Some(value.clone());
+                }
+            }
+        }
+        self.live_value_environments
+            .borrow()
+            .get(&origin.0)
+            .and_then(|environment| environment.get(&origin.1))
+            .cloned()
     }
 
     fn imported_function(&self, name: &str) -> Option<&Rc<FnEntry>> {
@@ -1338,7 +1589,30 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     Value::Module(module) => Some(Rc::clone(module)),
                     _ => None,
                 };
+                if self.is_module_top_scope() {
+                    if let Some(origin) = self.binding_origins.get(&name).cloned() {
+                        if origin.0 != self.current_module || origin.1 != name {
+                            if let Some(previous) = self
+                                .current_scopes_mut()
+                                .last_mut()
+                                .and_then(|scope| scope.remove(&name))
+                            {
+                                self.live_value_environments
+                                    .borrow_mut()
+                                    .entry(origin.0)
+                                    .or_default()
+                                    .insert(origin.1, previous);
+                            }
+                        }
+                    }
+                }
                 self.define_local(name.clone(), v);
+                if self.is_module_top_scope() {
+                    self.binding_origins.insert(
+                        name.clone(),
+                        (self.current_module.clone(), name.clone()),
+                    );
+                }
                 self.sync_top_level_module_alias(name, module);
             }
             Instr::StoreVar(n) => {
@@ -2642,7 +2916,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 self.push_value(result.0);
                 return Ok(Next::Continue);
             }
-            if let Some(callee) = m.__binding(method) {
+            if let Some(callee) = self.module_binding(m, method) {
                 drop(obj);
                 return self.invoke_value(callee, args, line);
             }
@@ -3366,7 +3640,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 )
             }),
             Value::Module(m) => {
-                if let Some(v) = m.__binding(field) {
+                if let Some(v) = self.module_binding(m, field) {
                     return Ok(v);
                 }
                 if m.has_type(field) {
@@ -3622,7 +3896,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
                 CaptureSource::ParentScope(look_name) => {
                     let mut found = None;
-                    for scope in frame.scopes.iter().rev() {
+                    let defining_environment_floor =
+                        usize::from(frame.defining_environment_module.is_some());
+                    for scope in frame
+                        .scopes
+                        .iter()
+                        .skip(defining_environment_floor)
+                        .rev()
+                    {
                         if let Some(v) = scope.get(look_name.as_str()) {
                             found = Some(v.clone());
                             break;
@@ -3891,10 +4172,23 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     ),
                 ));
             }
-            let module_rc = bop::value::BopModule::try_new_with_type_exports(
+            let live_bindings = exports
+                .iter()
+                .map(|(name, _)| {
+                    let origin = artifacts
+                        .binding_origins
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| (path.to_string(), name.clone()));
+                    (name.clone(), origin)
+                })
+                .collect();
+            let module_rc = bop::value::BopModule::__try_new_live_with_type_exports(
                 path.to_string(),
                 exports,
                 bop::value::BopTypeExports::from_origins(exposed_types),
+                live_bindings,
+                Rc::clone(&self.live_value_environments),
                 line,
             )?;
             // Bind the alias three ways:
@@ -3944,7 +4238,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .expect("imported function scope")
                     .insert(name, entry);
             }
-            for (name, value) in exports {
+            for (name, mut value) in exports {
                 if skip_private && bop::naming::is_private(&name) {
                     continue;
                 }
@@ -3962,6 +4256,26 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     continue;
                 }
                 let module = artifacts.module_exports.get(&name).cloned();
+                let origin = artifacts
+                    .binding_origins
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| (path.to_string(), name.clone()));
+                if module_top_scope {
+                    self.binding_origins.insert(name.clone(), origin.clone());
+                    if origin.0 != self.current_module || origin.1 != name {
+                        if let Some(authoritative) = self
+                            .live_value_environments
+                            .borrow_mut()
+                            .get_mut(&origin.0)
+                            .and_then(|environment| environment.remove(&origin.1))
+                        {
+                            value = authoritative;
+                        }
+                    }
+                } else if let Some(current) = self.live_origin_value(&origin) {
+                    value = current;
+                }
                 if let Some(frame) = self.frames.last_mut() {
                     if let Some(scope) = frame.scopes.last_mut() {
                         scope.insert(name.clone(), value);
@@ -4192,18 +4506,41 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     ) -> Result<ModuleArtifacts, BopError> {
         let stmts = bop::parse(source)?;
         let chunk = crate::compile(&stmts)?;
-        let imports = Rc::clone(&self.imports);
+        let module_runtime = ModuleRuntime {
+            imports: Rc::clone(&self.imports),
+            environments: Rc::clone(&self.live_value_environments),
+            origins: Rc::clone(&self.live_binding_origins),
+        };
         let limits = self.limits.clone();
         let mut sub = Vm::new_internal(
             chunk,
             self.host,
             limits,
-            imports,
+            module_runtime,
             module_path.to_string(),
             BTreeMap::new(),
             self.function_origin.clone(),
         );
-        sub.run_internal()?;
+        if let Err(module_error) = sub.run_internal() {
+            sub.restore_instance_baseline();
+            let failed_environment = sub
+                .frames
+                .first_mut()
+                .and_then(|frame| frame.scopes.first_mut())
+                .map(core::mem::take)
+                .unwrap_or_default();
+            put_live_environment(
+                &sub.live_value_environments,
+                module_path,
+                failed_environment,
+                &sub.binding_origins,
+            );
+            // Forwarded bindings have been returned to their declaration
+            // modules; the failed facade's partial state must not survive.
+            sub.live_value_environments.borrow_mut().remove(module_path);
+            sub.live_binding_origins.borrow_mut().remove(module_path);
+            return Err(module_error);
+        }
         // Collect top-level lets from the module frame's one
         // remaining scope…
         let mut bindings: Vec<(String, Value)> = Vec::new();
@@ -4214,6 +4551,22 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
             }
         }
+        let live_environment = sub
+            .frames
+            .first_mut()
+            .and_then(|frame| frame.scopes.first_mut())
+            .map(core::mem::take)
+            .unwrap_or_default();
+        let binding_origins = sub.binding_origins.clone();
+        put_live_environment(
+            &sub.live_value_environments,
+            module_path,
+            live_environment,
+            &binding_origins,
+        );
+        sub.live_binding_origins
+            .borrow_mut()
+            .insert(module_path.to_string(), binding_origins.clone());
         // Named fn entries go out separately so the importer
         // can register them in `self.functions` for bare-ident
         // call resolution. Reified `Value::Fn`s for the same
@@ -4258,6 +4611,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         });
         Ok(ModuleArtifacts {
             bindings,
+            binding_origins,
             fn_decls,
             struct_defs,
             enum_defs,
@@ -4303,7 +4657,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
         // Pop the current frame, truncate any frame-local stack
         // residue, and push the return value for the caller.
-        let frame = self.frames.pop().expect("frame present");
+        let mut frame = self.frames.pop().expect("frame present");
+        self.store_frame_defining_environment(&mut frame);
+        self.restore_active_defining_environment();
         self.stack.truncate(frame.stack_base);
         // Drop the function's protected type-binding scope plus any runtime
         // scopes skipped by an early return. Top-level return preserves the
@@ -4680,7 +5036,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // Drain the unwound frames through the freelist instead
         // of `truncate`, so their slot vecs get recycled.
         while self.frames.len() > wrap_idx {
-            let frame = self.frames.pop().expect("frame present");
+            let mut frame = self.frames.pop().expect("frame present");
+            self.store_frame_defining_environment(&mut frame);
             self.type_bindings
                 .truncate(frame.caller_type_scope_depth());
             self.module_aliases.truncate(frame.alias_scope_base);
@@ -4690,6 +5047,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 self.return_slots(frame.slots);
             }
         }
+        self.restore_active_defining_environment();
         self.stack.truncate(wrapper_stack_base);
         self.push_value(builtins::make_try_call_err(&err));
         Ok(())
@@ -4783,7 +5141,7 @@ impl BopInstance {
             compiled.chunk,
             host,
             limits.clone(),
-            Rc::new(RefCell::new(BTreeMap::new())),
+            ModuleRuntime::empty(),
             bop::value::ROOT_MODULE_PATH.to_string(),
             compiled.root_function_visibility,
             BopFnOrigin::__instance("vm"),

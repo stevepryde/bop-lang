@@ -991,6 +991,23 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     Value::Module(module) => Some(Rc::clone(module)),
                     _ => None,
                 };
+                if self.is_module_top_scope() {
+                    if let Some(origin) = self.binding_origins.get(name).cloned() {
+                        if origin.0 != self.current_module || origin.1 != name.as_str() {
+                            if let Some(previous) = self
+                                .scopes
+                                .last_mut()
+                                .and_then(|scope| scope.remove(name))
+                            {
+                                self.live_value_environments
+                                    .borrow_mut()
+                                    .entry(origin.0)
+                                    .or_default()
+                                    .insert(origin.1, previous);
+                            }
+                        }
+                    }
+                }
                 self.define(name.clone(), val);
                 if self.is_module_top_scope() {
                     self.binding_origins.insert(

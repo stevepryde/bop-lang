@@ -309,6 +309,33 @@ mod tests {
     }
 
     #[test]
+    fn facade_local_overwrite_returns_the_forwarded_value_to_its_origin() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "leaf".to_string(),
+            "let count = 7\nfn read() { return count }\nfn bump() { count += 1; return count }"
+                .to_string(),
+        );
+        modules.insert(
+            "facade".to_string(),
+            "use leaf\nlet count = 100\nfn own_bump() { count += 1; return count }".to_string(),
+        );
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "use facade as facade\nuse leaf as leaf\npub fn bump() { return facade.own_bump() }\npub fn leaf_read() { return leaf.read() }\npub fn leaf_bump() { return leaf.bump() }\npub fn read() { return [facade.count, leaf.count] }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+
+        assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[100, 7]");
+        assert_eq!(instance.call("leaf_read", &[], &mut host).unwrap().inspect(), "7");
+        assert_eq!(instance.call("leaf_bump", &[], &mut host).unwrap().inspect(), "8");
+        assert_eq!(instance.call("bump", &[], &mut host).unwrap().inspect(), "101");
+        assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[101, 8]");
+    }
+
+    #[test]
     fn callbacks_keep_module_globals_live_instead_of_capturing_snapshots() {
         let mut host = Host;
         let mut instance = BopInstance::load(
