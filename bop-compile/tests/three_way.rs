@@ -469,6 +469,35 @@ if x == 1 { print("one") } else if x == 2 { print("two") } else { print("other")
     ),
     ("if_expression", "let x = if true { 1 } else { 2 }\nprint(x)"),
     (
+        "struct_literals_in_condition_delimiters",
+        r#"struct Point { x, y }
+enum Maybe { Some(value) }
+fn get_x(point) { return point.x }
+fn Point.same_x(self, other) { return self.x == other.x }
+let choices = [false, true]
+if get_x(Point { x: 1, y: 2 }) == 1 { print("call") }
+if (Point { x: 2, y: 0 }).x == 2 { print("paren") }
+if (Point { x: 3, y: 0 }).same_x(Point { x: 3, y: 1 }) { print("method-arg") }
+if choices[Point { x: 1, y: 0 }.x] { print("index") }
+if [Point { x: 4, y: 0 }][0].x == 4 { print("array") }
+if {"point": Point { x: 5, y: 0 }}["point"].x == 5 { print("dict") }
+if Ok(Point { x: 6, y: 0 }).is_ok() { print("result") }
+if match Maybe::Some(Point { x: 7, y: 0 }) {
+    Maybe::Some(point) => point.x,
+} == 7 { print("enum-tuple") }
+if match 1 {
+    value if Point { x: value, y: 0 }.x == 1 => Point { x: 8, y: 0 }.x,
+    _ => 0,
+} == 8 { print("match") }
+if (if true { Point { x: 9, y: 0 }.x } else { 0 }) == 9 { print("if-expr") }
+if fn() { return Point { x: 10, y: 0 }.x }() == 10 { print("lambda") }
+let count = 0
+while get_x(Point { x: count, y: 0 }) < 1 { count += 1 }
+print("while")
+for point in [Point { x: 11, y: 0 }] { print(point.x) }
+repeat [Point { x: 12, y: 0 }].len() { print("repeat") }"#,
+    ),
+    (
         "while_loop",
         "let i = 0\nwhile i < 5 { i += 1 }\nprint(i)",
     ),

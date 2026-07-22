@@ -560,19 +560,27 @@ impl Parser {
             .unwrap_or(&Token::Eof)
     }
 
-    /// Run `f` with `allow_struct_literal = false`, restoring the
-    /// prior value on exit. Used for `if` / `while` conditions and
-    /// `for-in` iterables so `if foo { body }` doesn't mis-parse
-    /// as `if (struct-literal-foo) { … }`.
-    fn without_struct_literal<F, R>(&mut self, f: F) -> R
+    /// Run `f` with an explicit struct-literal policy, restoring the prior
+    /// value even when `f` returns an error. Restricted control-flow heads use
+    /// `false`; unambiguous delimiter interiors use `true`.
+    fn with_struct_literal<F, R>(&mut self, allowed: bool, f: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
     {
         let saved = self.allow_struct_literal;
-        self.allow_struct_literal = false;
+        self.allow_struct_literal = allowed;
         let result = f(self);
         self.allow_struct_literal = saved;
         result
+    }
+
+    /// Keep a control-flow body's opening brace from being consumed as a
+    /// struct literal belonging to the preceding condition or iterable.
+    fn without_struct_literal<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        self.with_struct_literal(false, f)
     }
 
     fn advance(&mut self) -> &Token {
@@ -665,7 +673,7 @@ impl Parser {
         let mut stmts = Vec::new();
         self.skip_semicolons();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            stmts.push(self.parse_statement()?);
+            stmts.push(self.with_struct_literal(true, |p| p.parse_statement())?);
             self.skip_semicolons();
         }
         self.expect(&Token::RBrace)?;
@@ -1320,7 +1328,7 @@ impl Parser {
                 Token::LBracket => {
                     let (line, column) = self.peek_pos();
                     self.advance();
-                    let index = self.parse_expr()?;
+                    let index = self.with_struct_literal(true, |p| p.parse_expr())?;
                     self.expect(&Token::RBracket)?;
                     expr = Expr {
                         kind: ExprKind::Index {
@@ -1406,10 +1414,10 @@ impl Parser {
     fn parse_args(&mut self) -> Result<Vec<Expr>, BopError> {
         let mut args = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
-            args.push(self.parse_expr()?);
+            args.push(self.with_struct_literal(true, |p| p.parse_expr())?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
-                args.push(self.parse_expr()?);
+                args.push(self.with_struct_literal(true, |p| p.parse_expr())?);
             }
         }
         Ok(args)
@@ -1514,7 +1522,7 @@ impl Parser {
             Token::LParen => {
                 self.enter()?;
                 self.advance();
-                let expr = self.parse_expr()?;
+                let expr = self.with_struct_literal(true, |p| p.parse_expr())?;
                 self.expect(&Token::RParen)?;
                 self.leave();
                 Ok(expr)
@@ -1546,13 +1554,13 @@ impl Parser {
                 self.advance();
                 let mut args: Vec<Expr> = Vec::new();
                 if !matches!(self.peek(), Token::RParen) {
-                    args.push(self.parse_expr()?);
+                    args.push(self.with_struct_literal(true, |p| p.parse_expr())?);
                     while matches!(self.peek(), Token::Comma) {
                         self.advance();
                         if matches!(self.peek(), Token::RParen) {
                             break;
                         }
-                        args.push(self.parse_expr()?);
+                        args.push(self.with_struct_literal(true, |p| p.parse_expr())?);
                     }
                 }
                 self.expect(&Token::RParen)?;
@@ -1614,13 +1622,13 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let mut args: Vec<Expr> = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
-            args.push(self.parse_expr()?);
+            args.push(self.with_struct_literal(true, |p| p.parse_expr())?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
                 if matches!(self.peek(), Token::RParen) {
                     break;
                 }
-                args.push(self.parse_expr()?);
+                args.push(self.with_struct_literal(true, |p| p.parse_expr())?);
             }
         }
         self.expect(&Token::RParen)?;
@@ -1681,13 +1689,13 @@ impl Parser {
         self.advance(); // consume [
         let mut elements = Vec::new();
         if !matches!(self.peek(), Token::RBracket) {
-            elements.push(self.parse_expr()?);
+            elements.push(self.with_struct_literal(true, |p| p.parse_expr())?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
                 if matches!(self.peek(), Token::RBracket) {
                     break; // trailing comma
                 }
-                elements.push(self.parse_expr()?);
+                elements.push(self.with_struct_literal(true, |p| p.parse_expr())?);
             }
         }
         self.expect(&Token::RBracket)?;
@@ -1705,7 +1713,7 @@ impl Parser {
         if !matches!(self.peek(), Token::RBrace) {
             let key = self.expect_string_key()?;
             self.expect(&Token::Colon)?;
-            let value = self.parse_expr()?;
+            let value = self.with_struct_literal(true, |p| p.parse_expr())?;
             entries.push((key, value));
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
@@ -1714,7 +1722,7 @@ impl Parser {
                 }
                 let key = self.expect_string_key()?;
                 self.expect(&Token::Colon)?;
-                let value = self.parse_expr()?;
+                let value = self.with_struct_literal(true, |p| p.parse_expr())?;
                 entries.push((key, value));
             }
         }
@@ -1772,12 +1780,12 @@ impl Parser {
         let pattern = self.parse_pattern()?;
         let guard = if matches!(self.peek(), Token::If) {
             self.advance();
-            Some(self.without_struct_literal(|p| p.parse_expr())?)
+            Some(self.with_struct_literal(true, |p| p.parse_expr())?)
         } else {
             None
         };
         self.expect(&Token::FatArrow)?;
-        let body = self.parse_expr()?;
+        let body = self.with_struct_literal(true, |p| p.parse_expr())?;
         Ok(MatchArm {
             pattern,
             guard,
@@ -2131,11 +2139,11 @@ impl Parser {
         self.advance(); // consume 'if'
         let condition = self.without_struct_literal(|p| p.parse_expr())?;
         self.expect(&Token::LBrace)?;
-        let then_expr = self.parse_expr()?;
+        let then_expr = self.with_struct_literal(true, |p| p.parse_expr())?;
         self.expect(&Token::RBrace)?;
         self.expect(&Token::Else)?;
         self.expect(&Token::LBrace)?;
-        let else_expr = self.parse_expr()?;
+        let else_expr = self.with_struct_literal(true, |p| p.parse_expr())?;
         self.expect(&Token::RBrace)?;
         Ok(Expr {
             kind: ExprKind::IfExpr {
@@ -2382,6 +2390,39 @@ mod depth_tests {
                 .parse_pattern()
                 .expect_err("the namespaced pattern should be malformed");
             assert_eq!(parser.depth, 0, "source: {source}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod struct_literal_context_tests {
+    use super::*;
+
+    fn expression_parser(source: &str) -> Parser {
+        Parser::new(crate::lexer::lex(source).expect("test expression should lex"))
+    }
+
+    #[test]
+    fn delimiter_errors_restore_restricted_struct_literal_context() {
+        let cases = [
+            "(Point { x: 1 }",
+            "get_x(Point { x: 1 }",
+            "items[Point { x: 1 }.x",
+            "[Point { x: 1 }",
+            r#"{"point": Point { x: 1 }"#,
+            "Ok(Point { x: 1 }",
+            "Result::Ok(Point { x: 1 }",
+            "match 1 { _ => Point { x: 1 }",
+            "fn() { return Point { x: 1 }",
+        ];
+
+        for source in cases {
+            let mut parser = expression_parser(source);
+            parser.allow_struct_literal = false;
+            parser
+                .parse_expr()
+                .expect_err("the deliberately unclosed delimiter should fail");
+            assert!(!parser.allow_struct_literal, "source: {source}");
         }
     }
 }
