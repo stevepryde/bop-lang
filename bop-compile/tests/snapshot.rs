@@ -33,6 +33,18 @@ fn inconsistent_or_pattern_is_rejected_before_aot_emission() {
 }
 
 #[test]
+fn top_level_try_uses_the_shared_diagnostic_constructor() {
+    let rust = compile(
+        r#"enum Result { Ok(value), Err(error) }
+let value = try Result::Err("boom")"#,
+    );
+    assert!(rust.contains("::bop::error_messages::top_level_try_error(2)"));
+    assert!(!rust.contains("BopError::runtime(\"try encountered Err at top-level\""));
+    assert!(rust.contains("if let Some(hint) = &err.friendly_hint"));
+    assert!(rust.contains("eprintln!(\"hint: {}\", hint)"));
+}
+
+#[test]
 fn multiline_if_expression_still_rejects_multiple_branch_values_before_aot_emission() {
     let error = transpile(
         "let value = if true {\n    1\n    2\n} else {\n    3\n}",

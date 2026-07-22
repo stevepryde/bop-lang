@@ -106,6 +106,20 @@ pub const NESTED_MUTATION_ERROR_MESSAGE: &str =
 pub const NESTED_MUTATION_HINT: &str =
     "Assign the value to a variable, mutate that variable, then assign it back.";
 
+/// Exact diagnostic contract for `try` encountering an `Err` outside a
+/// function. All execution engines construct this through
+/// [`top_level_try_error`] so both the message and actionable hint stay in
+/// sync.
+pub const TOP_LEVEL_TRY_ERROR_MESSAGE: &str = "try encountered Err at top-level";
+pub const TOP_LEVEL_TRY_HINT: &str =
+    "Wrap the calling code in a fn, or use `match` to handle both arms explicitly.";
+
+pub fn top_level_try_error(line: u32) -> crate::error::BopError {
+    let mut error = crate::error::BopError::runtime(TOP_LEVEL_TRY_ERROR_MESSAGE, line);
+    error.friendly_hint = Some(String::from(TOP_LEVEL_TRY_HINT));
+    error
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +170,13 @@ mod tests {
             NESTED_MUTATION_HINT,
             "Assign the value to a variable, mutate that variable, then assign it back."
         );
+    }
+
+    #[test]
+    fn top_level_try_error_keeps_message_hint_and_line_together() {
+        let error = top_level_try_error(17);
+        assert_eq!(error.line, Some(17));
+        assert_eq!(error.message, TOP_LEVEL_TRY_ERROR_MESSAGE);
+        assert_eq!(error.friendly_hint.as_deref(), Some(TOP_LEVEL_TRY_HINT));
     }
 }

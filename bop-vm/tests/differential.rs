@@ -1823,6 +1823,14 @@ fn try_at_top_level_on_err_errors_diff() {
 let r = try Result::Err("boom")"#,
     );
     assert!(msg.contains("top-level"), "got: {}", msg);
+    assert_eq!(
+        vm_hint(
+            r#"enum Result { Ok(v), Err(e) }
+let r = try Result::Err("boom")"#,
+        )
+        .as_deref(),
+        Some(bop::error_messages::TOP_LEVEL_TRY_HINT)
+    );
 }
 
 #[test]

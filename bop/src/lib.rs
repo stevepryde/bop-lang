@@ -2252,11 +2252,18 @@ print(match r {
 
     #[test]
     fn try_at_top_level_on_err_value_errors() {
-        let msg = run_err(
+        let error = run_err_full(
             r#"enum Result { Ok(v), Err(e) }
 let r = try Result::Err("boom")"#,
         );
-        assert!(msg.contains("top-level"), "got: {}", msg);
+        assert_eq!(
+            error.message,
+            crate::error_messages::TOP_LEVEL_TRY_ERROR_MESSAGE
+        );
+        assert_eq!(
+            error.friendly_hint.as_deref(),
+            Some(crate::error_messages::TOP_LEVEL_TRY_HINT)
+        );
     }
 
     #[test]

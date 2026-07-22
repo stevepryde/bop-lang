@@ -1381,3 +1381,27 @@ print("unreachable")"#,
         run.stderr
     );
 }
+
+#[test]
+#[ignore]
+fn e2e_top_level_try_renders_the_shared_friendly_hint() {
+    let run = run_aot_with_opts(
+        r#"enum Result { Ok(value), Err(error) }
+let value = try Result::Err("boom")"#,
+        "top_level_try_friendly_hint",
+        &Options::default(),
+    );
+    assert_eq!(run.status, Some(1), "stderr:\n{}", run.stderr);
+    assert!(run.stdout.is_empty(), "unexpected stdout: {}", run.stdout);
+    assert!(
+        run.stderr
+            .contains(bop::error_messages::TOP_LEVEL_TRY_ERROR_MESSAGE),
+        "missing canonical message:\n{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(bop::error_messages::TOP_LEVEL_TRY_HINT),
+        "missing friendly hint:\n{}",
+        run.stderr
+    );
+}

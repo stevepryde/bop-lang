@@ -2367,7 +2367,7 @@ impl Emitter {
         let v_name = format!("__try_v_{}", id);
         let err_arm = if self.in_top_level {
             format!(
-                "return ::std::result::Result::Err(::bop::error::BopError::runtime(\"try encountered Err at top-level\", {}));",
+                "return ::std::result::Result::Err(::bop::error_messages::top_level_try_error({}));",
                 line
             )
         } else {
@@ -4739,6 +4739,9 @@ const MAIN_FN: &str = r#"fn main() {
     let mut host = ::bop_sys::StandardHost::new();
     if let Err(err) = run(&mut host) {
         eprintln!("{}", err);
+        if let Some(hint) = &err.friendly_hint {
+            eprintln!("hint: {}", hint);
+        }
         ::std::process::exit(1);
     }
 }
@@ -4782,6 +4785,9 @@ const MAIN_FN_SANDBOX: &str = r#"fn main() {
     let limits = ::bop::BopLimits::standard();
     if let Err(err) = run(&mut host, &limits) {
         eprintln!("{}", err);
+        if let Some(hint) = &err.friendly_hint {
+            eprintln!("hint: {}", hint);
+        }
         ::std::process::exit(1);
     }
 }

@@ -2643,11 +2643,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     .map(|f| f.is_function)
                     .unwrap_or(false);
                 if !current_is_fn {
-                    return Err(error_with_hint(
-                        line,
-                        "try encountered Err at top-level",
-                        "Wrap the calling code in a fn, or use `match` to handle both arms explicitly.",
-                    ));
+                    return Err(bop::error_messages::top_level_try_error(line));
                 }
                 // Fast-return with the Err value: identical path
                 // to an ordinary `return err`.
