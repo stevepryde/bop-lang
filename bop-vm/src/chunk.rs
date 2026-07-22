@@ -5,8 +5,6 @@
 #[cfg(feature = "no_std")]
 use alloc::{string::String, vec::Vec};
 
-use bop::lexer::StringPart;
-
 /// One bytecode operation.
 ///
 /// Operand indices (`ConstIdx`, `NameIdx`, `FnIdx`, `InterpIdx`) are
@@ -145,10 +143,9 @@ pub enum Instr {
     },
 
     // ─── String interpolation ─────────────────────────────────────
-    /// Interpolate using a recipe from the chunk's interp pool. The
-    /// variables named in the recipe are looked up by name in the
-    /// current scope and formatted in order; the resulting string is
-    /// pushed.
+    /// Interpolate using a recipe from the chunk's interp pool. Each
+    /// variable part is already resolved to either a frame slot or a
+    /// name-pool entry; the resulting string is pushed.
     StringInterp(InterpIdx),
 
     // ─── Collections ──────────────────────────────────────────────
@@ -450,11 +447,25 @@ pub enum Constant {
     Str(String),
 }
 
-/// A compiled string-interpolation recipe. Variables are looked up by
-/// name at runtime and formatted in their declared order.
+/// One part of a compiled string-interpolation recipe.
+///
+/// Binding resolution happens in the compiler, not the VM: function
+/// parameters and locals become [`Self::Local`] while captures and
+/// module-level bindings remain [`Self::Name`]. This is the same split
+/// used by `LoadLocal` / `LoadVar` and avoids losing slot-only locals at
+/// runtime.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpPart {
+    Literal(String),
+    Local(SlotIdx),
+    Name(NameIdx),
+}
+
+/// A compiled string-interpolation recipe. Parts are formatted in
+/// source order using their compile-time-resolved bindings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterpRecipe {
-    pub parts: Vec<StringPart>,
+    pub parts: Vec<InterpPart>,
 }
 
 /// Compiled descriptor for a `use` statement. Parallel to the

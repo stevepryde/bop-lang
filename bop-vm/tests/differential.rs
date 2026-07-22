@@ -325,6 +325,38 @@ print("hi {name}!")"#),
 }
 
 #[test]
+fn string_interpolation_sees_function_parameters_locals_and_shadowing() {
+    assert_eq!(
+        say(r#"fn greet(name) {
+    let punctuation = "!"
+    if true {
+        let name = "inner"
+        return "hi {name}{punctuation}"
+    }
+    return "unreachable"
+}
+print(greet("outer"))"#),
+        "hi inner!"
+    );
+}
+
+#[test]
+fn string_interpolation_missing_binding_error_matches_walker() {
+    let out = run_both(r#"print("missing: {unknown}")"#, &standard());
+    assert_eq!(out.error.as_deref(), Some("Variable `unknown` not found"));
+}
+
+#[test]
+fn lambda_interpolation_missing_binding_error_matches_walker() {
+    let out = run_both(
+        r#"let read = fn() { return "{unknown}" }
+print(read())"#,
+        &standard(),
+    );
+    assert_eq!(out.error.as_deref(), Some("Variable `unknown` not found"));
+}
+
+#[test]
 fn string_auto_coerce_in_add() {
     assert_eq!(say(r#"print("val=" + 42)"#), "val=42");
 }
@@ -2237,6 +2269,22 @@ let greet = fn() { return "hello {name}" }
 name = "later"
 print(greet())"#),
         "hello world"
+    );
+}
+
+#[test]
+fn nested_closures_capture_values_used_only_by_interpolation_diff() {
+    assert_eq!(
+        say(r#"fn build(prefix) {
+    let local = "local"
+    return fn(suffix) {
+        let middle = ":"
+        return fn() { return "{prefix}{middle}{local}{suffix}" }
+    }
+}
+let finish = build("start:")("end")
+print(finish())"#),
+        "start::localend"
     );
 }
 

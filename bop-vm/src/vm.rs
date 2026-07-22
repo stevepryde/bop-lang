@@ -60,7 +60,6 @@ use alloc::collections::{BTreeMap, BTreeSet};
 
 use bop::builtins::{self, error, error_fatal_with_hint, error_with_hint};
 use bop::error::BopError;
-use bop::lexer::StringPart;
 use bop::methods;
 use bop::ops;
 use bop::value::{BopFn, FnBody, Value};
@@ -68,7 +67,7 @@ use bop::{BopHost, BopLimits};
 
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx, EnumVariantShape,
-    FnDef, FnIdx, Instr, LoopStateKind, NameIdx, PatternIdx, StructIdx,
+    FnDef, FnIdx, Instr, InterpPart, LoopStateKind, NameIdx, PatternIdx, StructIdx,
 };
 
 /// Hard cap on call depth; matches the tree-walker.
@@ -1553,14 +1552,23 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
     // ─── String interpolation ────────────────────────────────────
 
-    fn build_interp(&self, parts: &[StringPart], line: u32) -> Result<Value, BopError> {
+    fn build_interp(&self, parts: &[InterpPart], line: u32) -> Result<Value, BopError> {
         let mut result = String::new();
         for part in parts {
             match part {
-                StringPart::Literal(s) => result.push_str(s),
-                StringPart::Variable(name) => {
-                    let v = self.lookup_var(name).ok_or_else(|| {
-                        error(line, bop::error_messages::variable_not_found(&name))
+                InterpPart::Literal(s) => result.push_str(s),
+                InterpPart::Local(slot) => {
+                    let v = self
+                        .frames
+                        .last()
+                        .and_then(|frame| frame.slots.get(slot.0 as usize))
+                        .ok_or_else(|| error(line, "VM: local slot out of range"))?;
+                    result.push_str(&format!("{}", v));
+                }
+                InterpPart::Name(name_idx) => {
+                    let name = self.current_chunk().name(*name_idx);
+                    let v = self.lookup_var_by_idx(*name_idx).ok_or_else(|| {
+                        error(line, bop::error_messages::variable_not_found(name))
                     })?;
                     result.push_str(&format!("{}", v));
                 }

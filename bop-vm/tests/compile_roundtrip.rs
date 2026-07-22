@@ -458,6 +458,39 @@ print("hi {name}!")"#);
 }
 
 #[test]
+fn string_interpolation_resolves_function_bindings_to_slots() {
+    let d = disasm(
+        r#"fn greet(name) {
+    let punctuation = "!"
+    return "hi {name}{punctuation}"
+}
+print(greet("bop"))"#,
+    );
+    assert!(
+        d.contains(r#"StringInterp ["hi ", $@0, $@1]"#),
+        "function interpolation should reference parameter/local slots:\n{}",
+        d
+    );
+}
+
+#[test]
+fn string_interpolation_only_reference_is_a_lambda_capture() {
+    let ast = parse(
+        r#"let outer = "captured"
+let read = fn() { return "{outer}" }"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let lambda = &chunk.functions[0];
+
+    assert_eq!(lambda.capture_names, ["outer"]);
+    assert!(
+        disassemble(&lambda.chunk).contains("StringInterp [$outer]"),
+        "unresolved interpolation binding should use the named capture path"
+    );
+}
+
+#[test]
 fn dict_literal_layout() {
     // Keys go in as Str constants, values get compiled; MakeDict pops both.
     assert_disasm(

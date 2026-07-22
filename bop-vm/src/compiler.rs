@@ -10,8 +10,8 @@ use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind,
 
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx,
-    EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, InterpIdx, InterpRecipe, Instr,
-    LoopStateKind, NameIdx, PatternIdx, SlotIdx, StructDef, StructIdx,
+    EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, Instr, InterpIdx, InterpPart,
+    InterpRecipe, LoopStateKind, NameIdx, PatternIdx, SlotIdx, StructDef, StructIdx,
 };
 use bop::parser::{ArrayRest, MatchArm, Pattern, VariantKind, VariantPatternPayload};
 
@@ -944,12 +944,26 @@ impl Compiler {
             }
 
             ExprKind::StringInterp(parts) => {
+                let mut resolved = Vec::with_capacity(parts.len());
                 for part in parts {
-                    if let bop::lexer::StringPart::Variable(name) = part {
-                        self.note_free_var(name);
+                    match part {
+                        bop::lexer::StringPart::Literal(value) => {
+                            resolved.push(InterpPart::Literal(value.clone()));
+                        }
+                        bop::lexer::StringPart::Variable(name) => {
+                            if let Some(slot) =
+                                self.current_resolver().and_then(|r| r.resolve(name))
+                            {
+                                resolved.push(InterpPart::Local(slot));
+                            } else {
+                                self.note_free_var(name);
+                                let name = self.add_name(name);
+                                resolved.push(InterpPart::Name(name));
+                            }
+                        }
                     }
                 }
-                let recipe = InterpRecipe { parts: parts.clone() };
+                let recipe = InterpRecipe { parts: resolved };
                 let idx = self.add_interp(recipe);
                 self.emit(Instr::StringInterp(idx), line);
             }

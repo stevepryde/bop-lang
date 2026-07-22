@@ -403,6 +403,24 @@ print(yield(crate, super, ctx))
 print(x, __bop_user_value_78)
 print(holder.read())"#,
     ),
+    (
+        "string_interpolation_function_locals",
+        r#"fn greet(name) {
+    let punctuation = "!"
+    return "hi {name}{punctuation}"
+}
+print(greet("bop"))"#,
+    ),
+    (
+        "string_interpolation_nested_closure_captures",
+        r#"fn build(prefix) {
+    let local = "local"
+    return fn(suffix) {
+        return fn() { return "{prefix}:{local}:{suffix}" }
+    }
+}
+print(build("start")("end")())"#,
+    ),
     ("equality", "print(1 == 1)\nprint(1 == 2)\nprint(1 != 2)"),
     (
         "ordering",
