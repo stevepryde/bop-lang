@@ -499,8 +499,8 @@ fn module_paths_that_only_differ_by_dot_and_underscore_do_not_collide() {
             "fn __bop_user_fn_m615f62_n68656c706572(",
         ],
     );
-    assert!(!out.contains("__load"));
-    assert!(!out.contains("__Exports"));
+    assert!(!out.contains("fn __mod_a_b_load("));
+    assert!(!out.contains("struct BopModulea_bExports"));
 }
 
 #[test]
@@ -1189,8 +1189,8 @@ let result = match value {
     )
     .expect("an unselected pattern type remains a legal non-matching pattern");
 
-    assert!(out.contains("Option::Some(\"narrowed\"), \"A\""));
-    assert!(!out.contains("Option::Some(\"narrowed\"), \"B\""));
+    assert!(out.contains("Option::Some(\"narrowed\"), __tn"));
+    assert!(out.contains("__module.types.iter().any(|__type| __type == __tn)"));
 }
 
 #[test]

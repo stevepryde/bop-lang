@@ -950,14 +950,17 @@ let label = match 1 { 1 => "one", _ => "other" }"#,
         &chunk.functions[0].chunk,
         &cloned.functions[0].chunk,
     ));
-    assert!(Rc::ptr_eq(&chunk.patterns[0], &cloned.patterns[0]));
+    assert!(Rc::ptr_eq(
+        &chunk.patterns[0].pattern,
+        &cloned.patterns[0].pattern,
+    ));
     assert!(Rc::ptr_eq(
         &chunk.interps[0].parts,
         &cloned.interps[0].parts,
     ));
 
     let function_body = Rc::downgrade(&chunk.functions[0].chunk);
-    let pattern = Rc::downgrade(&chunk.patterns[0]);
+    let pattern = Rc::downgrade(&chunk.patterns[0].pattern);
     let interpolation = Rc::downgrade(&chunk.interps[0].parts);
     drop(cloned);
     drop(chunk);

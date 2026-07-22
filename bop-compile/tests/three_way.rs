@@ -1416,10 +1416,10 @@ fn build(value) {
     return match called { t.Point { value: found } => found, _ => 0 }
 }
 print(build(41))"#,
-        &[((
+        &[(
             "types",
             "struct Point { value }\nfn make(value) { return Point { value: value } }",
-        ))],
+        )],
     ),
     (
         "declaration_alias_is_shadowed_by_parameter",
@@ -1457,10 +1457,10 @@ print(captured(), read(1, point))"#,
         "module_functions_resolve_during_module_load",
         r#"use loading
 print(value)"#,
-        &[((
+        &[(
             "loading",
             "fn helper(n) { return n + 1 }\nfn recurse(n) { if n == 0 { return 0 } return recurse(n - 1) + 1 }\nfn build() { return helper(40) + recurse(1) }\nlet value = build()",
-        ))],
+        )],
     ),
     (
         "imported_fn_method_declaration_alias_context",

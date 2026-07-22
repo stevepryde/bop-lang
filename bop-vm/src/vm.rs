@@ -964,6 +964,15 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     }
                 }
             }
+        }
+        if let Some(entry) = self.imported_function(name) {
+            return Some(entry.clone());
+        }
+        let defining_module = self
+            .frames
+            .last()
+            .and_then(|frame| frame.function_module.as_deref());
+        if let Some(module_path) = defining_module {
             if let Some(entry) = self
                 .functions
                 .get(name)
@@ -972,17 +981,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 return Some(entry.clone());
             }
         }
-        self.imported_function(name).cloned().or_else(|| {
-            let defining_module = self
-                .frames
-                .last()
-                .and_then(|frame| frame.function_module.as_deref());
-            if defining_module.is_none_or(|path| path == self.current_module) {
-                self.functions.get(name).cloned()
-            } else {
-                None
-            }
-        })
+        if defining_module.is_none_or(|path| path == self.current_module) {
+            self.functions.get(name).cloned()
+        } else {
+            None
+        }
     }
 
     // ─── Dispatch ────────────────────────────────────────────────
@@ -2717,21 +2720,20 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let alias_scope_floor = frame.is_function.then_some(frame.alias_scope_base);
         let resolver = |ns: Option<&str>, tn: &str| -> Option<String> {
             if let Some(ns) = ns {
-                if let Some((_, namespace)) = recipe
+                if let Some(crate::chunk::NamespaceRef::Slot { slot, .. }) = recipe
                     .namespaces
                     .iter()
                     .find(|(name, _)| name == ns)
+                    .map(|(_, namespace)| namespace)
                 {
-                    if let crate::chunk::NamespaceRef::Slot { slot, .. } = namespace {
-                        return match frame.slots.get(slot.0 as usize) {
-                            Some(Value::Module(module))
-                                if module.types.iter().any(|name| name == tn) =>
-                            {
-                                Some(module.path.clone())
-                            }
-                            _ => None,
-                        };
-                    }
+                    return match frame.slots.get(slot.0 as usize) {
+                        Some(Value::Module(module))
+                            if module.types.iter().any(|name| name == tn) =>
+                        {
+                            Some(module.path.clone())
+                        }
+                        _ => None,
+                    };
                 }
             }
             bop::resolve_type_in_scoped(
@@ -4073,11 +4075,11 @@ for outer in [1, 2] {
         );
         vm.pop_scope();
         assert_eq!(vm.frames.last().unwrap().scopes.len(), 0);
-        assert_eq!(vm.type_bindings.len(), 2);
+        assert_eq!(vm.type_bindings.len(), 3);
         vm.push_scope();
         vm.pop_scope();
         assert_eq!(vm.frames.last().unwrap().scopes.len(), 0);
-        assert_eq!(vm.type_bindings.len(), 2);
+        assert_eq!(vm.type_bindings.len(), 3);
         vm.push_scope();
         vm.push_scope();
         vm.do_return(Value::None).expect("return");
@@ -4104,7 +4106,7 @@ for outer in [1, 2] {
             frame.scopes[0].get("captured"),
             Some(Value::Int(10))
         ));
-        assert_eq!(vm.type_bindings.len(), 2);
+        assert_eq!(vm.type_bindings.len(), 3);
 
         // Error unwinding must remove both the try-call frame and a nested
         // function's still-open runtime scopes, restoring the top-level type

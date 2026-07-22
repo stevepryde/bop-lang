@@ -741,22 +741,25 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 }
             }
+        }
+        if let Some(function) = self.imported_function(name) {
+            return Some(function.clone());
+        }
+        let defining_module = self.function_modules.last().map(String::as_str);
+        if let Some(module_path) = defining_module {
             if let Some(function) = self
                 .functions
                 .get(name)
-                .filter(|function| function.module_path == *module_path)
+                .filter(|function| function.module_path == module_path)
             {
                 return Some(function.clone());
             }
         }
-        self.imported_function(name).cloned().or_else(|| {
-            let defining_module = self.function_modules.last().map(String::as_str);
-            if defining_module.is_none_or(|path| path == self.current_module) {
-                self.functions.get(name).cloned()
-            } else {
-                None
-            }
-        })
+        if defining_module.is_none_or(|path| path == self.current_module) {
+            self.functions.get(name).cloned()
+        } else {
+            None
+        }
     }
 
     // ─── Statements ────────────────────────────────────────────────
