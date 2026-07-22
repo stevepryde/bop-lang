@@ -721,6 +721,30 @@ fn compile_with_modules(
     )
 }
 
+fn module_export_fields(generated: &str, module: &str) -> Vec<String> {
+    let slug: String = module
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let marker = format!("struct __mod_{slug}__Exports {{");
+    let body = generated
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("missing exports struct for `{module}`:\n{generated}"))
+        .1;
+    body.lines()
+        .skip(1)
+        .take_while(|line| line.trim() != "}")
+        .map(|line| {
+            line.trim()
+                .split_once(':')
+                .expect("exports struct field")
+                .0
+                .to_string()
+        })
+        .collect()
+}
+
 #[test]
 fn aliased_use_constructs_a_depth_checked_module_value() {
     let out = compile_with_modules("\nuse helpers as h", &[("helpers", "let x = [1]")])
@@ -810,6 +834,79 @@ let two = fn() { use shared; return helper(2) }"#,
             .count(),
         2,
         "aliases are shaped bindings and must never enter the plain-glob idempotency cache:\n{aliases}"
+    );
+}
+
+#[test]
+fn nested_import_effective_exports_match_the_exact_use_shape() {
+    let out = compile_with_modules(
+        r#"use aliased as aliased_module
+use selected as selected_module
+use globbed as globbed_module
+use selected_alias as selected_alias_module
+use mixed as mixed_module
+use chained as chained_module
+use hygienic as hygienic_module"#,
+        &[
+            (
+                "shared",
+                r#"let public = 1
+let _private = 2
+fn helper(n) { return n + 1 }
+fn _hidden(n) { return n - 1 }
+struct Thing { value }"#,
+            ),
+            ("aliased", "use shared as dep\nlet value = dep.public"),
+            ("selected", "use shared.{_private, helper}"),
+            ("globbed", "use shared"),
+            ("selected_alias", "use shared.{_private, Thing} as chosen"),
+            ("mixed", "use shared.{_private}\nuse shared"),
+            ("chained", "use aliased as layer"),
+            ("hygienic", "use shared as ctx"),
+        ],
+    )
+    .expect("transpile shaped nested imports");
+
+    assert_eq!(
+        module_export_fields(&out, "aliased"),
+        [
+            "__bop_user_value_646570",
+            "__bop_user_value_76616c7565",
+        ]
+    );
+    assert_eq!(
+        module_export_fields(&out, "selected"),
+        [
+            "__bop_user_value_5f70726976617465",
+            "__bop_user_value_68656c706572",
+        ]
+    );
+    assert_eq!(
+        module_export_fields(&out, "globbed"),
+        [
+            "__bop_user_value_7075626c6963",
+            "__bop_user_value_68656c706572",
+        ]
+    );
+    assert_eq!(
+        module_export_fields(&out, "selected_alias"),
+        ["__bop_user_value_63686f73656e"]
+    );
+    assert_eq!(
+        module_export_fields(&out, "mixed"),
+        [
+            "__bop_user_value_5f70726976617465",
+            "__bop_user_value_7075626c6963",
+            "__bop_user_value_68656c706572",
+        ]
+    );
+    assert_eq!(
+        module_export_fields(&out, "chained"),
+        ["__bop_user_value_6c61796572"]
+    );
+    assert_eq!(
+        module_export_fields(&out, "hygienic"),
+        ["__bop_user_value_637478"]
     );
 }
 

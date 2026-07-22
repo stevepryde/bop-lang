@@ -1412,6 +1412,73 @@ print(l.one, r.two)"#,
         ],
     ),
     (
+        "import_alias_only_function_surface",
+        r#"use internal as module
+print(module.twice(3))
+print(module.recurse(4))
+let returned = module.twice
+print(returned(5))
+print(module.closure(6))
+print(module._private)"#,
+        &[(
+            "internal",
+            r#"fn helper(n) { return n + 1 }
+fn twice(n) { return helper(n) + helper(n) }
+fn recurse(n) {
+    if n == 0 { return 0 }
+    return 1 + recurse(n - 1)
+}
+let closure = fn(n) { return helper(n) }
+let _private = 99"#,
+        )],
+    ),
+    (
+        "import_alias_rejects_bare_function",
+        r#"use internal as module
+print(module.helper(1))
+print(helper(2))"#,
+        &[("internal", "fn helper(n) { return n + 1 }")],
+    ),
+    (
+        "import_nested_alias_rejects_bare_function",
+        r#"use wrapper
+print(via_alias)"#,
+        &[
+            ("shared", "fn helper(n) { return n + 1 }"),
+            (
+                "wrapper",
+                "use shared as dep\nlet via_alias = dep.helper(3)\nlet via_bare = helper(4)",
+            ),
+        ],
+    ),
+    (
+        "import_selective_glob_mix",
+        r#"use mixed as module
+print(module.total)
+print(module._private)
+print(module.helper(5))"#,
+        &[
+            (
+                "shared",
+                "let public = 10\nlet _private = 2\nfn helper(n) { return n + 1 }",
+            ),
+            (
+                "mixed",
+                "use shared.{_private}\nuse shared\nlet total = _private + public",
+            ),
+        ],
+    ),
+    (
+        "import_alias_of_alias_hygiene",
+        r#"use facade as outer
+print(outer.layer.ctx.helper(4))"#,
+        &[
+            ("shared", "fn helper(n) { return n + 1 }"),
+            ("layer", "use shared as ctx"),
+            ("facade", "use layer as layer"),
+        ],
+    ),
+    (
         "import_idempotent_cache",
         r#"use m
 use m

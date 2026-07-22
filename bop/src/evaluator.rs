@@ -92,6 +92,7 @@ enum Signal {
 struct FnDef {
     params: Vec<String>,
     body: Vec<Stmt>,
+    module_path: String,
 }
 
 /// Lexical free-variable analysis for walker-created lambdas.
@@ -383,6 +384,10 @@ pub struct Evaluator<'h, H: BopHost> {
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
+    /// Defining module for each active function call. This keeps module-owned
+    /// sibling lookup private to that function instead of leaking aliased
+    /// functions into the caller-visible `functions` map.
+    function_modules: Vec<String>,
     limits: BopLimits,
     rand_state: u64,
     /// Shared across nested evaluators so recursive imports see
@@ -425,6 +430,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             host,
             steps: 0,
             call_depth: 0,
+            function_modules: Vec::new(),
             limits,
             rand_state: 0,
             imports: Rc::new(RefCell::new(alloc_import::collections::BTreeMap::new())),
@@ -459,6 +465,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             host,
             steps: 0,
             call_depth: 0,
+            function_modules: Vec::new(),
             limits,
             rand_state: 0,
             imports,
@@ -631,6 +638,26 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             candidates.push((*builtin).to_string());
         }
         crate::suggest::did_you_mean(target, candidates)
+    }
+
+    /// Resolve a named function in the active function's defining module
+    /// before falling back to caller-visible bindings. Loaded module artifacts
+    /// are the module-scope environment: aliases therefore keep sibling calls
+    /// working without exposing those siblings as bare names to the importer.
+    fn lookup_function(&self, name: &str) -> Option<FnDef> {
+        if let Some(module_path) = self.function_modules.last() {
+            if module_path != crate::value::ROOT_MODULE_PATH {
+                let cache = self.imports.borrow();
+                if let Some(ImportSlot::Loaded(bindings)) = cache.get(module_path) {
+                    if let Some((_, function)) =
+                        bindings.fn_decls.iter().find(|(candidate, _)| candidate == name)
+                    {
+                        return Some(function.clone());
+                    }
+                }
+            }
+        }
+        self.functions.get(name).cloned()
     }
 
     // ─── Statements ────────────────────────────────────────────────
@@ -842,6 +869,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     FnDef {
                         params: params.clone(),
                         body: body.clone(),
+                        module_path: self.current_module.clone(),
                     },
                 );
                 Ok(Signal::None)
@@ -869,6 +897,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         FnDef {
                             params: params.clone(),
                             body: body.clone(),
+                            module_path: self.current_module.clone(),
                         },
                     );
                 Ok(Signal::None)
@@ -1083,11 +1112,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let mut fn_entries: Vec<(String, FnDef)> =
             Vec::with_capacity(bindings.fn_decls.len());
         for (name, fn_def) in &bindings.fn_decls {
-            let value = Value::try_new_fn(
+            let value = Value::try_new_module_fn(
                 fn_def.params.clone(),
                 Vec::new(),
                 fn_def.body.clone(),
                 Some(name.clone()),
+                fn_def.module_path.clone(),
                 line,
             )?;
             exports.push((name.clone(), value));
@@ -1173,18 +1203,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     ),
                 ));
             }
-            // Fn entries imported via alias also register in
-            // `self.functions` so `m.foo()` (which lowers to
-            // `Value::Fn` lookup in the module) and `foo()`
-            // (bare call, never reaches the alias) stay
-            // consistent when the module itself has sibling fn
-            // calls inside its own body. Selective + alias:
-            // only the listed fns register.
-            for (name, fn_def) in fn_entries {
-                if !self.functions.contains_key(&name) {
-                    self.functions.insert(name, fn_def);
-                }
-            }
+            // The callable values retain their defining module, so sibling
+            // calls resolve through that module's cached bindings. Publishing
+            // these entries in `self.functions` would make `helper()` visible
+            // after `use module as alias`, violating the alias-only surface.
             let module_rc = crate::value::BopModule::try_new(
                 path.to_string(),
                 exports,
@@ -1826,12 +1848,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 // synthesised `Value::Fn` carries `self_name` so
                 // recursive lookups inside the body still resolve
                 // through `self.functions` (see `call_bop_fn`).
-                if let Some(f) = self.functions.get(name) {
-                    return Value::try_new_fn(
+                if let Some(f) = self.lookup_function(name) {
+                    return Value::try_new_module_fn(
                         f.params.clone(),
                         Vec::new(),
                         f.body.clone(),
                         Some(name.to_string()),
+                        f.module_path.clone(),
                         expr.line,
                     );
                 }
@@ -1913,11 +1936,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             ExprKind::Lambda { params, body } => {
                 let free_variables = FreeVariableCollector::for_lambda(params).finish(body);
                 let captures = self.snapshot_captures(&free_variables);
-                Value::try_new_fn(
+                let module_path = self
+                    .function_modules
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| self.current_module.clone());
+                Value::try_new_module_fn(
                     params.clone(),
                     captures,
                     body.clone(),
                     None,
+                    module_path,
                     expr.line,
                 )
             }
@@ -2025,11 +2054,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         let mut full_args = Vec::with_capacity(eval_args.len() + 1);
                         full_args.push(obj_val);
                         full_args.extend(eval_args);
-                        let bop_fn = BopFn::try_new_ast(
+                        let bop_fn = BopFn::try_new_ast_in_module(
                             m.params,
                             Vec::new(),
                             m.body,
                             None,
+                            Some(m.module_path),
                             expr.line,
                         )?;
                         return self.call_bop_fn(&bop_fn, full_args, expr.line);
@@ -2522,6 +2552,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // type decl inside the fn body still ends up scoped to
         // that fn and vanishes on return.
         self.call_depth += 1;
+        self.function_modules.push(
+            func.module_path
+                .clone()
+                .unwrap_or_else(|| crate::value::ROOT_MODULE_PATH.to_string()),
+        );
         let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
         self.type_bindings.push(BTreeMap::new());
 
@@ -2543,6 +2578,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let result = self.exec_block(body);
         self.scopes = saved_scopes;
         self.type_bindings.pop();
+        self.function_modules.pop();
         self.call_depth -= 1;
 
         // `try` unwinds as a sentinel `BopError`; the call
@@ -2664,7 +2700,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // `BopFn` and delegate to the shared call path. This keeps
         // the behaviour of `fn name` declarations and `Value::Fn`
         // values identical, including self-reference semantics.
-        let func = self.functions.get(name).cloned().ok_or_else(|| {
+        let func = self.lookup_function(name).ok_or_else(|| {
             // Preference order: "did you mean" suggestion first
             // (most specific to the user's typo), then the
             // host's generic function hint (embedder-specific
@@ -2690,11 +2726,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
         })?;
 
-        let bop_fn = BopFn::try_new_ast(
+        let bop_fn = BopFn::try_new_ast_in_module(
             func.params,
             Vec::new(),
             func.body,
             Some(name.to_string()),
+            Some(func.module_path),
             line,
         )?;
         self.call_bop_fn(&bop_fn, args, line)
@@ -2751,11 +2788,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let mut full_args = Vec::with_capacity(args.len() + 1);
                 full_args.push(obj.clone());
                 full_args.extend(args);
-                let bop_fn = BopFn::try_new_ast(
+                let bop_fn = BopFn::try_new_ast_in_module(
                     m.params,
                     Vec::new(),
                     m.body,
                     None,
+                    Some(m.module_path),
                     line,
                 )?;
                 return self.call_bop_fn(&bop_fn, full_args, line);
@@ -3484,6 +3522,7 @@ impl ReplSession {
             host,
             steps: 0,
             call_depth: 0,
+            function_modules: Vec::new(),
             limits,
             pending_try_return: None,
             runtime_warnings: Vec::new(),
