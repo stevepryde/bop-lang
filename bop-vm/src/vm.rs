@@ -2643,14 +2643,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// the enclosing frame's BTreeMap scope stack to find the
     /// binding.
     ///
-    /// A `ParentScope` miss doesn't automatically become
-    /// `Value::None`: if the name happens to be a globally-
-    /// reachable user fn / host / builtin, we *skip* the capture
-    /// entirely so the lambda body's `Call { name }` / `LoadVar`
-    /// dispatches fall through to the fn registry at call time.
-    /// Otherwise a shadowing `None` would turn `fn() { risky(5)
-    /// }` into "`risky` is a none, not a function" — the bug this
-    /// filter fixes.
+    /// A missing `ParentScope` binding is skipped rather than
+    /// represented by `Value::None`. Absence and a binding whose
+    /// value is genuinely `none` are observably different: leaving
+    /// an absent name uncaptured lets the lambda body's normal
+    /// `LoadVar` / call path resolve a named function or report
+    /// `Variable not found`.
     fn snapshot_captures_for(&self, fn_def: &FnDef) -> Vec<(String, Value)> {
         let frame = self.frames.last().expect("frame present");
         let mut out = Vec::with_capacity(fn_def.capture_names.len());
@@ -2678,38 +2676,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     }
                     if let Some(v) = found {
                         out.push((name.clone(), v));
-                    } else if self.is_globally_reachable_name(look_name) {
-                        // Skip — the lambda body's dynamic
-                        // dispatch will find it at call time.
-                    } else {
-                        out.push((name.clone(), Value::None));
                     }
                 }
             };
         }
         out
-    }
-
-    /// A name reachable through the VM's non-scope registries at
-    /// call time: declared user fns, core callable builtins, and
-    /// host-provided fns. Used by capture snapshotting to avoid
-    /// shadowing globals with a `None` when the defining frame
-    /// doesn't itself have the binding.
-    fn is_globally_reachable_name(&self, name: &str) -> bool {
-        if self.functions.contains_key(name) {
-            return true;
-        }
-        if bop::suggest::CORE_CALLABLE_BUILTINS.contains(&name) {
-            return true;
-        }
-        // Host fn probe: there's no registry API, so we infer by
-        // calling with zero args and seeing if it's handled. That
-        // would mutate host state on some hosts, so keep it as
-        // an overly-conservative fallback only for names that
-        // look like host fns by convention. For now, return false
-        // — if a host fn is being captured, the user can
-        // declare a local shim.
-        false
     }
 
     /// Call a `Value::Fn` by pushing a new frame whose scope holds
@@ -3838,5 +3809,25 @@ mod tests {
         vm.unwind_to_try_call(error(1, "boom")).expect("unwind");
         assert_eq!(vm.frames.len(), 1);
         assert_eq!(vm.type_bindings.len(), 1);
+    }
+
+    #[test]
+    fn capture_snapshot_distinguishes_missing_from_bound_none() {
+        let program = bop::parse(
+            r#"let present = none
+let read = fn() { return [missing, present] }"#,
+        )
+        .expect("parse");
+        let chunk = crate::compile(&program).expect("compile");
+        let lambda = chunk.functions[0].clone();
+        let mut host = SilentHost;
+        let mut vm = Vm::new(chunk, &mut host, BopLimits::standard());
+        vm.define_local("present".to_string(), Value::None);
+
+        let captures = vm.snapshot_captures_for(&lambda);
+
+        assert_eq!(captures.len(), 1, "missing bindings must not be invented");
+        assert_eq!(captures[0].0, "present");
+        assert!(matches!(captures[0].1, Value::None));
     }
 }

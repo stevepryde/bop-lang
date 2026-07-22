@@ -595,6 +595,24 @@ fn nested_function_has_its_own_chunk() {
 }
 
 #[test]
+fn unresolved_lambda_name_compiles_as_a_parent_scope_candidate() {
+    let ast = parse(
+        r#"fn build() {
+    return fn() { return missing }
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let lambda = &chunk.functions[0].chunk.functions[0];
+
+    assert_eq!(lambda.capture_names, ["missing"]);
+    assert!(matches!(
+        lambda.capture_sources.as_slice(),
+        [bop_vm::chunk::CaptureSource::ParentScope(name)] if name == "missing"
+    ));
+}
+
+#[test]
 fn break_outside_loop_is_compile_error() {
     let ast = parse("break").expect("parse");
     let err = compile(&ast).expect_err("should reject break outside loop");
