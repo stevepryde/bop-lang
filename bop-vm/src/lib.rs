@@ -44,8 +44,9 @@
 //!   entry), push a dict.
 //!
 //! ## String interpolation
-//! - `StringInterp(idx)` — run the recipe at `idx`, looking up any
-//!   variable parts in the current scope, and push the result.
+//! - `StringInterp(idx)` — run the recipe at `idx`, loading variable
+//!   parts from their compiler-resolved local slot or named binding,
+//!   and push the result.
 //!
 //! ## Calls
 //! - `Call { name, argc }` — call a named function (builtin, host, or
@@ -95,8 +96,8 @@ pub mod vm;
 
 pub use chunk::{
     Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx, EnumVariantDef,
-    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, LoopStateKind, NameIdx,
-    StructDef, StructIdx,
+    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpPart, InterpRecipe, Instr, LoopStateKind,
+    NameIdx, StructDef, StructIdx,
 };
 pub use compiler::compile;
 pub use disasm::disassemble;

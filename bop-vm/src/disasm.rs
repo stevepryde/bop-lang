@@ -8,9 +8,7 @@
 #[cfg(feature = "no_std")]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
-use bop::lexer::StringPart;
-
-use crate::chunk::{Chunk, Constant, Instr, LoopStateKind};
+use crate::chunk::{Chunk, Constant, Instr, InterpPart, LoopStateKind};
 
 /// Render a chunk as a string. One line per instruction; nested
 /// function bodies are indented and follow the main body.
@@ -112,8 +110,9 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 .parts
                 .iter()
                 .map(|p| match p {
-                    StringPart::Literal(s) => format!("{:?}", s),
-                    StringPart::Variable(name) => format!("${}", name),
+                    InterpPart::Literal(s) => format!("{:?}", s),
+                    InterpPart::Local(slot) => format!("$@{}", slot.0),
+                    InterpPart::Name(name) => format!("${}", chunk.name(*name)),
                 })
                 .collect();
             format!("StringInterp [{}]", parts.join(", "))
