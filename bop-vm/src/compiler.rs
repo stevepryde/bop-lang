@@ -13,8 +13,8 @@ use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind,
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, ConstructFieldsIdx, EnumConstructShape,
     EnumDef, EnumIdx, EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, Instr,
-    InterpIdx, InterpPart, InterpRecipe, LoopStateKind, NameIdx, NamespaceRef, PatternIdx,
-    PatternRecipe, SlotIdx, StructDef, StructIdx,
+    InterpIdx, InterpPart, InterpRecipe, LoopStateKind, NameIdx, NamespaceIdx, NamespaceRef,
+    PatternIdx, PatternRecipe, SlotIdx, StructDef, StructIdx,
 };
 use bop::parser::{MatchArm, Pattern, VariantKind};
 
@@ -498,6 +498,13 @@ impl Compiler {
         idx
     }
 
+    fn add_namespace_ref(&mut self, name: &str) -> NamespaceIdx {
+        let namespace = self.namespace_ref(name);
+        let idx = NamespaceIdx::new(self.chunk.namespace_refs.len() as u32);
+        self.chunk.namespace_refs.push(namespace);
+        idx
+    }
+
     fn namespace_ref(&mut self, name: &str) -> NamespaceRef {
         let slot = self.current_resolver().and_then(|resolver| resolver.resolve(name));
         if slot.is_none() {
@@ -505,8 +512,8 @@ impl Compiler {
         }
         let name = self.add_name(name);
         match slot {
-            Some(slot) => NamespaceRef::Slot { name, slot },
-            None => NamespaceRef::Name(name),
+            Some(slot) => NamespaceRef::from_slot(name, slot),
+            None => NamespaceRef::from_name(name),
         }
     }
 
@@ -1285,7 +1292,7 @@ impl Compiler {
                 fields,
             } => {
                 let type_idx = self.add_name(type_name);
-                let namespace = namespace.as_ref().map(|ns| self.namespace_ref(ns));
+                let namespace = namespace.as_ref().map(|ns| self.add_namespace_ref(ns));
                 let construct_fields = self.add_construct_fields(
                     fields.iter().map(|(name, _)| name.clone()).collect(),
                 );
@@ -1326,7 +1333,7 @@ impl Compiler {
                 use bop::parser::VariantPayload;
                 let type_idx = self.add_name(type_name);
                 let var_idx = self.add_name(variant);
-                let namespace = namespace.as_ref().map(|ns| self.namespace_ref(ns));
+                let namespace = namespace.as_ref().map(|ns| self.add_namespace_ref(ns));
                 let construct_fields = self.add_construct_fields(match payload {
                     VariantPayload::Struct(fields) => {
                         fields.iter().map(|(name, _)| name.clone()).collect()

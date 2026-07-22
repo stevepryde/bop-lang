@@ -993,12 +993,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// Resolve module-owned sibling functions from cached module artifacts
     /// before falling back to caller-visible functions. This preserves module
     /// function environments without making alias imports publish bare names.
+    #[inline]
     fn lookup_function_entry(&self, name: &str) -> Option<Rc<FnEntry>> {
-        if let Some(module_path) = self
-            .frames
-            .last()
-            .and_then(|frame| frame.function_module.as_deref())
-        {
+        let frame = self.frames.last()?;
+        let defining_module = frame.function_module.as_deref();
+        if let Some(module_path) = defining_module {
             if module_path != bop::value::ROOT_MODULE_PATH {
                 let cache = self.imports.borrow();
                 if let Some(ImportSlot::Loaded(artifacts)) = cache.get(module_path) {
@@ -1010,13 +1009,34 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
             }
         }
+
+        // Alias-free named calls dominate real programs. Avoid probing every
+        // empty runtime import scope and then the empty defining-module map
+        // before reaching `self.functions`. The moment any active import map
+        // contains a callable, keep the full lookup below so a block/function
+        // import can still shadow a same-named declared function.
+        let import_floor = if frame.is_function {
+            frame.alias_scope_base
+        } else {
+            0
+        };
+        let runtime_imports_empty = self.imported_functions[import_floor..]
+            .iter()
+            .all(BTreeMap::is_empty);
+        if runtime_imports_empty && frame.lexical_context.imported_functions.is_empty() {
+            if let Some(module_path) = defining_module {
+                return self
+                    .functions
+                    .get(name)
+                    .filter(|entry| entry.module_path == module_path)
+                    .cloned();
+            }
+            return self.functions.get(name).cloned();
+        }
+
         if let Some(entry) = self.imported_function(name) {
             return Some(entry.clone());
         }
-        let defining_module = self
-            .frames
-            .last()
-            .and_then(|frame| frame.function_module.as_deref());
         if let Some(module_path) = defining_module {
             if let Some(entry) = self
                 .functions
@@ -1737,7 +1757,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             } => {
                 let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
                 self.validate_struct_construct(
-                    namespace,
+                    namespace.map(|namespace| chunk.namespace_ref(namespace)),
                     chunk.name(type_name),
                     chunk.construct_fields(fields),
                     line,
@@ -1752,7 +1772,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             } => {
                 let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
                 self.validate_enum_construct(
-                    namespace,
+                    namespace.map(|namespace| chunk.namespace_ref(namespace)),
                     chunk.name(type_name),
                     chunk.name(variant),
                     shape,
@@ -1765,6 +1785,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 type_name,
                 count,
             } => {
+                let namespace =
+                    namespace.map(|namespace| self.current_chunk().namespace_ref(namespace));
                 self.construct_struct(namespace, type_name, count as usize, line)?;
             }
             Instr::ConstructEnum {
@@ -1773,6 +1795,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 variant,
                 shape,
             } => {
+                let namespace =
+                    namespace.map(|namespace| self.current_chunk().namespace_ref(namespace));
                 self.construct_enum(namespace, type_name, variant, shape, line)?;
             }
             Instr::FieldGet(n) => {
@@ -3083,11 +3107,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let module_aliases = &self.module_aliases;
         let resolver = |ns: Option<&str>, tn: &str| -> Option<String> {
             if let Some(ns) = ns {
-                if let Some(crate::chunk::NamespaceRef::Slot { slot, .. }) = recipe
+                if let Some(slot) = recipe
                     .namespaces
                     .iter()
                     .find(|(name, _)| name == ns)
                     .map(|(_, namespace)| namespace)
+                    .and_then(|namespace| namespace.slot_idx())
                 {
                     return match frame.slots.get(slot.0 as usize) {
                         Some(Value::Module(module))
@@ -3632,26 +3657,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
         type_name: &str,
         line: u32,
     ) -> Result<String, BopError> {
-        use crate::chunk::NamespaceRef;
-
-        let (name, value) = match namespace {
-            NamespaceRef::Name(name) => {
-                let name = self.current_chunk().name(name);
-                self.validate_namespaced_type(name, type_name, line)?;
-                return self.resolve_type_ref(Some(name), type_name).ok_or_else(|| {
-                    error(line, format!("`{type_name}` isn't a type exported from `{name}`"))
-                });
-            }
-            NamespaceRef::Slot { name, slot } => {
-                let name = self.current_chunk().name(name);
-                let value = self
-                    .frames
-                    .last()
-                    .and_then(|frame| frame.slots.get(slot.0 as usize))
-                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
-                (name, value)
-            }
+        let name = self.current_chunk().name(namespace.name_idx());
+        let Some(slot) = namespace.slot_idx() else {
+            self.validate_namespaced_type(name, type_name, line)?;
+            return self.resolve_type_ref(Some(name), type_name).ok_or_else(|| {
+                error(line, format!("`{type_name}` isn't a type exported from `{name}`"))
+            });
         };
+        let value = self
+            .frames
+            .last()
+            .and_then(|frame| frame.slots.get(slot.0 as usize))
+            .ok_or_else(|| error(line, "VM: local slot out of range"))?;
         let module = match value {
             Value::Module(module) => module,
             other => {

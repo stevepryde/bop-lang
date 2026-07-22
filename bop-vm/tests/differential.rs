@@ -2851,6 +2851,20 @@ seed()
 print(helper())"#,
     );
     assert!(error.contains("Function `helper` not found"), "got: {error}");
+
+    set_modules(&[("inner", "fn helper() { return 2 }")]);
+    let outcome = run_both(
+        r#"fn helper() { return 1 }
+fn local() {
+    use inner.{helper}
+    return helper()
+}
+print(local())
+print(helper())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["2", "1"]);
 }
 
 #[test]
