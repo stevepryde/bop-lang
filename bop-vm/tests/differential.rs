@@ -747,6 +747,104 @@ print(nested(false, true, 10, 20, 30))
     );
 }
 
+#[test]
+fn inc_local_int_matches_direct_compound_and_control_flow_semantics_diff() {
+    let outcome = run_both(
+        r#"
+fn direct(value) {
+    value = value + 3
+    value = value - 1
+    return value
+}
+fn compound(value) {
+    value += 7
+    value -= 2
+    return value
+}
+fn branch(condition, value) {
+    value = if condition { value + 1 } else { value + 2 }
+    value += 4
+    return value
+}
+fn large(value) {
+    value = value + 2147483648
+    return value
+}
+fn generic(value) {
+    value += 1
+    return value
+}
+
+print(direct(10))
+print(compound(10))
+print(branch(true, 10))
+print(branch(false, 10))
+print(large(1))
+print(generic(1.5))
+print(generic("v"))
+"#,
+        &standard(),
+    );
+
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        ["12", "15", "15", "16", "2147483649", "2.5", "v1"]
+    );
+}
+
+#[test]
+fn local_subtraction_preserves_generic_operator_errors_diff() {
+    for source in [
+        r#"fn expression(value) { return value - 1 }
+print(expression("v"))"#,
+        r#"fn direct(value) {
+    value = value - 1
+    return value
+}
+print(direct("v"))"#,
+        r#"fn different_slot(source, target) {
+    target = source - 1
+    return target
+}
+print(different_slot("v", 0))"#,
+        r#"fn compound(value) {
+    value -= 1
+    return value
+}
+print(compound("v"))"#,
+    ] {
+        let outcome = run_both(source, &standard());
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("Can't use `-` with string and int")
+        );
+    }
+}
+
+#[test]
+fn local_add_superinstructions_preserve_canonical_overflow_errors_diff() {
+    for source in [
+        r#"fn expression(value) { return value + 1 }
+print(expression(9223372036854775807))"#,
+        r#"fn direct(value) {
+    value = value + 1
+    return value
+}
+print(direct(9223372036854775807))"#,
+        r#"fn compound(value) {
+    value += 1
+    return value
+}
+print(compound(9223372036854775807))"#,
+        r#"fn local_local(left, right) { return left + right }
+print(local_local(9223372036854775807, 1))"#,
+    ] {
+        let outcome = run_both(source, &standard());
+        assert_eq!(outcome.error.as_deref(), Some("Integer overflow in `+`"));
+    }
+}
+
 // ─── While ────────────────────────────────────────────────────────
 
 #[test]

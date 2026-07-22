@@ -73,8 +73,9 @@ pub enum Instr {
     /// `LoadLocal(a) + LoadLocal(b) + Lt`. Same
     /// Int-fast-path / generic-fallback split as `AddLocals`.
     LtLocals(SlotIdx, SlotIdx),
-    /// `frame.slots[slot] += k` for a small `i32` `k`, fuses
-    /// `LoadLocal(slot) + LoadConst(k) + Add + StoreLocal(slot)`.
+    /// `frame.slots[slot] += k` for a small `i32` `k`. The final store
+    /// peephole fuses `LoadLocalAddInt(slot, k) + StoreLocal(slot)`, which
+    /// represents `LoadLocal(slot) + LoadConst(k) + Add + StoreLocal(slot)`.
     /// Specialised for `Int` slots — the `i = i + 1` and
     /// `total = total + small_k` idioms in tight loops. If the
     /// slot isn't an `Int`, falls back to generic add via the
@@ -82,9 +83,8 @@ pub enum Instr {
     IncLocalInt(SlotIdx, i32),
     /// Push `frame.slots[slot] + k` (as `Int`), fuses
     /// `LoadLocal(slot) + LoadConst(k) + Add`. Covers the
-    /// `fib(n - 1)` / `array[i + 1]` patterns — `Sub` compiles
-    /// as `Add` with a negated const so this one opcode captures
-    /// both. Non-Int fallback delegates to `ops::add`.
+    /// `array[i + 1]` pattern. Non-Int fallback delegates to
+    /// `ops::add`, preserving the language's generic `+` semantics.
     LoadLocalAddInt(SlotIdx, i32),
     /// Push `frame.slots[slot] < k` (as `Bool`), fuses
     /// `LoadLocal(slot) + LoadConst(k:Int) + Lt`. The `n < 2`

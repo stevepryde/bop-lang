@@ -281,9 +281,8 @@ impl Compiler {
                         return Some(Instr::AddLocals(a, b));
                     }
                     // `LoadLocal s; LoadConst(Int k); Add` →
-                    // `LoadLocalAddInt(s, k)`. The `fib(n - 1)`
-                    // / `array[i + 1]` pattern — one of the
-                    // hottest sites in recursive benchmarks.
+                    // `LoadLocalAddInt(s, k)`. Covers local values plus
+                    // small integer literals such as `array[i + 1]`.
                     if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
                         (code[code.len() - 2], code[code.len() - 1])
                     {
@@ -296,30 +295,6 @@ impl Compiler {
                                     .lines
                                     .truncate(self.chunk.lines.len() - 2);
                                 return Some(Instr::LoadLocalAddInt(s, k32));
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            Instr::Sub => {
-                // `LoadLocal s; LoadConst(Int k); Sub` →
-                // `LoadLocalAddInt(s, -k)`.
-                if self.can_fuse_tail(2) {
-                    if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
-                        (code[code.len() - 2], code[code.len() - 1])
-                    {
-                        if let crate::chunk::Constant::Int(k) =
-                            self.chunk.constants[c.0 as usize]
-                        {
-                            if let Some(neg) = k.checked_neg() {
-                                if let Ok(k32) = i32::try_from(neg) {
-                                    self.chunk.code.truncate(code.len() - 2);
-                                    self.chunk
-                                        .lines
-                                        .truncate(self.chunk.lines.len() - 2);
-                                    return Some(Instr::LoadLocalAddInt(s, k32));
-                                }
                             }
                         }
                     }
@@ -358,26 +333,25 @@ impl Compiler {
                 None
             }
             Instr::StoreLocal(store_slot) => {
-                // `AddLocals(slot, other); StoreLocal(slot)` and
-                // `LoadLocal(slot); LoadConst(k:Int); Add;
-                // StoreLocal(slot)` both collapse to
-                // `IncLocalInt(slot, k)` when the constant is a
-                // small int — the `i = i + k` idiom.
-                //
-                // Pattern A (post-AddLocals fusion): detect
-                // `AddLocals(slot, other) + StoreLocal(slot)`
-                // only when `other` resolves to a constant via
-                // the preceding `LoadLocal` — we don't handle
-                // that here yet; stick with the direct 3-step
-                // match instead.
-                //
-                // Pattern B: `LoadLocal(slot), LoadConst(Int k),
-                // Add, StoreLocal(slot)`. The `Add` has already
-                // been peephole-collapsed to `AddLocals(slot,
-                // load_slot)` when both are locals — but for
-                // `LoadLocal + LoadConst + Add` the peephole
-                // above didn't fire, so the trailing sequence is
-                // still `LoadLocal(slot), LoadConst(k), Add`.
+                // The Add peephole runs before the store arrives, so the
+                // hot `slot = slot + small_int` tail is normally already one
+                // `LoadLocalAddInt`. Collapse that instruction with a store
+                // back to the same slot. `can_fuse_tail` keeps the rewrite on
+                // the safe side of every control-flow landing point.
+                if self.can_fuse_tail(1) {
+                    let n = code.len();
+                    if let Instr::LoadLocalAddInt(load_slot, k) = code[n - 1] {
+                        if load_slot == *store_slot {
+                            self.chunk.code.truncate(n - 1);
+                            self.chunk.lines.truncate(self.chunk.lines.len() - 1);
+                            return Some(Instr::IncLocalInt(*store_slot, k));
+                        }
+                    }
+                }
+
+                // Retain the unfused source-form match as a defensive
+                // fallback in case another emission path leaves the Add raw:
+                // `LoadLocal(slot), LoadConst(Int k), Add, StoreLocal(slot)`.
                 if self.can_fuse_tail(3) {
                     let n = code.len();
                     if let (
