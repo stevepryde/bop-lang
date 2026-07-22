@@ -3,6 +3,13 @@ use alloc::{format, string::String, vec::Vec};
 
 use crate::error::BopError;
 
+pub(crate) const I64_MIN_MAGNITUDE: u64 = (i64::MAX as u64) + 1;
+pub(crate) const I64_MIN_MAGNITUDE_TEXT: &str = "9223372036854775808";
+
+pub(crate) fn integer_literal_out_of_range(digits: &str) -> String {
+    format!("Integer literal out of range for i64: {}", digits)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StringPart {
     Literal(String),
@@ -17,6 +24,11 @@ pub enum Token {
     /// `ExprKind::Int` which the engines evaluate as
     /// `Value::Int`.
     Int(i64),
+    /// The sole unsigned integer magnitude that does not fit in
+    /// `i64` but can form `i64::MIN` when immediately negated.
+    /// The parser must consume this sentinel; it never reaches
+    /// the AST or an execution engine.
+    IntMinMagnitude,
     Number(f64),
     Str(String),
     StringInterp(Vec<StringPart>),
@@ -161,6 +173,7 @@ fn triggers_semicolon(token: &Token) -> bool {
         token,
         Token::Ident(_)
             | Token::Int(_)
+            | Token::IntMinMagnitude
             | Token::Number(_)
             | Token::Str(_)
             | Token::StringInterp(_)
@@ -181,6 +194,7 @@ fn supports_dot_continuation(token: &Token) -> bool {
         token,
         Token::Ident(_)
             | Token::Int(_)
+            | Token::IntMinMagnitude
             | Token::Number(_)
             | Token::Str(_)
             | Token::StringInterp(_)
@@ -324,6 +338,17 @@ impl Lexer {
         }
     }
 
+    fn error_at(&self, line: u32, column: u32, message: impl Into<String>) -> BopError {
+        BopError {
+            line: Some(line),
+            column: Some(column),
+            message: message.into(),
+            friendly_hint: None,
+            is_fatal: false,
+            is_try_return: false,
+        }
+    }
+
     fn error_with_hint(
         &self,
         message: impl Into<String>,
@@ -388,7 +413,7 @@ impl Lexer {
 
                 '0'..='9' => {
                     tokens.push(SpannedToken {
-                        token: self.lex_number()?,
+                        token: self.lex_number(line, column)?,
                         line,
                     column,
                     });
@@ -723,7 +748,7 @@ impl Lexer {
         Ok(tokens)
     }
 
-    fn lex_number(&mut self) -> Result<Token, BopError> {
+    fn lex_number(&mut self, line: u32, column: u32) -> Result<Token, BopError> {
         let mut s = String::new();
         while let Some(ch) = self.peek() {
             if ch.is_ascii_digit() {
@@ -757,19 +782,21 @@ impl Lexer {
         if is_float {
             let n: f64 = s
                 .parse()
-                .map_err(|_| self.error(format!("Invalid number: {}", s)))?;
+                .map_err(|_| self.error_at(line, column, format!("Invalid number: {}", s)))?;
             Ok(Token::Number(n))
         } else {
-            // Integer literal — try `i64`. Out-of-range values
-            // surface as a lex-time error rather than silently
-            // wrapping or degrading to `f64`, since that's the
-            // ergonomic opposite of "exact int arithmetic".
-            match s.parse::<i64>() {
-                Ok(n) => Ok(Token::Int(n)),
-                Err(_) => Err(self.error(format!(
-                    "Integer literal out of range for i64: {}",
-                    s
-                ))),
+            // Preserve one otherwise-unrepresentable magnitude
+            // for the parser to fold only under unary `-`. Every
+            // other out-of-range value still fails here rather
+            // than wrapping or degrading to `f64`.
+            match s.parse::<u64>() {
+                Ok(n) if n <= i64::MAX as u64 => Ok(Token::Int(n as i64)),
+                Ok(I64_MIN_MAGNITUDE) => Ok(Token::IntMinMagnitude),
+                _ => Err(self.error_at(
+                    line,
+                    column,
+                    integer_literal_out_of_range(&s),
+                )),
             }
         }
     }
@@ -918,6 +945,25 @@ mod tests {
     fn integer() {
         // Integer literals now lex to `Token::Int` (phase 6).
         assert_eq!(toks("42"), vec![Token::Int(42)]);
+    }
+
+    #[test]
+    fn i64_min_magnitude_is_preserved_for_unary_minus_parsing() {
+        assert_eq!(
+            toks(I64_MIN_MAGNITUDE_TEXT),
+            vec![Token::IntMinMagnitude]
+        );
+    }
+
+    #[test]
+    fn integer_beyond_i64_min_magnitude_errors_at_the_literal_start() {
+        let error = lex("\n  9223372036854775809").expect_err("magnitude must be rejected");
+        assert_eq!(error.line, Some(2));
+        assert_eq!(error.column, Some(3));
+        assert_eq!(
+            error.message,
+            "Integer literal out of range for i64: 9223372036854775809"
+        );
     }
 
     #[test]

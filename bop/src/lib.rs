@@ -2585,14 +2585,45 @@ print(match r {
     }
 
     #[test]
-    fn int_overflow_on_neg_of_i64_min_errors() {
-        // `i64::MIN` can't be written as a literal (its magnitude
-        // exceeds `i64::MAX`), so we build it arithmetically and
-        // then negate — which overflows.
-        let msg = run_err(
-            "let x = -9223372036854775807 - 1\nprint(-x)",
+    fn i64_min_literal_is_an_exact_int_in_expressions_and_patterns() {
+        assert_eq!(
+            say("print(-9223372036854775808)"),
+            "-9223372036854775808"
         );
-        assert!(msg.contains("overflow"), "got: {}", msg);
+        assert_eq!(say("print((-9223372036854775808).type())"), "int");
+        assert_eq!(
+            say("print(-9223372036854775808 == (-9223372036854775807 - 1))"),
+            "true"
+        );
+        assert_eq!(
+            say("print(-9223372036854775808 < -9223372036854775807)"),
+            "true"
+        );
+        assert_eq!(
+            say("print(-9223372036854775808 + 1)"),
+            "-9223372036854775807"
+        );
+        assert_eq!(
+            say(
+                r#"let min = -9223372036854775808
+print(match min {
+    -9223372036854775808 => "minimum",
+    _ => "other",
+})"#,
+            ),
+            "minimum"
+        );
+    }
+
+    #[test]
+    fn int_overflow_on_neg_of_i64_min_errors() {
+        for source in [
+            "print(--9223372036854775808)",
+            "print(-9223372036854775808 - 1)",
+        ] {
+            let msg = run_err(source);
+            assert_eq!(msg, "Integer overflow in `-`", "source: {source}");
+        }
     }
 
     #[test]
@@ -2660,6 +2691,21 @@ print(n)"#),
         // lex-time error, not a silent downgrade to float.
         let msg = parse_err("let x = 99999999999999999999");
         assert!(msg.contains("out of range"), "got: {}", msg);
+    }
+
+    #[test]
+    fn signed_integer_literal_boundaries_report_the_owning_column() {
+        let cases = [
+            ("let x = 9223372036854775808", 9),
+            ("let x = 9223372036854775809", 9),
+            ("let x = -9223372036854775809", 10),
+        ];
+        for (source, column) in cases {
+            let error = parse_err_full(source);
+            assert_eq!(error.line, Some(1), "source: {source}");
+            assert_eq!(error.column, Some(column), "source: {source}");
+            assert!(error.message.contains("out of range"), "error: {error:?}");
+        }
     }
 
     // ─── Modules / use ──────────────────────────────────────────

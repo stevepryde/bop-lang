@@ -1353,6 +1353,48 @@ print(range(max, min, min))"#,
 
 #[test]
 #[ignore]
+fn e2e_i64_min_literal_stays_exact_through_native_aot() {
+    let output = run_aot(
+        r#"let min = -9223372036854775808
+print(min)
+print(min.type())
+print(min + 1)
+print(min < -9223372036854775807)
+print(match min {
+    -9223372036854775808 => "minimum",
+    _ => "other",
+})"#,
+        "i64_min_literal_exact",
+    );
+    assert_eq!(
+        output,
+        "-9223372036854775808\nint\n-9223372036854775807\ntrue\nminimum"
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_i64_min_literal_keeps_native_overflow_checks() {
+    for (source, name) in [
+        ("print(--9223372036854775808)", "i64_min_neg_overflow"),
+        (
+            "print(-9223372036854775808 - 1)",
+            "i64_min_sub_overflow",
+        ),
+    ] {
+        let run = run_aot_with_opts(source, name, &Options::default());
+        assert_eq!(run.status, Some(1), "stderr:\n{}", run.stderr);
+        assert!(run.stdout.is_empty(), "unexpected stdout: {}", run.stdout);
+        assert!(
+            run.stderr.contains("[line 1] Integer overflow in `-`"),
+            "unexpected stderr:\n{}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
+#[ignore]
 fn e2e_range_limit_is_fatal_through_try_call() {
     let run = run_aot_with_opts(
         r#"let result = try_call(fn() {

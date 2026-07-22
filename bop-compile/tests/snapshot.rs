@@ -53,6 +53,26 @@ let value = try Result::Err("boom")"#;
 }
 
 #[test]
+fn i64_min_literal_emits_exact_integer_values_and_patterns() {
+    let rust = compile(
+        r#"let min = -9223372036854775808
+print(match min {
+    -9223372036854775808 => min,
+    _ => 0,
+})"#,
+    );
+    assert!(
+        rust.contains("::bop::value::Value::Int(-9223372036854775808i64)"),
+        "generated Rust lost the exact expression value"
+    );
+    assert!(
+        rust.contains("::bop::parser::LiteralPattern::Int(-9223372036854775808i64)"),
+        "generated Rust lost the exact pattern value"
+    );
+    assert!(!rust.contains("Value::Number(-9223372036854775808"));
+}
+
+#[test]
 fn multiline_if_expression_still_rejects_multiple_branch_values_before_aot_emission() {
     let error = transpile(
         "let value = if true {\n    1\n    2\n} else {\n    3\n}",

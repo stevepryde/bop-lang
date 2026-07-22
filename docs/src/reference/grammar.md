@@ -118,6 +118,8 @@ params      = IDENT ("," IDENT)*
 args        = expr ("," expr)*
 ```
 
+`INT` is an exact signed 64-bit integer after unary parsing. Decimal magnitudes through `9223372036854775807` are ordinary primary expressions; the boundary spelling `-9223372036854775808` is accepted when unary `-` directly owns that magnitude, including in literal patterns. A bare `9223372036854775808`, `0 - 9223372036854775808`, or any larger magnitude is out of range rather than being converted to a floating-point `number`.
+
 Note: `methodDecl`, enum variant `IDENT`s, and `struct` names must start with an uppercase letter. `IDENT` bound by `let`, `fn`, parameters, `for`, etc. must start with lowercase or `_`. `const` names must be all-caps. Mis-shaped declarations parse-error with a "did you mean?" suggestion — see [Variables](../basics/variables.md#name-shapes-are-checked).
 
 ## Automatic semicolons
