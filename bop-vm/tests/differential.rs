@@ -708,6 +708,77 @@ fn if_expression() {
 }
 
 #[test]
+fn multiline_if_expression_layout_diff() {
+    let outcome = run_both(
+        r#"let first = if true {
+    // A continued expression remains one branch value.
+
+    1 +
+        2;
+}
+else {
+    99
+}
+let second = if false {
+    0
+} else {
+    if true {
+        4
+    }
+    else {
+        5
+    }
+}
+print(first)
+print(second)
+let third = if true {
+    (
+        5
+        + 6
+    )
+} else {
+    0
+}
+print(third)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["3", "4", "11"]);
+}
+
+#[test]
+fn if_expression_branches_remain_single_expression_diff() {
+    let newline_error = run_err(
+        r#"let value = if true {
+    1
+    2
+} else {
+    3
+}"#,
+    );
+    assert_eq!(newline_error, "Expected `}` but found `an integer`");
+
+    let second_statement = run_err(
+        r#"let value = if true {
+    1
+    let inner = 2
+} else {
+    3
+}"#,
+    );
+    assert_eq!(second_statement, "Expected `}` but found `let`");
+
+    let statement_error = run_err("let value = if true { let inner = 1 } else { 2 }");
+    assert_eq!(statement_error, "I didn't expect `let` here");
+
+    let leading_semicolon = run_err("let value = if true { ; 1 } else { 2 }");
+    assert_eq!(leading_semicolon, "I didn't expect `;` here");
+
+    let boundary_semicolon = run_err("let value = if true { 1 };\nelse { 2 }");
+    assert_eq!(boundary_semicolon, "Expected `else` but found `;`");
+}
+
+#[test]
 fn if_expression_jump_targets_survive_all_peephole_fusions_diff() {
     let outcome = run_both(
         r#"

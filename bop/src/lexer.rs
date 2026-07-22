@@ -176,10 +176,17 @@ fn insert_semicolons(raw: Vec<SpannedToken>) -> Vec<SpannedToken> {
                     next,
                     Some(Token::RParen | Token::RBracket | Token::RBrace)
                 );
+                // A newline before `else` is branch layout, not a statement
+                // boundary. Suppressing its synthetic semicolon here keeps an
+                // explicit `;` distinguishable (and therefore invalid) at the
+                // same parser boundary.
+                let before_else = matches!(last.token, Token::RBrace)
+                    && matches!(next, Some(Token::Else));
                 let before_dot_continuation = matches!(next, Some(Token::Dot))
                     && supports_dot_continuation(&last.token);
                 if !inside_soft_delimiter
                     && !before_closing_delimiter
+                    && !before_else
                     && !before_dot_continuation
                     && triggers_semicolon(&last.token)
                 {
@@ -1245,6 +1252,40 @@ mod tests {
                 Token::Ident("x".into()),
                 Token::Semicolon,
                 Token::Ident("y".into()),
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn newline_before_else_does_not_insert_semicolon() {
+        assert_eq!(
+            toks("if true { 1 }\nelse { 2 }"),
+            vec![
+                Token::If,
+                Token::True,
+                Token::LBrace,
+                Token::Int(1),
+                Token::RBrace,
+                Token::Else,
+                Token::LBrace,
+                Token::Int(2),
+                Token::RBrace,
+            ]
+        );
+
+        assert_eq!(
+            toks("if true { 1 };\nelse { 2 }"),
+            vec![
+                Token::If,
+                Token::True,
+                Token::LBrace,
+                Token::Int(1),
+                Token::RBrace,
+                Token::Semicolon,
+                Token::Else,
+                Token::LBrace,
+                Token::Int(2),
                 Token::RBrace,
             ]
         );

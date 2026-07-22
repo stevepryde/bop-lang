@@ -526,6 +526,88 @@ if x == 1 { print("one") } else if x == 2 { print("two") } else { print("other")
         assert_eq!(say("let x = if true { 1 } else { 2 }\nprint(x)"), "1");
     }
 
+    #[test]
+    fn if_expression_accepts_multiline_single_expression_branches() {
+        let source = r#"let first = if true {
+    // Leading comments and blank lines are layout, not statements.
+
+    1 +
+        2;
+}
+else {
+    99
+}
+print(first)
+
+let second = if false {
+    0
+} else {
+    if true {
+        4
+    }
+    else {
+        5
+    }
+}
+print(second)
+
+let third = if true {
+    (
+        5
+        + 6
+    )
+} else {
+    0
+}
+print(third)"#;
+        let mut host = TestHost::new();
+        run(source, &mut host, &test_limits()).expect("multiline if-expression should run");
+        assert_eq!(host.prints.borrow().clone(), ["3", "4", "11"]);
+    }
+
+    #[test]
+    fn if_expression_rejects_multiple_branch_expressions_at_second_token() {
+        let source = r#"let value = if true {
+    1
+    2
+} else {
+    3
+}"#;
+        let error = parse_err_full(source);
+        assert_eq!(error.line, Some(3));
+        assert_eq!(error.column, Some(5));
+        assert_eq!(error.message, "Expected `}` but found `an integer`");
+
+        let statement_source = r#"let value = if true {
+    1
+    let inner = 2
+} else {
+    3
+}"#;
+        let statement_error = parse_err_full(statement_source);
+        assert_eq!(statement_error.line, Some(3));
+        assert_eq!(statement_error.column, Some(5));
+        assert_eq!(statement_error.message, "Expected `}` but found `let`");
+    }
+
+    #[test]
+    fn if_expression_rejects_statement_branches() {
+        let error = parse_err_full("let value = if true { let inner = 1 } else { 2 }");
+        assert_eq!(error.line, Some(1));
+        assert_eq!(error.column, Some(23));
+        assert!(error.message.contains("I didn't expect `let` here"));
+
+        let leading_semicolon = parse_err_full("let value = if true { ; 1 } else { 2 }");
+        assert_eq!(leading_semicolon.column, Some(23));
+        assert_eq!(leading_semicolon.message, "I didn't expect `;` here");
+
+        let boundary_semicolon =
+            parse_err_full("let value = if true { 1 };\nelse { 2 }");
+        assert_eq!(boundary_semicolon.line, Some(1));
+        assert_eq!(boundary_semicolon.column, Some(26));
+        assert_eq!(boundary_semicolon.message, "Expected `else` but found `;`");
+    }
+
     // ─── While ─────────────────────────────────────────────────────
 
     #[test]

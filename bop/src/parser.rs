@@ -2261,13 +2261,9 @@ impl Parser {
         let (line, column) = self.peek_pos();
         self.advance(); // consume 'if'
         let condition = self.without_struct_literal(|p| p.parse_expr())?;
-        self.expect(&Token::LBrace)?;
-        let then_expr = self.with_struct_literal(true, |p| p.parse_expr())?;
-        self.expect(&Token::RBrace)?;
+        let then_expr = self.parse_if_expr_branch()?;
         self.expect(&Token::Else)?;
-        self.expect(&Token::LBrace)?;
-        let else_expr = self.with_struct_literal(true, |p| p.parse_expr())?;
-        self.expect(&Token::RBrace)?;
+        let else_expr = self.parse_if_expr_branch()?;
         Ok(Expr {
             kind: ExprKind::IfExpr {
                 condition: Box::new(condition),
@@ -2277,6 +2273,22 @@ impl Parser {
             line,
                     column,
         })
+    }
+
+    /// Parse one expression between an if-expression branch's braces.
+    ///
+    /// Braces remain normal statement-capable delimiters rather than the soft
+    /// delimiters used by parentheses and brackets. Consume semicolon tokens
+    /// only after the branch expression, where they are a trailing terminator;
+    /// requiring `}` immediately afterward keeps a second expression or
+    /// statement invalid. Leading semicolons stay invalid because they cannot
+    /// be produced by layout after `{`.
+    fn parse_if_expr_branch(&mut self) -> Result<Expr, BopError> {
+        self.expect(&Token::LBrace)?;
+        let branch_expr = self.with_struct_literal(true, |p| p.parse_expr())?;
+        self.skip_semicolons();
+        self.expect(&Token::RBrace)?;
+        Ok(branch_expr)
     }
 }
 

@@ -538,6 +538,39 @@ if x == 1 { print("one") } else if x == 2 { print("two") } else { print("other")
     ),
     ("if_expression", "let x = if true { 1 } else { 2 }\nprint(x)"),
     (
+        "if_expression_multiline_layout",
+        r#"let first = if true {
+    // Comments and blank lines remain layout.
+
+    1 +
+        2;
+}
+else {
+    99
+}
+let second = if false {
+    0
+} else {
+    if true {
+        4
+    }
+    else {
+        5
+    }
+}
+print(first)
+print(second)
+let third = if true {
+    (
+        5
+        + 6
+    )
+} else {
+    0
+}
+print(third)"#,
+    ),
+    (
         "struct_literals_in_condition_delimiters",
         r#"struct Point { x, y }
 enum Maybe { Some(value) }
