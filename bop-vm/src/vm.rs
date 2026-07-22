@@ -131,11 +131,68 @@ struct Frame {
     /// `DefineLocal` / `StoreVar`. Function frames that stay on
     /// the fast path never push into this at runtime.
     scopes: Vec<BTreeMap<String, Value>>,
+    /// Number of value scopes owned by the frame at entry. `PopScope`
+    /// may only remove scopes above this floor: the top-level frame and
+    /// closures retain their initial scope, while named-function and method
+    /// frames start at zero.
+    scope_base: usize,
+    /// Protected depth of the VM-wide `type_bindings` stack at frame entry.
+    /// Runtime scopes live above this depth and are paired with `scopes`.
+    /// Function exit truncates back to the caller depth so an early return
+    /// cannot leak type scopes whose `PopScope` was skipped.
+    type_scope_base: usize,
     stack_base: usize,
     is_function: bool,
     /// How this frame's return value should be transformed
     /// before being pushed for the caller. See [`FrameWrap`].
     wrap: FrameWrap,
+}
+
+impl Frame {
+    fn top(chunk: Chunk) -> Self {
+        let scopes = vec![BTreeMap::new()];
+        Self {
+            chunk: Rc::new(chunk),
+            ip: 0,
+            slots: Vec::new(),
+            scope_base: scopes.len(),
+            scopes,
+            // The builtin type-binding map is the top frame's protected base.
+            type_scope_base: 1,
+            stack_base: 0,
+            is_function: false,
+            wrap: FrameWrap::None,
+        }
+    }
+
+    fn function(
+        chunk: Rc<Chunk>,
+        slots: Vec<Value>,
+        scopes: Vec<BTreeMap<String, Value>>,
+        type_scope_base: usize,
+        stack_base: usize,
+        wrap: FrameWrap,
+    ) -> Self {
+        Self {
+            chunk,
+            ip: 0,
+            slots,
+            scope_base: scopes.len(),
+            scopes,
+            type_scope_base,
+            stack_base,
+            is_function: true,
+            wrap,
+        }
+    }
+
+    fn caller_type_scope_depth(&self) -> usize {
+        if self.is_function {
+            self.type_scope_base.saturating_sub(1)
+        } else {
+            self.type_scope_base
+        }
+    }
 }
 
 /// Post-processing applied to a frame's return value / error at
@@ -410,15 +467,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         imports: ImportCache,
         current_module: String,
     ) -> Self {
-        let top = Frame {
-            chunk: Rc::new(chunk),
-            ip: 0,
-            slots: Vec::new(),
-            scopes: vec![BTreeMap::new()],
-            stack_base: 0,
-            is_function: false,
-            wrap: FrameWrap::None,
-        };
+        let top = Frame::top(chunk);
         let step_budget = limits.max_steps.saturating_mul(STEP_SCALE);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
         Self {
@@ -621,13 +670,52 @@ impl<'h, H: BopHost> Vm<'h, H> {
     }
 
     fn pop_scope(&mut self) {
-        let scopes = self.current_scopes_mut();
-        if scopes.len() > 1 {
-            scopes.pop();
-            if self.type_bindings.len() > 1 {
+        let popped = {
+            let frame = self.frames.last_mut().expect("frame present");
+            if frame.scopes.len() > frame.scope_base {
+                frame.scopes.pop();
+                true
+            } else {
+                false
+            }
+        };
+        if popped {
+            let type_scope_base = self
+                .frames
+                .last()
+                .expect("frame present")
+                .type_scope_base;
+            debug_assert!(
+                self.type_bindings.len() > type_scope_base,
+                "value and type scope stacks must stay paired"
+            );
+            if self.type_bindings.len() > type_scope_base {
                 self.type_bindings.pop();
             }
         }
+    }
+
+    /// Push a function-like frame together with its protected type-binding
+    /// scope. Keeping this transition in one helper prevents constructors for
+    /// named functions, closures, methods, and iterator methods from drifting.
+    fn push_function_frame(
+        &mut self,
+        chunk: Rc<Chunk>,
+        slots: Vec<Value>,
+        scopes: Vec<BTreeMap<String, Value>>,
+        stack_base: usize,
+        wrap: FrameWrap,
+    ) {
+        let type_scope_base = self.type_bindings.len() + 1;
+        self.frames.push(Frame::function(
+            chunk,
+            slots,
+            scopes,
+            type_scope_base,
+            stack_base,
+            wrap,
+        ));
+        self.type_bindings.push(BTreeMap::new());
     }
 
     fn define_local(&mut self, name: String, value: Value) {
@@ -1689,9 +1777,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
         self.stack.truncate(start);
 
-        let frame = Frame {
-            chunk: entry.chunk.clone(),
-            ip: 0,
+        self.push_function_frame(
+            entry.chunk.clone(),
             slots,
             // Function frames don't use the BTreeMap scope stack
             // on the fast path — captures are on the `Value::Fn`
@@ -1700,17 +1787,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // allocate and keeps `LoadVar` / `DefineLocal` from
             // panicking if they still get emitted (they shouldn't
             // inside a fn body, but the fallback is safe).
-            scopes: Vec::new(),
-            stack_base: self.stack.len(),
-            is_function: true,
-            wrap: FrameWrap::None,
-        };
-        self.frames.push(frame);
+            Vec::new(),
+            self.stack.len(),
+            FrameWrap::None,
+        );
         // A fresh type_bindings frame scopes any type decl
         // inside this fn to the fn body itself — same rule
         // as push_scope / pop_scope for block scoping. On
         // `do_return` we pop this frame.
-        self.type_bindings.push(BTreeMap::new());
         Ok(Next::Continue)
     }
 
@@ -1910,16 +1994,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 for (i, a) in args.into_iter().enumerate() {
                     slots[i + 1] = a;
                 }
-                self.frames.push(Frame {
-                    chunk: entry.chunk.clone(),
-                    ip: 0,
+                self.push_function_frame(
+                    entry.chunk.clone(),
                     slots,
-                    scopes: Vec::new(),
-                    stack_base: self.stack.len(),
-                    is_function: true,
-                    wrap: FrameWrap::None,
-                });
-                self.type_bindings.push(BTreeMap::new());
+                    Vec::new(),
+                    self.stack.len(),
+                    FrameWrap::None,
+                );
                 // User methods don't do mutation back-assign
                 // — the receiver is passed by value, and the
                 // method returns a fresh instance if it wants to
@@ -2704,16 +2785,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scope.insert(self_name.clone(), Value::Fn(Rc::clone(func)));
         }
 
-        self.frames.push(Frame {
+        self.push_function_frame(
             chunk,
-            ip: 0,
             slots,
-            scopes: vec![scope],
-            stack_base: self.stack.len(),
-            is_function: true,
-            wrap: FrameWrap::None,
-        });
-        self.type_bindings.push(BTreeMap::new());
+            vec![scope],
+            self.stack.len(),
+            FrameWrap::None,
+        );
         Ok(Next::Continue)
     }
 
@@ -3213,13 +3291,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // residue, and push the return value for the caller.
         let frame = self.frames.pop().expect("frame present");
         self.stack.truncate(frame.stack_base);
-        // Drop the fn-local type_bindings frame so type decls
-        // inside this fn don't leak into the caller. Only fns
-        // push one; top-level frames don't, so the check keeps
-        // the builtin frame on the stack.
-        if frame.is_function && self.type_bindings.len() > 1 {
-            self.type_bindings.pop();
-        }
+        // Drop the function's protected type-binding scope plus any runtime
+        // scopes skipped by an early return. Top-level return preserves the
+        // builtin map while discarding any open runtime scopes.
+        self.type_bindings
+            .truncate(frame.caller_type_scope_depth());
         // Recycle the slot vec so the next call can reuse its
         // allocation. Dropping it here would drop every `Value`
         // slot in place, which is still cheap for `Int`/`Bool`
@@ -3423,16 +3499,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
         for (i, a) in extra_args.into_iter().enumerate() {
             slots[i + 1] = a;
         }
-        self.frames.push(Frame {
-            chunk: entry.chunk.clone(),
-            ip: 0,
+        self.push_function_frame(
+            entry.chunk.clone(),
             slots,
-            scopes: Vec::new(),
-            stack_base: self.stack.len(),
-            is_function: true,
+            Vec::new(),
+            self.stack.len(),
             wrap,
-        });
-        self.type_bindings.push(BTreeMap::new());
+        );
         Ok(())
     }
 
@@ -3584,9 +3657,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // of `truncate`, so their slot vecs get recycled.
         while self.frames.len() > wrap_idx {
             let frame = self.frames.pop().expect("frame present");
-            if frame.is_function && self.type_bindings.len() > 1 {
-                self.type_bindings.pop();
-            }
+            self.type_bindings
+                .truncate(frame.caller_type_scope_depth());
             if !frame.slots.is_empty() {
                 self.return_slots(frame.slots);
             }
@@ -3683,5 +3755,88 @@ mod tests {
             "clean completion left {} loop sidecars on the value stack",
             vm.stack.len()
         );
+    }
+
+    #[test]
+    fn frame_scope_floors_preserve_base_scopes_and_pair_type_scopes() {
+        let mut host = SilentHost;
+        let mut vm = Vm::new(Chunk::new(), &mut host, BopLimits::standard());
+
+        // A redundant PopScope cannot remove the top-level binding map.
+        vm.pop_scope();
+        assert_eq!(vm.frames.last().unwrap().scopes.len(), 1);
+        assert_eq!(vm.type_bindings.len(), 1);
+        vm.push_scope();
+        vm.pop_scope();
+        assert_eq!(vm.frames.last().unwrap().scopes.len(), 1);
+        assert_eq!(vm.type_bindings.len(), 1);
+
+        // Named-function frames start with no value scope, but their first
+        // pushed runtime scope is removable. Function exit also discards all
+        // still-open type scopes, as an early return requires.
+        vm.push_function_frame(
+            Rc::new(Chunk::new()),
+            Vec::new(),
+            Vec::new(),
+            0,
+            FrameWrap::None,
+        );
+        vm.pop_scope();
+        assert_eq!(vm.frames.last().unwrap().scopes.len(), 0);
+        assert_eq!(vm.type_bindings.len(), 2);
+        vm.push_scope();
+        vm.pop_scope();
+        assert_eq!(vm.frames.last().unwrap().scopes.len(), 0);
+        assert_eq!(vm.type_bindings.len(), 2);
+        vm.push_scope();
+        vm.push_scope();
+        vm.do_return(Value::None).expect("return");
+        assert_eq!(vm.frames.len(), 1);
+        assert_eq!(vm.type_bindings.len(), 1);
+
+        // Closure frames retain their capture map while removing a match
+        // scope above it.
+        let mut captures = BTreeMap::new();
+        captures.insert(String::from("captured"), Value::Int(10));
+        vm.push_function_frame(
+            Rc::new(Chunk::new()),
+            Vec::new(),
+            vec![captures],
+            vm.stack.len(),
+            FrameWrap::None,
+        );
+        vm.push_scope();
+        vm.pop_scope();
+        let frame = vm.frames.last().unwrap();
+        assert_eq!(frame.scopes.len(), 1);
+        assert!(matches!(
+            frame.scopes[0].get("captured"),
+            Some(Value::Int(10))
+        ));
+        assert_eq!(vm.type_bindings.len(), 2);
+
+        // Error unwinding must remove both the try-call frame and a nested
+        // function's still-open runtime scopes, restoring the top-level type
+        // depth exactly.
+        vm.do_return(Value::None).expect("closure return");
+        vm.push_function_frame(
+            Rc::new(Chunk::new()),
+            Vec::new(),
+            Vec::new(),
+            vm.stack.len(),
+            FrameWrap::TryCall { line: 1 },
+        );
+        vm.push_scope();
+        vm.push_function_frame(
+            Rc::new(Chunk::new()),
+            Vec::new(),
+            Vec::new(),
+            vm.stack.len(),
+            FrameWrap::None,
+        );
+        vm.push_scope();
+        vm.unwind_to_try_call(error(1, "boom")).expect("unwind");
+        assert_eq!(vm.frames.len(), 1);
+        assert_eq!(vm.type_bindings.len(), 1);
     }
 }

@@ -1146,6 +1146,74 @@ print(n)"#,
     assert!(msg.contains("not found") || msg.contains("Variable"), "got: {}", msg);
 }
 
+#[test]
+fn named_fn_match_binding_scope_isolated_diff() {
+    // Named-function frames have no initial value scope. Their first match
+    // scope must still be popped when the arm completes.
+    let msg = run_err(
+        r#"fn read() {
+  let value = match 1 { leaked => leaked }
+  return leaked
+}
+print(read())"#,
+    );
+    assert!(msg.contains("not found") || msg.contains("Variable"), "got: {}", msg);
+}
+
+#[test]
+fn match_scopes_in_loops_do_not_shadow_calls_or_leak_between_calls_diff() {
+    // Exercise match scopes inside a slot-resolved loop/block, then resolve a
+    // same-named function. A leaked pattern binding would make `target()` try
+    // to call the matched integer instead. Repeating the outer call also
+    // checks that frame cleanup restores the caller's scope depths exactly.
+    let out = run_both(
+        r#"fn target() { return 7 }
+fn check(value) {
+  repeat 2 {
+    let ignored = match value { target => target }
+  }
+  return target()
+}
+print(check(1))
+print(check(2))"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "got: {:?}", out.error);
+    assert_eq!(out.prints, vec!["7", "7"]);
+}
+
+#[test]
+fn user_method_match_binding_scope_isolated_diff() {
+    // User methods use the same zero-base frame layout as named functions.
+    let msg = run_err(
+        r#"struct Box { value }
+fn Box.read(self) {
+  let value = match self.value { leaked => leaked }
+  return leaked
+}
+print(Box { value: 3 }.read())"#,
+    );
+    assert!(msg.contains("not found") || msg.contains("Variable"), "got: {}", msg);
+}
+
+#[test]
+fn closure_match_scope_preserves_capture_floor_diff() {
+    // Closure frames retain their capture map as scope zero. Popping a match
+    // scope must reveal that map again rather than remove it.
+    let out = run_both(
+        r#"let captured = 10
+let add = fn(value) {
+  let matched = match value { captured => captured }
+  return captured + matched
+}
+print(add(2))
+print(add(5))"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "got: {:?}", out.error);
+    assert_eq!(out.prints, vec!["12", "15"]);
+}
+
 // ─── `try` operator ───────────────────────────────────────────────
 
 #[test]
