@@ -622,6 +622,7 @@ fn analyze_module(
         push_unique(&mut type_exports, &mut seen_types, ty);
     }
 
+
     graph.modules.insert(
         name.to_string(),
         ModuleEntry {
@@ -925,11 +926,51 @@ fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<String>
     }
 }
 
+fn callable_assignment_names(stmts: &[Stmt]) -> HashSet<String> {
+    fn visit(stmts: &[Stmt], names: &mut HashSet<String>) {
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::Assign {
+                    target: AssignTarget::Variable(name),
+                    ..
+                } => {
+                    names.insert(name.clone());
+                }
+                StmtKind::If {
+                    body,
+                    else_ifs,
+                    else_body,
+                    ..
+                } => {
+                    visit(body, names);
+                    for (_, body) in else_ifs {
+                        visit(body, names);
+                    }
+                    if let Some(body) = else_body {
+                        visit(body, names);
+                    }
+                }
+                StmtKind::While { body, .. }
+                | StmtKind::Repeat { body, .. }
+                | StmtKind::ForIn { body, .. } => visit(body, names),
+                // Nested named functions and lambdas are separate callable
+                // mutation domains and are analysed when emitted.
+                _ => {}
+            }
+        }
+    }
+    let mut names = HashSet::new();
+    visit(stmts, &mut names);
+    names
+}
+
 // ─── Emitter ───────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct EmissionScope {
     locals: HashSet<String>,
+    module_alias_locals: HashSet<String>,
+    mutated_locals: HashSet<String>,
     plain_glob_imports: HashSet<String>,
 }
 
@@ -1003,6 +1044,23 @@ struct Emitter {
     /// with `scope_stack` depth to distinguish a module's direct use-site from
     /// a nested lexical import when applying named-function first-win rules.
     in_callable_body: bool,
+    /// Aliased top-level imports owned by the module whose lifted callables are
+    /// currently being emitted. Their runtime values are resolved lazily from
+    /// `Ctx::module_aliases` because lifted Rust functions cannot capture the
+    /// loader's source-ordered locals.
+    declaration_aliases: Vec<ModuleImport>,
+    /// Per-callable declaration-alias binding names. Each required alias gets
+    /// separate call-local overlay and read-cache slots. Reads consult an
+    /// assigned overlay first, then the cache and live declaration context;
+    /// assignment populates only the overlay for the rest of the invocation.
+    declaration_alias_overlays: Vec<HashSet<String>>,
+    /// Whole-callable assignment pre-analysis. Namespace aliases assigned on
+    /// any control-flow path use runtime type identity even at construction
+    /// sites that appear textually before the assignment (for example, on a
+    /// later loop iteration).
+    callable_mutations: Vec<HashSet<String>>,
+    /// Root copy restored after temporarily emitting imported modules/methods.
+    root_declaration_aliases: Vec<ModuleImport>,
 }
 
 impl Emitter {
@@ -1045,6 +1103,10 @@ impl Emitter {
             scope_stack: Vec::new(),
             in_top_level: false,
             in_callable_body: false,
+            declaration_aliases: Vec::new(),
+            declaration_alias_overlays: Vec::new(),
+            callable_mutations: Vec::new(),
+            root_declaration_aliases: Vec::new(),
         }
     }
 
@@ -1147,7 +1209,7 @@ impl Emitter {
     /// compare the value's full identity against what the
     /// source-level reference resolves to *at that point in
     /// the program*.
-    fn emit_resolver_closure_src(&self) -> String {
+    fn emit_resolver_closure_src(&self, pattern_namespaces: &[String]) -> String {
         let mut bare_arms = String::new();
         // Flatten bare-name bindings inside-out so the
         // innermost shadow wins. A HashSet tracks which names
@@ -1168,10 +1230,11 @@ impl Emitter {
                 ));
             }
         }
-        // Module aliases: emit one arm per (alias, type_name in
-        // module). Cross-reference the TypeRegistry to enumerate
-        // the types each alias's module actually exports.
+        // Module aliases resolve from runtime Values. A local/parameter binding
+        // hard-shadows declaration context; otherwise a lifted callable checks
+        // the defining module's source-ordered alias map.
         let mut alias_arms = String::new();
+        let mut alias_prelude = String::new();
         let mut aliases: Vec<(&String, &ModuleAliasBinding)> = Vec::new();
         let mut seen_aliases: HashSet<String> = HashSet::new();
         for frame in self.module_aliases.iter().rev() {
@@ -1185,30 +1248,60 @@ impl Emitter {
             }
         }
         aliases.sort_by(|a, b| a.0.cmp(b.0));
-        for (alias, binding) in aliases {
-            for tn in &binding.exposed_types {
-                let key = (binding.module_path.clone(), tn.clone());
-                if !self.types.structs.contains_key(&key)
-                    && !self.types.enums.contains_key(&key)
-                {
-                    continue;
-                }
-                alias_arms.push_str(&format!(
-                    "                        (::std::option::Option::Some({alias_lit}), {tn}) => ::std::option::Option::Some({mp}.to_string()),\n",
-                    alias_lit = rust_string_literal(alias),
-                    tn = rust_string_literal(tn),
-                    mp = rust_string_literal(&binding.module_path),
+        for (alias, _) in aliases {
+            let value = if self.is_local(alias) {
+                format!("::std::option::Option::Some(&{})", rust_user_ident(alias))
+            } else if let Some(overlay) = self.declaration_alias_overlay(alias) {
+                let snapshot = declaration_alias_pattern_snapshot_ident(alias);
+                alias_prelude.push_str(&format!(
+                    "            let {snapshot} = __bop_declaration_alias_optional(ctx, &mut {overlay}, {module}, {alias});\n",
+                    module = rust_string_literal(&self.current_module),
+                    alias = rust_string_literal(alias),
                 ));
+                format!(
+                    "{snapshot}.as_ref()",
+                )
+            } else if self
+                .declaration_aliases
+                .iter()
+                .any(|import| import.alias.as_deref() == Some(alias.as_str()))
+            {
+                format!(
+                    "ctx.module_aliases.get(&({module}.to_string(), {alias}.to_string()))",
+                    module = rust_string_literal(&self.current_module),
+                    alias = rust_string_literal(alias),
+                )
+            } else {
+                "::std::option::Option::None".to_string()
+            };
+            alias_arms.push_str(&format!(
+                "                        (::std::option::Option::Some({alias}), __tn) => match {value} {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) if __module.types.iter().any(|__type| __type == __tn) => ::std::option::Option::Some(__module.path.clone()), _ => ::std::option::Option::None }},\n",
+                alias = rust_string_literal(alias),
+                value = value,
+            ));
+        }
+        let mut dynamic_namespaces = pattern_namespaces.to_vec();
+        dynamic_namespaces.sort();
+        dynamic_namespaces.dedup();
+        for namespace in dynamic_namespaces {
+            if seen_aliases.contains(&namespace) || !self.is_local(&namespace) {
+                continue;
             }
+            alias_arms.push_str(&format!(
+                "                        (::std::option::Option::Some({namespace}), __tn) => match ::std::option::Option::Some(&{value}) {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) if __module.types.iter().any(|__type| __type == __tn) => ::std::option::Option::Some(__module.path.clone()), _ => ::std::option::Option::None }},\n",
+                namespace = rust_string_literal(&namespace),
+                value = rust_user_ident(&namespace),
+            ));
         }
         format!(
-            "            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
+            "{prelude}            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
              \x20                   match (__ns, __tn) {{\n\
              {bare}{alias}                        _ => ::std::option::Option::None,\n\
              \x20                   }}\n\
              \x20           }};\n",
             bare = bare_arms,
             alias = alias_arms,
+            prelude = alias_prelude,
         )
     }
 
@@ -1229,6 +1322,110 @@ impl Emitter {
         self.scope_stack
             .last()
             .is_some_and(|scope| scope.locals.contains(name))
+    }
+
+    fn is_dynamic_namespace_local(&self, name: &str) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            if scope.locals.contains(name) {
+                return !scope.module_alias_locals.contains(name)
+                    || scope.mutated_locals.contains(name)
+                    || self
+                        .callable_mutations
+                        .last()
+                        .is_some_and(|names| names.contains(name));
+            }
+        }
+        self.declaration_alias_overlay(name).is_some()
+    }
+
+    fn mark_local_mutated(&mut self, name: &str) {
+        for scope in self.scope_stack.iter_mut().rev() {
+            if scope.locals.contains(name) {
+                scope.mutated_locals.insert(name.to_string());
+                break;
+            }
+        }
+    }
+
+    fn declaration_alias_overlay(&self, name: &str) -> Option<String> {
+        self.declaration_alias_overlays
+            .last()
+            .filter(|aliases| aliases.contains(name))
+            .map(|_| declaration_alias_overlay_ident(name))
+    }
+
+    fn declaration_alias_read_src(&self, name: &str, line: u32) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_read(ctx, &mut {overlay}, {module}, {alias}, {line})?",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn declaration_alias_namespace_src(&self, name: &str, line: u32) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_namespace(ctx, &mut {overlay}, {module}, {alias}, {line})?",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn declaration_alias_optional_src(&self, name: &str) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_optional(ctx, &mut {overlay}, {module}, {alias})",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn declaration_alias_mut_src(&self, name: &str, line: u32) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_mut(&mut {overlay}, {alias}, {line})?",
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn declaration_alias_assign_src(
+        &self,
+        name: &str,
+        value: &str,
+        line: u32,
+    ) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_assign(ctx, &mut {overlay}, {value}, {module}, {alias}, {line})?;",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn ident_value_src(&self, name: &str, line: u32) -> Result<String, BopError> {
+        if self.is_local(name) {
+            Ok(format!("{}.clone()", rust_user_ident(name)))
+        } else if let Some(alias) = self.declaration_alias_read_src(name, line) {
+            Ok(alias)
+        } else if self.fn_info.top_level_fns.contains(name) {
+            Ok(format!("{}({})?", self.wrapper_fn_name(name), line))
+        } else if self.fn_info.all_fns.contains_key(name) {
+            Err(BopError::runtime(
+                format!(
+                    "bop-compile: nested function `{}` can't be used as a first-class value (only top-level fns are currently wrappable)",
+                    name
+                ),
+                line,
+            ))
+        } else {
+            Ok(format!("{}.clone()", rust_user_ident(name)))
+        }
     }
 
     fn is_module_top_scope(&self) -> bool {
@@ -1268,6 +1465,60 @@ impl Emitter {
                 }
             }
         }
+    }
+
+    fn declaration_aliases_for_callable(
+        &self,
+        params: &[String],
+        body: &[Stmt],
+    ) -> Vec<String> {
+        let mut outer = EmissionScope::default();
+        for import in &self.declaration_aliases {
+            if let Some(alias) = &import.alias {
+                outer.locals.insert(alias.clone());
+            }
+        }
+        let mut known: HashSet<String> = params.iter().cloned().collect();
+        let mut referenced = FreeVarDependencies::for_declaration_aliases();
+        scan_free_vars_stmts(
+            body,
+            &mut known,
+            &mut referenced,
+            core::slice::from_ref(&outer),
+            &self.fn_info,
+        );
+        referenced.required.extend(referenced.pattern_namespaces);
+        let mut aliases = Vec::new();
+        for import in &self.declaration_aliases {
+            let Some(alias) = &import.alias else {
+                continue;
+            };
+            if !referenced.required.contains(alias) || self.is_local(alias) {
+                continue;
+            }
+            aliases.push(alias.clone());
+        }
+        aliases
+    }
+
+    fn emit_declaration_alias_overlays(
+        &mut self,
+        aliases: &[String],
+        initializers: &HashMap<String, String>,
+    ) -> HashSet<String> {
+        let mut overlays = HashSet::new();
+        for alias in aliases {
+            overlays.insert(alias.clone());
+            let initializer = initializers
+                .get(alias)
+                .map(String::as_str)
+                .unwrap_or("::std::option::Option::None");
+            self.line(&format!(
+                "let mut {overlay} = __BopDeclarationAliasBinding {{ overlay: {initializer}, cached: ::std::option::Option::None }};",
+                overlay = declaration_alias_overlay_ident(alias),
+            ));
+        }
+        overlays
     }
 
     fn imported_type_names(
@@ -1325,6 +1576,11 @@ impl Emitter {
         }
         self.emit_header();
         self.emit_runtime_preamble();
+        self.root_declaration_aliases = collect_top_level_imports(stmts)
+            .into_iter()
+            .filter(|import| import.alias.is_some())
+            .collect();
+        self.declaration_aliases = self.root_declaration_aliases.clone();
         // Seed the outermost type_bindings frame with the
         // root program's declared types so methods + top-level
         // fns (emitted ahead of the main AST walk) can resolve
@@ -1420,6 +1676,13 @@ impl Emitter {
             &mut self.module_aliases,
             vec![HashMap::new()],
         );
+        let saved_declaration_aliases = std::mem::replace(
+            &mut self.declaration_aliases,
+            collect_top_level_imports(&entry.ast)
+                .into_iter()
+                .filter(|import| import.alias.is_some())
+                .collect(),
+        );
         // Seed this module's types too — see
         // `seed_types_for_module` for why this matters. Methods
         // inside the module need to resolve bare type names
@@ -1438,6 +1701,7 @@ impl Emitter {
         self.current_module = saved_module;
         self.type_bindings = saved_bindings;
         self.module_aliases = saved_aliases;
+        self.declaration_aliases = saved_declaration_aliases;
         Ok(())
     }
 
@@ -1492,6 +1756,7 @@ impl Emitter {
         alias: &Option<String>,
         line: u32,
     ) -> Result<(), BopError> {
+        let module_top_scope = self.is_module_top_scope();
         // Idempotency: only plain-glob re-imports are cached. The
         // other three forms can legitimately produce different
         // visible effects (different item subset, different alias
@@ -1611,7 +1876,20 @@ impl Emitter {
                     types = types_src,
                     line = line,
                 ));
+                if module_top_scope {
+                    self.line(&format!(
+                        "ctx.module_aliases.insert(({module}.to_string(), {alias_name}.to_string()), {alias}.clone());",
+                        module = rust_string_literal(&self.current_module),
+                        alias_name = rust_string_literal(alias_name),
+                        alias = rust_user_ident(alias_name),
+                    ));
+                }
                 self.bind_local(alias_name);
+                self.scope_stack
+                    .last_mut()
+                    .expect("use emission has a scope")
+                    .module_alias_locals
+                    .insert(alias_name.clone());
                 // Track the alias for compile-time resolution
                 // of namespaced references (`m.Color`). Emit-
                 // time resolution is sufficient here because
@@ -1704,6 +1982,15 @@ impl Emitter {
             r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__ModuleLoading));"#,
             key = name
         ));
+        self.line(&format!(
+            "ctx.module_aliases.retain(|(module, _), _| module != {});",
+            rust_string_literal(name)
+        ));
+        self.line(&format!(
+            "let __load_result = (|| -> Result<{exports}, ::bop::error::BopError> {{",
+            exports = exports
+        ));
+        self.indent += 1;
 
         // Sandbox gets a tick at module entry too — same checkpoint
         // as any fn entry.
@@ -1713,6 +2000,8 @@ impl Emitter {
         // fn decls (already emitted) but handling imports /
         // lets / everything else. Track a fresh scope so the
         // emitter's Ident lookup resolves within the module.
+        self.callable_mutations
+            .push(callable_assignment_names(&entry.ast));
         self.push_scope();
         for stmt in &entry.ast {
             if matches!(&stmt.kind, StmtKind::FnDecl { .. }) {
@@ -1764,6 +2053,22 @@ impl Emitter {
         self.pad();
         self.out.push_str("Ok(__exports)\n");
         self.pop_scope();
+        self.callable_mutations.pop();
+        self.indent -= 1;
+        self.line("})();");
+        self.line("if __load_result.is_err() {");
+        self.indent += 1;
+        self.line(&format!(
+            "ctx.module_cache.remove({});",
+            rust_string_literal(name)
+        ));
+        self.line(&format!(
+            "ctx.module_aliases.retain(|(module, _), _| module != {});",
+            rust_string_literal(name)
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line("__load_result");
         self.indent = 0;
         self.out.push_str("}\n\n");
         Ok(())
@@ -1880,6 +2185,51 @@ impl Emitter {
                 &mut self.module_prefix,
                 entry.module_prefix.clone(),
             );
+            let saved_module_context = if module_path == bop::value::ROOT_MODULE_PATH {
+                None
+            } else {
+                let module_ast = self
+                    .modules
+                    .modules
+                    .get(module_path)
+                    .expect("method's declaring module must be in the module graph")
+                    .ast
+                    .clone();
+                let saved_module = std::mem::replace(
+                    &mut self.current_module,
+                    module_path.clone(),
+                );
+                let mut builtin_types = HashMap::new();
+                for name in ["Result", "RuntimeError", "Iter"] {
+                    builtin_types.insert(
+                        name.to_string(),
+                        bop::value::BUILTIN_MODULE_PATH.to_string(),
+                    );
+                }
+                let saved_type_bindings = std::mem::replace(
+                    &mut self.type_bindings,
+                    vec![builtin_types],
+                );
+                let saved_module_aliases = std::mem::replace(
+                    &mut self.module_aliases,
+                    vec![HashMap::new()],
+                );
+                let saved_declaration_aliases = std::mem::replace(
+                    &mut self.declaration_aliases,
+                    collect_top_level_imports(&module_ast)
+                        .into_iter()
+                        .filter(|import| import.alias.is_some())
+                        .collect(),
+                );
+                self.seed_types_for_module(module_path);
+                self.seed_uses(&module_ast);
+                Some((
+                    saved_module,
+                    saved_type_bindings,
+                    saved_module_aliases,
+                    saved_declaration_aliases,
+                ))
+            };
             let mut method_fn_info = collect_fn_info(&entry.body);
             // The method's Rust symbol stays type-qualified, while calls in
             // its body resolve against the declaring module's functions.
@@ -1906,6 +2256,14 @@ impl Emitter {
             self.emit_fn_decl_as(&method_fn_name, &entry.params, &entry.body, 0)?;
             self.fn_info = saved_fn_info;
             self.module_prefix = saved_prefix;
+            if let Some((module, type_bindings, module_aliases, declaration_aliases)) =
+                saved_module_context
+            {
+                self.current_module = module;
+                self.type_bindings = type_bindings;
+                self.module_aliases = module_aliases;
+                self.declaration_aliases = declaration_aliases;
+            }
         }
         Ok(())
     }
@@ -2028,6 +2386,8 @@ impl Emitter {
         let saved_top_level = self.in_top_level;
         self.in_top_level = true;
         self.emit_tick(0);
+        self.callable_mutations
+            .push(callable_assignment_names(stmts));
         self.push_scope();
         // Top-level fn decls were already emitted at module scope;
         // skip them here. The scope_stack deliberately stays empty
@@ -2040,6 +2400,7 @@ impl Emitter {
             self.emit_stmt(stmt)?;
         }
         self.pop_scope();
+        self.callable_mutations.pop();
         self.line("Ok(())");
         self.indent = 0;
         self.out.push_str("}\n\n");
@@ -2299,6 +2660,39 @@ impl Emitter {
             AssignTarget::Variable(name) => {
                 let ident = rust_user_ident(name);
                 let rhs_src = self.expr_src(value)?;
+                if !self.is_local(name) {
+                    if let Some(overlay) = self.declaration_alias_overlay(name) {
+                        let rhs_tmp = self.fresh_tmp();
+                        self.line(&format!("let {} = {};", rhs_tmp, rhs_src));
+                        match op {
+                            AssignOp::Eq => {
+                                let assign = self
+                                    .declaration_alias_assign_src(name, &rhs_tmp, line)
+                                    .expect("overlay checked above");
+                                self.line(&assign);
+                            }
+                            compound => {
+                                let current_tmp = self.fresh_tmp();
+                                let current = self
+                                    .declaration_alias_read_src(name, line)
+                                    .expect("overlay checked above");
+                                self.line(&format!(
+                                    "let {} = {};",
+                                    current_tmp, current
+                                ));
+                                self.line(&format!(
+                                    "{}.overlay = ::std::option::Option::Some({}(&{}, &{}, {})?);",
+                                    overlay,
+                                    compound_op_path(*compound),
+                                    current_tmp,
+                                    rhs_tmp,
+                                    line
+                                ));
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
                 match op {
                     AssignOp::Eq => {
                         self.line(&format!("{} = {};", ident, rhs_src));
@@ -2313,13 +2707,14 @@ impl Emitter {
                         ));
                     }
                 }
+                self.mark_local_mutated(name);
                 Ok(())
             }
             AssignTarget::Index { object, index } => {
                 // Tree-walker requires the object to be a bare ident;
                 // anything else is a compile-time error here too.
-                let target = match &object.kind {
-                    ExprKind::Ident(n) => rust_user_ident(n),
+                let target_name = match &object.kind {
+                    ExprKind::Ident(n) => n,
                     _ => {
                         return Err(BopError::runtime(
                             "Can only assign to indexed variables (like `arr[0] = val`)",
@@ -2336,11 +2731,29 @@ impl Emitter {
                 let idx_tmp = self.fresh_tmp();
                 self.line(&format!("let {} = {};", val_tmp, val_src));
                 self.line(&format!("let {} = {};", idx_tmp, idx_src));
+                let (target_read, target_write) = if !self.is_local(target_name) {
+                    if let Some(target_src) =
+                        self.declaration_alias_mut_src(target_name, line)
+                    {
+                        let target_tmp = self.fresh_tmp();
+                        self.line(&format!(
+                            "let {}: &mut ::bop::value::Value = {};",
+                            target_tmp, target_src
+                        ));
+                        (format!("&*{}", target_tmp), format!("&mut *{}", target_tmp))
+                    } else {
+                        let target = rust_user_ident(target_name);
+                        (format!("&{}", target), format!("&mut {}", target))
+                    }
+                } else {
+                    let target = rust_user_ident(target_name);
+                    (format!("&{}", target), format!("&mut {}", target))
+                };
                 match op {
                     AssignOp::Eq => {
                         self.line(&format!(
-                            "::bop::ops::index_set(&mut {}, &{}, {}, {})?;",
-                            target, idx_tmp, val_tmp, line
+                            "::bop::ops::index_set({}, &{}, {}, {})?;",
+                            target_write, idx_tmp, val_tmp, line
                         ));
                     }
                     compound => {
@@ -2348,24 +2761,24 @@ impl Emitter {
                         let cur_tmp = self.fresh_tmp();
                         let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "let {} = ::bop::ops::index_get(&{}, &{}, {})?;",
-                            cur_tmp, target, idx_tmp, line
+                            "let {} = ::bop::ops::index_get({}, &{}, {})?;",
+                            cur_tmp, target_read, idx_tmp, line
                         ));
                         self.line(&format!(
                             "let {} = {}(&{}, &{}, {})?;",
                             new_tmp, op_path, cur_tmp, val_tmp, line
                         ));
                         self.line(&format!(
-                            "::bop::ops::index_set(&mut {}, &{}, {}, {})?;",
-                            target, idx_tmp, new_tmp, line
+                            "::bop::ops::index_set({}, &{}, {}, {})?;",
+                            target_write, idx_tmp, new_tmp, line
                         ));
                     }
                 }
                 Ok(())
             }
             AssignTarget::Field { object, field } => {
-                let target = match &object.kind {
-                    ExprKind::Ident(n) => rust_user_ident(n),
+                let target_name = match &object.kind {
+                    ExprKind::Ident(n) => n,
                     _ => {
                         return Err(BopError::runtime(
                             "Can only assign to fields of named variables (like `p.x = val`)",
@@ -2376,25 +2789,43 @@ impl Emitter {
                 let val_src = self.expr_src(value)?;
                 let val_tmp = self.fresh_tmp();
                 self.line(&format!("let {} = {};", val_tmp, val_src));
+                let target_tmp = self.fresh_tmp();
+                let target_src = if self.is_local(target_name) {
+                    format!("&mut {}", rust_user_ident(target_name))
+                } else {
+                    self.declaration_alias_mut_src(target_name, line)
+                        .unwrap_or_else(|| format!("&mut {}", rust_user_ident(target_name)))
+                };
+                self.line(&format!(
+                    "let {}: &mut ::bop::value::Value = {};",
+                    target_tmp, target_src
+                ));
                 match op {
                     AssignOp::Eq => {
+                        let old_tmp = self.fresh_tmp();
+                        let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "{} = __bop_field_set({}, {}, {}, {})?;",
-                            target,
-                            target,
+                            "let {} = ::core::mem::replace(&mut *{}, ::bop::value::Value::None);",
+                            old_tmp, target_tmp
+                        ));
+                        self.line(&format!(
+                            "let {} = __bop_field_set({}, {}, {}, {})?;",
+                            new_tmp,
+                            old_tmp,
                             rust_string_literal(field),
                             val_tmp,
                             line
                         ));
+                        self.line(&format!("*{} = {};", target_tmp, new_tmp));
                     }
                     compound => {
                         let op_path = compound_op_path(*compound);
                         let cur_tmp = self.fresh_tmp();
                         let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "let {} = __bop_field_get(&{}, {}, {})?;",
+                            "let {} = __bop_field_get(&*{}, {}, {})?;",
                             cur_tmp,
-                            target,
+                            target_tmp,
                             rust_string_literal(field),
                             line
                         ));
@@ -2402,14 +2833,21 @@ impl Emitter {
                             "let {} = {}(&{}, &{}, {})?;",
                             new_tmp, op_path, cur_tmp, val_tmp, line
                         ));
+                        let old_tmp = self.fresh_tmp();
+                        let replaced_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "{} = __bop_field_set({}, {}, {}, {})?;",
-                            target,
-                            target,
+                            "let {} = ::core::mem::replace(&mut *{}, ::bop::value::Value::None);",
+                            old_tmp, target_tmp
+                        ));
+                        self.line(&format!(
+                            "let {} = __bop_field_set({}, {}, {}, {})?;",
+                            replaced_tmp,
+                            old_tmp,
                             rust_string_literal(field),
                             new_tmp,
                             line
                         ));
+                        self.line(&format!("*{} = {};", target_tmp, replaced_tmp));
                     }
                 }
                 Ok(())
@@ -2467,6 +2905,21 @@ impl Emitter {
         // checks at loop backedges / function entry". No-op outside
         // sandbox mode.
         self.emit_tick(line);
+        // Rust item functions cannot capture locals from `run_program` or a
+        // module loader. Give each alias required by this callable or one of
+        // its descendant lambdas a lazy call-local binding. No context lookup
+        // occurs until an executed read, so an unexecuted branch cannot fail
+        // merely because its alias has not been declared yet.
+        let saved_scope_stack = core::mem::take(&mut self.scope_stack);
+        self.push_scope();
+        let declaration_aliases =
+            self.declaration_aliases_for_callable(params, body);
+        let declaration_alias_overlays =
+            self.emit_declaration_alias_overlays(&declaration_aliases, &HashMap::new());
+        self.declaration_alias_overlays
+            .push(declaration_alias_overlays);
+        self.callable_mutations
+            .push(callable_assignment_names(body));
         // Fresh scope with the params bound; Rust-level fn scope
         // isolates outer locals anyway, but scope tracking is the
         // source of truth for lambda-capture analysis.
@@ -2482,6 +2935,10 @@ impl Emitter {
             self.emit_stmt(s)?;
         }
         self.pop_scope();
+        self.pop_scope();
+        self.callable_mutations.pop();
+        self.declaration_alias_overlays.pop();
+        self.scope_stack = saved_scope_stack;
         // Implicit `return none` if control falls off the end. The
         // `allow(unreachable_code)` at the top of the file silences
         // the warning for bodies that always return explicitly.
@@ -2514,33 +2971,7 @@ impl Emitter {
             ExprKind::None => "::bop::value::Value::None".to_string(),
 
             ExprKind::Ident(name) => {
-                if self.is_local(name) {
-                    format!("{}.clone()", rust_user_ident(name))
-                } else if self.fn_info.top_level_fns.contains(name) {
-                    // Top-level fn used as a value — hand back the
-                    // wrapper that reifies the Rust fn as a
-                    // `Value::Fn`.
-                    format!("{}({})?", self.wrapper_fn_name(name), line)
-                } else if self.fn_info.all_fns.contains_key(name) {
-                    // A nested fn isn't reachable as a value from
-                    // outside its outer fn's Rust scope — document
-                    // and bail explicitly rather than emit broken
-                    // Rust.
-                    return Err(BopError::runtime(
-                        format!(
-                            "bop-compile: nested function `{}` can't be used as a first-class value (only top-level fns are currently wrappable)",
-                            name
-                        ),
-                        line,
-                    ));
-                } else {
-                    // Fall through: treat as a local binding and
-                    // let rustc flag it if the name doesn't
-                    // actually resolve. Matches the existing
-                    // "undefined at compile time" behaviour for
-                    // plain `print(nope)` and the like.
-                    format!("{}.clone()", rust_user_ident(name))
-                }
+                self.ident_value_src(name, line)?
             }
 
             ExprKind::StringInterp(parts) => self.string_interp_src(parts, line)?,
@@ -2762,6 +3193,7 @@ impl Emitter {
             // treats them as locals (not free captures) inside the
             // guard and body.
             let names: Vec<String> = arm.pattern.binding_names().into_iter().collect();
+            let namespaces: Vec<String> = arm.pattern.namespace_names().into_iter().collect();
 
             src.push_str("        {\n");
             src.push_str(&format!(
@@ -2774,7 +3206,7 @@ impl Emitter {
             // Patterns reaching this point use the same lexical
             // scope we're in *right now*, so statically baking
             // the mapping is both correct and efficient.
-            src.push_str(&self.emit_resolver_closure_src());
+            src.push_str(&self.emit_resolver_closure_src(&namespaces));
             src.push_str(&format!(
                 "            if ::bop::pattern_matches(&__pat, &{}, &mut __bindings, &__resolver) {{\n",
                 sc_name
@@ -2891,16 +3323,16 @@ impl Emitter {
     }
 
     fn call_src(&mut self, callee: &Expr, args: &[Expr], line: u32) -> Result<String, BopError> {
-        // Non-Ident callees go through the value-call path:
-        // evaluate the callee onto the stack, then dispatch via
-        // `__bop_call_value`. Captures `funcs[0](x)`,
+        // Non-Ident callees go through the value-call path. Evaluate
+        // arguments first, then the callee, matching the walker and the
+        // language's call-dispatch order. Captures `funcs[0](x)`,
         // `make_adder(5)(3)`, `(if cond { f } else { g })(x)`, etc.
         let name = match &callee.kind {
             ExprKind::Ident(n) => n.clone(),
             _ => {
                 let callee_src = self.expr_src(callee)?;
                 let callee_tmp = self.fresh_tmp();
-                let mut arg_lets = format!("let {} = {}; ", callee_tmp, callee_src);
+                let mut arg_lets = String::new();
                 let mut arg_names = Vec::with_capacity(args.len());
                 for arg in args {
                     let src = self.expr_src(arg)?;
@@ -2908,6 +3340,7 @@ impl Emitter {
                     write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
                     arg_names.push(tmp);
                 }
+                write!(arg_lets, "let {} = {}; ", callee_tmp, callee_src).unwrap();
                 let args_vec = if arg_names.is_empty() {
                     "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
                 } else {
@@ -2924,6 +3357,7 @@ impl Emitter {
         // becomes a value call. Matches the walker / VM rule that
         // local shadowing wins over builtin / host / named-fn.
         if self.is_local(&name) {
+            let callee_src = self.ident_value_src(&name, line)?;
             let mut arg_lets = String::new();
             let mut arg_names = Vec::with_capacity(args.len());
             for arg in args {
@@ -2938,10 +3372,11 @@ impl Emitter {
                 format!("vec![{}]", arg_names.join(", "))
             };
             return Ok(format!(
-                "{{ {}__bop_call_value(ctx, {}.clone(), {}, {})? }}",
+                "{{ {}__bop_call_named_value(ctx, {}, {}, {}, {})? }}",
                 arg_lets,
-                rust_user_ident(&name),
+                callee_src,
                 args_vec,
+                rust_string_literal(&name),
                 line
             ));
         }
@@ -3050,6 +3485,18 @@ impl Emitter {
             }
         };
 
+        if let Some(alias) = self.declaration_alias_optional_src(&name) {
+            let args_vec = if arg_names.is_empty() {
+                "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
+            } else {
+                format!("vec![{}]", arg_names.join(", "))
+            };
+            return Ok(format!(
+                "{{ {arg_lets}match {alias} {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }} }}",
+                name = rust_string_literal(&name),
+            ));
+        }
+
         Ok(format!("{{ {}{} }}", arg_lets, body))
     }
 
@@ -3106,6 +3553,23 @@ impl Emitter {
         fields: &[(String, Expr)],
         line: u32,
     ) -> Result<String, BopError> {
+        if let Some(namespace) =
+            namespace.filter(|namespace| self.is_dynamic_namespace_local(namespace))
+        {
+            let namespace_value = if self.is_local(namespace) {
+                rust_user_ident(namespace)
+            } else {
+                self.declaration_alias_namespace_src(namespace, line)
+                    .expect("dynamic declaration namespace has an overlay")
+            };
+            return self.dynamic_struct_construct_src(
+                namespace,
+                &namespace_value,
+                type_name,
+                fields,
+                line,
+            );
+        }
         // Resolve the source-level type reference to its full
         // identity `(module_path, type_name)`. This is what
         // drives both the compile-time shape lookup *and* the
@@ -3133,13 +3597,30 @@ impl Emitter {
         // after `use foo as m`) surfaces with a clear runtime
         // message instead of compiling fine but panicking.
         let ns_check = match namespace {
-            Some(ns) => format!(
-                "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
-                ns_ident = rust_user_ident(ns),
-                ns_lit = rust_string_literal(ns),
-                ty_lit = rust_string_literal(type_name),
-                line = line,
-            ),
+            Some(ns) => {
+                if self.is_local(ns) {
+                    format!(
+                        "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
+                        ns_ident = rust_user_ident(ns),
+                        ns_lit = rust_string_literal(ns),
+                        ty_lit = rust_string_literal(type_name),
+                    )
+                } else {
+                    let value = if let Some(value) =
+                        self.declaration_alias_namespace_src(ns, line)
+                    {
+                        value
+                    } else {
+                        self.ident_value_src(ns, line)?
+                    };
+                    let tmp = self.fresh_tmp();
+                    format!(
+                        "let {tmp} = {value}; __bop_validate_namespace_type(&{tmp}, {ns_lit}, {ty_lit}, {line})?; ",
+                        ns_lit = rust_string_literal(ns),
+                        ty_lit = rust_string_literal(type_name),
+                    )
+                }
+            }
             None => String::new(),
         };
         // Compile-time validation: set matches exactly, no dups.
@@ -3208,6 +3689,80 @@ impl Emitter {
         ))
     }
 
+    fn dynamic_struct_construct_src(
+        &mut self,
+        namespace: &str,
+        namespace_value: &str,
+        type_name: &str,
+        fields: &[(String, Expr)],
+        line: u32,
+    ) -> Result<String, BopError> {
+        let mut candidates: Vec<(&String, &Vec<String>)> = self
+            .types
+            .structs
+            .iter()
+            .filter_map(|((module, candidate), fields)| {
+                (candidate == type_name).then_some((module, fields))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(b.0));
+        if candidates.is_empty() {
+            return Err(BopError::runtime(
+                bop::error_messages::struct_not_declared(type_name),
+                line,
+            ));
+        }
+
+        let mut shape_arms = String::new();
+        for (module, declared) in candidates {
+            let fields = declared
+                .iter()
+                .map(|field| rust_string_literal(field))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                shape_arms,
+                "{} => &[{}],",
+                rust_string_literal(module),
+                fields
+            )
+            .unwrap();
+        }
+        let provided_names = fields
+            .iter()
+            .map(|(name, _)| rust_string_literal(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut lets = String::new();
+        let mut provided = Vec::with_capacity(fields.len());
+        for (name, expr) in fields {
+            let src = self.expr_src(expr)?;
+            let tmp = self.fresh_tmp();
+            write!(lets, "let {} = {}; ", tmp, src).unwrap();
+            provided.push(format!(
+                "({}.to_string(), {})",
+                rust_string_literal(name),
+                tmp
+            ));
+        }
+        Ok(format!(
+            "{{ let __module_path = __bop_validate_namespace_type(&{namespace}, {alias}, {type_name}, {line})?; \
+                let __declared_fields: &'static [&'static str] = match __module_path.as_str() {{ {shape_arms} _ => return Err(::bop::error::BopError::runtime(::bop::error_messages::struct_not_declared({type_name}), {line})), }}; \
+                __bop_validate_named_fields(__declared_fields, &[{provided_names}], {type_name}, ::std::option::Option::None, {line})?; \
+                {lets}let __provided = vec![{provided}]; \
+                let __ordered = __bop_order_named_fields(__declared_fields, __provided); \
+                ::bop::value::Value::try_new_struct(__module_path, {type_name}.to_string(), __ordered, {line})? }}",
+            namespace = namespace_value,
+            alias = rust_string_literal(namespace),
+            type_name = rust_string_literal(type_name),
+            shape_arms = shape_arms,
+            provided_names = provided_names,
+            lets = lets,
+            provided = provided.join(", "),
+            line = line,
+        ))
+    }
+
     fn enum_construct_src(
         &mut self,
         namespace: Option<&str>,
@@ -3216,6 +3771,24 @@ impl Emitter {
         payload: &VariantPayload,
         line: u32,
     ) -> Result<String, BopError> {
+        if let Some(namespace) =
+            namespace.filter(|namespace| self.is_dynamic_namespace_local(namespace))
+        {
+            let namespace_value = if self.is_local(namespace) {
+                rust_user_ident(namespace)
+            } else {
+                self.declaration_alias_namespace_src(namespace, line)
+                    .expect("dynamic declaration namespace has an overlay")
+            };
+            return self.dynamic_enum_construct_src(
+                namespace,
+                &namespace_value,
+                type_name,
+                variant,
+                payload,
+                line,
+            );
+        }
         // Resolve the source-level reference to its declaring
         // module so the resulting `Value::EnumVariant` is tagged
         // with the right identity. Two modules declaring the
@@ -3261,13 +3834,30 @@ impl Emitter {
         // same as a bare construct, so the check is purely a guard
         // matching walker + VM semantics.
         let ns_check = match namespace {
-            Some(ns) => format!(
-                "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
-                ns_ident = rust_user_ident(ns),
-                ns_lit = rust_string_literal(ns),
-                ty_lit = rust_string_literal(type_name),
-                line = line,
-            ),
+            Some(ns) => {
+                if self.is_local(ns) {
+                    format!(
+                        "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
+                        ns_ident = rust_user_ident(ns),
+                        ns_lit = rust_string_literal(ns),
+                        ty_lit = rust_string_literal(type_name),
+                    )
+                } else {
+                    let value = if let Some(value) =
+                        self.declaration_alias_namespace_src(ns, line)
+                    {
+                        value
+                    } else {
+                        self.ident_value_src(ns, line)?
+                    };
+                    let tmp = self.fresh_tmp();
+                    format!(
+                        "let {tmp} = {value}; __bop_validate_namespace_type(&{tmp}, {ns_lit}, {ty_lit}, {line})?; ",
+                        ns_lit = rust_string_literal(ns),
+                        ty_lit = rust_string_literal(type_name),
+                    )
+                }
+            }
             None => String::new(),
         };
         let mp_lit = rust_string_literal(&module_path);
@@ -3396,18 +3986,142 @@ impl Emitter {
         }
     }
 
+    fn dynamic_enum_construct_src(
+        &mut self,
+        namespace: &str,
+        namespace_value: &str,
+        type_name: &str,
+        variant: &str,
+        payload: &VariantPayload,
+        line: u32,
+    ) -> Result<String, BopError> {
+        let mut candidates: Vec<(&String, &HashMap<String, VariantKind>)> = self
+            .types
+            .enums
+            .iter()
+            .filter_map(|((module, candidate), variants)| {
+                (candidate == type_name).then_some((module, variants))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(b.0));
+        if candidates.is_empty() {
+            return Err(BopError::runtime(
+                bop::error_messages::enum_not_declared(type_name),
+                line,
+            ));
+        }
+
+        let mut shape_arms = String::new();
+        for (module, variants) in candidates {
+            let shape = match variants.get(variant) {
+                Some(VariantKind::Unit) => "__BopDynamicVariantShape::Unit".to_string(),
+                Some(VariantKind::Tuple(fields)) => {
+                    format!("__BopDynamicVariantShape::Tuple({})", fields.len())
+                }
+                Some(VariantKind::Struct(fields)) => {
+                    let fields = fields
+                        .iter()
+                        .map(|field| rust_string_literal(field))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("__BopDynamicVariantShape::Struct(&[{}])", fields)
+                }
+                None => format!(
+                    "return Err(::bop::error::BopError::runtime(::bop::error_messages::enum_has_no_variant({}, {}), {}))",
+                    rust_string_literal(type_name),
+                    rust_string_literal(variant),
+                    line
+                ),
+            };
+            writeln!(
+                shape_arms,
+                "{} => {},",
+                rust_string_literal(module),
+                shape
+            )
+            .unwrap();
+        }
+
+        let namespace_check = format!(
+            "let __module_path = __bop_validate_namespace_type(&{}, {}, {}, {})?; \
+             let __variant_shape = match __module_path.as_str() {{ {} _ => return Err(::bop::error::BopError::runtime(::bop::error_messages::enum_not_declared({}), {})), }}; ",
+            namespace_value,
+            rust_string_literal(namespace),
+            rust_string_literal(type_name),
+            line,
+            shape_arms,
+            rust_string_literal(type_name),
+            line,
+        );
+        let type_lit = rust_string_literal(type_name);
+        let variant_lit = rust_string_literal(variant);
+        match payload {
+            VariantPayload::Unit => Ok(format!(
+                "{{ {namespace_check}match __variant_shape {{ \
+                    __BopDynamicVariantShape::Unit => {{}}, \
+                    __BopDynamicVariantShape::Tuple(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects positional arguments `(…)`\", {type_lit}, {variant_lit}), {line})), \
+                    __BopDynamicVariantShape::Struct(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects named fields `{{{{ … }}}}`\", {type_lit}, {variant_lit}), {line})), \
+                }} ::bop::value::Value::new_enum_unit(__module_path, {type_lit}.to_string(), {variant_lit}.to_string()) }}"
+            )),
+            VariantPayload::Tuple(args) => {
+                let mut lets = String::new();
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    let src = self.expr_src(arg)?;
+                    let tmp = self.fresh_tmp();
+                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
+                    values.push(tmp);
+                }
+                Ok(format!(
+                    "{{ {namespace_check}match __variant_shape {{ \
+                        __BopDynamicVariantShape::Unit => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` takes no payload\", {type_lit}, {variant_lit}), {line})), \
+                        __BopDynamicVariantShape::Tuple(__expected) if __expected == {actual} => {{}}, \
+                        __BopDynamicVariantShape::Tuple(__expected) => return Err(::bop::error::BopError::runtime(format!(\"`{{}}::{{}}` expects {{}} argument{{}}, but got {{}}\", {type_lit}, {variant_lit}, __expected, if __expected == 1 {{ \"\" }} else {{ \"s\" }}, {actual}), {line})), \
+                        __BopDynamicVariantShape::Struct(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects named fields `{{{{ … }}}}`\", {type_lit}, {variant_lit}), {line})), \
+                    }} {lets}::bop::value::Value::try_new_enum_tuple(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), vec![{values}], {line})? }}",
+                    actual = args.len(),
+                    values = values.join(", "),
+                ))
+            }
+            VariantPayload::Struct(fields) => {
+                let provided_names = fields
+                    .iter()
+                    .map(|(name, _)| rust_string_literal(name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut lets = String::new();
+                let mut provided = Vec::with_capacity(fields.len());
+                for (name, expr) in fields {
+                    let src = self.expr_src(expr)?;
+                    let tmp = self.fresh_tmp();
+                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
+                    provided.push(format!(
+                        "({}.to_string(), {})",
+                        rust_string_literal(name),
+                        tmp
+                    ));
+                }
+                Ok(format!(
+                    "{{ {namespace_check}let __declared_fields = match __variant_shape {{ \
+                        __BopDynamicVariantShape::Unit => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` takes no payload\", {type_lit}, {variant_lit}), {line})), \
+                        __BopDynamicVariantShape::Tuple(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects positional arguments `(…)`\", {type_lit}, {variant_lit}), {line})), \
+                        __BopDynamicVariantShape::Struct(__fields) => __fields, \
+                    }}; __bop_validate_named_fields(__declared_fields, &[{provided_names}], {type_lit}, ::std::option::Option::Some({variant_lit}), {line})?; \
+                    {lets}let __provided = vec![{provided}]; let __ordered = __bop_order_named_fields(__declared_fields, __provided); \
+                    ::bop::value::Value::try_new_enum_struct(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), __ordered, {line})? }}",
+                    provided = provided.join(", "),
+                ))
+            }
+        }
+    }
+
     fn string_interp_src(
         &mut self,
         parts: &[StringPart],
         line: u32,
     ) -> Result<String, BopError> {
-        // Mirror the tree-walker: for each Variable part, format the
-        // current value of the Bop ident into the buffer. Missing
-        // idents surface as a Rust compile error ("cannot find value
-        // X"), which is strictly sooner than the tree-walker's
-        // runtime "Variable X not found" — acceptable; the program
-        // still fails with a clear message.
-        let _ = line;
+        // Mirror the tree-walker: for each Variable part, resolve the
+        // current Bop value at the point where that part executes.
         let mut body = String::from("{ let mut __s = ::std::string::String::new(); ");
         for part in parts {
             match part {
@@ -3415,13 +4129,14 @@ impl Emitter {
                     write!(body, "__s.push_str({}); ", rust_string_literal(s)).unwrap();
                 }
                 StringPart::Variable(name) => {
+                    let value = self.ident_value_src(name, line)?;
                     // The cloned Value lives only for the duration
                     // of the format call; its Drop tracks the
                     // de-alloc correctly against `bop::memory`.
                     write!(
                         body,
-                        "__s.push_str(&format!(\"{{}}\", {}.clone())); ",
-                        rust_user_ident(name)
+                        "__s.push_str(&format!(\"{{}}\", {})); ",
+                        value
                     )
                     .unwrap();
                 }
@@ -3479,7 +4194,7 @@ impl Emitter {
         );
         let ident_target = if mutating {
             match &object.kind {
-                ExprKind::Ident(n) => Some(rust_user_ident(n)),
+                ExprKind::Ident(n) => Some(n.clone()),
                 _ => None,
             }
         } else {
@@ -3499,13 +4214,56 @@ impl Emitter {
         // named `push`, so non-arrays still clone once and go through the full
         // user-method-before-builtin dispatcher. Only the built-in Array arm
         // takes the in-place path.
-        if let Some(target) = ident_target {
+        if let Some(target_name) = ident_target {
             let owned_args = if arg_tmps.is_empty() {
                 "::std::vec::Vec::new()".to_string()
             } else {
                 format!("::std::vec![{}]", arg_tmps.join(", "))
             };
             let obj_tmp = self.fresh_tmp();
+            if !self.is_local(&target_name) {
+                if let Some(overlay) = self.declaration_alias_overlay(&target_name) {
+                    let read = self
+                        .declaration_alias_read_src(&target_name, line)
+                        .expect("overlay checked above");
+                    let mut body = String::new();
+                    write!(
+                        body,
+                        "{{ {}let __ret = if let ::std::option::Option::Some(::bop::value::Value::Array(__bop_array)) = {}.overlay.as_mut() {{ \
+                            ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                        }} else {{ \
+                            let {} = {}; \
+                            match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
+                                Some(v) => v, \
+                                None => {{ \
+                                    let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
+                                    if let Some(__new_obj) = __mutated {{ {}.overlay = ::std::option::Option::Some(__new_obj); }} \
+                                    __r \
+                                }}, \
+                            }} \
+                        }}; __ret }}",
+                        arg_lets,
+                        overlay,
+                        method_lit,
+                        owned_args,
+                        line,
+                        obj_tmp,
+                        read,
+                        obj_tmp,
+                        method_lit,
+                        args_arr,
+                        line,
+                        obj_tmp,
+                        method_lit,
+                        args_arr,
+                        line,
+                        overlay,
+                    )
+                    .unwrap();
+                    return Ok(body);
+                }
+            }
+            let target = rust_user_ident(&target_name);
             let mut body = String::new();
             write!(
                 body,
@@ -3593,7 +4351,7 @@ impl Emitter {
         line: u32,
     ) -> Result<String, BopError> {
         // Free-variable analysis against the outer scope stack.
-        let mut captures = std::collections::BTreeSet::<String>::new();
+        let mut dependencies = FreeVarDependencies::default();
         let mut body_known = HashSet::new();
         for p in params {
             body_known.insert(p.clone());
@@ -3601,11 +4359,12 @@ impl Emitter {
         scan_free_vars_stmts(
             body,
             &mut body_known,
-            &mut captures,
+            &mut dependencies,
             &self.scope_stack,
             &self.fn_info,
         );
-        let captures_ordered: Vec<String> = captures.into_iter().collect();
+        dependencies.required.extend(dependencies.pattern_namespaces);
+        let captures_ordered: Vec<String> = dependencies.required.into_iter().collect();
 
         // Switch into the lambda's lexical context before emitting
         // its body: outer scope is hidden (so Ident lookups inside
@@ -3619,6 +4378,17 @@ impl Emitter {
         }
         for cap in &captures_ordered {
             self.bind_local(cap);
+        }
+        let declaration_aliases =
+            self.declaration_aliases_for_callable(params, body);
+        let mut alias_initializers = HashMap::new();
+        let mut alias_captures = Vec::new();
+        for (index, alias) in declaration_aliases.iter().enumerate() {
+            if let Some(parent_overlay) = self.declaration_alias_overlay(alias) {
+                let capture = format!("__alias_cap_{}", index);
+                alias_initializers.insert(alias.clone(), format!("{}.clone()", capture));
+                alias_captures.push((capture, parent_overlay));
+            }
         }
 
         // Emit body into a side buffer so we can splice it into
@@ -3637,9 +4407,17 @@ impl Emitter {
         self.tmp_counter = 0;
         self.in_top_level = false;
         self.in_callable_body = true;
+        let declaration_alias_overlays =
+            self.emit_declaration_alias_overlays(&declaration_aliases, &alias_initializers);
+        self.declaration_alias_overlays
+            .push(declaration_alias_overlays);
+        self.callable_mutations
+            .push(callable_assignment_names(body));
         for s in body {
             self.emit_stmt(s)?;
         }
+        self.callable_mutations.pop();
+        self.declaration_alias_overlays.pop();
         let body_src = core::mem::replace(&mut self.out, saved_out);
         self.indent = saved_indent;
         self.tmp_counter = saved_tmp;
@@ -3674,12 +4452,24 @@ impl Emitter {
             )
             .unwrap();
         }
-        let opaque_body_depth = captures_ordered
+        for (capture, parent_overlay) in &alias_captures {
+            writeln!(
+                capture_prelude,
+                "let {capture} = {parent_overlay}.overlay.clone();"
+            )
+            .unwrap();
+        }
+        let mut opaque_body_depth = captures_ordered
             .iter()
             .enumerate()
             .fold(String::from("0u16"), |depth, (i, _)| {
                 format!("{depth}.max(__cap_{i}.ownership_depth())")
             });
+        for (capture, _) in &alias_captures {
+            opaque_body_depth = format!(
+                "{opaque_body_depth}.max({capture}.as_ref().map_or(0u16, ::bop::value::Value::ownership_depth))"
+            );
+        }
 
         let arity = params.len();
         let arity_suffix = if arity == 1 { "" } else { "s" };
@@ -3728,10 +4518,34 @@ impl Emitter {
 // stay callable without capture (they're globally reachable Rust
 // fns) and unknown identifiers are left for rustc to flag.
 
+#[derive(Default)]
+struct FreeVarDependencies {
+    /// Value/expression references that must exist when the closure or lifted
+    /// function is created.
+    required: std::collections::BTreeSet<String>,
+    /// Namespace references used only by patterns. Declaration aliases in
+    /// this set are resolved lazily by the pattern resolver, while a lambda
+    /// still promotes outer locals/params from this set into real captures.
+    pattern_namespaces: std::collections::BTreeSet<String>,
+    /// Nested named functions have their own declaration context and do not
+    /// capture a caller's alias overlay. Nested lambdas do capture it and must
+    /// continue to propagate through arbitrarily deep closure chains.
+    skip_nested_named_functions: bool,
+}
+
+impl FreeVarDependencies {
+    fn for_declaration_aliases() -> Self {
+        Self {
+            skip_nested_named_functions: true,
+            ..Self::default()
+        }
+    }
+}
+
 fn scan_free_vars_stmts(
     stmts: &[Stmt],
     known: &mut HashSet<String>,
-    free: &mut std::collections::BTreeSet<String>,
+    free: &mut FreeVarDependencies,
     outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
@@ -3743,7 +4557,7 @@ fn scan_free_vars_stmts(
 fn scan_free_vars_stmt(
     stmt: &Stmt,
     known: &mut HashSet<String>,
-    free: &mut std::collections::BTreeSet<String>,
+    free: &mut FreeVarDependencies,
     outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
@@ -3756,7 +4570,7 @@ fn scan_free_vars_stmt(
             match target {
                 AssignTarget::Variable(n) => {
                     if !known.contains(n) && is_outer_local(n, outer_scopes) {
-                        free.insert(n.clone());
+                        free.required.insert(n.clone());
                     }
                 }
                 AssignTarget::Index { object, index } => {
@@ -3818,6 +4632,9 @@ fn scan_free_vars_stmt(
             // analysed with only its params in scope — matches
             // how the walker / VM treat nested fns.
             known.insert(name.clone());
+            if free.skip_nested_named_functions {
+                return;
+            }
             let mut inner_known = HashSet::new();
             for p in params {
                 inner_known.insert(p.clone());
@@ -3831,9 +4648,12 @@ fn scan_free_vars_stmt(
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::Use { .. } => {
+        StmtKind::Use { alias, .. } => {
             // Import bindings are created when the lambda executes,
             // so the use site itself does not capture an outer value.
+            if let Some(alias) = alias {
+                known.insert(alias.clone());
+            }
         }
         StmtKind::StructDecl { .. } => {
             // Struct declarations don't reference any identifiers
@@ -4007,7 +4827,7 @@ fn variant_payload_rust(payload: &bop::parser::VariantPatternPayload) -> String 
 fn scan_free_vars_expr(
     expr: &Expr,
     known: &mut HashSet<String>,
-    free: &mut std::collections::BTreeSet<String>,
+    free: &mut FreeVarDependencies,
     outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
@@ -4027,14 +4847,14 @@ fn scan_free_vars_expr(
                 && !fn_info.top_level_fns.contains(name)
                 && is_outer_local(name, outer_scopes)
             {
-                free.insert(name.clone());
+                free.required.insert(name.clone());
             }
         }
         ExprKind::StringInterp(parts) => {
             for part in parts {
                 if let StringPart::Variable(name) = part {
                     if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                        free.insert(name.clone());
+                        free.required.insert(name.clone());
                     }
                 }
             }
@@ -4111,7 +4931,7 @@ fn scan_free_vars_expr(
             // Rust closure capture so opaque ownership depth includes it.
             if let Some(name) = namespace {
                 if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                    free.insert(name.clone());
+                    free.required.insert(name.clone());
                 }
             }
             for (_, v) in fields {
@@ -4125,7 +4945,7 @@ fn scan_free_vars_expr(
         } => {
             if let Some(name) = namespace {
                 if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                    free.insert(name.clone());
+                    free.required.insert(name.clone());
                 }
             }
             use bop::parser::VariantPayload;
@@ -4149,6 +4969,13 @@ fn scan_free_vars_expr(
             // bubble up as captures.
             scan_free_vars_expr(scrutinee, known, free, outer_scopes, fn_info);
             for arm in arms {
+                for namespace in arm.pattern.namespace_names() {
+                    if !known.contains(&namespace)
+                        && is_outer_local(&namespace, outer_scopes)
+                    {
+                        free.pattern_namespaces.insert(namespace);
+                    }
+                }
                 let mut arm_known = known.clone();
                 arm_known.extend(arm.pattern.binding_names());
                 if let Some(guard) = &arm.guard {
@@ -4225,6 +5052,14 @@ fn user_name_component(name: &str) -> String {
 /// ...), Rust keywords, or another source name.
 fn rust_user_ident(name: &str) -> String {
     format!("__bop_user_value_{}", user_name_component(name))
+}
+
+fn declaration_alias_overlay_ident(name: &str) -> String {
+    format!("__bop_declaration_alias_{}", user_name_component(name))
+}
+
+fn declaration_alias_pattern_snapshot_ident(name: &str) -> String {
+    format!("__bop_pattern_alias_{}", user_name_component(name))
 }
 
 /// Render a Bop user-fn name as a Rust function name under a
@@ -4378,6 +5213,10 @@ const CTX_BASE: &str = r#"pub struct Ctx<'h> {
     /// sentinel.
     pub module_cache:
         ::std::collections::HashMap<::std::string::String, ::std::boxed::Box<dyn ::core::any::Any + 'static>>,
+    pub module_aliases: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        ::bop::value::Value,
+    >,
 }
 
 "#;
@@ -4398,6 +5237,10 @@ const CTX_SANDBOX: &str = r#"pub struct Ctx<'h> {
     /// sentinel.
     pub module_cache:
         ::std::collections::HashMap<::std::string::String, ::std::boxed::Box<dyn ::core::any::Any + 'static>>,
+    pub module_aliases: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        ::bop::value::Value,
+    >,
 }
 
 "#;
@@ -4433,6 +5276,103 @@ const RUNTIME_SHARED: &str = r#"/// Sentinel type inserted into `module_cache` w
 /// state it means a circular import — the runtime returns a clear
 /// error and halts.
 pub struct __ModuleLoading;
+
+struct __BopDeclarationAliasBinding {
+    overlay: ::std::option::Option<::bop::value::Value>,
+    cached: ::std::option::Option<::bop::value::Value>,
+}
+
+enum __BopDynamicVariantShape {
+    Unit,
+    Tuple(usize),
+    Struct(&'static [&'static str]),
+}
+
+fn __bop_declaration_alias_optional(
+    ctx: &Ctx<'_>,
+    binding: &mut __BopDeclarationAliasBinding,
+    module: &str,
+    alias: &str,
+) -> ::std::option::Option<::bop::value::Value> {
+    if let ::std::option::Option::Some(value) = &binding.overlay {
+        return ::std::option::Option::Some(value.clone());
+    }
+    if let ::std::option::Option::Some(value) = &binding.cached {
+        return ::std::option::Option::Some(value.clone());
+    }
+    let value = ctx
+        .module_aliases
+        .get(&(module.to_string(), alias.to_string()))
+        .cloned()?;
+    binding.cached = ::std::option::Option::Some(value.clone());
+    ::std::option::Option::Some(value)
+}
+
+fn __bop_declaration_alias_read(
+    ctx: &Ctx<'_>,
+    binding: &mut __BopDeclarationAliasBinding,
+    module: &str,
+    alias: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    __bop_declaration_alias_optional(ctx, binding, module, alias).ok_or_else(|| {
+            ::bop::error::BopError::runtime(
+                ::bop::error_messages::variable_not_found(alias),
+                line,
+            )
+        })
+}
+
+fn __bop_declaration_alias_namespace(
+    ctx: &Ctx<'_>,
+    binding: &mut __BopDeclarationAliasBinding,
+    module: &str,
+    alias: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    __bop_declaration_alias_optional(ctx, binding, module, alias).ok_or_else(|| {
+        ::bop::error::BopError::runtime(
+            format!("`{}` isn't a module alias in scope", alias),
+            line,
+        )
+    })
+}
+
+fn __bop_declaration_alias_assign(
+    ctx: &Ctx<'_>,
+    binding: &mut __BopDeclarationAliasBinding,
+    value: ::bop::value::Value,
+    module: &str,
+    alias: &str,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    if binding.overlay.is_none()
+        && binding.cached.is_none()
+        && !ctx
+            .module_aliases
+            .contains_key(&(module.to_string(), alias.to_string()))
+    {
+        return Err(::bop::error::BopError::runtime(
+            format!("Variable `{}` doesn't exist yet", alias),
+            line,
+        ));
+    }
+    binding.overlay = ::std::option::Option::Some(value);
+    Ok(())
+}
+
+fn __bop_declaration_alias_mut<'v>(
+    binding: &'v mut __BopDeclarationAliasBinding,
+    alias: &str,
+    line: u32,
+) -> Result<&'v mut ::bop::value::Value, ::bop::error::BopError> {
+    binding.overlay.as_mut().ok_or_else(|| {
+        ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(alias),
+            line,
+        )
+    })
+}
 
 /// Opaque body that a `Value::Fn` carries around in AOT-emitted
 /// code. The callable is a higher-ranked `Fn` so the same Rc can
@@ -4509,6 +5449,22 @@ fn __bop_call_value(
             line,
         )),
     }
+}
+
+fn __bop_call_named_value(
+    ctx: &mut Ctx<'_>,
+    callee: ::bop::value::Value,
+    args: ::std::vec::Vec<::bop::value::Value>,
+    name: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    if !matches!(&callee, ::bop::value::Value::Fn(_)) {
+        return Err(::bop::error::BopError::runtime(
+            format!("`{}` is a {}, not a function", name, callee.type_name()),
+            line,
+        ));
+    }
+    __bop_call_value(ctx, callee, args, line)
 }
 
 /// `try_call(f)` implementation. Invokes `f` with no args via
@@ -4724,7 +5680,8 @@ fn __bop_field_get(
 
 /// Runtime guard for namespaced type access: verifies that the
 /// value behind the alias is actually a `Value::Module`, and that
-/// the module's published `types` list contains the name. Used by
+/// the module's published `types` list contains the name, then returns
+/// the module path that defines the constructed value's runtime identity. Used by
 /// struct / enum construct emission when `namespace` is `Some(...)`,
 /// so the AOT surfaces the same error as walker + VM when someone
 /// writes `m.MissingType { ... }` or uses a non-module as a namespace.
@@ -4734,30 +5691,88 @@ fn __bop_validate_namespace_type(
     alias: &str,
     type_name: &str,
     line: u32,
-) -> Result<(), ::bop::error::BopError> {
+) -> Result<String, ::bop::error::BopError> {
     match ns {
         ::bop::value::Value::Module(m) => {
             if m.types.iter().any(|t| t == type_name) {
-                Ok(())
+                Ok(m.path.clone())
             } else {
                 Err(::bop::error::BopError::runtime(
-                    format!(
-                        "Module `{}` (bound as `{}`) has no type `{}`",
-                        m.path, alias, type_name
-                    ),
+                    format!("`{}` isn't a type exported from `{}`", type_name, m.path),
                     line,
                 ))
             }
         }
         other => Err(::bop::error::BopError::runtime(
             format!(
-                "`{}` is not a module (got {})",
+                "`{}` is a {}, not a module alias — can't reach `{}` through it",
                 alias,
-                other.type_name()
+                other.type_name(),
+                type_name
             ),
             line,
         )),
     }
+}
+
+fn __bop_validate_named_fields(
+    declared: &[&str],
+    provided: &[&str],
+    type_name: &str,
+    variant: ::std::option::Option<&str>,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    for (index, field) in provided.iter().enumerate() {
+        if provided[..index].contains(field) {
+            let owner = match variant {
+                ::std::option::Option::Some(variant) => format!("{}::{}", type_name, variant),
+                ::std::option::Option::None => type_name.to_string(),
+            };
+            return Err(::bop::error::BopError::runtime(
+                format!("Field `{}` specified twice in `{}` construction", field, owner),
+                line,
+            ));
+        }
+        if !declared.contains(field) {
+            let message = match variant {
+                ::std::option::Option::Some(variant) => {
+                    ::bop::error_messages::variant_has_no_field(type_name, variant, field)
+                }
+                ::std::option::Option::None => {
+                    ::bop::error_messages::struct_has_no_field(type_name, field)
+                }
+            };
+            return Err(::bop::error::BopError::runtime(message, line));
+        }
+    }
+    for field in declared {
+        if !provided.contains(field) {
+            let owner = match variant {
+                ::std::option::Option::Some(variant) => format!("{}::{}", type_name, variant),
+                ::std::option::Option::None => type_name.to_string(),
+            };
+            return Err(::bop::error::BopError::runtime(
+                format!("Missing field `{}` in `{}` construction", field, owner),
+                line,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn __bop_order_named_fields(
+    declared: &[&str],
+    mut provided: ::std::vec::Vec<(String, ::bop::value::Value)>,
+) -> ::std::vec::Vec<(String, ::bop::value::Value)> {
+    let mut ordered = ::std::vec::Vec::with_capacity(declared.len());
+    for field in declared {
+        let index = provided
+            .iter()
+            .position(|(name, _)| name == field)
+            .expect("dynamic construction shape was validated before payload evaluation");
+        ordered.push(provided.remove(index));
+    }
+    ordered
 }
 
 /// Write a struct field on the owned live-binding value and return it.
@@ -5016,6 +6031,7 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         host: host as &mut dyn ::bop::BopHost,
         rand_state: 0,
         module_cache: ::std::collections::HashMap::new(),
+        module_aliases: ::std::collections::HashMap::new(),
     };
     run_program(&mut ctx)
 }
@@ -5061,6 +6077,7 @@ pub fn run<H: ::bop::BopHost>(
         steps: 0,
         max_steps: limits.max_steps,
         module_cache: ::std::collections::HashMap::new(),
+        module_aliases: ::std::collections::HashMap::new(),
     };
     run_program(&mut ctx)
 }

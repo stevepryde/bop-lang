@@ -2610,6 +2610,68 @@ print(t.Point { value: 42 })"#,
 }
 
 #[test]
+fn assigned_block_local_module_alias_does_not_leak_diff() {
+    set_modules(&[
+        ("first", "struct Point { first }"),
+        ("second", "struct Point { second }"),
+    ]);
+    for body in ["", "        dep = other\n"] {
+        let source = format!(
+            r#"use second as other
+fn make() {{
+    if true {{
+        use first as dep
+{body}    }}
+    return dep.Point {{ second: 7 }}
+}}
+make()"#
+        );
+        assert_eq!(run_err(&source), "`dep` isn't a module alias in scope");
+    }
+}
+
+#[test]
+fn block_local_type_and_callable_import_metadata_do_not_leak_diff() {
+    set_modules(&[("funcmod", "fn answer() { return 42 }")]);
+    let type_error = run_err(
+        r#"fn make() {
+    if true { struct Point { value } }
+    return Point { value: 7 }
+}
+make()"#,
+    );
+    assert_eq!(type_error, "Struct `Point` is not declared");
+
+    let function_error = run_err(
+        r#"fn make() {
+    if true { use funcmod.{answer} }
+    return answer()
+}
+make()"#,
+    );
+    assert_eq!(function_error, "Function `answer` not found");
+}
+
+#[test]
+fn block_local_import_scope_unwinds_on_return_and_error_diff() {
+    set_modules(&[("first", "struct Point { value }")]);
+    for source in [
+        r#"fn seed() {
+    if true { use first as dep; return 1 }
+}
+seed()
+dep.Point { value: 7 }"#,
+        r#"fn seed() {
+    if true { use first as dep; panic("stop") }
+}
+try_call(seed)
+dep.Point { value: 7 }"#,
+    ] {
+        assert_eq!(run_err(source), "`dep` isn't a module alias in scope");
+    }
+}
+
+#[test]
 fn named_function_does_not_dynamically_inherit_caller_alias_diff() {
     set_modules(&[("types", "struct Point { value }")]);
     let error = run_err(
@@ -2620,6 +2682,86 @@ if true {
 }"#,
     );
     assert!(error.contains("isn't a module alias in scope"), "got: {error}");
+}
+
+#[test]
+fn namespaced_construction_validates_alias_before_payload_diff() {
+    set_modules(&[(
+        "types",
+        "struct Stack { items }\nenum Maybe { Some(value), Named { value } }",
+    )]);
+    for source in [
+        r#"fn invalid() { return dep.Stack { items: panic("payload") } }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { return dep.Maybe::Some(panic("payload")) }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { return dep.Maybe::Named { value: panic("payload") } }
+invalid()
+use types as dep"#,
+    ] {
+        assert_eq!(
+            run_err(source),
+            "`dep` isn't a module alias in scope",
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn constructor_shape_validation_precedes_every_payload_diff() {
+    set_modules(&[(
+        "types",
+        "struct Stack { items }\nenum Maybe { Some(value), Named { value } }",
+    )]);
+    let cases = [
+        (
+            r#"use types as dep
+dep.Stack { wrong: panic("payload") }"#,
+            "Struct `Stack` has no field `wrong`",
+        ),
+        (
+            r#"use types as dep
+dep.Stack { items: panic("payload"), wrong: 2 }"#,
+            "Struct `Stack` has no field `wrong`",
+        ),
+        (
+            r#"use types as dep
+dep.Maybe::Some(panic("payload"), 2)"#,
+            "`Maybe::Some` expects 1 argument, but got 2",
+        ),
+        (
+            r#"use types as dep
+dep.Maybe::Missing(panic("payload"))"#,
+            "Enum `Maybe` has no variant `Missing`",
+        ),
+        (
+            r#"use types as dep
+dep.Maybe::Named { value: panic("payload"), wrong: 2 }"#,
+            "Variant `Maybe::Named` has no field `wrong`",
+        ),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(run_err(source), expected, "{source}");
+    }
+}
+
+#[test]
+fn call_arguments_precede_receiver_and_callee_dispatch_diff() {
+    set_modules(&[("types", "fn exported(value) { return value }")]);
+    for source in [
+        r#"fn invalid() { return dep.nope(panic("payload")) }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { return "receiver".nope(panic("payload")) }
+invalid()"#,
+        r#"fn invalid() { return dep["exported"](panic("payload")) }
+invalid()
+use types as dep"#,
+    ] {
+        assert_eq!(run_err(source), "payload", "{source}");
+    }
 }
 
 #[test]
@@ -2709,6 +2851,20 @@ seed()
 print(helper())"#,
     );
     assert!(error.contains("Function `helper` not found"), "got: {error}");
+
+    set_modules(&[("inner", "fn helper() { return 2 }")]);
+    let outcome = run_both(
+        r#"fn helper() { return 1 }
+fn local() {
+    use inner.{helper}
+    return helper()
+}
+print(local())
+print(helper())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["2", "1"]);
 }
 
 #[test]
@@ -2769,6 +2925,418 @@ print(public)"#,
 print(Thing { value: 1 })"#,
     );
     assert!(type_error.contains("Struct `Thing` is not declared"));
+}
+
+#[test]
+fn root_named_functions_keep_module_alias_context_diff() {
+    set_modules(&[(
+        "types",
+        r#"struct Point { value }
+fn make(value) { return Point { value: value } }"#,
+    )]);
+    let outcome = run_both(
+        r#"use types as t
+fn build(value) {
+    let direct = t.Point { value: value }
+    let called = t.make(direct.value + 1)
+    return match called {
+        t.Point { value: found } => found,
+        _ => 0,
+    }
+}
+print(build(41))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["42"]);
+}
+
+#[test]
+fn declaration_alias_is_shadowed_by_function_parameter_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let error = run_err(
+        r#"use types as t
+fn build(t) { return t.Point { value: 42 } }
+print(build(1))"#,
+    );
+    assert!(
+        error.contains("`t` is a int, not a module alias"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn imported_functions_and_methods_keep_defining_module_context_diff() {
+    set_modules(&[
+        (
+            "first_types",
+            r#"struct Point { value }
+fn make(value) { return Point { value: value } }"#,
+        ),
+        (
+            "second_types",
+            r#"struct Point { value }
+fn make(value) { return Point { value: value + 100 } }"#,
+        ),
+        (
+            "first_holder",
+            r#"use first_types as dep
+struct Holder { value }
+fn build(value) {
+    let point = dep.make(value)
+    return match point { dep.Point { value: found } => found, _ => 0 }
+}
+fn Holder.build(self) { return dep.make(self.value).value }"#,
+        ),
+        (
+            "second_holder",
+            r#"use second_types as dep
+struct Holder { value }
+fn build(value) {
+    let point = dep.Point { value: value }
+    return match point { dep.Point { value: found } => found, _ => 0 }
+}
+fn Holder.build(self) { return dep.make(self.value).value }"#,
+        ),
+    ]);
+    let outcome = run_both(
+        r#"use first_holder as first
+use second_holder as second
+use second_types as dep
+print(first.build(1), first.Holder { value: 2 }.build())
+print(second.build(3), second.Holder { value: 4 }.build())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1 2", "3 104"]);
+}
+
+#[test]
+fn declaration_alias_interpolation_and_call_paths_keep_context_diff() {
+    set_modules(&[
+        (
+            "types",
+            r#"struct Point { value }
+fn push(value) { return value + 1 }"#,
+        ),
+        (
+            "holder",
+            r#"use types as dep
+struct Holder { value }
+fn show() { return "{dep}" == dep.to_str() }
+fn Holder.show(self) { return "{dep}" == dep.to_str() }
+fn shadow(dep) { return "{dep}" }
+fn call_push() { return dep.push(1) }"#,
+        ),
+    ]);
+    let outcome = run_both(
+        r#"use holder as holder
+print(holder.show(), holder.Holder { value: 0 }.show())
+print(holder.shadow("local"), holder.call_push())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["true true", "local 2"]);
+}
+
+#[test]
+fn declaration_alias_bare_call_is_a_non_callable_value_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let error = run_err(
+        r#"use types as dep
+fn invoke() { return dep() }
+invoke()"#,
+    );
+    assert!(
+        error.contains("`dep` is a module, not a function"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn future_declaration_alias_does_not_shadow_earlier_call_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let outcome = run_both(
+        r#"fn before() { print("before") }
+before()
+use types as print"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["before"]);
+}
+
+#[test]
+fn declaration_alias_reads_are_lazy_across_branches_and_lambdas_diff() {
+    set_modules(&[("types", "struct Stack { items }")]);
+    let outcome = run_both(
+        r#"fn dead_branch() {
+    if false { print(dep) }
+    return 1
+}
+fn maker() {
+    return fn() { return dep.Stack { items: [] } }
+}
+let before = try_call(maker)
+print(dead_branch(), before.is_err())
+use types as dep
+print(before.unwrap()().items.len())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1 false", "0"]);
+}
+
+#[test]
+fn declaration_alias_overlay_propagates_through_nested_lambdas_diff() {
+    set_modules(&[
+        ("first", "struct Point { value }"),
+        ("second", "struct Point { value }"),
+    ]);
+    let outcome = run_both(
+        r#"fn dynamic_maker() {
+    return fn() { return fn() { return dep.Point { value: 9 }.value } }
+}
+let dynamic = dynamic_maker()()
+use first as dep
+use second as other
+fn assigned_maker() {
+    dep = other
+    return fn() {
+        return fn(value) {
+            return match value { dep.Point { value: found } => found, _ => 0 }
+        }
+    }
+}
+let assigned = assigned_maker()()
+print(dynamic(), assigned(other.Point { value: 7 }))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["9 7"]);
+}
+
+#[test]
+fn declaration_alias_mutable_places_require_an_overlay_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let outcome = run_both(
+        r#"use types as dep
+struct Box { value }
+fn invalid_index() { dep["value"] = 1 }
+fn invalid_field() { dep.value = 1 }
+fn valid_index() {
+    dep = {"value": 0}
+    dep["value"] = 2
+    return dep["value"]
+}
+fn valid_field() {
+    dep = Box { value: 0 }
+    dep.value = 3
+    return dep.value
+}
+print(try_call(invalid_index).is_err(), try_call(invalid_field).is_err())
+print(valid_index(), valid_field())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["true true", "2 3"]);
+}
+
+#[test]
+fn declaration_alias_mutable_place_errors_are_canonical_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    for source in [
+        r#"use types as dep
+fn invalid() { dep["value"] = 1 }
+invalid()"#,
+        r#"use types as dep
+fn invalid() { dep.value = 1 }
+invalid()"#,
+    ] {
+        assert_eq!(run_err(source), "Variable `dep` not found");
+    }
+}
+
+#[test]
+fn future_declaration_alias_assignment_errors_are_operation_specific_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let simple = run_err(
+        r#"fn invalid() { dep = 1 }
+invalid()
+use types as dep"#,
+    );
+    assert_eq!(simple, "Variable `dep` doesn't exist yet");
+
+    let compound = run_err(
+        r#"fn invalid() { dep += 1 }
+invalid()
+use types as dep"#,
+    );
+    assert_eq!(compound, "Variable `dep` not found");
+}
+
+#[test]
+fn compound_assignment_rhs_precedes_target_and_place_resolution_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    for source in [
+        r#"fn invalid() { dep += panic("payload") }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { dep[panic("index")] += panic("payload") }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { dep.value += panic("payload") }
+invalid()
+use types as dep"#,
+    ] {
+        assert_eq!(run_err(source), "payload", "{source}");
+    }
+}
+
+#[test]
+fn nested_named_function_uses_declaration_alias_not_outer_local_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let outcome = run_both(
+        r#"use types as dep
+fn outer() {
+    let dep = 1
+    fn inner() { return dep.Point { value: 4 }.value }
+    return inner()
+}
+print(outer())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["4"]);
+}
+
+#[test]
+fn imported_function_keeps_bare_type_binding_from_defining_module_diff() {
+    set_modules(&[
+        ("types", "struct Point { value }"),
+        (
+            "holder",
+            r#"use types.{Point}
+fn build(value) {
+    let point = Point { value: value }
+    return match point { Point { value: found } => found, _ => 0 }
+}"#,
+        ),
+    ]);
+    assert_eq!(
+        say(r#"use holder as module
+print(module.build(42))"#),
+        "42"
+    );
+}
+
+#[test]
+fn imported_functions_do_not_see_root_declaration_context_diff() {
+    set_modules(&[
+        ("types", "struct Point { value }"),
+        (
+            "alias_holder",
+            "fn build() { return t.Point { value: 42 } }",
+        ),
+        ("type_holder", "fn build() { return Point { value: 42 } }"),
+        ("fn_holder", "fn build() { return helper() }"),
+    ]);
+
+    let alias_error = run_err(
+        r#"use types as t
+use alias_holder as holder
+print(holder.build())"#,
+    );
+    assert!(alias_error.contains("isn't a module alias"), "got: {alias_error}");
+
+    let type_error = run_err(
+        r#"use types.{Point}
+use type_holder as holder
+print(holder.build())"#,
+    );
+    assert!(type_error.contains("Struct `Point` is not declared"));
+
+    let function_error = run_err(
+        r#"fn helper() { return 42 }
+use fn_holder as holder
+print(holder.build())"#,
+    );
+    assert!(function_error.contains("Function `helper` not found"));
+}
+
+#[test]
+fn module_functions_resolve_siblings_while_the_module_is_loading_diff() {
+    set_modules(&[(
+        "loading",
+        r#"fn helper(n) { return n + 1 }
+fn recurse(n) { if n == 0 { return 0 } return recurse(n - 1) + 1 }
+fn build() { return helper(40) + recurse(1) }
+let value = build()"#,
+    )]);
+    let outcome = run_both("use loading\nprint(value)", &standard());
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["42"]);
+}
+
+#[test]
+fn namespace_only_lambda_captures_and_shadows_match_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let positive = run_both(
+        r#"use types as dep
+fn outer(dep) {
+    return fn() {
+        let point = dep.Point { value: 42 }
+        return match point { dep.Point { value: found } => found, _ => 0 }
+    }
+}
+print(outer(dep)())"#,
+        &standard(),
+    );
+    assert!(positive.is_ok(), "unexpected error: {:?}", positive.error);
+    assert_eq!(positive.prints, ["42"]);
+
+    let construct_error = run_err(
+        r#"use types as dep
+fn outer(dep) { return fn() { return dep.Point { value: 42 } } }
+print(outer(1)())"#,
+    );
+    assert!(
+        construct_error.contains("`dep` is a int, not a module alias"),
+        "got: {construct_error}"
+    );
+
+    let pattern = run_both(
+        r#"use types as dep
+let point = dep.Point { value: 42 }
+fn outer(dep) { return fn(value) { return match value { dep.Point { value: found } => found, _ => 0 } } }
+print(outer(1)(point))"#,
+        &standard(),
+    );
+    assert!(pattern.is_ok(), "unexpected error: {:?}", pattern.error);
+    assert_eq!(pattern.prints, ["0"]);
+}
+
+#[test]
+fn pattern_namespace_resolves_before_same_named_arm_binding_diff() {
+    set_modules(&[
+        ("types_a", "struct Point { dep }"),
+        ("types_b", "struct Point { dep }"),
+    ]);
+    let outcome = run_both(
+        r#"use types_a as dep
+use types_b as other
+fn make() {
+    let dep = other
+    return fn(value) {
+        return match value { dep.Point { dep } => dep, _ => -1 }
+    }
+}
+let f = make()
+print(f(other.Point { dep: 42 }))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["42"]);
 }
 
 #[test]

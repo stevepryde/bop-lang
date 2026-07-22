@@ -2,6 +2,8 @@
 //! bodies. See the crate root for the textual description of the
 //! instruction set.
 
+use core::num::{NonZeroU32, NonZeroU64};
+
 #[cfg(feature = "no_std")]
 use alloc::{rc::Rc, string::String, vec::Vec};
 #[cfg(not(feature = "no_std"))]
@@ -56,6 +58,13 @@ pub enum Instr {
     /// assignment; the VM treats them identically once slots are
     /// pre-sized at call time.
     StoreLocal(SlotIdx),
+    /// Pop an already-evaluated RHS, then read and compound-assign the live
+    /// target binding. Keeping target resolution after RHS evaluation matches
+    /// the walker/AOT error and side-effect order.
+    CompoundAssign {
+        target: AssignBack,
+        op: InPlaceAssignOp,
+    },
 
     // ─── Superinstructions ──────────────────────────────────────
     //
@@ -164,12 +173,13 @@ pub enum Instr {
     /// Resolution order: locally-bound closure → builtin → host →
     /// named user fn → error.
     Call { name: NameIdx, argc: u32 },
-    /// Call whatever sits under the `argc` args on the stack. The
+    /// Call whatever sits on top of the `argc` args on the stack. The
     /// callee must be a `Value::Fn`; anything else is a runtime
     /// error. Emitted when the call's callee expression isn't a
-    /// bare ident (e.g. `funcs[0](x)` or `make_adder(5)(3)`).
+    /// bare ident (e.g. `funcs[0](x)` or `make_adder(5)(3)`). Arguments
+    /// are evaluated before the callee, matching the tree walker.
     CallValue { argc: u32 },
-    /// Method call: `[.., obj, args...]` → `[.., ret]`, and if the
+    /// Method call: `[.., args..., obj]` → `[.., ret]`, and if the
     /// method is mutating and `obj` came from a variable, the VM
     /// writes the mutated value back to the original binding. The
     /// back-write target is the binding that produced `obj` —
@@ -261,6 +271,22 @@ pub enum Instr {
         method_name: NameIdx,
         fn_idx: FnIdx,
     },
+    /// Validate a complete struct-construction recipe before any field payload
+    /// expression is evaluated. The field-name list lives in a side pool so
+    /// this instruction remains `Copy`.
+    ValidateStructConstruct {
+        namespace: Option<NamespaceIdx>,
+        type_name: NameIdx,
+        fields: ConstructFieldsIdx,
+    },
+    /// Validate enum type/variant/payload shape before evaluating payloads.
+    ValidateEnumConstruct {
+        namespace: Option<NamespaceIdx>,
+        type_name: NameIdx,
+        variant: NameIdx,
+        shape: EnumConstructShape,
+        fields: ConstructFieldsIdx,
+    },
     /// Struct literal: pop `2 * count` stack entries (field-name
     /// string + value, alternating — same layout as `MakeDict`),
     /// validate against the struct declaration, push a
@@ -269,7 +295,7 @@ pub enum Instr {
     /// name resolves to a `Value::Module` whose exports include
     /// this type before falling through to the normal registry.
     ConstructStruct {
-        namespace: Option<NameIdx>,
+        namespace: Option<NamespaceIdx>,
         type_name: NameIdx,
         count: u32,
     },
@@ -283,7 +309,7 @@ pub enum Instr {
     /// `namespace` mirrors the `ConstructStruct` field — set for
     /// `m.Result::Ok(v)` forms.
     ConstructEnum {
-        namespace: Option<NameIdx>,
+        namespace: Option<NamespaceIdx>,
         type_name: NameIdx,
         variant: NameIdx,
         shape: EnumConstructShape,
@@ -393,6 +419,92 @@ pub struct EnumIdx(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PatternIdx(pub u32);
 
+/// Compact lexically resolved namespace used by a namespaced type reference.
+///
+/// Function locals live in slots, while captures and module bindings retain
+/// name-based lookup. The non-zero packed representation keeps side-table
+/// entries at eight bytes. Name index `u32::MAX` and slot index `u32::MAX` are
+/// reserved; neither can address a materializable bytecode pool or frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamespaceRef(NonZeroU64);
+
+impl NamespaceRef {
+    pub fn from_name(name: NameIdx) -> Self {
+        assert!(name.0 != u32::MAX, "namespace name index is reserved");
+        Self(NonZeroU64::new(u64::from(name.0) + 1).expect("non-zero name encoding"))
+    }
+
+    pub fn from_slot(name: NameIdx, slot: SlotIdx) -> Self {
+        assert!(name.0 != u32::MAX, "namespace name index is reserved");
+        assert!(slot.0 != u32::MAX, "namespace slot index is reserved");
+        let encoded = ((u64::from(slot.0) + 1) << 32) | u64::from(name.0);
+        Self(NonZeroU64::new(encoded).expect("non-zero slot encoding"))
+    }
+
+    pub fn name_idx(self) -> NameIdx {
+        let encoded = self.0.get();
+        if encoded <= u64::from(u32::MAX) {
+            NameIdx((encoded - 1) as u32)
+        } else {
+            NameIdx(encoded as u32)
+        }
+    }
+
+    pub fn slot_idx(self) -> Option<SlotIdx> {
+        let encoded = self.0.get();
+        if encoded <= u64::from(u32::MAX) {
+            None
+        } else {
+            Some(SlotIdx(((encoded >> 32) - 1) as u32))
+        }
+    }
+}
+
+/// Index into a chunk's namespace-reference pool. Stored as one-based
+/// `NonZeroU32` so `Option<NamespaceIdx>` remains four bytes inside hot
+/// instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NamespaceIdx(NonZeroU32);
+
+impl NamespaceIdx {
+    pub fn new(index: u32) -> Self {
+        Self(
+            NonZeroU32::new(index.checked_add(1).expect("namespace pool is too large"))
+                .expect("one-based namespace index"),
+        )
+    }
+
+    pub fn index(self) -> u32 {
+        self.0.get() - 1
+    }
+}
+
+#[cfg(test)]
+mod instruction_layout_tests {
+    use super::{Instr, NameIdx, NamespaceIdx, NamespaceRef, SlotIdx};
+
+    #[test]
+    fn instruction_remains_three_machine_words() {
+        assert_eq!(core::mem::size_of::<Instr>(), 24);
+        assert_eq!(core::mem::size_of::<Option<NamespaceIdx>>(), 4);
+    }
+
+    #[test]
+    fn packed_namespace_references_round_trip() {
+        for name in [0, u32::MAX - 1] {
+            let namespace = NamespaceRef::from_name(NameIdx(name));
+            assert_eq!(namespace.name_idx(), NameIdx(name));
+            assert_eq!(namespace.slot_idx(), None);
+
+            for slot in [0, u32::MAX - 1] {
+                let namespace = NamespaceRef::from_slot(NameIdx(name), SlotIdx(slot));
+                assert_eq!(namespace.name_idx(), NameIdx(name));
+                assert_eq!(namespace.slot_idx(), Some(SlotIdx(slot)));
+            }
+        }
+    }
+}
+
 /// Index into a chunk's `use_specs` pool. Each `use` statement
 /// emits one [`UseSpec`] describing the shape of the import
 /// (path + optional `items` + optional `alias`); `Instr::Use`
@@ -400,6 +512,10 @@ pub struct PatternIdx(pub u32);
 /// variable-length spec inline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UseIdx(pub u32);
+
+/// Index into a chunk's construction field-name recipe pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstructFieldsIdx(pub u32);
 
 /// Shape of an enum variant's payload at the construction site —
 /// tells the VM how many stack entries to pop.
@@ -499,9 +615,15 @@ pub struct Chunk {
     pub functions: Vec<FnDef>,
     pub struct_defs: Vec<StructDef>,
     pub enum_defs: Vec<EnumDef>,
+    /// Namespace references shared by construction preflight and construction
+    /// instructions. Indirection keeps namespace-aware instructions compact.
+    pub namespace_refs: Vec<NamespaceRef>,
+    /// Source-order field names for struct and struct-variant construction
+    /// preflight instructions.
+    pub construct_fields: Vec<Vec<String>>,
     /// Match patterns referenced by `MatchFail` instructions. Pool entries
     /// are shared because matching may execute the same arm in a hot loop.
-    pub patterns: Vec<Rc<bop::parser::Pattern>>,
+    pub patterns: Vec<PatternRecipe>,
     /// Side-table of `use` descriptors referenced by
     /// `Instr::Use`. Holds variable-length fields (path, items,
     /// alias) so the instruction payload stays `Copy`.
@@ -578,13 +700,30 @@ impl Chunk {
         &self.enum_defs[idx.0 as usize]
     }
 
-    pub fn pattern(&self, idx: PatternIdx) -> &Rc<bop::parser::Pattern> {
+    pub fn construct_fields(&self, idx: ConstructFieldsIdx) -> &[String] {
+        &self.construct_fields[idx.0 as usize]
+    }
+
+    pub fn namespace_ref(&self, idx: NamespaceIdx) -> NamespaceRef {
+        self.namespace_refs[idx.index() as usize]
+    }
+
+    pub fn pattern(&self, idx: PatternIdx) -> &PatternRecipe {
         &self.patterns[idx.0 as usize]
     }
 
     pub fn use_spec(&self, idx: UseIdx) -> &UseSpec {
         &self.use_specs[idx.0 as usize]
     }
+}
+
+/// A pattern plus the lexical resolution selected for every namespace it
+/// contains. Namespace names remain alongside their bytecode reference because
+/// one recursive pattern can mention several distinct aliases.
+#[derive(Debug, Clone)]
+pub struct PatternRecipe {
+    pub pattern: Rc<bop::parser::Pattern>,
+    pub namespaces: Vec<(String, NamespaceRef)>,
 }
 
 /// A compiled user-defined function.

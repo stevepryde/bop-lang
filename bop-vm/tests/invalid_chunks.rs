@@ -2,8 +2,9 @@ use std::rc::Rc;
 
 use bop::{BopHost, BopLimits, Value};
 use bop_vm::chunk::{
-    Chunk, CodeOffset, ConstIdx, EnumIdx, FnDef, FnIdx, Instr, InterpIdx, InterpPart, InterpRecipe,
-    NameIdx, PatternIdx, SlotIdx, StructIdx, UseIdx,
+    Chunk, CodeOffset, ConstIdx, ConstructFieldsIdx, EnumConstructShape, EnumIdx, FnDef, FnIdx,
+    Instr, InterpIdx, InterpPart, InterpRecipe, NameIdx, NamespaceIdx, NamespaceRef, PatternIdx,
+    PatternRecipe, SlotIdx, StructIdx, UseIdx,
 };
 use bop_vm::{Vm, execute};
 
@@ -68,6 +69,14 @@ fn execute_rejects_every_index_pool_without_panicking() {
         (Instr::DefineEnum(EnumIdx(0)), "enum definition 0"),
         (Instr::Use(UseIdx(0)), "use specification 0"),
         (
+            Instr::ConstructStruct {
+                namespace: Some(NamespaceIdx::new(0)),
+                type_name: NameIdx(0),
+                count: 0,
+            },
+            "namespace reference 0",
+        ),
+        (
             Instr::MatchFail {
                 pattern: PatternIdx(0),
                 on_fail: CodeOffset(1),
@@ -99,12 +108,79 @@ fn execute_rejects_invalid_interpolation_parts() {
 }
 
 #[test]
+fn execute_rejects_invalid_construction_field_recipe_pool() {
+    let mut chunk = chunk_with(Instr::ValidateStructConstruct {
+        namespace: None,
+        type_name: NameIdx(0),
+        fields: ConstructFieldsIdx(0),
+    });
+    chunk.names.push("Point".into());
+
+    let error = execution_error(chunk);
+    assert!(error.message.contains("construction field recipe 0"));
+}
+
+#[test]
 fn execute_rejects_top_level_local_slots_and_out_of_stream_jumps() {
     let slot_error = execution_error(chunk_with(Instr::LoadLocal(SlotIdx(0))));
     assert!(slot_error.message.contains("local slot 0"));
 
     let jump_error = execution_error(chunk_with(Instr::Jump(CodeOffset(2))));
     assert!(jump_error.message.contains("jump target 2"));
+}
+
+#[test]
+fn execute_rejects_invalid_namespace_references() {
+    let mut construct = chunk_with(Instr::ConstructStruct {
+        namespace: Some(NamespaceIdx::new(0)),
+        type_name: NameIdx(1),
+        count: 0,
+    });
+    construct.names = vec!["module".into(), "Point".into()];
+    construct
+        .namespace_refs
+        .push(NamespaceRef::from_slot(NameIdx(0), SlotIdx(0)));
+    let slot_error = execution_error(construct);
+    assert!(slot_error.message.contains("local slot 0"));
+
+    let mut struct_preflight = chunk_with(Instr::ValidateStructConstruct {
+        namespace: Some(NamespaceIdx::new(0)),
+        type_name: NameIdx(0),
+        fields: ConstructFieldsIdx(0),
+    });
+    struct_preflight.names.push("Point".into());
+    struct_preflight
+        .namespace_refs
+        .push(NamespaceRef::from_name(NameIdx(1)));
+    struct_preflight.construct_fields.push(vec![]);
+    let preflight_name_error = execution_error(struct_preflight);
+    assert!(preflight_name_error.message.contains("name 1"));
+
+    let mut enum_preflight = chunk_with(Instr::ValidateEnumConstruct {
+        namespace: Some(NamespaceIdx::new(0)),
+        type_name: NameIdx(1),
+        variant: NameIdx(2),
+        shape: EnumConstructShape::Unit,
+        fields: ConstructFieldsIdx(0),
+    });
+    enum_preflight.names = vec!["module".into(), "Maybe".into(), "Some".into()];
+    enum_preflight
+        .namespace_refs
+        .push(NamespaceRef::from_slot(NameIdx(0), SlotIdx(0)));
+    enum_preflight.construct_fields.push(vec![]);
+    let preflight_slot_error = execution_error(enum_preflight);
+    assert!(preflight_slot_error.message.contains("local slot 0"));
+
+    let mut pattern = chunk_with(Instr::MatchFail {
+        pattern: PatternIdx(0),
+        on_fail: CodeOffset(1),
+    });
+    pattern.patterns.push(PatternRecipe {
+        pattern: Rc::new(bop::parser::Pattern::Wildcard),
+        namespaces: vec![("module".into(), NamespaceRef::from_name(NameIdx(0)))],
+    });
+    let name_error = execution_error(pattern);
+    assert!(name_error.message.contains("pattern 0 references name 0"));
 }
 
 #[test]

@@ -7,7 +7,10 @@ use std::collections::BTreeSet;
 
 use bop::error::BopError;
 
-use crate::chunk::{AssignBack, CaptureSource, Chunk, CodeOffset, Instr, InterpPart, SlotIdx};
+use crate::chunk::{
+    AssignBack, CaptureSource, Chunk, CodeOffset, Instr, InterpPart, NamespaceIdx, NamespaceRef,
+    SlotIdx,
+};
 
 /// Validate a bytecode chunk before executing it.
 ///
@@ -157,6 +160,12 @@ impl<'a> Validator<'a> {
             ));
         }
 
+        for (index, recipe) in self.chunk.patterns.iter().enumerate() {
+            for (_, namespace) in &recipe.namespaces {
+                self.namespace_ref(*namespace, 0, &format!("pattern {index}"))?;
+            }
+        }
+
         for (offset, instr) in self.chunk.code.iter().copied().enumerate() {
             self.instruction(instr, offset)?;
         }
@@ -182,6 +191,7 @@ impl<'a> Validator<'a> {
                 self.slot(a, line, &at)?;
                 self.slot(b, line, &at)?;
             }
+            Instr::CompoundAssign { target, .. } => self.assign_back(target, line, &at)?,
             Instr::SetIndexInPlace { target, .. } => self.assign_back(target, line, &at)?,
             Instr::StringInterp(index) => self.pool(
                 index.0,
@@ -247,6 +257,43 @@ impl<'a> Validator<'a> {
                 self.pool(method_name.0, self.chunk.names.len(), line, "name", &at)?;
                 self.pool(fn_idx.0, self.chunk.functions.len(), line, "function", &at)?;
             }
+            Instr::ValidateStructConstruct {
+                namespace,
+                type_name,
+                fields,
+            } => {
+                if let Some(namespace) = namespace {
+                    self.namespace_idx(namespace, line, &at)?;
+                }
+                self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(
+                    fields.0,
+                    self.chunk.construct_fields.len(),
+                    line,
+                    "construction field recipe",
+                    &at,
+                )?;
+            }
+            Instr::ValidateEnumConstruct {
+                namespace,
+                type_name,
+                variant,
+                fields,
+                ..
+            } => {
+                if let Some(namespace) = namespace {
+                    self.namespace_idx(namespace, line, &at)?;
+                }
+                self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(variant.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(
+                    fields.0,
+                    self.chunk.construct_fields.len(),
+                    line,
+                    "construction field recipe",
+                    &at,
+                )?;
+            }
             Instr::ConstructStruct {
                 namespace,
                 type_name,
@@ -254,7 +301,7 @@ impl<'a> Validator<'a> {
             } => {
                 self.pair_count(count, line, &at)?;
                 if let Some(namespace) = namespace {
-                    self.pool(namespace.0, self.chunk.names.len(), line, "name", &at)?;
+                    self.namespace_idx(namespace, line, &at)?;
                 }
                 self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
             }
@@ -268,7 +315,7 @@ impl<'a> Validator<'a> {
                     self.pair_count(count, line, &at)?;
                 }
                 if let Some(namespace) = namespace {
-                    self.pool(namespace.0, self.chunk.names.len(), line, "name", &at)?;
+                    self.namespace_idx(namespace, line, &at)?;
                 }
                 self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
                 self.pool(variant.0, self.chunk.names.len(), line, "name", &at)?;
@@ -335,6 +382,41 @@ impl<'a> Validator<'a> {
                 format!("{detail} has a field-pair count that overflows this target"),
             ))
         }
+    }
+
+    fn namespace_ref(
+        &self,
+        namespace: NamespaceRef,
+        line: u32,
+        detail: &str,
+    ) -> Result<(), BopError> {
+        self.pool(
+            namespace.name_idx().0,
+            self.chunk.names.len(),
+            line,
+            "name",
+            detail,
+        )?;
+        if let Some(slot) = namespace.slot_idx() {
+            self.slot(slot, line, detail)?;
+        }
+        Ok(())
+    }
+
+    fn namespace_idx(
+        &self,
+        namespace: NamespaceIdx,
+        line: u32,
+        detail: &str,
+    ) -> Result<(), BopError> {
+        self.pool(
+            namespace.index(),
+            self.chunk.namespace_refs.len(),
+            line,
+            "namespace reference",
+            detail,
+        )?;
+        self.namespace_ref(self.chunk.namespace_ref(namespace), line, detail)
     }
 
     fn assign_back(&self, target: AssignBack, line: u32, detail: &str) -> Result<(), BopError> {

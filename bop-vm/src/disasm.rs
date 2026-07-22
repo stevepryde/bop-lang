@@ -8,7 +8,7 @@
 #[cfg(feature = "no_std")]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
-use crate::chunk::{Chunk, Constant, Instr, InterpPart, LoopStateKind};
+use crate::chunk::{Chunk, Constant, Instr, InterpPart, LoopStateKind, NamespaceIdx};
 
 /// Render a chunk as a string. One line per instruction; nested
 /// function bodies are indented and follow the main body.
@@ -16,6 +16,18 @@ pub fn disassemble(chunk: &Chunk) -> String {
     let mut out = String::new();
     render_chunk(chunk, &mut out, 0);
     out
+}
+
+fn namespace_prefix(chunk: &Chunk, namespace: Option<NamespaceIdx>) -> String {
+    let Some(namespace_idx) = namespace else {
+        return String::new();
+    };
+    let namespace = chunk.namespace_ref(namespace_idx);
+    let name = chunk.name(namespace.name_idx());
+    match namespace.slot_idx() {
+        Some(slot) => format!("{}.(@{}).", name, slot.0),
+        None => format!("{}.", name),
+    }
 }
 
 fn render_chunk(chunk: &Chunk, out: &mut String, indent: usize) {
@@ -54,6 +66,18 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
 
         Instr::LoadLocal(s) => format!("LoadLocal @{}", s.0),
         Instr::StoreLocal(s) => format!("StoreLocal @{}", s.0),
+        Instr::CompoundAssign { target, op } => match target {
+            crate::chunk::AssignBack::Name(name) => format!(
+                "CompoundAssign{} (target {})",
+                assign_op_suffix(*op),
+                chunk.name(*name)
+            ),
+            crate::chunk::AssignBack::Slot(slot) => format!(
+                "CompoundAssign{} (target @{})",
+                assign_op_suffix(*op),
+                slot.0
+            ),
+        },
 
         Instr::AddLocals(a, b) => format!("AddLocals @{}, @{}", a.0, b.0),
         Instr::LtLocals(a, b) => format!("LtLocals @{}, @{}", a.0, b.0),
@@ -229,15 +253,42 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 fn_idx.0,
             )
         }
+        Instr::ValidateStructConstruct {
+            namespace,
+            type_name,
+            fields,
+        } => {
+            let namespace = namespace_prefix(chunk, *namespace);
+            format!(
+                "ValidateStructConstruct {}{} [{}]",
+                namespace,
+                chunk.name(*type_name),
+                chunk.construct_fields(*fields).join(", ")
+            )
+        }
+        Instr::ValidateEnumConstruct {
+            namespace,
+            type_name,
+            variant,
+            shape,
+            fields,
+        } => {
+            let namespace = namespace_prefix(chunk, *namespace);
+            format!(
+                "ValidateEnumConstruct {}{}::{} {:?} [{}]",
+                namespace,
+                chunk.name(*type_name),
+                chunk.name(*variant),
+                shape,
+                chunk.construct_fields(*fields).join(", ")
+            )
+        }
         Instr::ConstructStruct {
             namespace,
             type_name,
             count,
         } => {
-            let ns_prefix = match namespace {
-                Some(ns) => format!("{}.", chunk.name(*ns)),
-                None => String::new(),
-            };
+            let ns_prefix = namespace_prefix(chunk, *namespace);
             format!(
                 "ConstructStruct {}{}/{}",
                 ns_prefix,
@@ -257,10 +308,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 S::Tuple(n) => format!("Tuple({})", n),
                 S::Struct(n) => format!("Struct({})", n),
             };
-            let ns_prefix = match namespace {
-                Some(ns) => format!("{}.", chunk.name(*ns)),
-                None => String::new(),
-            };
+            let ns_prefix = namespace_prefix(chunk, *namespace);
             format!(
                 "ConstructEnum {}{}::{} {}",
                 ns_prefix,

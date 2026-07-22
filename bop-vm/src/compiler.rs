@@ -11,9 +11,10 @@ use bop::methods;
 use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 
 use crate::chunk::{
-    CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx,
-    EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, Instr, InterpIdx, InterpPart,
-    InterpRecipe, LoopStateKind, NameIdx, PatternIdx, SlotIdx, StructDef, StructIdx,
+    CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, ConstructFieldsIdx, EnumConstructShape,
+    EnumDef, EnumIdx, EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, Instr,
+    InterpIdx, InterpPart, InterpRecipe, LoopStateKind, NameIdx, NamespaceIdx, NamespaceRef,
+    PatternIdx, PatternRecipe, SlotIdx, StructDef, StructIdx,
 };
 use bop::parser::{MatchArm, Pattern, VariantKind};
 
@@ -476,8 +477,44 @@ impl Compiler {
 
     fn add_pattern(&mut self, pat: Pattern) -> PatternIdx {
         let idx = PatternIdx(self.chunk.patterns.len() as u32);
-        self.chunk.patterns.push(Rc::new(pat));
+        let namespaces = pat
+            .namespace_names()
+            .into_iter()
+            .map(|name| {
+                let namespace = self.namespace_ref(&name);
+                (name, namespace)
+            })
+            .collect();
+        self.chunk.patterns.push(PatternRecipe {
+            pattern: Rc::new(pat),
+            namespaces,
+        });
         idx
+    }
+
+    fn add_construct_fields(&mut self, fields: Vec<String>) -> ConstructFieldsIdx {
+        let idx = ConstructFieldsIdx(self.chunk.construct_fields.len() as u32);
+        self.chunk.construct_fields.push(fields);
+        idx
+    }
+
+    fn add_namespace_ref(&mut self, name: &str) -> NamespaceIdx {
+        let namespace = self.namespace_ref(name);
+        let idx = NamespaceIdx::new(self.chunk.namespace_refs.len() as u32);
+        self.chunk.namespace_refs.push(namespace);
+        idx
+    }
+
+    fn namespace_ref(&mut self, name: &str) -> NamespaceRef {
+        let slot = self.current_resolver().and_then(|resolver| resolver.resolve(name));
+        if slot.is_none() {
+            self.note_free_var(name);
+        }
+        let name = self.add_name(name);
+        match slot {
+            Some(slot) => NamespaceRef::from_slot(name, slot),
+            None => NamespaceRef::from_name(name),
+        }
     }
 
     // ─── Statements ───────────────────────────────────────────────
@@ -500,13 +537,30 @@ impl Compiler {
     /// still tracks block-local bindings.
     fn compile_scoped_block(&mut self, stmts: &[Stmt], line: u32) -> Result<(), BopError> {
         let fast = self.current_resolver().is_some();
+        let needs_runtime_import_scope = fast
+            && stmts
+                .iter()
+                .any(|stmt| {
+                    matches!(
+                        &stmt.kind,
+                        StmtKind::Use { .. }
+                            | StmtKind::StructDecl { .. }
+                            | StmtKind::EnumDecl { .. }
+                    )
+                });
         if fast {
             self.current_resolver_mut().unwrap().push_scope();
+            if needs_runtime_import_scope {
+                self.push_runtime_scope(line);
+            }
         } else {
             self.push_runtime_scope(line);
         }
         self.compile_block_no_scope(stmts)?;
         if fast {
+            if needs_runtime_import_scope {
+                self.pop_runtime_scope(line);
+            }
             self.current_resolver_mut().unwrap().pop_scope();
         } else {
             self.pop_runtime_scope(line);
@@ -826,9 +880,33 @@ impl Compiler {
                         self.compile_expr(value)?;
                     }
                     compound => {
-                        self.emit_load_var(slot, n, line);
+                        // Integer literals are infallible and side-effect free,
+                        // so the legacy load/op/store shape is observably
+                        // RHS-first while retaining the VM's small-int
+                        // peephole fusions. Every potentially effectful RHS
+                        // uses the target-aware opcode below.
+                        if slot.is_some() && matches!(value.kind, ExprKind::Int(_)) {
+                            self.emit_load_var(slot, n, line);
+                            self.compile_expr(value)?;
+                            self.emit(binop_for_compound(*compound), line);
+                            self.emit_store_var(slot, n, line);
+                            return Ok(());
+                        }
                         self.compile_expr(value)?;
-                        self.emit(binop_for_compound(*compound), line);
+                        let target = slot
+                            .map(crate::chunk::AssignBack::Slot)
+                            .unwrap_or(crate::chunk::AssignBack::Name(n));
+                        if slot.is_none() {
+                            self.note_free_var(name);
+                        }
+                        self.emit(
+                            Instr::CompoundAssign {
+                                target,
+                                op: in_place_assign_op(*compound),
+                            },
+                            line,
+                        );
+                        return Ok(());
                     }
                 }
                 self.emit_store_var(slot, n, line);
@@ -905,21 +983,17 @@ impl Compiler {
         Ok(())
     }
 
-    /// Emit a variable load that picks the slot fast path when
-    /// the caller already resolved it; otherwise falls back to
-    /// the name-based `LoadVar` and notes the name as a free
-    /// variable for the enclosing lambda's capture list.
     fn emit_load_var(&mut self, slot: Option<SlotIdx>, name: NameIdx, line: u32) {
         match slot {
-            Some(s) => {
-                self.emit(Instr::LoadLocal(s), line);
+            Some(slot) => {
+                self.emit(Instr::LoadLocal(slot), line);
             }
             None => {
                 let name_str = self.chunk.names[name.0 as usize].clone();
                 self.note_free_var(&name_str);
                 self.emit(Instr::LoadVar(name), line);
             }
-        };
+        }
     }
 
     /// Emit a variable store — slot fast path when resolved, name-
@@ -1034,14 +1108,14 @@ impl Compiler {
                 //     — the fast `Call { name }` path does the
                 //     dynamic resolution.
                 //  3. Non-ident callee (`funcs[0](x)`,
-                //     `make_adder(5)(3)`) — evaluate the callee
-                //     onto the stack, then `CallValue`.
+                //     `make_adder(5)(3)`) — evaluate arguments
+                //     first, then the callee, and use `CallValue`.
                 if let ExprKind::Ident(name) = &callee.kind {
                     if let Some(slot) = self.current_resolver().and_then(|r| r.resolve(name)) {
-                        self.emit(Instr::LoadLocal(slot), line);
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
+                        self.emit(Instr::LoadLocal(slot), line);
                         self.emit(
                             Instr::CallValue {
                                 argc: args.len() as u32,
@@ -1073,10 +1147,10 @@ impl Compiler {
                         );
                     }
                 } else {
-                    self.compile_expr(callee)?;
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
+                    self.compile_expr(callee)?;
                     self.emit(
                         Instr::CallValue {
                             argc: args.len() as u32,
@@ -1134,10 +1208,10 @@ impl Compiler {
                             line,
                         );
                     } else {
-                        self.compile_expr(object)?;
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
+                        self.compile_expr(object)?;
                         self.emit(
                             Instr::CallMethod {
                                 method: method_idx,
@@ -1149,10 +1223,10 @@ impl Compiler {
                         );
                     }
                 } else {
-                    self.compile_expr(object)?;
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
+                    self.compile_expr(object)?;
                     self.emit(
                         Instr::CallMethod {
                             method: method_idx,
@@ -1217,6 +1291,19 @@ impl Compiler {
                 type_name,
                 fields,
             } => {
+                let type_idx = self.add_name(type_name);
+                let namespace = namespace.as_ref().map(|ns| self.add_namespace_ref(ns));
+                let construct_fields = self.add_construct_fields(
+                    fields.iter().map(|(name, _)| name.clone()).collect(),
+                );
+                self.emit(
+                    Instr::ValidateStructConstruct {
+                        namespace,
+                        type_name: type_idx,
+                        fields: construct_fields,
+                    },
+                    line,
+                );
                 // Push each (name, value) pair in the order
                 // provided — the VM's `ConstructStruct` handler
                 // does the matching against the declared fields,
@@ -1227,11 +1314,9 @@ impl Compiler {
                     self.emit(Instr::LoadConst(c), line);
                     self.compile_expr(fexpr)?;
                 }
-                let type_idx = self.add_name(type_name);
-                let ns_idx = namespace.as_ref().map(|ns| self.add_name(ns));
                 self.emit(
                     Instr::ConstructStruct {
-                        namespace: ns_idx,
+                        namespace,
                         type_name: type_idx,
                         count: fields.len() as u32,
                     },
@@ -1246,29 +1331,52 @@ impl Compiler {
                 payload,
             } => {
                 use bop::parser::VariantPayload;
+                let type_idx = self.add_name(type_name);
+                let var_idx = self.add_name(variant);
+                let namespace = namespace.as_ref().map(|ns| self.add_namespace_ref(ns));
+                let construct_fields = self.add_construct_fields(match payload {
+                    VariantPayload::Struct(fields) => {
+                        fields.iter().map(|(name, _)| name.clone()).collect()
+                    }
+                    _ => Vec::new(),
+                });
                 let shape = match payload {
                     VariantPayload::Unit => EnumConstructShape::Unit,
                     VariantPayload::Tuple(args) => {
-                        for a in args {
-                            self.compile_expr(a)?;
-                        }
                         EnumConstructShape::Tuple(args.len() as u32)
                     }
                     VariantPayload::Struct(fields) => {
-                        for (fname, fexpr) in fields {
-                            let c = self.add_const(Constant::Str(fname.clone()));
-                            self.emit(Instr::LoadConst(c), line);
-                            self.compile_expr(fexpr)?;
-                        }
                         EnumConstructShape::Struct(fields.len() as u32)
                     }
                 };
-                let type_idx = self.add_name(type_name);
-                let var_idx = self.add_name(variant);
-                let ns_idx = namespace.as_ref().map(|ns| self.add_name(ns));
+                self.emit(
+                    Instr::ValidateEnumConstruct {
+                        namespace,
+                        type_name: type_idx,
+                        variant: var_idx,
+                        shape,
+                        fields: construct_fields,
+                    },
+                    line,
+                );
+                match payload {
+                    VariantPayload::Unit => {}
+                    VariantPayload::Tuple(args) => {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                    }
+                    VariantPayload::Struct(fields) => {
+                        for (name, expr) in fields {
+                            let name = self.add_const(Constant::Str(name.clone()));
+                            self.emit(Instr::LoadConst(name), line);
+                            self.compile_expr(expr)?;
+                        }
+                    }
+                }
                 self.emit(
                     Instr::ConstructEnum {
-                        namespace: ns_idx,
+                        namespace,
                         type_name: type_idx,
                         variant: var_idx,
                         shape,
@@ -1350,11 +1458,15 @@ impl Compiler {
 
         for arm in arms {
             let arm_line = arm.line;
+            // Namespace references belong to the environment before this
+            // arm's bindings exist. Record the pattern recipe first so a
+            // pattern such as `dep.Point { dep }` still captures/resolves the
+            // outer `dep`; the field binding only enters scope after matching.
+            let pat_idx = self.add_pattern(arm.pattern.clone());
             let runtime_bindings = arm.pattern.binding_names().into_iter().collect();
             self.runtime_bindings.push(runtime_bindings);
             self.push_runtime_scope(arm_line);
             self.emit(Instr::Dup, arm_line);
-            let pat_idx = self.add_pattern(arm.pattern.clone());
             let match_fail_site = self.emit(
                 Instr::MatchFail {
                     pattern: pat_idx,

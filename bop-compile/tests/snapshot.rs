@@ -499,8 +499,8 @@ fn module_paths_that_only_differ_by_dot_and_underscore_do_not_collide() {
             "fn __bop_user_fn_m615f62_n68656c706572(",
         ],
     );
-    assert!(!out.contains("__load"));
-    assert!(!out.contains("__Exports"));
+    assert!(!out.contains("fn __mod_a_b_load("));
+    assert!(!out.contains("struct BopModulea_bExports"));
 }
 
 #[test]
@@ -1031,6 +1031,54 @@ use dep as dep"#,
 }
 
 #[test]
+fn declaration_alias_binding_precedes_same_named_parameter_binding() {
+    let output = compile_with_modules(
+        r#"use types as t
+fn build(t) { return t.Point { value: 42 } }"#,
+        &[("types", "struct Point { value }")],
+    )
+    .expect("transpile declaration alias shadowed by a parameter");
+    let function = output
+        .split_once("fn __bop_user_fn_n6275696c64(")
+        .expect("lifted build function")
+        .1;
+    let parameter_binding = function
+        .find("let mut __bop_user_value_74: ::bop::value::Value = __bop_param_0;")
+        .expect("Bop parameter binding");
+    assert_eq!(parameter_binding, function.find("let mut __bop_user_value_74").unwrap());
+    assert!(
+        !function[..function.find("fn __bop_try_user_method").unwrap()]
+            .contains("ctx.module_aliases.get"),
+        "a same-named parameter must suppress declaration-alias restoration:\n{function}"
+    );
+}
+
+#[test]
+fn module_loader_clears_declaration_alias_context_after_failure() {
+    let output = compile_with_modules(
+        "use holder",
+        &[(
+            "holder",
+            "use types as dep\nlet broken = 1 / 0",
+        ), ("types", "let value = 42")],
+    )
+    .expect("transpile failing module body");
+    let loader = output
+        .split_once(&module_load_marker("holder"))
+        .expect("holder loader")
+        .1;
+    let loader = loader
+        .split_once("fn ")
+        .map_or(loader, |(loader, _)| loader);
+    assert!(loader.contains("let __load_result = (||"));
+    assert!(loader.contains("if __load_result.is_err()"));
+    assert!(loader.contains("ctx.module_cache.remove(\"holder\")"));
+    assert!(loader.contains(
+        "ctx.module_aliases.retain(|(module, _), _| module != \"holder\")"
+    ));
+}
+
+#[test]
 fn block_local_module_alias_does_not_leak_into_the_enclosing_scope() {
     let error = compile_with_modules(
         r#"if true {
@@ -1141,8 +1189,8 @@ let result = match value {
     )
     .expect("an unselected pattern type remains a legal non-matching pattern");
 
-    assert!(out.contains("Option::Some(\"narrowed\"), \"A\""));
-    assert!(!out.contains("Option::Some(\"narrowed\"), \"B\""));
+    assert!(out.contains("Option::Some(\"narrowed\"), __tn"));
+    assert!(out.contains("__module.types.iter().any(|__type| __type == __tn)"));
 }
 
 #[test]

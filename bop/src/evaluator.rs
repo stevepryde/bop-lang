@@ -66,6 +66,18 @@ struct ModuleBindings {
     /// type_name), method_name, fn_def)` — the importer merges
     /// these directly into its own `methods` table.
     methods: Vec<((String, String), String, FnDef)>,
+    /// Module-owned lexical metadata that named functions and methods need
+    /// after the loading evaluator has gone away. Installed as a protected
+    /// outer call frame so caller-local aliases/types cannot affect the
+    /// callee, while the callee's own locals remain free to shadow it.
+    lexical_context: Rc<ModuleLexicalContext>,
+}
+
+#[derive(Clone, Default)]
+struct ModuleLexicalContext {
+    type_bindings: BTreeMap<String, String>,
+    module_aliases: BTreeMap<String, Rc<crate::value::BopModule>>,
+    imported_functions: BTreeMap<String, FnDef>,
 }
 
 type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
@@ -264,12 +276,23 @@ impl FreeVariableCollector {
                 }
             }
             ExprKind::FieldAccess { object, .. } => self.visit_expr(object),
-            ExprKind::StructConstruct { fields, .. } => {
+            ExprKind::StructConstruct {
+                namespace, fields, ..
+            } => {
+                if let Some(namespace) = namespace {
+                    self.reference(namespace);
+                }
                 for (_, value) in fields {
                     self.visit_expr(value);
                 }
             }
-            ExprKind::EnumConstruct { payload, .. } => match payload {
+            ExprKind::EnumConstruct {
+                namespace, payload, ..
+            } => {
+                if let Some(namespace) = namespace {
+                    self.reference(namespace);
+                }
+                match payload {
                 VariantPayload::Unit => {}
                 VariantPayload::Tuple(values) => {
                     for value in values {
@@ -281,7 +304,8 @@ impl FreeVariableCollector {
                         self.visit_expr(value);
                     }
                 }
-            },
+                }
+            }
             ExprKind::Index { object, index } => {
                 self.visit_expr(object);
                 self.visit_expr(index);
@@ -314,6 +338,9 @@ impl FreeVariableCollector {
             ExprKind::Match { scrutinee, arms } => {
                 self.visit_expr(scrutinee);
                 for arm in arms {
+                    for namespace in arm.pattern.namespace_names() {
+                        self.reference(&namespace);
+                    }
                     let bindings = arm.pattern.binding_names();
                     self.scopes.push(bindings);
                     if let Some(guard) = &arm.guard {
@@ -385,6 +412,11 @@ pub struct Evaluator<'h, H: BopHost> {
     /// value scopes. This keeps direct calls fast without publishing a local
     /// import in the evaluator-wide named-function registry.
     imported_functions: Vec<BTreeMap<String, FnDef>>,
+    /// Current module namespace, refreshed only by top-level declarations and
+    /// imports. Calls clone this one Rc and keep mutable locals in ordinary
+    /// per-call maps.
+    root_lexical_context: Rc<ModuleLexicalContext>,
+    active_lexical_contexts: Vec<Rc<ModuleLexicalContext>>,
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
@@ -425,6 +457,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     pub fn new(host: &'h mut H, limits: BopLimits) -> Self {
         crate::memory::bop_memory_init(limits.max_memory);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
+        let root_lexical_context = Rc::new(ModuleLexicalContext {
+            type_bindings: builtin_bindings.clone(),
+            module_aliases: BTreeMap::new(),
+            imported_functions: BTreeMap::new(),
+        });
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
@@ -435,6 +472,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             type_bindings: vec![builtin_bindings],
             module_aliases: vec![BTreeMap::new()],
             imported_functions: vec![BTreeMap::new()],
+            root_lexical_context,
+            active_lexical_contexts: Vec::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -462,6 +501,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         module_path: String,
     ) -> Self {
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
+        let root_lexical_context = Rc::new(ModuleLexicalContext {
+            type_bindings: builtin_bindings.clone(),
+            module_aliases: BTreeMap::new(),
+            imported_functions: BTreeMap::new(),
+        });
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
@@ -472,6 +516,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             type_bindings: vec![builtin_bindings],
             module_aliases: vec![BTreeMap::new()],
             imported_functions: vec![BTreeMap::new()],
+            root_lexical_context,
+            active_lexical_contexts: Vec::new(),
             host,
             steps: 0,
             call_depth: 0,
@@ -562,8 +608,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .filter(|(index, _)| floor.is_none_or(|floor| *index >= floor))
             .find_map(|(_, frame)| frame.get(name))
+            .or_else(|| {
+                self.active_lexical_contexts
+                    .last()
+                    .and_then(|context| context.module_aliases.get(name))
+            })
     }
 
     fn imported_function(&self, name: &str) -> Option<&FnDef> {
@@ -572,8 +623,32 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .filter(|(index, _)| floor.is_none_or(|floor| *index >= floor))
             .find_map(|(_, frame)| frame.get(name))
+            .or_else(|| {
+                self.active_lexical_contexts
+                    .last()
+                    .and_then(|context| context.imported_functions.get(name))
+            })
+    }
+
+    fn module_lexical_context(&self, module_path: &str) -> Rc<ModuleLexicalContext> {
+        if module_path == self.current_module {
+            return Rc::clone(&self.root_lexical_context);
+        }
+        let cache = self.imports.borrow();
+        match cache.get(module_path) {
+            Some(ImportSlot::Loaded(bindings)) => Rc::clone(&bindings.lexical_context),
+            _ => Rc::new(ModuleLexicalContext::default()),
+        }
+    }
+
+    fn refresh_root_lexical_context(&mut self) {
+        self.root_lexical_context = Rc::new(ModuleLexicalContext {
+            type_bindings: self.type_bindings.first().cloned().unwrap_or_default(),
+            module_aliases: self.module_aliases.first().cloned().unwrap_or_default(),
+            imported_functions: self.imported_functions.first().cloned().unwrap_or_default(),
+        });
     }
 
     fn is_module_top_scope(&self) -> bool {
@@ -588,11 +663,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     /// `validate_namespaced_type` and its backing module path
     /// returned. Returns `None` when no matching type is visible.
     fn resolve_type_ref(&self, namespace: Option<&str>, type_name: &str) -> Option<String> {
-        resolve_type_in_scoped(
+        resolve_type_in_evaluator_context(
             &self.scopes,
             &self.type_bindings,
             &self.module_aliases,
             self.alias_scope_floors.last().copied(),
+            self.active_lexical_contexts.last().map(Rc::as_ref),
             namespace,
             type_name,
         )
@@ -607,6 +683,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     fn bind_local_type(&mut self, name: &str) {
         if let Some(top) = self.type_bindings.last_mut() {
             top.insert(name.to_string(), self.current_module.clone());
+        }
+        if self.is_module_top_scope() {
+            self.refresh_root_lexical_context();
         }
     }
 
@@ -625,6 +704,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         None
     }
 
+    fn get_var_value(&self, name: &str) -> Option<Value> {
+        self.get_var(name)
+            .cloned()
+            .or_else(|| self.module_alias(name).map(|module| Value::Module(Rc::clone(module))))
+    }
+
     fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(value) = scope.get_mut(name) {
@@ -634,12 +719,29 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         None
     }
 
+    fn has_active_declaration_alias(&self, name: &str) -> bool {
+        self.active_lexical_contexts
+            .last()
+            .is_some_and(|context| context.module_aliases.contains_key(name))
+    }
+
     fn set_var(&mut self, name: &str, value: Value) -> bool {
         for scope in self.scopes.iter_mut().rev() {
             if scope.contains_key(name) {
                 scope.insert(name.to_string(), value);
                 return true;
             }
+        }
+        if self
+            .active_lexical_contexts
+            .last()
+            .is_some_and(|context| context.module_aliases.contains_key(name))
+        {
+            self.scopes
+                .first_mut()
+                .expect("function call base scope")
+                .insert(name.to_string(), value);
+            return true;
         }
         false
     }
@@ -700,9 +802,24 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 }
             }
         }
-        self.imported_function(name)
-            .cloned()
-            .or_else(|| self.functions.get(name).cloned())
+        if let Some(function) = self.imported_function(name) {
+            return Some(function.clone());
+        }
+        let defining_module = self.function_modules.last().map(String::as_str);
+        if let Some(module_path) = defining_module {
+            if let Some(function) = self
+                .functions
+                .get(name)
+                .filter(|function| function.module_path == module_path)
+            {
+                return Some(function.clone());
+            }
+        }
+        if defining_module.is_none_or(|path| path == self.current_module) {
+            self.functions.get(name).cloned()
+        } else {
+            None
+        }
     }
 
     // ─── Statements ────────────────────────────────────────────────
@@ -1098,6 +1215,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         alias: Option<&str>,
         line: u32,
     ) -> Result<(), BopError> {
+        let refresh_root_context = self.is_module_top_scope();
         // Idempotent at the glob injection site: re-importing a
         // module already applied is a no-op. Aliased / selective
         // forms don't enter this cache — they always run, because
@@ -1381,6 +1499,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 .expect("import scope")
                 .insert(path.to_string());
         }
+        if refresh_root_context {
+            self.refresh_root_lexical_context();
+        }
         Ok(())
     }
 
@@ -1504,12 +1625,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 methods.push((type_key.clone(), method_name, fn_def));
             }
         }
+        let lexical_context = Rc::new(ModuleLexicalContext {
+            type_bindings: sub.type_bindings.into_iter().next().unwrap_or_default(),
+            module_aliases: sub.module_aliases.into_iter().next().unwrap_or_default(),
+            imported_functions: sub.imported_functions.into_iter().next().unwrap_or_default(),
+        });
         Ok(ModuleBindings {
             bindings,
             fn_decls,
             struct_defs,
             enum_defs,
             methods,
+            lexical_context,
         })
     }
 
@@ -1652,8 +1779,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
             (VariantKind::Struct(decl_fields), VariantPayload::Struct(provided)) => {
                 let mut seen = alloc_import::collections::BTreeSet::new();
-                let mut provided_map: BTreeMap<String, Value> = BTreeMap::new();
-                for (fname, fexpr) in provided {
+                for (fname, _) in provided {
                     if !seen.insert(fname.clone()) {
                         return Err(error(
                             line,
@@ -1671,23 +1797,31 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             ),
                         ));
                     }
+                }
+                for decl_field in decl_fields {
+                    if !seen.contains(decl_field) {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Missing field `{}` in `{}::{}` construction",
+                                decl_field, type_name, variant
+                            ),
+                        ));
+                    }
+                }
+                let mut provided_map: BTreeMap<String, Value> = BTreeMap::new();
+                for (fname, fexpr) in provided {
                     provided_map.insert(fname.clone(), self.eval_expr(fexpr)?);
                 }
                 let mut values: Vec<(String, Value)> =
                     Vec::with_capacity(decl_fields.len());
                 for decl_field in decl_fields {
-                    match provided_map.remove(decl_field) {
-                        Some(v) => values.push((decl_field.clone(), v)),
-                        None => {
-                            return Err(error(
-                                line,
-                                format!(
-                                    "Missing field `{}` in `{}::{}` construction",
-                                    decl_field, type_name, variant
-                                ),
-                            ));
-                        }
-                    }
+                    values.push((
+                        decl_field.clone(),
+                        provided_map
+                            .remove(decl_field)
+                            .expect("variant shape validated before payload evaluation"),
+                    ));
                 }
                 Value::try_new_enum_struct(
                     module_path,
@@ -1734,11 +1868,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     AssignOp::Eq => new_val,
                     _ => {
                         let current = self
-                            .get_var(name)
+                            .get_var_value(name)
                             .ok_or_else(|| {
-                                error(line, format!("Variable `{}` doesn't exist yet", name))
-                            })?
-                            .clone();
+                                error(line, crate::error_messages::variable_not_found(name))
+                            })?;
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };
@@ -1767,6 +1900,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         };
                         let current = if let Some(obj) = self.get_var(name) {
                             ops::index_get(obj, &idx, line)?
+                        } else if self.has_active_declaration_alias(name) {
+                            return Err(error(
+                                line,
+                                crate::error_messages::variable_not_found(name),
+                            ));
                         } else {
                             // Preserve the identifier evaluator's existing
                             // not-found hint / named-function fallback on the
@@ -1778,8 +1916,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 };
                 if let ExprKind::Ident(name) = &object.kind {
+                    let declaration_alias = self.has_active_declaration_alias(name);
                     let obj = self.get_var_mut(name).ok_or_else(|| {
-                        error(line, format!("Variable `{}` doesn't exist", name))
+                        if declaration_alias {
+                            error(line, crate::error_messages::variable_not_found(name))
+                        } else {
+                            error(line, format!("Variable `{}` doesn't exist", name))
+                        }
                     })?;
                     // Mutate through the live binding. Cloning the receiver
                     // first would temporarily raise its CoW refcount and force
@@ -1808,11 +1951,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                 };
+                let declaration_alias = self.has_active_declaration_alias(&name);
                 let val_to_set = match op {
                     AssignOp::Eq => new_val,
                     _ => {
                         let obj = self.get_var(&name).ok_or_else(|| {
-                            error(line, format!("Variable `{}` doesn't exist", name))
+                            if declaration_alias {
+                                error(line, crate::error_messages::variable_not_found(&name))
+                            } else {
+                                error(line, format!("Variable `{}` doesn't exist", name))
+                            }
                         })?;
                         let current = match obj {
                             Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
@@ -1838,7 +1986,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 };
                 let obj = self.get_var_mut(&name).ok_or_else(|| {
-                    error(line, format!("Variable `{}` doesn't exist", name))
+                    if declaration_alias {
+                        error(line, crate::error_messages::variable_not_found(&name))
+                    } else {
+                        error(line, format!("Variable `{}` doesn't exist", name))
+                    }
                 })?;
                 match obj {
                     Value::Struct(s) => {
@@ -1899,11 +2051,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         StringPart::Literal(s) => result.push_str(s),
                         StringPart::Variable(name) => {
                             let val = self
-                                .get_var(name)
+                                .get_var_value(name)
                                 .ok_or_else(|| {
                                     error_at(expr.line, expr.column, crate::error_messages::variable_not_found(name))
-                                })?
-                                .clone();
+                                })?;
                             result.push_str(&format!("{}", val));
                         }
                     }
@@ -1914,8 +2065,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             ExprKind::Ident(name) => {
                 // Lexical lookup first — matches the intuition that
                 // `let x = ...` locally shadows everything else.
-                if let Some(v) = self.get_var(name) {
-                    return Ok(v.clone());
+                if let Some(v) = self.get_var_value(name) {
+                    return Ok(v);
                 }
                 // Fall back to named `fn` declarations so they can
                 // be passed around as first-class values. The
@@ -1994,6 +2145,21 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     // silently dispatch to the builtin.
                     if let Some(v) = self.get_var(name).cloned() {
                         return self.call_value(v, eval_args, expr.line, Some(name));
+                    }
+                    let declaration_alias = self.active_lexical_contexts.last().and_then(|context| {
+                        if context.module_aliases.is_empty() {
+                            None
+                        } else {
+                            context.module_aliases.get(name).cloned()
+                        }
+                    });
+                    if let Some(module) = declaration_alias {
+                        return self.call_value(
+                            Value::Module(module),
+                            eval_args,
+                            expr.line,
+                            Some(name),
+                        );
                     }
                     // Otherwise fall through to the original
                     // name-based dispatch (builtins → host → named
@@ -2304,13 +2470,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 // fields. The per-field loops below produce the
                 // specific messages the tests assert on.
                 let mut seen = alloc_import::collections::BTreeSet::new();
-                let mut values: Vec<(String, Value)> =
-                    Vec::with_capacity(decl_fields.len());
-                // Evaluate provided fields by name, then emit them
-                // in *declaration* order so the `Value::Struct`'s
-                // field list is stable across construction sites.
-                let mut provided: BTreeMap<String, Value> = BTreeMap::new();
-                for (fname, fexpr) in fields {
+                for (fname, _) in fields {
                     if !seen.insert(fname.clone()) {
                         return Err(error(
                             expr.line,
@@ -2331,21 +2491,31 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         };
                         return Err(err);
                     }
-                    provided.insert(fname.clone(), self.eval_expr(fexpr)?);
                 }
                 for decl in &decl_fields {
-                    match provided.remove(decl) {
-                        Some(v) => values.push((decl.clone(), v)),
-                        None => {
-                            return Err(error(
-                                expr.line,
-                                format!(
-                                    "Missing field `{}` in `{}` construction",
-                                    decl, type_name
-                                ),
-                            ));
-                        }
+                    if !seen.contains(decl) {
+                        return Err(error(
+                            expr.line,
+                            format!(
+                                "Missing field `{}` in `{}` construction",
+                                decl, type_name
+                            ),
+                        ));
                     }
+                }
+                let mut provided: BTreeMap<String, Value> = BTreeMap::new();
+                for (fname, fexpr) in fields {
+                    provided.insert(fname.clone(), self.eval_expr(fexpr)?);
+                }
+                let mut values: Vec<(String, Value)> =
+                    Vec::with_capacity(decl_fields.len());
+                for decl in &decl_fields {
+                    values.push((
+                        decl.clone(),
+                        provided
+                            .remove(decl)
+                            .expect("struct shape validated before payload evaluation"),
+                    ));
                 }
                 Value::try_new_struct(module_path, type_name.clone(), values, expr.line)
             }
@@ -2465,11 +2635,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             let module_aliases = &self.module_aliases;
             let alias_scope_floor = self.alias_scope_floors.last().copied();
             let resolver = |ns: Option<&str>, tn: &str| -> Option<String> {
-                resolve_type_in_scoped(
+                resolve_type_in_evaluator_context(
                     scopes,
                     type_bindings,
                     module_aliases,
                     alias_scope_floor,
+                    self.active_lexical_contexts.last().map(Rc::as_ref),
                     ns,
                     tn,
                 )
@@ -2631,12 +2802,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // type decl inside the fn body still ends up scoped to
         // that fn and vanishes on return.
         self.call_depth += 1;
-        self.function_modules.push(
-            func.module_path
-                .clone()
-                .unwrap_or_else(|| crate::value::ROOT_MODULE_PATH.to_string()),
-        );
+        let function_module = func
+            .module_path
+            .clone()
+            .unwrap_or_else(|| crate::value::ROOT_MODULE_PATH.to_string());
+        let lexical_context = self.module_lexical_context(&function_module);
+        self.function_modules.push(function_module);
+        self.active_lexical_contexts.push(lexical_context);
         let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
+        let type_scope_floor = self.type_bindings.len();
         self.type_bindings.push(BTreeMap::new());
         let alias_scope_floor = self.module_aliases.len();
         self.module_aliases.push(BTreeMap::new());
@@ -2662,11 +2836,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
         let result = self.exec_block(body);
         self.scopes = saved_scopes;
-        self.type_bindings.pop();
+        self.type_bindings.truncate(type_scope_floor);
         self.module_aliases.truncate(alias_scope_floor);
         self.imported_functions.truncate(alias_scope_floor);
         self.alias_scope_floors.pop();
         self.imported_here.truncate(alias_scope_floor);
+        self.active_lexical_contexts.pop();
         self.function_modules.pop();
         self.call_depth -= 1;
 
@@ -3152,18 +3327,78 @@ pub fn resolve_type_in(
     )
 }
 
-/// Scoped variant used by evaluators that retain one module-alias frame per
-/// lexical value scope. Frame zero remains visible across function calls;
-/// `alias_scope_floor` hides active caller-local frames below the callee.
-#[doc(hidden)]
-pub fn resolve_type_in_scoped(
+fn resolve_type_in_evaluator_context(
     value_scopes: &[BTreeMap<String, Value>],
     type_scopes: &[BTreeMap<String, String>],
     module_aliases: &[BTreeMap<String, Rc<crate::value::BopModule>>],
-    alias_scope_floor: Option<usize>,
+    local_floor: Option<usize>,
+    defining_context: Option<&ModuleLexicalContext>,
     namespace: Option<&str>,
     type_name: &str,
 ) -> Option<String> {
+    if let Some(namespace) = namespace {
+        for scope in value_scopes.iter().rev() {
+            if let Some(value) = scope.get(namespace) {
+                return match value {
+                    Value::Module(module)
+                        if module.types.iter().any(|candidate| candidate == type_name) =>
+                    {
+                        Some(module.path.clone())
+                    }
+                    _ => None,
+                };
+            }
+        }
+        for (index, aliases) in module_aliases.iter().enumerate().rev() {
+            if local_floor.is_some_and(|floor| index < floor) {
+                continue;
+            }
+            if let Some(module) = aliases.get(namespace) {
+                return module
+                    .types
+                    .iter()
+                    .any(|candidate| candidate == type_name)
+                    .then(|| module.path.clone());
+            }
+        }
+        return defining_context
+            .and_then(|context| context.module_aliases.get(namespace))
+            .and_then(|module| {
+                module
+                    .types
+                    .iter()
+                    .any(|candidate| candidate == type_name)
+                    .then(|| module.path.clone())
+            });
+    }
+
+    for (index, bindings) in type_scopes.iter().enumerate().rev() {
+        if local_floor.is_some_and(|floor| index < floor) {
+            continue;
+        }
+        if let Some(module_path) = bindings.get(type_name) {
+            return Some(module_path.clone());
+        }
+    }
+    defining_context.and_then(|context| context.type_bindings.get(type_name).cloned())
+}
+
+/// Scoped variant used by evaluators that retain one module-alias frame per
+/// lexical value scope. At call time the defining module's context is copied
+/// at `alias_scope_floor`, so every caller frame below that floor is hidden.
+#[doc(hidden)]
+pub fn resolve_type_in_scoped<T, A>(
+    value_scopes: &[BTreeMap<String, Value>],
+    type_scopes: &[T],
+    module_aliases: &[A],
+    alias_scope_floor: Option<usize>,
+    namespace: Option<&str>,
+    type_name: &str,
+) -> Option<String>
+where
+    T: core::borrow::Borrow<BTreeMap<String, String>>,
+    A: core::borrow::Borrow<BTreeMap<String, Rc<crate::value::BopModule>>>,
+{
     if let Some(ns) = namespace {
         // First: look the alias up in value scopes (catches
         // locally-bound modules, if any). Then fall back to
@@ -3181,10 +3416,10 @@ pub fn resolve_type_in_scoped(
             }
         }
         for (index, frame) in module_aliases.iter().enumerate().rev() {
-            if alias_scope_floor.is_some_and(|floor| index != 0 && index < floor) {
+            if alias_scope_floor.is_some_and(|floor| index < floor) {
                 continue;
             }
-            if let Some(module) = frame.get(ns) {
+            if let Some(module) = frame.borrow().get(ns) {
                 if module.types.iter().any(|ty| ty == type_name) {
                     return Some(module.path.clone());
                 }
@@ -3193,8 +3428,11 @@ pub fn resolve_type_in_scoped(
         }
         return None;
     }
-    for scope in type_scopes.iter().rev() {
-        if let Some(mp) = scope.get(type_name) {
+    for (index, scope) in type_scopes.iter().enumerate().rev() {
+        if alias_scope_floor.is_some_and(|floor| index < floor) {
+            continue;
+        }
+        if let Some(mp) = scope.borrow().get(type_name) {
             return Some(mp.clone());
         }
     }
@@ -3629,6 +3867,11 @@ impl ReplSession {
         host: &'h mut H,
         limits: BopLimits,
     ) -> Evaluator<'h, H> {
+        let root_lexical_context = Rc::new(ModuleLexicalContext {
+            type_bindings: self.type_bindings.first().cloned().unwrap_or_default(),
+            module_aliases: self.module_aliases.first().cloned().unwrap_or_default(),
+            imported_functions: self.imported_functions.first().cloned().unwrap_or_default(),
+        });
         Evaluator {
             scopes: core::mem::take(&mut self.scopes),
             functions: core::mem::take(&mut self.functions),
@@ -3639,6 +3882,8 @@ impl ReplSession {
             type_bindings: core::mem::take(&mut self.type_bindings),
             module_aliases: core::mem::take(&mut self.module_aliases),
             imported_functions: core::mem::take(&mut self.imported_functions),
+            root_lexical_context,
+            active_lexical_contexts: Vec::new(),
             imports: Rc::clone(&self.imports),
             imported_here: core::mem::take(&mut self.imported_here),
             rand_state: self.rand_state,
@@ -3743,6 +3988,16 @@ mod array_mutation_tests {
             .run(&statements)
             .expect("program should run");
         host.prints
+    }
+
+    #[test]
+    fn named_calls_reuse_one_shared_module_context() {
+        let mut host = TestHost::default();
+        let evaluator = Evaluator::new(&mut host, crate::BopLimits::standard());
+        let context = evaluator.module_lexical_context(crate::value::ROOT_MODULE_PATH);
+
+        assert!(Rc::ptr_eq(&context, &evaluator.root_lexical_context));
+        assert_eq!(Rc::strong_count(&context), 2);
     }
 
     #[test]

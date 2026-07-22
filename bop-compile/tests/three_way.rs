@@ -1408,6 +1408,504 @@ print(square(7))"#,
         &[("math", "fn square(n) { return n * n }")],
     ),
     (
+        "root_named_fn_declaration_alias_context",
+        r#"use types as t
+fn build(value) {
+    let direct = t.Point { value: value }
+    let called = t.make(direct.value + 1)
+    return match called { t.Point { value: found } => found, _ => 0 }
+}
+print(build(41))"#,
+        &[(
+            "types",
+            "struct Point { value }\nfn make(value) { return Point { value: value } }",
+        )],
+    ),
+    (
+        "declaration_alias_is_shadowed_by_parameter",
+        r#"use types as t
+fn build(t) { return t.Point { value: 42 } }
+print(build(1))"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "future_alias_struct_namespace_precedes_payload",
+        r#"fn invalid() { return dep.Stack { items: panic("payload") } }
+invalid()
+use types as dep"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "future_alias_enum_tuple_namespace_precedes_payload",
+        r#"fn invalid() { return dep.Maybe::Some(panic("payload")) }
+invalid()
+use types as dep"#,
+        &[("types", "enum Maybe { Some(value) }")],
+    ),
+    (
+        "future_alias_enum_struct_namespace_precedes_payload",
+        r#"fn invalid() { return dep.Maybe::Named { value: panic("payload") } }
+invalid()
+use types as dep"#,
+        &[("types", "enum Maybe { Named { value } }")],
+    ),
+    (
+        "future_alias_method_arguments_precede_receiver",
+        r#"fn invalid() { return dep.nope(panic("payload")) }
+invalid()
+use types as dep"#,
+        &[("types", "fn exported(value) { return value }")],
+    ),
+    (
+        "ordinary_method_arguments_precede_receiver",
+        r#"fn invalid() { return "receiver".nope(panic("payload")) }
+invalid()"#,
+        &[],
+    ),
+    (
+        "non_ident_call_arguments_precede_callee",
+        r#"fn invalid() { return dep["exported"](panic("payload")) }
+invalid()
+use types as dep"#,
+        &[("types", "fn exported(value) { return value }")],
+    ),
+    (
+        "dynamic_struct_namespace_without_declaration_seed",
+        r#"use second as other
+fn make(module) { return module.Point { second: 2 } }
+fn is_second(value) {
+    return match value { other.Point { second: found } => found == 2, _ => false }
+}
+print(is_second(make(other)))"#,
+        &[("second", "struct Point { second }")],
+    ),
+    (
+        "dynamic_struct_namespace_shadow_uses_runtime_identity_and_shape",
+        r#"use first as dep
+use second as other
+fn make(dep) { return dep.Point { second: 2 } }
+fn is_second(value) {
+    return match value { other.Point { second: found } => found == 2, _ => false }
+}
+print(is_second(make(other)))"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+        ],
+    ),
+    (
+        "dynamic_enum_namespace_unit_tuple_and_struct",
+        r#"use second as other
+fn unit(module) { return module.State::Ready }
+fn tuple(module) { return module.TupleState::Item(2) }
+fn named(module) { return module.NamedState::Item { second: 3 } }
+print(match unit(other) { other.State::Ready => true, _ => false })
+print(match tuple(other) { other.TupleState::Item(value) => value, _ => 0 })
+print(match named(other) { other.NamedState::Item { second: value } => value, _ => 0 })"#,
+        &[(
+            "second",
+            "enum State { Ready }\nenum TupleState { Item(value) }\nenum NamedState { Item { second } }",
+        )],
+    ),
+    (
+        "dynamic_enum_namespace_shadow_uses_runtime_shape",
+        r#"use first as dep
+use second as other
+fn tuple(dep) { return dep.TupleState::Item(2) }
+fn named(dep) { return dep.NamedState::Item { second: 3 } }
+print(match tuple(other) { other.TupleState::Item(value) => value, _ => 0 })
+print(match named(other) { other.NamedState::Item { second: value } => value, _ => 0 })"#,
+        &[
+            (
+                "first",
+                "enum TupleState { Item(left, right) }\nenum NamedState { Item { first } }",
+            ),
+            (
+                "second",
+                "enum TupleState { Item(value) }\nenum NamedState { Item { second } }",
+            ),
+        ],
+    ),
+    (
+        "dynamic_constructor_shape_precedes_payload",
+        r#"use types as module
+fn invalid_struct(ns) { return ns.Stack { wrong: panic("payload") } }
+invalid_struct(module)"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "dynamic_enum_variant_and_arity_precede_payload",
+        r#"use types as module
+fn invalid_enum(ns) { return ns.Maybe::Some(panic("payload"), 2) }
+invalid_enum(module)"#,
+        &[("types", "enum Maybe { Some(value) }")],
+    ),
+    (
+        "reassigned_declaration_alias_constructs_runtime_struct_identity",
+        r#"use first as dep
+use second as other
+fn make() {
+    dep = other
+    return dep.Point { second: 2 }
+}
+print(match make() { other.Point { second: value } => value, _ => 0 })"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+        ],
+    ),
+    (
+        "reassigned_local_alias_constructs_runtime_enum_identity",
+        r#"use second as other
+fn make() {
+    use first as dep
+    dep = other
+    return dep.State::Item { second: 3 }
+}
+print(match make() { other.State::Item { second: value } => value, _ => 0 })"#,
+        &[
+            ("first", "enum State { Item { first } }"),
+            ("second", "enum State { Item { second } }"),
+        ],
+    ),
+    (
+        "loop_carried_alias_mutation_uses_runtime_struct_and_enum_shapes",
+        r#"use first as dep
+use second as other
+let i = 0
+while i < 2 {
+    if i == 1 {
+        let point = dep.Point { second: 2 }
+        let state = dep.State::Item { second: 3 }
+        print(match point { other.Point { second: value } => value, _ => 0 })
+        print(match state { other.State::Item { second: value } => value, _ => 0 })
+    }
+    dep = other
+    i += 1
+}"#,
+        &[
+            (
+                "first",
+                "struct Point { first }\nenum State { Item { first } }",
+            ),
+            (
+                "second",
+                "struct Point { second }\nenum State { Item { second } }",
+            ),
+        ],
+    ),
+    (
+        "compound_assignment_rhs_precedes_future_alias_target",
+        r#"fn invalid() { dep += panic("payload") }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "index_compound_assignment_rhs_precedes_future_alias_target",
+        r#"fn invalid() { dep[panic("index")] += panic("payload") }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "field_compound_assignment_rhs_precedes_future_alias_target",
+        r#"fn invalid() { dep.value += panic("payload") }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "declaration_alias_assignment_creates_call_local_overlay",
+        r#"use types as dep
+fn replace() {
+    dep = 1
+    return dep
+}
+print(replace(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_compound_assignment_uses_local_overlay",
+        r#"use types as dep
+fn increment() {
+    dep = 1
+    dep += 2
+    return dep
+}
+fn invalid() { dep += 1 }
+print(increment(), try_call(invalid).is_err(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_interpolation_call_and_local_shadow",
+        r#"use holder as holder
+print(holder.show(), holder.Holder { value: 0 }.show())
+print(holder.shadow("local"), holder.call_push())"#,
+        &[
+            (
+                "types",
+                "struct Point { value }\nfn push(value) { return value + 1 }",
+            ),
+            (
+                "holder",
+                r#"use types as dep
+struct Holder { value }
+fn show() { return "{dep}" == dep.to_str() }
+fn Holder.show(self) { return "{dep}" == dep.to_str() }
+fn shadow(dep) { return "{dep}" }
+fn call_push() { return dep.push(1) }"#,
+            ),
+        ],
+    ),
+    (
+        "declaration_alias_bare_call_is_non_callable",
+        r#"use types as dep
+fn invoke() { return dep() }
+invoke()"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "future_declaration_alias_does_not_shadow_earlier_call",
+        r#"fn before() { print("before") }
+before()
+use types as print"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "declaration_alias_reads_are_source_order_lazy",
+        r#"fn dead_branch() {
+    if false { print(dep) }
+    return 1
+}
+fn maker() {
+    return fn() { return dep.Stack { items: [] } }
+}
+let before = try_call(maker)
+print(dead_branch(), before.is_err())
+use types as dep
+print(before.unwrap()().items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_overlay_crosses_nested_lambdas",
+        r#"fn dynamic_maker() {
+    return fn() { return fn() { return dep.Point { value: 9 }.value } }
+}
+let dynamic = dynamic_maker()()
+use first as dep
+use second as other
+fn assigned_maker() {
+    dep = other
+    return fn() {
+        return fn(value) {
+            return match value { dep.Point { value: found } => found, _ => 0 }
+        }
+    }
+}
+let assigned = assigned_maker()()
+print(dynamic(), assigned(other.Point { value: 7 }))"#,
+        &[
+            ("first", "struct Point { value }"),
+            ("second", "struct Point { value }"),
+        ],
+    ),
+    (
+        "declaration_alias_mutable_places_need_overlay",
+        r#"use types as dep
+struct Box { value }
+fn invalid_index() { dep["value"] = 1 }
+fn invalid_field() { dep.value = 1 }
+fn valid_index() {
+    dep = {"value": 0}
+    dep["value"] = 2
+    return dep["value"]
+}
+fn valid_field() {
+    dep = Box { value: 0 }
+    dep.value = 3
+    return dep.value
+}
+print(try_call(invalid_index).is_err(), try_call(invalid_field).is_err())
+print(valid_index(), valid_field())"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "declaration_alias_unoverlaid_index_error_is_canonical",
+        r#"use types as dep
+fn invalid() { dep["value"] = 1 }
+invalid()"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "declaration_alias_unoverlaid_field_error_is_canonical",
+        r#"use types as dep
+fn invalid() { dep.value = 1 }
+invalid()"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "future_declaration_alias_simple_assignment_error",
+        r#"fn invalid() { dep = 1 }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "future_declaration_alias_compound_assignment_error",
+        r#"fn invalid() { dep += 1 }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "nested_named_function_uses_declaration_not_outer_local",
+        r#"use types as dep
+fn outer() {
+    let dep = 1
+    fn inner() { return dep.Point { value: 4 }.value }
+    return inner()
+}
+print(outer())"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "declaration_alias_overlay_survives_nested_blocks",
+        r#"use types as dep
+fn replace() {
+    if true {
+        if true { dep = 1 }
+    }
+    return dep
+}
+print(replace(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_overlay_survives_loop_for_compound_write",
+        r#"use types as dep
+fn increment() {
+    if true { dep = 1 }
+    repeat 1 { dep += 2 }
+    return dep
+}
+print(increment(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_is_source_ordered_at_call_time",
+        r#"fn build() { return t.Point { value: 42 } }
+let before = try_call(build)
+use types as t
+print(before.is_err(), build().value)"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "pattern_only_declaration_alias_is_optional_and_source_ordered",
+        r#"fn label(value) {
+    return match value { dep.Stack { items } => "hit", _ => "miss" }
+}
+print(label(1))
+use types as dep
+print(label(dep.Stack { items: [1] }))"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "pattern_only_lambda_captures_parameter_namespace",
+        r#"use types as root_dep
+let value = root_dep.Stack { items: [1] }
+fn matcher(dep) {
+    return fn(value) {
+        return match value { dep.Stack { items } => items.len(), _ => 0 }
+    }
+}
+let hit = matcher(root_dep)
+let miss = matcher(1)
+print(hit(value), miss(value))"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "namespace_only_lambda_capture_and_pattern_shadow",
+        r#"use types as dep
+let point = dep.Point { value: 42 }
+fn outer(dep) {
+    return fn() {
+        let made = dep.Point { value: 41 }
+        return match made { dep.Point { value: found } => found + 1, _ => 0 }
+    }
+}
+let captured = outer(dep)
+fn read(dep, value) {
+    return match value { dep.Point { value: found } => found, _ => 0 }
+}
+print(captured(), read(1, point))"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "pattern_namespace_precedes_same_named_arm_binding",
+        r#"use types_a as dep
+use types_b as other
+fn make() {
+    let dep = other
+    return fn(value) {
+        return match value { dep.Point { dep } => dep, _ => -1 }
+    }
+}
+let f = make()
+print(f(other.Point { dep: 42 }))"#,
+        &[
+            ("types_a", "struct Point { dep }"),
+            ("types_b", "struct Point { dep }"),
+        ],
+    ),
+    (
+        "module_functions_resolve_during_module_load",
+        r#"use loading
+print(value)"#,
+        &[(
+            "loading",
+            "fn helper(n) { return n + 1 }\nfn recurse(n) { if n == 0 { return 0 } return recurse(n - 1) + 1 }\nfn build() { return helper(40) + recurse(1) }\nlet value = build()",
+        )],
+    ),
+    (
+        "imported_fn_method_declaration_alias_context",
+        r#"use first_holder as first
+use second_holder as second
+use second_types as dep
+print(first.build(1), first.Holder { value: 2 }.build())
+print(second.build(3), second.Holder { value: 4 }.build())"#,
+        &[
+            (
+                "first_types",
+                "struct Point { value }\nfn make(value) { return Point { value: value } }",
+            ),
+            (
+                "second_types",
+                "struct Point { value }\nfn make(value) { return Point { value: value + 100 } }",
+            ),
+            (
+                "first_holder",
+                "use first_types as dep\nstruct Holder { value }\nfn build(value) { let point = dep.make(value) return match point { dep.Point { value: found } => found, _ => 0 } }\nfn Holder.build(self) { return dep.make(self.value).value }",
+            ),
+            (
+                "second_holder",
+                "use second_types as dep\nstruct Holder { value }\nfn build(value) { let point = dep.Point { value: value } return match point { dep.Point { value: found } => found, _ => 0 } }\nfn Holder.build(self) { return dep.make(self.value).value }",
+            ),
+        ],
+    ),
+    (
+        "imported_fn_bare_type_declaration_context",
+        r#"use holder as module
+print(module.build(42))"#,
+        &[
+            ("types", "struct Point { value }"),
+            (
+                "holder",
+                "use types.{Point}\nfn build(value) { let point = Point { value: value } return match point { Point { value: found } => found, _ => 0 } }",
+            ),
+        ],
+    ),
+    (
         "import_dotted_path",
         r#"use std.math
 print(e)"#,
