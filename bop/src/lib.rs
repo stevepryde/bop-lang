@@ -1247,6 +1247,25 @@ print(d.len())"#),
     }
 
     #[test]
+    fn parser_reports_real_reserved_word_bindings_at_the_keyword() {
+        for (source, keyword, line, column) in [
+            ("let if = 1", "if", 1, 5),
+            ("\nfn const() { none }", "const", 2, 4),
+            ("for while in [] {}", "while", 1, 5),
+        ] {
+            let error = parse_err_full(source);
+            assert_eq!(error.line, Some(line), "source: {source}");
+            assert_eq!(error.column, Some(column), "source: {source}");
+            assert_eq!(
+                error.message,
+                format!("`{keyword}` is a reserved word in Bop"),
+                "source: {source}"
+            );
+            assert!(error.friendly_hint.is_some(), "source: {source}");
+        }
+    }
+
+    #[test]
     fn parse_error_renders_with_snippet_and_carat() {
         let src = "let 42";
         let err = parse_err_full(src);

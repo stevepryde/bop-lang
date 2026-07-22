@@ -89,6 +89,57 @@ pub enum Token {
     Eof,
 }
 
+// Define keyword spelling once and derive both lexer recognition and
+// diagnostic metadata from it. Keeping these directions in one declaration
+// prevents consumers such as the parser and public precheck API from growing
+// hand-maintained keyword lists that drift from the lexer.
+macro_rules! define_keywords {
+    ($($spelling:literal => $variant:ident),+ $(,)?) => {
+        impl Token {
+            pub(crate) fn from_keyword(value: &str) -> Option<Self> {
+                match value {
+                    $($spelling => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            pub(crate) fn keyword_name(&self) -> Option<&'static str> {
+                match self {
+                    $(Self::$variant => Some($spelling),)+
+                    _ => None,
+                }
+            }
+        }
+
+        #[cfg(test)]
+        pub(crate) const KEYWORD_NAMES: &[&str] = &[$($spelling),+];
+    };
+}
+
+define_keywords! {
+    "let" => Let,
+    "const" => Const,
+    "fn" => Fn,
+    "return" => Return,
+    "if" => If,
+    "else" => Else,
+    "while" => While,
+    "for" => For,
+    "in" => In,
+    "repeat" => Repeat,
+    "break" => Break,
+    "continue" => Continue,
+    "use" => Use,
+    "as" => As,
+    "struct" => Struct,
+    "enum" => Enum,
+    "match" => Match,
+    "try" => Try,
+    "true" => True,
+    "false" => False,
+    "none" => None,
+}
+
 #[derive(Debug, Clone)]
 pub struct SpannedToken {
     pub token: Token,
@@ -733,30 +784,7 @@ impl Lexer {
                 break;
             }
         }
-        match s.as_str() {
-            "let" => Token::Let,
-            "const" => Token::Const,
-            "fn" => Token::Fn,
-            "return" => Token::Return,
-            "if" => Token::If,
-            "else" => Token::Else,
-            "while" => Token::While,
-            "for" => Token::For,
-            "in" => Token::In,
-            "repeat" => Token::Repeat,
-            "break" => Token::Break,
-            "continue" => Token::Continue,
-            "use" => Token::Use,
-            "as" => Token::As,
-            "struct" => Token::Struct,
-            "enum" => Token::Enum,
-            "match" => Token::Match,
-            "try" => Token::Try,
-            "true" => Token::True,
-            "false" => Token::False,
-            "none" => Token::None,
-            _ => Token::Ident(s),
-        }
+        Token::from_keyword(&s).unwrap_or(Token::Ident(s))
     }
 
     fn lex_string(&mut self) -> Result<Token, BopError> {
@@ -985,6 +1013,17 @@ mod tests {
                 Token::None,
             ]
         );
+    }
+
+    #[test]
+    fn keyword_metadata_round_trips_the_lexer_vocabulary() {
+        assert!(KEYWORD_NAMES.contains(&"const"));
+
+        for &name in KEYWORD_NAMES {
+            let token = Token::from_keyword(name).expect("declared keyword should lex");
+            assert_eq!(token.keyword_name(), Some(name));
+            assert_eq!(toks(name), vec![token]);
+        }
     }
 
     #[test]

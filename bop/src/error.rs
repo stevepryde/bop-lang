@@ -57,6 +57,20 @@ impl BopError {
         }
     }
 
+    pub(crate) fn reserved_word(keyword: &str, line: u32, column: u32) -> Self {
+        Self {
+            line: Some(line),
+            column: Some(column),
+            message: format!("`{}` is a reserved word in Bop", keyword),
+            friendly_hint: Some(format!(
+                "`{}` is part of Bop syntax and can't be used as an identifier. Choose a different name.",
+                keyword
+            )),
+            is_fatal: false,
+            is_try_return: false,
+        }
+    }
+
     /// Create a runtime error at the given line *and* column.
     /// Callers that have an AST node handy (`expr.line`,
     /// `expr.column`) should prefer this over
