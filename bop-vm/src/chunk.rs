@@ -275,9 +275,11 @@ pub enum Instr {
     },
     /// Enum variant construction. The `shape` tells the VM how
     /// many stack entries the payload consumes:
+    ///
     /// - `Unit` — no pops
     /// - `Tuple(argc)` — pop `argc` values
     /// - `Struct(count)` — pop `2 * count` (name, value) pairs
+    ///
     /// `namespace` mirrors the `ConstructStruct` field — set for
     /// `m.Result::Ok(v)` forms.
     ConstructEnum {

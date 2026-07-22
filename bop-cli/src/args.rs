@@ -59,11 +59,11 @@ fn parse_run(rest: &[String]) -> Result<Command, String> {
                 return Err(format!("`run`: unknown flag `{other}`"));
             }
             other => {
-                if file.is_some() {
+                if let Some(previous) = file.as_ref() {
                     return Err(format!(
                         "`run`: only one script file accepted (got `{}` after `{}`)",
                         other,
-                        file.as_ref().unwrap()
+                        previous
                     ));
                 }
                 file = Some(other.to_string());
@@ -96,11 +96,11 @@ fn parse_compile(rest: &[String]) -> Result<Command, String> {
                 return Err(format!("`compile`: unknown flag `{other}`"));
             }
             other => {
-                if file.is_some() {
+                if let Some(previous) = file.as_ref() {
                     return Err(format!(
                         "`compile`: only one script file accepted (got `{}` after `{}`)",
                         other,
-                        file.as_ref().unwrap()
+                        previous
                     ));
                 }
                 file = Some(other.to_string());

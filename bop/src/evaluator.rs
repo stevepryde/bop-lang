@@ -2230,14 +2230,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             // already. Reaching a FieldAccess here
                             // means the user wrote `m.Type` in a
                             // value-returning position.
+                            let alias = m.path.rsplit('.').next().unwrap_or(&m.path);
                             return Err(error_with_hint(
                                 expr.line,
                                 format!("`{}` in `{}` is a type, not a value", field, m.path),
                                 format!(
                                     "construct through the alias: `{}.{} {{ ... }}` or `{}.{}::Variant(...)`",
-                                    m.path.split('.').last().unwrap_or(&m.path),
+                                    alias,
                                     field,
-                                    m.path.split('.').last().unwrap_or(&m.path),
+                                    alias,
                                     field,
                                 ),
                             ));
@@ -3036,6 +3037,12 @@ fn unwrap_iter_result(v: &Value) -> Option<IterStep> {
     }
 }
 
+type BuiltinTypeTables = (
+    BTreeMap<(String, String), Vec<String>>,
+    BTreeMap<(String, String), Vec<VariantDecl>>,
+    BTreeMap<String, String>,
+);
+
 /// Seed a fresh evaluator's type tables with the engine-wide
 /// builtin types (`Result`, `RuntimeError`). The shapes come from
 /// `crate::builtins` so walker / VM / AOT can never drift out of
@@ -3049,11 +3056,7 @@ fn unwrap_iter_result(v: &Value) -> Option<IterStep> {
 ///   builtin, so the program's outermost scope can resolve
 ///   bare `Result::Ok(...)` and `RuntimeError { ... }` without
 ///   an explicit `use`.
-fn seed_builtin_types() -> (
-    BTreeMap<(String, String), Vec<String>>,
-    BTreeMap<(String, String), Vec<VariantDecl>>,
-    BTreeMap<String, String>,
-) {
+fn seed_builtin_types() -> BuiltinTypeTables {
     use crate::value::BUILTIN_MODULE_PATH;
     let mut struct_defs: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     let mut enum_defs: BTreeMap<(String, String), Vec<VariantDecl>> = BTreeMap::new();
@@ -3345,8 +3348,7 @@ pub fn pattern_matches(
                         }
                     }
                     if let ArrayRest::Named(name) = rest_kind {
-                        let tail: Vec<Value> =
-                            items[elements.len()..].iter().cloned().collect();
+                        let tail: Vec<Value> = items[elements.len()..].to_vec();
                         bindings.push((name.clone(), Value::new_array(tail)));
                     }
                     true

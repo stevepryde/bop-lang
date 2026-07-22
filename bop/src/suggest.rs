@@ -64,7 +64,7 @@ where
     if target_len == 0 {
         return None;
     }
-    let max_dist = (target_len / 3).max(1).min(3);
+    let max_dist = (target_len / 3).clamp(1, 3);
 
     let mut best: Option<(usize, String)> = None;
     for cand in candidates {
@@ -77,11 +77,7 @@ where
         // budget, the full Levenshtein can't find an answer
         // small enough to consider.
         let cand_len = cand_str.chars().count();
-        let len_diff = if cand_len > target_len {
-            cand_len - target_len
-        } else {
-            target_len - cand_len
-        };
+        let len_diff = cand_len.abs_diff(target_len);
         if len_diff > max_dist {
             continue;
         }

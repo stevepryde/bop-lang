@@ -1,5 +1,5 @@
 #[cfg(feature = "no_std")]
-use alloc::{format, string::{String, ToString}, vec::Vec};
+use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 
 use crate::builtins::{error, error_with_hint};
 use crate::error::BopError;
@@ -338,7 +338,10 @@ pub fn string_method(
     }
 }
 
+// Keep the array/string normalization tests next to those method families;
+// the remaining method families continue below in the same runtime module.
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -960,9 +963,7 @@ pub fn make_result_err(value: Value, line: u32) -> Result<Value, BopError> {
 }
 
 fn alloc_vec_of(value: Value) -> Vec<Value> {
-    let mut v = Vec::with_capacity(1);
-    v.push(value);
-    v
+    vec![value]
 }
 
 // ─── Iterator methods ──────────────────────────────────────────

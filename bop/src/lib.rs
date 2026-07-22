@@ -3,6 +3,12 @@
 #[cfg(feature = "no_std")]
 extern crate alloc;
 
+// The standard test harness remains available when `--all-features` selects
+// the library's `no_std` surface; make that test-only dependency explicit.
+#[cfg(all(test, feature = "no_std"))]
+#[macro_use]
+extern crate std;
+
 #[cfg(feature = "no_std")]
 use alloc::{string::String, vec::Vec};
 
@@ -206,6 +212,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "no_std")]
+    use alloc::string::ToString;
     use std::cell::RefCell;
 
     // ─── Test host ─────────────────────────────────────────────────
