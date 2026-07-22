@@ -75,9 +75,9 @@ struct ModuleBindings {
 
 #[derive(Clone, Default)]
 struct ModuleLexicalContext {
-    type_bindings: BTreeMap<String, String>,
-    module_aliases: BTreeMap<String, Rc<crate::value::BopModule>>,
-    imported_functions: BTreeMap<String, FnDef>,
+    type_bindings: Rc<BTreeMap<String, String>>,
+    module_aliases: Rc<BTreeMap<String, Rc<crate::value::BopModule>>>,
+    imported_functions: Rc<BTreeMap<String, FnDef>>,
 }
 
 type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
@@ -400,18 +400,22 @@ pub struct Evaluator<'h, H: BopHost> {
     /// bodies push a fresh frame on entry so any locally-
     /// declared types are discarded on return; module-scope
     /// entries below stay put.
-    type_bindings: Vec<BTreeMap<String, String>>,
+    type_bindings: Vec<Rc<BTreeMap<String, String>>>,
     /// Module-level aliases `m → Rc<BopModule>`, populated by
     /// aliased `use` statements. Separate from `scopes` so
     /// aliases remain reachable from inside function bodies
     /// (where `self.scopes` is fresh per call). Field access /
     /// method dispatch on `m.foo` falls back to this map when
     /// `m` isn't a local binding.
-    module_aliases: Vec<BTreeMap<String, Rc<crate::value::BopModule>>>,
+    module_aliases: Vec<Rc<BTreeMap<String, Rc<crate::value::BopModule>>>>,
     /// Callable exports introduced by non-aliased `use`, paired with lexical
     /// value scopes. This keeps direct calls fast without publishing a local
     /// import in the evaluator-wide named-function registry.
-    imported_functions: Vec<BTreeMap<String, FnDef>>,
+    imported_functions: Vec<Rc<BTreeMap<String, FnDef>>>,
+    /// Reused empty lexical frames. Cloning these handles keeps block and
+    /// function entry allocation-free until a declaration actually mutates a
+    /// frame, at which point `Rc::make_mut` creates the private local map.
+    empty_lexical_context: ModuleLexicalContext,
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
@@ -452,6 +456,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     pub fn new(host: &'h mut H, limits: BopLimits) -> Self {
         crate::memory::bop_memory_init(limits.max_memory);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
+        let empty_lexical_context = ModuleLexicalContext::default();
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
@@ -459,9 +464,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             struct_defs,
             enum_defs,
             methods: BTreeMap::new(),
-            type_bindings: vec![builtin_bindings],
-            module_aliases: vec![BTreeMap::new()],
-            imported_functions: vec![BTreeMap::new()],
+            type_bindings: vec![Rc::new(builtin_bindings)],
+            module_aliases: vec![Rc::clone(&empty_lexical_context.module_aliases)],
+            imported_functions: vec![Rc::clone(&empty_lexical_context.imported_functions)],
+            empty_lexical_context,
             host,
             steps: 0,
             call_depth: 0,
@@ -489,6 +495,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         module_path: String,
     ) -> Self {
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
+        let empty_lexical_context = ModuleLexicalContext::default();
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
@@ -496,9 +503,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             struct_defs,
             enum_defs,
             methods: BTreeMap::new(),
-            type_bindings: vec![builtin_bindings],
-            module_aliases: vec![BTreeMap::new()],
-            imported_functions: vec![BTreeMap::new()],
+            type_bindings: vec![Rc::new(builtin_bindings)],
+            module_aliases: vec![Rc::clone(&empty_lexical_context.module_aliases)],
+            imported_functions: vec![Rc::clone(&empty_lexical_context.imported_functions)],
+            empty_lexical_context,
             host,
             steps: 0,
             call_depth: 0,
@@ -568,9 +576,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         self.scopes.push(BTreeMap::new());
         // Type bindings parallel the value scopes — same push /
         // pop rhythm keeps `use`-injected type names stack-scoped.
-        self.type_bindings.push(BTreeMap::new());
-        self.module_aliases.push(BTreeMap::new());
-        self.imported_functions.push(BTreeMap::new());
+        self.type_bindings
+            .push(Rc::clone(&self.empty_lexical_context.type_bindings));
+        self.module_aliases
+            .push(Rc::clone(&self.empty_lexical_context.module_aliases));
+        self.imported_functions
+            .push(Rc::clone(&self.empty_lexical_context.imported_functions));
         self.imported_here
             .push(alloc_import::collections::BTreeSet::new());
     }
@@ -614,7 +625,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let cache = self.imports.borrow();
         match cache.get(module_path) {
             Some(ImportSlot::Loaded(bindings)) => bindings.lexical_context.clone(),
-            _ => ModuleLexicalContext::default(),
+            _ => self.empty_lexical_context.clone(),
         }
     }
 
@@ -648,7 +659,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     /// different-shape ones error.
     fn bind_local_type(&mut self, name: &str) {
         if let Some(top) = self.type_bindings.last_mut() {
-            top.insert(name.to_string(), self.current_module.clone());
+            Rc::make_mut(top).insert(name.to_string(), self.current_module.clone());
         }
     }
 
@@ -665,6 +676,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
         }
         None
+    }
+
+    fn get_var_value(&self, name: &str) -> Option<Value> {
+        self.get_var(name)
+            .cloned()
+            .or_else(|| self.module_alias(name).map(|module| Value::Module(Rc::clone(module))))
     }
 
     fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
@@ -1344,12 +1361,14 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 alias_name.to_string(),
                 Value::Module(Rc::clone(&module_rc)),
             );
-            self.module_aliases
-                .last_mut()
-                .expect("module alias scope")
-                .insert(alias_name.to_string(), Rc::clone(&module_rc));
+            Rc::make_mut(
+                self.module_aliases
+                    .last_mut()
+                    .expect("module alias scope"),
+            )
+            .insert(alias_name.to_string(), Rc::clone(&module_rc));
             if let Some(scope) = self.type_bindings.last_mut() {
-                scope.insert(alias_name.to_string(), path.to_string());
+                Rc::make_mut(scope).insert(alias_name.to_string(), path.to_string());
             }
         } else {
             // Glob / selective without alias — flat injection.
@@ -1381,10 +1400,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     ));
                     continue;
                 }
-                self.imported_functions
-                    .last_mut()
-                    .expect("imported function scope")
-                    .insert(name, fn_def);
+                Rc::make_mut(
+                    self.imported_functions
+                        .last_mut()
+                        .expect("imported function scope"),
+                )
+                .insert(name, fn_def);
             }
             for (name, value) in exports {
                 if skip_private && crate::naming::is_private(&name) {
@@ -1427,7 +1448,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     continue;
                 }
                 if let Some(scope) = self.type_bindings.last_mut() {
-                    scope.insert(tn.clone(), path.to_string());
+                    Rc::make_mut(scope).insert(tn.clone(), path.to_string());
                 }
             }
         }
@@ -1962,11 +1983,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         StringPart::Literal(s) => result.push_str(s),
                         StringPart::Variable(name) => {
                             let val = self
-                                .get_var(name)
+                                .get_var_value(name)
                                 .ok_or_else(|| {
                                     error_at(expr.line, expr.column, crate::error_messages::variable_not_found(name))
-                                })?
-                                .clone();
+                                })?;
                             result.push_str(&format!("{}", val));
                         }
                     }
@@ -1977,8 +1997,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             ExprKind::Ident(name) => {
                 // Lexical lookup first — matches the intuition that
                 // `let x = ...` locally shadows everything else.
-                if let Some(v) = self.get_var(name) {
-                    return Ok(v.clone());
+                if let Some(v) = self.get_var_value(name) {
+                    return Ok(v);
                 }
                 // Fall back to named `fn` declarations so they can
                 // be passed around as first-class values. The
@@ -2700,24 +2720,19 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             .unwrap_or_else(|| crate::value::ROOT_MODULE_PATH.to_string());
         let lexical_context = self.module_lexical_context(&function_module);
         self.function_modules.push(function_module);
-        let alias_values = lexical_context
-            .module_aliases
-            .iter()
-            .map(|(name, module)| (name.clone(), Value::Module(Rc::clone(module))))
-            .collect();
-        let saved_scopes = core::mem::replace(
-            &mut self.scopes,
-            vec![alias_values, BTreeMap::new()],
-        );
+        let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
         let type_scope_floor = self.type_bindings.len();
         self.type_bindings.push(lexical_context.type_bindings);
-        self.type_bindings.push(BTreeMap::new());
+        self.type_bindings
+            .push(Rc::clone(&self.empty_lexical_context.type_bindings));
         let alias_scope_floor = self.module_aliases.len();
         self.module_aliases.push(lexical_context.module_aliases);
-        self.module_aliases.push(BTreeMap::new());
+        self.module_aliases
+            .push(Rc::clone(&self.empty_lexical_context.module_aliases));
         self.imported_functions
             .push(lexical_context.imported_functions);
-        self.imported_functions.push(BTreeMap::new());
+        self.imported_functions
+            .push(Rc::clone(&self.empty_lexical_context.imported_functions));
         self.alias_scope_floors.push(alias_scope_floor);
         self.imported_here
             .push(alloc_import::collections::BTreeSet::new());
@@ -3235,14 +3250,18 @@ pub fn resolve_type_in(
 /// lexical value scope. At call time the defining module's context is copied
 /// at `alias_scope_floor`, so every caller frame below that floor is hidden.
 #[doc(hidden)]
-pub fn resolve_type_in_scoped(
+pub fn resolve_type_in_scoped<T, A>(
     value_scopes: &[BTreeMap<String, Value>],
-    type_scopes: &[BTreeMap<String, String>],
-    module_aliases: &[BTreeMap<String, Rc<crate::value::BopModule>>],
+    type_scopes: &[T],
+    module_aliases: &[A],
     alias_scope_floor: Option<usize>,
     namespace: Option<&str>,
     type_name: &str,
-) -> Option<String> {
+) -> Option<String>
+where
+    T: core::borrow::Borrow<BTreeMap<String, String>>,
+    A: core::borrow::Borrow<BTreeMap<String, Rc<crate::value::BopModule>>>,
+{
     if let Some(ns) = namespace {
         // First: look the alias up in value scopes (catches
         // locally-bound modules, if any). Then fall back to
@@ -3263,7 +3282,7 @@ pub fn resolve_type_in_scoped(
             if alias_scope_floor.is_some_and(|floor| index < floor) {
                 continue;
             }
-            if let Some(module) = frame.get(ns) {
+            if let Some(module) = frame.borrow().get(ns) {
                 if module.types.iter().any(|ty| ty == type_name) {
                     return Some(module.path.clone());
                 }
@@ -3276,7 +3295,7 @@ pub fn resolve_type_in_scoped(
         if alias_scope_floor.is_some_and(|floor| index < floor) {
             continue;
         }
-        if let Some(mp) = scope.get(type_name) {
+        if let Some(mp) = scope.borrow().get(type_name) {
             return Some(mp.clone());
         }
     }
@@ -3519,9 +3538,9 @@ pub struct ReplSession {
     struct_defs: BTreeMap<(String, String), Vec<String>>,
     enum_defs: BTreeMap<(String, String), Vec<VariantDecl>>,
     methods: BTreeMap<(String, String), BTreeMap<String, FnDef>>,
-    type_bindings: Vec<BTreeMap<String, String>>,
-    module_aliases: Vec<BTreeMap<String, Rc<crate::value::BopModule>>>,
-    imported_functions: Vec<BTreeMap<String, FnDef>>,
+    type_bindings: Vec<Rc<BTreeMap<String, String>>>,
+    module_aliases: Vec<Rc<BTreeMap<String, Rc<crate::value::BopModule>>>>,
+    imported_functions: Vec<Rc<BTreeMap<String, FnDef>>>,
     imports: ImportCache,
     imported_here: Vec<alloc_import::collections::BTreeSet<String>>,
     rand_state: u64,
@@ -3546,9 +3565,9 @@ impl ReplSession {
             struct_defs,
             enum_defs,
             methods: BTreeMap::new(),
-            type_bindings: vec![builtin_bindings],
-            module_aliases: vec![BTreeMap::new()],
-            imported_functions: vec![BTreeMap::new()],
+            type_bindings: vec![Rc::new(builtin_bindings)],
+            module_aliases: vec![Rc::new(BTreeMap::new())],
+            imported_functions: vec![Rc::new(BTreeMap::new())],
             imports: Rc::new(RefCell::new(
                 alloc_import::collections::BTreeMap::new(),
             )),
@@ -3721,6 +3740,7 @@ impl ReplSession {
             type_bindings: core::mem::take(&mut self.type_bindings),
             module_aliases: core::mem::take(&mut self.module_aliases),
             imported_functions: core::mem::take(&mut self.imported_functions),
+            empty_lexical_context: ModuleLexicalContext::default(),
             imports: Rc::clone(&self.imports),
             imported_here: core::mem::take(&mut self.imported_here),
             rand_state: self.rand_state,
@@ -3754,7 +3774,7 @@ impl ReplSession {
         if type_bindings.is_empty() {
             // Re-seed so builtins stay visible.
             let (_, _, builtins) = seed_builtin_types();
-            type_bindings.push(builtins);
+            type_bindings.push(Rc::new(builtins));
         }
         self.scopes = scopes;
         self.functions = eval.functions;
@@ -3768,7 +3788,7 @@ impl ReplSession {
             module_aliases.truncate(1);
         }
         if module_aliases.is_empty() {
-            module_aliases.push(BTreeMap::new());
+            module_aliases.push(Rc::new(BTreeMap::new()));
         }
         self.module_aliases = module_aliases;
         let mut imported_functions = eval.imported_functions;
@@ -3776,7 +3796,7 @@ impl ReplSession {
             imported_functions.truncate(1);
         }
         if imported_functions.is_empty() {
-            imported_functions.push(BTreeMap::new());
+            imported_functions.push(Rc::new(BTreeMap::new()));
         }
         self.imported_functions = imported_functions;
         let mut imported_here = eval.imported_here;
@@ -3825,6 +3845,34 @@ mod array_mutation_tests {
             .run(&statements)
             .expect("program should run");
         host.prints
+    }
+
+    #[test]
+    fn named_calls_reuse_shared_module_and_empty_lexical_maps() {
+        let mut host = TestHost::default();
+        let mut evaluator = Evaluator::new(&mut host, crate::BopLimits::standard());
+        let context = evaluator.module_lexical_context(crate::value::ROOT_MODULE_PATH);
+
+        assert!(Rc::ptr_eq(&context.type_bindings, &evaluator.type_bindings[0]));
+        assert!(Rc::ptr_eq(&context.module_aliases, &evaluator.module_aliases[0]));
+        assert!(Rc::ptr_eq(
+            &context.imported_functions,
+            &evaluator.imported_functions[0]
+        ));
+
+        evaluator.push_scope();
+        assert!(Rc::ptr_eq(
+            evaluator.type_bindings.last().unwrap(),
+            &evaluator.empty_lexical_context.type_bindings
+        ));
+        assert!(Rc::ptr_eq(
+            evaluator.module_aliases.last().unwrap(),
+            &evaluator.empty_lexical_context.module_aliases
+        ));
+        assert!(Rc::ptr_eq(
+            evaluator.imported_functions.last().unwrap(),
+            &evaluator.empty_lexical_context.imported_functions
+        ));
     }
 
     #[test]

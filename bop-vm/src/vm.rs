@@ -404,9 +404,9 @@ struct ModuleArtifacts {
 
 #[derive(Clone, Default)]
 struct ModuleLexicalContext {
-    type_bindings: BTreeMap<String, String>,
-    module_aliases: BTreeMap<String, Rc<bop::value::BopModule>>,
-    imported_functions: BTreeMap<String, Rc<FnEntry>>,
+    type_bindings: Rc<BTreeMap<String, String>>,
+    module_aliases: Rc<BTreeMap<String, Rc<bop::value::BopModule>>>,
+    imported_functions: Rc<BTreeMap<String, Rc<FnEntry>>>,
 }
 
 /// Import cache shared across nested VMs so recursive imports
@@ -465,14 +465,17 @@ pub struct Vm<'h, H: BopHost> {
     /// plus a fresh frame at fn-call entry so a fn's own type
     /// decls are isolated from the caller's scope. `<builtin>`
     /// types seed scope 0.
-    type_bindings: Vec<BTreeMap<String, String>>,
+    type_bindings: Vec<Rc<BTreeMap<String, String>>>,
     /// Module-level aliases. Unlike value scope, these persist
     /// across function boundaries so namespaced references
     /// inside fn bodies (`p.Color::Red` in a pattern) can still
     /// resolve to the aliased module.
-    module_aliases: Vec<BTreeMap<String, Rc<bop::value::BopModule>>>,
+    module_aliases: Vec<Rc<BTreeMap<String, Rc<bop::value::BopModule>>>>,
     /// Non-aliased imported callables, paired with lexical scope frames.
-    imported_functions: Vec<BTreeMap<String, Rc<FnEntry>>>,
+    imported_functions: Vec<Rc<BTreeMap<String, Rc<FnEntry>>>>,
+    /// Shared empty lexical frames reused by blocks and calls. They detach
+    /// only when a local declaration/import writes through `Rc::make_mut`.
+    empty_lexical_context: ModuleLexicalContext,
     /// Freelist of cleared slot vecs from popped frames. Every
     /// fn call needs a fresh `Vec<Value>` sized to `slot_count`
     /// — allocating a new one per call was ~500k small heap
@@ -507,6 +510,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let top = Frame::top(chunk);
         let step_budget = limits.max_steps.saturating_mul(STEP_SCALE);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
+        let empty_lexical_context = ModuleLexicalContext::default();
         Self {
             frames: vec![top],
             stack: Vec::new(),
@@ -522,9 +526,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
             struct_defs,
             enum_defs,
             user_methods: BTreeMap::new(),
-            type_bindings: vec![builtin_bindings],
-            module_aliases: vec![BTreeMap::new()],
-            imported_functions: vec![BTreeMap::new()],
+            type_bindings: vec![Rc::new(builtin_bindings)],
+            module_aliases: vec![Rc::clone(&empty_lexical_context.module_aliases)],
+            imported_functions: vec![Rc::clone(&empty_lexical_context.imported_functions)],
+            empty_lexical_context,
             slots_freelist: Vec::new(),
         }
     }
@@ -700,9 +705,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // Type bindings parallel value scopes so inline type
         // decls inside a block vanish on block exit, same rule
         // the walker applies.
-        self.type_bindings.push(BTreeMap::new());
-        self.module_aliases.push(BTreeMap::new());
-        self.imported_functions.push(BTreeMap::new());
+        self.type_bindings
+            .push(Rc::clone(&self.empty_lexical_context.type_bindings));
+        self.module_aliases
+            .push(Rc::clone(&self.empty_lexical_context.module_aliases));
+        self.imported_functions
+            .push(Rc::clone(&self.empty_lexical_context.imported_functions));
         self.imported_here.push(BTreeSet::new());
     }
 
@@ -750,28 +758,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let lexical_context = function_module
             .as_deref()
             .map(|module| self.module_lexical_context(module))
-            .unwrap_or_default();
-        let mut scopes = scopes;
-        if !lexical_context.module_aliases.is_empty() {
-            let alias_values = lexical_context
-                .module_aliases
-                .iter()
-                .map(|(name, module)| {
-                    (name.clone(), Value::Module(Rc::clone(module)))
-                })
-                .collect();
-            scopes.insert(0, alias_values);
-            if scopes.len() == 1 {
-                scopes.push(BTreeMap::new());
-            }
-        }
+            .unwrap_or_else(|| self.empty_lexical_context.clone());
         let type_scope_base = self.type_bindings.len() + 2;
         let alias_scope_base = self.module_aliases.len();
         self.module_aliases.push(lexical_context.module_aliases);
-        self.module_aliases.push(BTreeMap::new());
+        self.module_aliases
+            .push(Rc::clone(&self.empty_lexical_context.module_aliases));
         self.imported_functions
             .push(lexical_context.imported_functions);
-        self.imported_functions.push(BTreeMap::new());
+        self.imported_functions
+            .push(Rc::clone(&self.empty_lexical_context.imported_functions));
         self.imported_here.push(BTreeSet::new());
         self.imported_here.push(BTreeSet::new());
         self.frames.push(Frame::function(
@@ -787,7 +783,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
             wrap,
         ));
         self.type_bindings.push(lexical_context.type_bindings);
-        self.type_bindings.push(BTreeMap::new());
+        self.type_bindings
+            .push(Rc::clone(&self.empty_lexical_context.type_bindings));
     }
 
     fn module_alias(&self, name: &str) -> Option<&Rc<bop::value::BopModule>> {
@@ -941,7 +938,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let cache = self.imports.borrow();
         match cache.get(module_path) {
             Some(ImportSlot::Loaded(artifacts)) => artifacts.lexical_context.clone(),
-            _ => ModuleLexicalContext::default(),
+            _ => self.empty_lexical_context.clone(),
         }
     }
 
@@ -1023,6 +1020,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     // need the name as a `&str` / `String`.
                     let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
                     let name = chunk.name(n);
+                    if let Some(module) = self.module_alias(name).cloned() {
+                        self.push_value(Value::Module(module));
+                        return Ok(Next::Continue);
+                    }
                     let fn_entry = self.lookup_function_entry(name);
                     if let Some(entry) = fn_entry {
                         let params = entry.params.clone();
@@ -2333,7 +2334,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// to *this* module's version.
     fn bind_local_type(&mut self, name: &str) {
         if let Some(scope) = self.type_bindings.last_mut() {
-            scope.insert(name.to_string(), self.current_module.clone());
+            Rc::make_mut(scope).insert(name.to_string(), self.current_module.clone());
         }
     }
 
@@ -3172,12 +3173,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     scope.insert(alias_name.to_string(), module_value);
                 }
             }
-            self.module_aliases
-                .last_mut()
-                .expect("module alias scope")
-                .insert(alias_name.to_string(), Rc::clone(&module_rc));
+            Rc::make_mut(
+                self.module_aliases
+                    .last_mut()
+                    .expect("module alias scope"),
+            )
+            .insert(alias_name.to_string(), Rc::clone(&module_rc));
             if let Some(scope) = self.type_bindings.last_mut() {
-                scope.insert(alias_name.to_string(), path.to_string());
+                Rc::make_mut(scope).insert(alias_name.to_string(), path.to_string());
             }
         } else {
             // Flat form (glob / selective). Glob skips
@@ -3201,10 +3204,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     blocked_function_values.insert(name);
                     continue;
                 }
-                self.imported_functions
-                    .last_mut()
-                    .expect("imported function scope")
-                    .insert(name, entry);
+                Rc::make_mut(
+                    self.imported_functions
+                        .last_mut()
+                        .expect("imported function scope"),
+                )
+                .insert(name, entry);
             }
             for (name, value) in exports {
                 if skip_private && bop::naming::is_private(&name) {
@@ -3242,7 +3247,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     continue;
                 }
                 if let Some(scope) = self.type_bindings.last_mut() {
-                    scope.insert(tn.clone(), path.to_string());
+                    Rc::make_mut(scope).insert(tn.clone(), path.to_string());
                 }
             }
         }
@@ -4133,6 +4138,40 @@ for outer in [1, 2] {
         vm.unwind_to_try_call(error(1, "boom")).expect("unwind");
         assert_eq!(vm.frames.len(), 1);
         assert_eq!(vm.type_bindings.len(), 1);
+    }
+
+    #[test]
+    fn named_call_frames_share_module_and_empty_lexical_maps() {
+        let mut host = SilentHost;
+        let mut vm = Vm::new(Chunk::new(), &mut host, BopLimits::standard());
+        let root_types = Rc::clone(&vm.type_bindings[0]);
+        let root_aliases = Rc::clone(&vm.module_aliases[0]);
+        let root_functions = Rc::clone(&vm.imported_functions[0]);
+
+        vm.push_function_frame(
+            Rc::new(Chunk::new()),
+            Vec::new(),
+            Vec::new(),
+            0,
+            Some(bop::value::ROOT_MODULE_PATH.to_string()),
+            FrameWrap::None,
+        );
+
+        assert!(Rc::ptr_eq(&vm.type_bindings[1], &root_types));
+        assert!(Rc::ptr_eq(&vm.module_aliases[1], &root_aliases));
+        assert!(Rc::ptr_eq(&vm.imported_functions[1], &root_functions));
+        assert!(Rc::ptr_eq(
+            &vm.type_bindings[2],
+            &vm.empty_lexical_context.type_bindings
+        ));
+        assert!(Rc::ptr_eq(
+            &vm.module_aliases[2],
+            &vm.empty_lexical_context.module_aliases
+        ));
+        assert!(Rc::ptr_eq(
+            &vm.imported_functions[2],
+            &vm.empty_lexical_context.imported_functions
+        ));
     }
 
     #[test]

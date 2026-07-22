@@ -1156,7 +1156,7 @@ impl Emitter {
     /// compare the value's full identity against what the
     /// source-level reference resolves to *at that point in
     /// the program*.
-    fn emit_resolver_closure_src(&self) -> String {
+    fn emit_resolver_closure_src(&self, pattern_namespaces: &[String]) -> String {
         let mut bare_arms = String::new();
         // Flatten bare-name bindings inside-out so the
         // innermost shadow wins. A HashSet tracks which names
@@ -1214,6 +1214,19 @@ impl Emitter {
                 "                        (::std::option::Option::Some({alias}), __tn) => match {value} {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) if __module.types.iter().any(|__type| __type == __tn) => ::std::option::Option::Some(__module.path.clone()), _ => ::std::option::Option::None }},\n",
                 alias = rust_string_literal(alias),
                 value = value,
+            ));
+        }
+        let mut dynamic_namespaces = pattern_namespaces.to_vec();
+        dynamic_namespaces.sort();
+        dynamic_namespaces.dedup();
+        for namespace in dynamic_namespaces {
+            if seen_aliases.contains(&namespace) || !self.is_local(&namespace) {
+                continue;
+            }
+            alias_arms.push_str(&format!(
+                "                        (::std::option::Option::Some({namespace}), __tn) => match ::std::option::Option::Some(&{value}) {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) if __module.types.iter().any(|__type| __type == __tn) => ::std::option::Option::Some(__module.path.clone()), _ => ::std::option::Option::None }},\n",
+                namespace = rust_string_literal(&namespace),
+                value = rust_user_ident(&namespace),
             ));
         }
         format!(
@@ -1297,7 +1310,7 @@ impl Emitter {
             }
         }
         let mut known: HashSet<String> = params.iter().cloned().collect();
-        let mut referenced = std::collections::BTreeSet::new();
+        let mut referenced = FreeVarDependencies::default();
         scan_free_vars_stmts(
             body,
             &mut known,
@@ -1310,7 +1323,7 @@ impl Emitter {
             let Some(alias) = import.alias else {
                 continue;
             };
-            if !referenced.contains(&alias) {
+            if !referenced.required.contains(&alias) {
                 continue;
             }
             self.line(&format!(
@@ -2923,6 +2936,7 @@ impl Emitter {
             // treats them as locals (not free captures) inside the
             // guard and body.
             let names: Vec<String> = arm.pattern.binding_names().into_iter().collect();
+            let namespaces: Vec<String> = arm.pattern.namespace_names().into_iter().collect();
 
             src.push_str("        {\n");
             src.push_str(&format!(
@@ -2935,7 +2949,7 @@ impl Emitter {
             // Patterns reaching this point use the same lexical
             // scope we're in *right now*, so statically baking
             // the mapping is both correct and efficient.
-            src.push_str(&self.emit_resolver_closure_src());
+            src.push_str(&self.emit_resolver_closure_src(&namespaces));
             src.push_str(&format!(
                 "            if ::bop::pattern_matches(&__pat, &{}, &mut __bindings, &__resolver) {{\n",
                 sc_name
@@ -3754,7 +3768,7 @@ impl Emitter {
         line: u32,
     ) -> Result<String, BopError> {
         // Free-variable analysis against the outer scope stack.
-        let mut captures = std::collections::BTreeSet::<String>::new();
+        let mut dependencies = FreeVarDependencies::default();
         let mut body_known = HashSet::new();
         for p in params {
             body_known.insert(p.clone());
@@ -3762,11 +3776,12 @@ impl Emitter {
         scan_free_vars_stmts(
             body,
             &mut body_known,
-            &mut captures,
+            &mut dependencies,
             &self.scope_stack,
             &self.fn_info,
         );
-        let captures_ordered: Vec<String> = captures.into_iter().collect();
+        dependencies.required.extend(dependencies.pattern_namespaces);
+        let captures_ordered: Vec<String> = dependencies.required.into_iter().collect();
 
         // Switch into the lambda's lexical context before emitting
         // its body: outer scope is hidden (so Ident lookups inside
@@ -3889,10 +3904,21 @@ impl Emitter {
 // stay callable without capture (they're globally reachable Rust
 // fns) and unknown identifiers are left for rustc to flag.
 
+#[derive(Default)]
+struct FreeVarDependencies {
+    /// Value/expression references that must exist when the closure or lifted
+    /// function is created.
+    required: std::collections::BTreeSet<String>,
+    /// Namespace references used only by patterns. Declaration aliases in
+    /// this set are resolved lazily by the pattern resolver, while a lambda
+    /// still promotes outer locals/params from this set into real captures.
+    pattern_namespaces: std::collections::BTreeSet<String>,
+}
+
 fn scan_free_vars_stmts(
     stmts: &[Stmt],
     known: &mut HashSet<String>,
-    free: &mut std::collections::BTreeSet<String>,
+    free: &mut FreeVarDependencies,
     outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
@@ -3904,7 +3930,7 @@ fn scan_free_vars_stmts(
 fn scan_free_vars_stmt(
     stmt: &Stmt,
     known: &mut HashSet<String>,
-    free: &mut std::collections::BTreeSet<String>,
+    free: &mut FreeVarDependencies,
     outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
@@ -3917,7 +3943,7 @@ fn scan_free_vars_stmt(
             match target {
                 AssignTarget::Variable(n) => {
                     if !known.contains(n) && is_outer_local(n, outer_scopes) {
-                        free.insert(n.clone());
+                        free.required.insert(n.clone());
                     }
                 }
                 AssignTarget::Index { object, index } => {
@@ -4171,7 +4197,7 @@ fn variant_payload_rust(payload: &bop::parser::VariantPatternPayload) -> String 
 fn scan_free_vars_expr(
     expr: &Expr,
     known: &mut HashSet<String>,
-    free: &mut std::collections::BTreeSet<String>,
+    free: &mut FreeVarDependencies,
     outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
@@ -4191,14 +4217,14 @@ fn scan_free_vars_expr(
                 && !fn_info.top_level_fns.contains(name)
                 && is_outer_local(name, outer_scopes)
             {
-                free.insert(name.clone());
+                free.required.insert(name.clone());
             }
         }
         ExprKind::StringInterp(parts) => {
             for part in parts {
                 if let StringPart::Variable(name) = part {
                     if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                        free.insert(name.clone());
+                        free.required.insert(name.clone());
                     }
                 }
             }
@@ -4275,7 +4301,7 @@ fn scan_free_vars_expr(
             // Rust closure capture so opaque ownership depth includes it.
             if let Some(name) = namespace {
                 if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                    free.insert(name.clone());
+                    free.required.insert(name.clone());
                 }
             }
             for (_, v) in fields {
@@ -4289,7 +4315,7 @@ fn scan_free_vars_expr(
         } => {
             if let Some(name) = namespace {
                 if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                    free.insert(name.clone());
+                    free.required.insert(name.clone());
                 }
             }
             use bop::parser::VariantPayload;
@@ -4317,7 +4343,7 @@ fn scan_free_vars_expr(
                     if !known.contains(&namespace)
                         && is_outer_local(&namespace, outer_scopes)
                     {
-                        free.insert(namespace);
+                        free.pattern_namespaces.insert(namespace);
                     }
                 }
                 let mut arm_known = known.clone();

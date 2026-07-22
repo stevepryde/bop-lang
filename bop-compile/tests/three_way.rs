@@ -1437,6 +1437,30 @@ print(before.is_err(), build().value)"#,
         &[("types", "struct Point { value }")],
     ),
     (
+        "pattern_only_declaration_alias_is_optional_and_source_ordered",
+        r#"fn label(value) {
+    return match value { dep.Stack { items } => "hit", _ => "miss" }
+}
+print(label(1))
+use types as dep
+print(label(dep.Stack { items: [1] }))"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "pattern_only_lambda_captures_parameter_namespace",
+        r#"use types as root_dep
+let value = root_dep.Stack { items: [1] }
+fn matcher(dep) {
+    return fn(value) {
+        return match value { dep.Stack { items } => items.len(), _ => 0 }
+    }
+}
+let hit = matcher(root_dep)
+let miss = matcher(1)
+print(hit(value), miss(value))"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
         "namespace_only_lambda_capture_and_pattern_shadow",
         r#"use types as dep
 let point = dep.Point { value: 42 }
