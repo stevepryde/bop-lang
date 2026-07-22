@@ -1451,6 +1451,29 @@ print(increment(), try_call(invalid).is_err(), dep.Stack { items: [] }.items.len
         &[("types", "struct Stack { items }")],
     ),
     (
+        "declaration_alias_overlay_survives_nested_blocks",
+        r#"use types as dep
+fn replace() {
+    if true {
+        if true { dep = 1 }
+    }
+    return dep
+}
+print(replace(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_overlay_survives_loop_for_compound_write",
+        r#"use types as dep
+fn increment() {
+    if true { dep = 1 }
+    repeat 1 { dep += 2 }
+    return dep
+}
+print(increment(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
         "declaration_alias_is_source_ordered_at_call_time",
         r#"fn build() { return t.Point { value: 42 } }
 let before = try_call(build)

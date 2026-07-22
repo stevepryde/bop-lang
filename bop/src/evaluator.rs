@@ -731,7 +731,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             .last()
             .is_some_and(|context| context.module_aliases.contains_key(name))
         {
-            self.define(name.to_string(), value);
+            self.scopes
+                .first_mut()
+                .expect("function call base scope")
+                .insert(name.to_string(), value);
             return true;
         }
         false

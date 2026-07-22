@@ -146,6 +146,10 @@ struct Frame {
     /// closures retain their initial scope, while named-function and method
     /// frames start at zero.
     scope_base: usize,
+    /// Lazily inserted protected value scope for assignments that shadow an
+    /// inherited declaration alias. It lives for the whole call even when
+    /// the assignment occurs inside a nested runtime scope.
+    has_declaration_overlay: bool,
     /// Protected depth of the VM-wide `type_bindings` stack at frame entry.
     /// Runtime scopes live above this depth and are paired with `scopes`.
     /// Function exit truncates back to the caller depth so an early return
@@ -176,6 +180,7 @@ impl Frame {
             ip: 0,
             slots: Vec::new(),
             scope_base: scopes.len(),
+            has_declaration_overlay: false,
             scopes,
             // The builtin type-binding map is the top frame's protected base.
             type_scope_base: 1,
@@ -201,6 +206,7 @@ impl Frame {
             ip: 0,
             slots,
             scope_base: scopes.len(),
+            has_declaration_overlay: false,
             scopes,
             type_scope_base: context.scope_bases.types,
             alias_scope_base: context.scope_bases.aliases,
@@ -900,12 +906,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
         if frame.is_function && frame.lexical_context.module_aliases.contains_key(name) {
             let name = name.to_string();
-            if frame.scopes.is_empty() {
-                frame.scopes.push(BTreeMap::new());
-            }
+            let overlay_scope = if frame.has_declaration_overlay {
+                frame.scope_base - 1
+            } else {
+                let scope = frame.scope_base;
+                frame.scopes.insert(scope, BTreeMap::new());
+                frame.scope_base += 1;
+                frame.has_declaration_overlay = true;
+                scope
+            };
             frame
                 .scopes
-                .last_mut()
+                .get_mut(overlay_scope)
                 .expect("alias overlay scope")
                 .insert(name, value);
             return true;
