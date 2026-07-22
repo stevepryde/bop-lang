@@ -114,6 +114,11 @@ enum Slot {
 
 // ─── Frame ─────────────────────────────────────────────────────────
 
+struct FrameScopeBases {
+    types: usize,
+    aliases: usize,
+}
+
 struct Frame {
     chunk: Rc<Chunk>,
     ip: usize,
@@ -176,8 +181,7 @@ impl Frame {
         chunk: Rc<Chunk>,
         slots: Vec<Value>,
         scopes: Vec<BTreeMap<String, Value>>,
-        type_scope_base: usize,
-        alias_scope_base: usize,
+        scope_bases: FrameScopeBases,
         stack_base: usize,
         function_module: Option<String>,
         wrap: FrameWrap,
@@ -188,8 +192,8 @@ impl Frame {
             slots,
             scope_base: scopes.len(),
             scopes,
-            type_scope_base,
-            alias_scope_base,
+            type_scope_base: scope_bases.types,
+            alias_scope_base: scope_bases.aliases,
             stack_base,
             is_function: true,
             function_module,
@@ -742,8 +746,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
             chunk,
             slots,
             scopes,
-            type_scope_base,
-            alias_scope_base,
+            FrameScopeBases {
+                types: type_scope_base,
+                aliases: alias_scope_base,
+            },
             stack_base,
             function_module,
             wrap,
