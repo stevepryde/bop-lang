@@ -1252,7 +1252,20 @@ impl Parser {
     // ─── Expressions ───────────────────────────────────────────────────
 
     fn parse_expr(&mut self) -> Result<Expr, BopError> {
-        self.parse_or()
+        let expression = self.parse_or()?;
+        if matches!(self.peek(), Token::DotDot) {
+            let (line, column) = self.peek_pos();
+            let mut error = BopError::runtime_at(
+                "`..` range syntax is not supported in expressions",
+                line,
+                column,
+            );
+            error.friendly_hint = Some(
+                "use `range(start, end)` instead, for example `range(0, 3)`.".to_string(),
+            );
+            return Err(error);
+        }
+        Ok(expression)
     }
 
     fn parse_or(&mut self) -> Result<Expr, BopError> {
@@ -1936,6 +1949,28 @@ impl Parser {
             None
         };
         self.expect(&Token::FatArrow)?;
+        // Braces in expression position introduce a dictionary, not a
+        // statement block. Preserve valid dictionary-valued arms while giving
+        // the common `pattern => { do_work() }` mistake a diagnostic that
+        // points at the construct the user needs to change. Comments are
+        // absent from the token stream, so the next token is the first item in
+        // the braces even when the body starts on a later line.
+        let starts_dictionary = matches!(self.peek_at(1), Token::RBrace)
+            || (matches!(self.peek_at(1), Token::Str(_))
+                && matches!(self.peek_at(2), Token::Colon));
+        if matches!(self.peek(), Token::LBrace) && !starts_dictionary {
+            let (body_line, body_column) = self.peek_pos();
+            let mut error = BopError::runtime_at(
+                "`{ ... }` after `=>` is a dictionary expression, not a match-arm block",
+                body_line,
+                body_column,
+            );
+            error.friendly_hint = Some(
+                "`match` arm bodies must be a single expression; put it directly after `=>`, or quote dictionary keys if you meant to return a dictionary."
+                    .to_string(),
+            );
+            return Err(error);
+        }
         let body = self.with_struct_literal(true, |p| p.parse_expr())?;
         Ok(MatchArm {
             pattern,
@@ -2709,6 +2744,79 @@ mod struct_literal_context_tests {
                 .expect_err("the deliberately unclosed delimiter should fail");
             assert!(!parser.allow_struct_literal, "source: {source}");
         }
+    }
+}
+
+#[cfg(test)]
+mod targeted_diagnostic_tests {
+    use super::*;
+
+    fn parse_source(source: &str) -> Result<Vec<Stmt>, BopError> {
+        parse(crate::lexer::lex(source)?)
+    }
+
+    #[test]
+    fn block_shaped_match_arm_points_at_the_opening_brace() {
+        for source in [
+            "let label = match 1 {\n  1 => { print(\"one\") },\n  _ => \"other\",\n}",
+            "let label = match 1 {\n  1 => { \"one\"; print(\"done\") },\n  _ => \"other\",\n}",
+        ] {
+            let error = parse_source(source).expect_err("block-shaped arm must be rejected");
+
+            assert_eq!(error.line, Some(2), "source: {source}");
+            assert_eq!(error.column, Some(8), "source: {source}");
+            assert_eq!(
+                error.message,
+                "`{ ... }` after `=>` is a dictionary expression, not a match-arm block",
+                "source: {source}"
+            );
+            assert_eq!(
+                error.friendly_hint.as_deref(),
+                Some(
+                    "`match` arm bodies must be a single expression; put it directly after `=>`, or quote dictionary keys if you meant to return a dictionary."
+                ),
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn dotdot_in_expression_points_at_the_operator_and_suggests_range() {
+        for (source, line, column) in [
+            ("for i in 0..3 {}", 1, 11),
+            ("let values = 4..9", 1, 15),
+            ("let values = (\n  4..9\n)", 2, 4),
+        ] {
+            let error = parse_source(source).expect_err("expression range must be rejected");
+            assert_eq!(error.line, Some(line), "source: {source}");
+            assert_eq!(error.column, Some(column), "source: {source}");
+            assert_eq!(
+                error.message,
+                "`..` range syntax is not supported in expressions",
+                "source: {source}"
+            );
+            assert_eq!(
+                error.friendly_hint.as_deref(),
+                Some("use `range(start, end)` instead, for example `range(0, 3)`."),
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn dictionary_arms_and_rest_patterns_keep_their_existing_grammar() {
+        parse_source(
+            r#"struct Pair { left, right }
+let value = match [1, 2, 3] {
+  [head, ..tail] => {"head": head, "tail": tail},
+  _ => {},
+}
+let pair = Pair { left: 1, right: 2 }
+let right = match pair {
+  Pair { left, .. } => left,
+}"#,
+        )
+        .expect("valid dictionary arms and rest patterns must still parse");
     }
 }
 
