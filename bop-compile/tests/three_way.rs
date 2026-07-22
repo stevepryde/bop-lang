@@ -1451,6 +1451,110 @@ print(increment(), try_call(invalid).is_err(), dep.Stack { items: [] }.items.len
         &[("types", "struct Stack { items }")],
     ),
     (
+        "declaration_alias_interpolation_call_and_local_shadow",
+        r#"use holder as holder
+print(holder.show(), holder.Holder { value: 0 }.show())
+print(holder.shadow("local"), holder.call_push())"#,
+        &[
+            (
+                "types",
+                "struct Point { value }\nfn push(value) { return value + 1 }",
+            ),
+            (
+                "holder",
+                r#"use types as dep
+struct Holder { value }
+fn show() { return "{dep}" == dep.to_str() }
+fn Holder.show(self) { return "{dep}" == dep.to_str() }
+fn shadow(dep) { return "{dep}" }
+fn call_push() { return dep.push(1) }"#,
+            ),
+        ],
+    ),
+    (
+        "declaration_alias_bare_call_is_non_callable",
+        r#"use types as dep
+fn invoke() { return dep() }
+invoke()"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "future_declaration_alias_does_not_shadow_earlier_call",
+        r#"fn before() { print("before") }
+before()
+use types as print"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "declaration_alias_reads_are_source_order_lazy",
+        r#"fn dead_branch() {
+    if false { print(dep) }
+    return 1
+}
+fn maker() {
+    return fn() { return dep.Stack { items: [] } }
+}
+let before = try_call(maker)
+print(dead_branch(), before.is_err())
+use types as dep
+print(before.unwrap()().items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_overlay_crosses_nested_lambdas",
+        r#"fn dynamic_maker() {
+    return fn() { return fn() { return dep.Point { value: 9 }.value } }
+}
+let dynamic = dynamic_maker()()
+use first as dep
+use second as other
+fn assigned_maker() {
+    dep = other
+    return fn() {
+        return fn(value) {
+            return match value { dep.Point { value: found } => found, _ => 0 }
+        }
+    }
+}
+let assigned = assigned_maker()()
+print(dynamic(), assigned(other.Point { value: 7 }))"#,
+        &[
+            ("first", "struct Point { value }"),
+            ("second", "struct Point { value }"),
+        ],
+    ),
+    (
+        "declaration_alias_mutable_places_need_overlay",
+        r#"use types as dep
+struct Box { value }
+fn invalid_index() { dep["value"] = 1 }
+fn invalid_field() { dep.value = 1 }
+fn valid_index() {
+    dep = {"value": 0}
+    dep["value"] = 2
+    return dep["value"]
+}
+fn valid_field() {
+    dep = Box { value: 0 }
+    dep.value = 3
+    return dep.value
+}
+print(try_call(invalid_index).is_err(), try_call(invalid_field).is_err())
+print(valid_index(), valid_field())"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "nested_named_function_uses_declaration_not_outer_local",
+        r#"use types as dep
+fn outer() {
+    let dep = 1
+    fn inner() { return dep.Point { value: 4 }.value }
+    return inner()
+}
+print(outer())"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
         "declaration_alias_overlay_survives_nested_blocks",
         r#"use types as dep
 fn replace() {

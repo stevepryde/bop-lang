@@ -1799,10 +1799,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
                 InterpPart::Name(name_idx) => {
                     let name = self.current_chunk().name(*name_idx);
-                    let v = self.lookup_var_by_idx(*name_idx).ok_or_else(|| {
-                        error(line, bop::error_messages::variable_not_found(name))
-                    })?;
-                    result.push_str(&format!("{}", v));
+                    if let Some(value) = self.lookup_var_by_idx(*name_idx) {
+                        result.push_str(&format!("{}", value));
+                    } else if let Some(module) = self.module_alias(name) {
+                        result.push_str(&format!("{}", Value::Module(Rc::clone(module))));
+                    } else {
+                        return Err(error(
+                            line,
+                            bop::error_messages::variable_not_found(name),
+                        ));
+                    }
                 }
             }
         }
@@ -1851,6 +1857,29 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     ),
                 )),
             };
+        }
+
+        // A defining-module declaration alias is a protected value binding.
+        // Keep the borrowed local peek above as the hot path, then consult the
+        // lexical context only when no local/parameter shadows the name. Clone
+        // the module handle solely on this rare alias-call error path.
+        let declaration_alias = self.frames.last().and_then(|frame| {
+            if frame.lexical_context.module_aliases.is_empty() {
+                None
+            } else {
+                frame.lexical_context.module_aliases.get(name).cloned()
+            }
+        });
+        if let Some(module) = declaration_alias {
+            let _args = self.pop_n_values(argc, line)?;
+            return Err(error(
+                line,
+                format!(
+                    "`{}` is a {}, not a function",
+                    name,
+                    Value::Module(module).type_name()
+                ),
+            ));
         }
 
         // User-fn hot path: if `name` is a declared fn and no
@@ -2123,7 +2152,17 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
             crate::chunk::AssignBack::Name(name_idx) => {
                 let name = chunk.name(name_idx);
-                let Some(value) = self.lookup_var_mut_by_idx(name_idx) else {
+                if self.lookup_var_mut_by_idx(name_idx).is_none() {
+                    if let Some(module) = self.module_alias(name).cloned() {
+                        return self.dispatch_method(
+                            Value::Module(module),
+                            method,
+                            args,
+                            None,
+                            false,
+                            line,
+                        );
+                    }
                     let hint = self.value_candidates_hint(name).unwrap_or_else(|| {
                         "Did you forget to create it with `let`?".to_string()
                     });
@@ -2132,7 +2171,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         bop::error_messages::variable_not_found(name),
                         hint,
                     ));
-                };
+                }
+                let value = self
+                    .lookup_var_mut_by_idx(name_idx)
+                    .expect("binding checked above");
                 if let Value::Array(array) = value {
                     let result = methods::array_method_mut(array, method, args, line)?;
                     self.push_value(result);

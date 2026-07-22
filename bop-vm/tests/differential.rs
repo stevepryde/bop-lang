@@ -2856,6 +2856,154 @@ print(second.build(3), second.Holder { value: 4 }.build())"#,
 }
 
 #[test]
+fn declaration_alias_interpolation_and_call_paths_keep_context_diff() {
+    set_modules(&[
+        (
+            "types",
+            r#"struct Point { value }
+fn push(value) { return value + 1 }"#,
+        ),
+        (
+            "holder",
+            r#"use types as dep
+struct Holder { value }
+fn show() { return "{dep}" == dep.to_str() }
+fn Holder.show(self) { return "{dep}" == dep.to_str() }
+fn shadow(dep) { return "{dep}" }
+fn call_push() { return dep.push(1) }"#,
+        ),
+    ]);
+    let outcome = run_both(
+        r#"use holder as holder
+print(holder.show(), holder.Holder { value: 0 }.show())
+print(holder.shadow("local"), holder.call_push())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["true true", "local 2"]);
+}
+
+#[test]
+fn declaration_alias_bare_call_is_a_non_callable_value_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let error = run_err(
+        r#"use types as dep
+fn invoke() { return dep() }
+invoke()"#,
+    );
+    assert!(
+        error.contains("`dep` is a module, not a function"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn future_declaration_alias_does_not_shadow_earlier_call_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let outcome = run_both(
+        r#"fn before() { print("before") }
+before()
+use types as print"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["before"]);
+}
+
+#[test]
+fn declaration_alias_reads_are_lazy_across_branches_and_lambdas_diff() {
+    set_modules(&[("types", "struct Stack { items }")]);
+    let outcome = run_both(
+        r#"fn dead_branch() {
+    if false { print(dep) }
+    return 1
+}
+fn maker() {
+    return fn() { return dep.Stack { items: [] } }
+}
+let before = try_call(maker)
+print(dead_branch(), before.is_err())
+use types as dep
+print(before.unwrap()().items.len())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1 false", "0"]);
+}
+
+#[test]
+fn declaration_alias_overlay_propagates_through_nested_lambdas_diff() {
+    set_modules(&[
+        ("first", "struct Point { value }"),
+        ("second", "struct Point { value }"),
+    ]);
+    let outcome = run_both(
+        r#"fn dynamic_maker() {
+    return fn() { return fn() { return dep.Point { value: 9 }.value } }
+}
+let dynamic = dynamic_maker()()
+use first as dep
+use second as other
+fn assigned_maker() {
+    dep = other
+    return fn() {
+        return fn(value) {
+            return match value { dep.Point { value: found } => found, _ => 0 }
+        }
+    }
+}
+let assigned = assigned_maker()()
+print(dynamic(), assigned(other.Point { value: 7 }))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["9 7"]);
+}
+
+#[test]
+fn declaration_alias_mutable_places_require_an_overlay_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let outcome = run_both(
+        r#"use types as dep
+struct Box { value }
+fn invalid_index() { dep["value"] = 1 }
+fn invalid_field() { dep.value = 1 }
+fn valid_index() {
+    dep = {"value": 0}
+    dep["value"] = 2
+    return dep["value"]
+}
+fn valid_field() {
+    dep = Box { value: 0 }
+    dep.value = 3
+    return dep.value
+}
+print(try_call(invalid_index).is_err(), try_call(invalid_field).is_err())
+print(valid_index(), valid_field())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["true true", "2 3"]);
+}
+
+#[test]
+fn nested_named_function_uses_declaration_alias_not_outer_local_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let outcome = run_both(
+        r#"use types as dep
+fn outer() {
+    let dep = 1
+    fn inner() { return dep.Point { value: 4 }.value }
+    return inner()
+}
+print(outer())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["4"]);
+}
+
+#[test]
 fn imported_function_keeps_bare_type_binding_from_defining_module_diff() {
     set_modules(&[
         ("types", "struct Point { value }"),

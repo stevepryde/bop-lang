@@ -1005,9 +1005,15 @@ struct Emitter {
     /// a nested lexical import when applying named-function first-win rules.
     in_callable_body: bool,
     /// Aliased top-level imports owned by the module whose lifted callables are
-    /// currently being emitted. Their runtime values must be recreated inside
-    /// each Rust function because loader locals are not capturable Rust state.
+    /// currently being emitted. Their runtime values are resolved lazily from
+    /// `Ctx::module_aliases` because lifted Rust functions cannot capture the
+    /// loader's source-ordered locals.
     declaration_aliases: Vec<ModuleImport>,
+    /// Per-callable declaration-alias binding names. Each required alias gets
+    /// separate call-local overlay and read-cache slots. Reads consult an
+    /// assigned overlay first, then the cache and live declaration context;
+    /// assignment populates only the overlay for the rest of the invocation.
+    declaration_alias_overlays: Vec<HashSet<String>>,
     /// Root copy restored after temporarily emitting imported modules/methods.
     root_declaration_aliases: Vec<ModuleImport>,
 }
@@ -1053,6 +1059,7 @@ impl Emitter {
             in_top_level: false,
             in_callable_body: false,
             declaration_aliases: Vec::new(),
+            declaration_alias_overlays: Vec::new(),
             root_declaration_aliases: Vec::new(),
         }
     }
@@ -1181,6 +1188,7 @@ impl Emitter {
         // hard-shadows declaration context; otherwise a lifted callable checks
         // the defining module's source-ordered alias map.
         let mut alias_arms = String::new();
+        let mut alias_prelude = String::new();
         let mut aliases: Vec<(&String, &ModuleAliasBinding)> = Vec::new();
         let mut seen_aliases: HashSet<String> = HashSet::new();
         for frame in self.module_aliases.iter().rev() {
@@ -1197,6 +1205,16 @@ impl Emitter {
         for (alias, _) in aliases {
             let value = if self.is_local(alias) {
                 format!("::std::option::Option::Some(&{})", rust_user_ident(alias))
+            } else if let Some(overlay) = self.declaration_alias_overlay(alias) {
+                let snapshot = declaration_alias_pattern_snapshot_ident(alias);
+                alias_prelude.push_str(&format!(
+                    "            let {snapshot} = __bop_declaration_alias_optional(ctx, &mut {overlay}, {module}, {alias});\n",
+                    module = rust_string_literal(&self.current_module),
+                    alias = rust_string_literal(alias),
+                ));
+                format!(
+                    "{snapshot}.as_ref()",
+                )
             } else if self
                 .declaration_aliases
                 .iter()
@@ -1230,13 +1248,14 @@ impl Emitter {
             ));
         }
         format!(
-            "            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
+            "{prelude}            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
              \x20                   match (__ns, __tn) {{\n\
              {bare}{alias}                        _ => ::std::option::Option::None,\n\
              \x20                   }}\n\
              \x20           }};\n",
             bare = bare_arms,
             alias = alias_arms,
+            prelude = alias_prelude,
         )
     }
 
@@ -1257,6 +1276,77 @@ impl Emitter {
         self.scope_stack
             .last()
             .is_some_and(|scope| scope.locals.contains(name))
+    }
+
+    fn declaration_alias_overlay(&self, name: &str) -> Option<String> {
+        self.declaration_alias_overlays
+            .last()
+            .filter(|aliases| aliases.contains(name))
+            .map(|_| declaration_alias_overlay_ident(name))
+    }
+
+    fn declaration_alias_read_src(&self, name: &str, line: u32) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_read(ctx, &mut {overlay}, {module}, {alias}, {line})?",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn declaration_alias_optional_src(&self, name: &str) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_optional(ctx, &mut {overlay}, {module}, {alias})",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn declaration_alias_mut_src(&self, name: &str, line: u32) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_mut(&mut {overlay}, {alias}, {line})?",
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn declaration_alias_assign_src(
+        &self,
+        name: &str,
+        value: &str,
+        line: u32,
+    ) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_assign(ctx, &mut {overlay}, {value}, {module}, {alias}, {line})?;",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn ident_value_src(&self, name: &str, line: u32) -> Result<String, BopError> {
+        if self.is_local(name) {
+            Ok(format!("{}.clone()", rust_user_ident(name)))
+        } else if let Some(alias) = self.declaration_alias_read_src(name, line) {
+            Ok(alias)
+        } else if self.fn_info.top_level_fns.contains(name) {
+            Ok(format!("{}({})?", self.wrapper_fn_name(name), line))
+        } else if self.fn_info.all_fns.contains_key(name) {
+            Err(BopError::runtime(
+                format!(
+                    "bop-compile: nested function `{}` can't be used as a first-class value (only top-level fns are currently wrappable)",
+                    name
+                ),
+                line,
+            ))
+        } else {
+            Ok(format!("{}.clone()", rust_user_ident(name)))
+        }
     }
 
     fn is_module_top_scope(&self) -> bool {
@@ -1298,11 +1388,11 @@ impl Emitter {
         }
     }
 
-    fn emit_declaration_alias_bindings(
-        &mut self,
+    fn declaration_aliases_for_callable(
+        &self,
         params: &[String],
         body: &[Stmt],
-    ) -> Result<(), BopError> {
+    ) -> Vec<String> {
         let mut outer = EmissionScope::default();
         for import in &self.declaration_aliases {
             if let Some(alias) = &import.alias {
@@ -1310,7 +1400,7 @@ impl Emitter {
             }
         }
         let mut known: HashSet<String> = params.iter().cloned().collect();
-        let mut referenced = FreeVarDependencies::default();
+        let mut referenced = FreeVarDependencies::for_declaration_aliases();
         scan_free_vars_stmts(
             body,
             &mut known,
@@ -1318,24 +1408,38 @@ impl Emitter {
             core::slice::from_ref(&outer),
             &self.fn_info,
         );
-        let imports = self.declaration_aliases.clone();
-        for import in imports {
-            let Some(alias) = import.alias else {
+        referenced.required.extend(referenced.pattern_namespaces);
+        let mut aliases = Vec::new();
+        for import in &self.declaration_aliases {
+            let Some(alias) = &import.alias else {
                 continue;
             };
-            if !referenced.required.contains(&alias) {
+            if !referenced.required.contains(alias) || self.is_local(alias) {
                 continue;
             }
-            self.line(&format!(
-                "let mut {alias_ident}: ::bop::value::Value = ctx.module_aliases.get(&({module}.to_string(), {alias}.to_string())).cloned().ok_or_else(|| ::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({alias}), {line}))?;",
-                alias_ident = rust_user_ident(&alias),
-                module = rust_string_literal(&self.current_module),
-                alias = rust_string_literal(&alias),
-                line = import.line,
-            ));
-            self.bind_local(&alias);
+            aliases.push(alias.clone());
         }
-        Ok(())
+        aliases
+    }
+
+    fn emit_declaration_alias_overlays(
+        &mut self,
+        aliases: &[String],
+        initializers: &HashMap<String, String>,
+    ) -> HashSet<String> {
+        let mut overlays = HashSet::new();
+        for alias in aliases {
+            overlays.insert(alias.clone());
+            let initializer = initializers
+                .get(alias)
+                .map(String::as_str)
+                .unwrap_or("::std::option::Option::None");
+            self.line(&format!(
+                "let mut {overlay} = __BopDeclarationAliasBinding {{ overlay: {initializer}, cached: ::std::option::Option::None }};",
+                overlay = declaration_alias_overlay_ident(alias),
+            ));
+        }
+        overlays
     }
 
     fn imported_type_names(
@@ -2466,6 +2570,39 @@ impl Emitter {
             AssignTarget::Variable(name) => {
                 let ident = rust_user_ident(name);
                 let rhs_src = self.expr_src(value)?;
+                if !self.is_local(name) {
+                    if let Some(overlay) = self.declaration_alias_overlay(name) {
+                        let rhs_tmp = self.fresh_tmp();
+                        self.line(&format!("let {} = {};", rhs_tmp, rhs_src));
+                        match op {
+                            AssignOp::Eq => {
+                                let assign = self
+                                    .declaration_alias_assign_src(name, &rhs_tmp, line)
+                                    .expect("overlay checked above");
+                                self.line(&assign);
+                            }
+                            compound => {
+                                let current_tmp = self.fresh_tmp();
+                                let current = self
+                                    .declaration_alias_read_src(name, line)
+                                    .expect("overlay checked above");
+                                self.line(&format!(
+                                    "let {} = {};",
+                                    current_tmp, current
+                                ));
+                                self.line(&format!(
+                                    "{}.overlay = ::std::option::Option::Some({}(&{}, &{}, {})?);",
+                                    overlay,
+                                    compound_op_path(*compound),
+                                    current_tmp,
+                                    rhs_tmp,
+                                    line
+                                ));
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
                 match op {
                     AssignOp::Eq => {
                         self.line(&format!("{} = {};", ident, rhs_src));
@@ -2485,8 +2622,8 @@ impl Emitter {
             AssignTarget::Index { object, index } => {
                 // Tree-walker requires the object to be a bare ident;
                 // anything else is a compile-time error here too.
-                let target = match &object.kind {
-                    ExprKind::Ident(n) => rust_user_ident(n),
+                let target_name = match &object.kind {
+                    ExprKind::Ident(n) => n,
                     _ => {
                         return Err(BopError::runtime(
                             "Can only assign to indexed variables (like `arr[0] = val`)",
@@ -2503,11 +2640,29 @@ impl Emitter {
                 let idx_tmp = self.fresh_tmp();
                 self.line(&format!("let {} = {};", val_tmp, val_src));
                 self.line(&format!("let {} = {};", idx_tmp, idx_src));
+                let (target_read, target_write) = if !self.is_local(target_name) {
+                    if let Some(target_src) =
+                        self.declaration_alias_mut_src(target_name, line)
+                    {
+                        let target_tmp = self.fresh_tmp();
+                        self.line(&format!(
+                            "let {}: &mut ::bop::value::Value = {};",
+                            target_tmp, target_src
+                        ));
+                        (format!("&*{}", target_tmp), format!("&mut *{}", target_tmp))
+                    } else {
+                        let target = rust_user_ident(target_name);
+                        (format!("&{}", target), format!("&mut {}", target))
+                    }
+                } else {
+                    let target = rust_user_ident(target_name);
+                    (format!("&{}", target), format!("&mut {}", target))
+                };
                 match op {
                     AssignOp::Eq => {
                         self.line(&format!(
-                            "::bop::ops::index_set(&mut {}, &{}, {}, {})?;",
-                            target, idx_tmp, val_tmp, line
+                            "::bop::ops::index_set({}, &{}, {}, {})?;",
+                            target_write, idx_tmp, val_tmp, line
                         ));
                     }
                     compound => {
@@ -2515,24 +2670,24 @@ impl Emitter {
                         let cur_tmp = self.fresh_tmp();
                         let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "let {} = ::bop::ops::index_get(&{}, &{}, {})?;",
-                            cur_tmp, target, idx_tmp, line
+                            "let {} = ::bop::ops::index_get({}, &{}, {})?;",
+                            cur_tmp, target_read, idx_tmp, line
                         ));
                         self.line(&format!(
                             "let {} = {}(&{}, &{}, {})?;",
                             new_tmp, op_path, cur_tmp, val_tmp, line
                         ));
                         self.line(&format!(
-                            "::bop::ops::index_set(&mut {}, &{}, {}, {})?;",
-                            target, idx_tmp, new_tmp, line
+                            "::bop::ops::index_set({}, &{}, {}, {})?;",
+                            target_write, idx_tmp, new_tmp, line
                         ));
                     }
                 }
                 Ok(())
             }
             AssignTarget::Field { object, field } => {
-                let target = match &object.kind {
-                    ExprKind::Ident(n) => rust_user_ident(n),
+                let target_name = match &object.kind {
+                    ExprKind::Ident(n) => n,
                     _ => {
                         return Err(BopError::runtime(
                             "Can only assign to fields of named variables (like `p.x = val`)",
@@ -2543,25 +2698,43 @@ impl Emitter {
                 let val_src = self.expr_src(value)?;
                 let val_tmp = self.fresh_tmp();
                 self.line(&format!("let {} = {};", val_tmp, val_src));
+                let target_tmp = self.fresh_tmp();
+                let target_src = if self.is_local(target_name) {
+                    format!("&mut {}", rust_user_ident(target_name))
+                } else {
+                    self.declaration_alias_mut_src(target_name, line)
+                        .unwrap_or_else(|| format!("&mut {}", rust_user_ident(target_name)))
+                };
+                self.line(&format!(
+                    "let {}: &mut ::bop::value::Value = {};",
+                    target_tmp, target_src
+                ));
                 match op {
                     AssignOp::Eq => {
+                        let old_tmp = self.fresh_tmp();
+                        let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "{} = __bop_field_set({}, {}, {}, {})?;",
-                            target,
-                            target,
+                            "let {} = ::core::mem::replace(&mut *{}, ::bop::value::Value::None);",
+                            old_tmp, target_tmp
+                        ));
+                        self.line(&format!(
+                            "let {} = __bop_field_set({}, {}, {}, {})?;",
+                            new_tmp,
+                            old_tmp,
                             rust_string_literal(field),
                             val_tmp,
                             line
                         ));
+                        self.line(&format!("*{} = {};", target_tmp, new_tmp));
                     }
                     compound => {
                         let op_path = compound_op_path(*compound);
                         let cur_tmp = self.fresh_tmp();
                         let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "let {} = __bop_field_get(&{}, {}, {})?;",
+                            "let {} = __bop_field_get(&*{}, {}, {})?;",
                             cur_tmp,
-                            target,
+                            target_tmp,
                             rust_string_literal(field),
                             line
                         ));
@@ -2569,14 +2742,21 @@ impl Emitter {
                             "let {} = {}(&{}, &{}, {})?;",
                             new_tmp, op_path, cur_tmp, val_tmp, line
                         ));
+                        let old_tmp = self.fresh_tmp();
+                        let replaced_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "{} = __bop_field_set({}, {}, {}, {})?;",
-                            target,
-                            target,
+                            "let {} = ::core::mem::replace(&mut *{}, ::bop::value::Value::None);",
+                            old_tmp, target_tmp
+                        ));
+                        self.line(&format!(
+                            "let {} = __bop_field_set({}, {}, {}, {})?;",
+                            replaced_tmp,
+                            old_tmp,
                             rust_string_literal(field),
                             new_tmp,
                             line
                         ));
+                        self.line(&format!("*{} = {};", target_tmp, replaced_tmp));
                     }
                 }
                 Ok(())
@@ -2635,11 +2815,18 @@ impl Emitter {
         // sandbox mode.
         self.emit_tick(line);
         // Rust item functions cannot capture locals from `run_program` or a
-        // module loader. Recreate the defining module's alias values in a
-        // protected outer scope, then put params/locals in a fresh inner scope
-        // so they retain normal lexical shadowing.
+        // module loader. Give each alias required by this callable or one of
+        // its descendant lambdas a lazy call-local binding. No context lookup
+        // occurs until an executed read, so an unexecuted branch cannot fail
+        // merely because its alias has not been declared yet.
+        let saved_scope_stack = core::mem::take(&mut self.scope_stack);
         self.push_scope();
-        self.emit_declaration_alias_bindings(params, body)?;
+        let declaration_aliases =
+            self.declaration_aliases_for_callable(params, body);
+        let declaration_alias_overlays =
+            self.emit_declaration_alias_overlays(&declaration_aliases, &HashMap::new());
+        self.declaration_alias_overlays
+            .push(declaration_alias_overlays);
         // Fresh scope with the params bound; Rust-level fn scope
         // isolates outer locals anyway, but scope tracking is the
         // source of truth for lambda-capture analysis.
@@ -2656,6 +2843,8 @@ impl Emitter {
         }
         self.pop_scope();
         self.pop_scope();
+        self.declaration_alias_overlays.pop();
+        self.scope_stack = saved_scope_stack;
         // Implicit `return none` if control falls off the end. The
         // `allow(unreachable_code)` at the top of the file silences
         // the warning for bodies that always return explicitly.
@@ -2688,33 +2877,7 @@ impl Emitter {
             ExprKind::None => "::bop::value::Value::None".to_string(),
 
             ExprKind::Ident(name) => {
-                if self.is_local(name) {
-                    format!("{}.clone()", rust_user_ident(name))
-                } else if self.fn_info.top_level_fns.contains(name) {
-                    // Top-level fn used as a value — hand back the
-                    // wrapper that reifies the Rust fn as a
-                    // `Value::Fn`.
-                    format!("{}({})?", self.wrapper_fn_name(name), line)
-                } else if self.fn_info.all_fns.contains_key(name) {
-                    // A nested fn isn't reachable as a value from
-                    // outside its outer fn's Rust scope — document
-                    // and bail explicitly rather than emit broken
-                    // Rust.
-                    return Err(BopError::runtime(
-                        format!(
-                            "bop-compile: nested function `{}` can't be used as a first-class value (only top-level fns are currently wrappable)",
-                            name
-                        ),
-                        line,
-                    ));
-                } else {
-                    // Fall through: treat as a local binding and
-                    // let rustc flag it if the name doesn't
-                    // actually resolve. Matches the existing
-                    // "undefined at compile time" behaviour for
-                    // plain `print(nope)` and the like.
-                    format!("{}.clone()", rust_user_ident(name))
-                }
+                self.ident_value_src(name, line)?
             }
 
             ExprKind::StringInterp(parts) => self.string_interp_src(parts, line)?,
@@ -3099,6 +3262,7 @@ impl Emitter {
         // becomes a value call. Matches the walker / VM rule that
         // local shadowing wins over builtin / host / named-fn.
         if self.is_local(&name) {
+            let callee_src = self.ident_value_src(&name, line)?;
             let mut arg_lets = String::new();
             let mut arg_names = Vec::with_capacity(args.len());
             for arg in args {
@@ -3113,10 +3277,11 @@ impl Emitter {
                 format!("vec![{}]", arg_names.join(", "))
             };
             return Ok(format!(
-                "{{ {}__bop_call_value(ctx, {}.clone(), {}, {})? }}",
+                "{{ {}__bop_call_named_value(ctx, {}, {}, {}, {})? }}",
                 arg_lets,
-                rust_user_ident(&name),
+                callee_src,
                 args_vec,
+                rust_string_literal(&name),
                 line
             ));
         }
@@ -3225,6 +3390,18 @@ impl Emitter {
             }
         };
 
+        if let Some(alias) = self.declaration_alias_optional_src(&name) {
+            let args_vec = if arg_names.is_empty() {
+                "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
+            } else {
+                format!("vec![{}]", arg_names.join(", "))
+            };
+            return Ok(format!(
+                "{{ {arg_lets}match {alias} {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }} }}",
+                name = rust_string_literal(&name),
+            ));
+        }
+
         Ok(format!("{{ {}{} }}", arg_lets, body))
     }
 
@@ -3308,13 +3485,24 @@ impl Emitter {
         // after `use foo as m`) surfaces with a clear runtime
         // message instead of compiling fine but panicking.
         let ns_check = match namespace {
-            Some(ns) => format!(
-                "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
-                ns_ident = rust_user_ident(ns),
-                ns_lit = rust_string_literal(ns),
-                ty_lit = rust_string_literal(type_name),
-                line = line,
-            ),
+            Some(ns) => {
+                if self.is_local(ns) {
+                    format!(
+                        "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
+                        ns_ident = rust_user_ident(ns),
+                        ns_lit = rust_string_literal(ns),
+                        ty_lit = rust_string_literal(type_name),
+                    )
+                } else {
+                    let value = self.ident_value_src(ns, line)?;
+                    let tmp = self.fresh_tmp();
+                    format!(
+                        "let {tmp} = {value}; __bop_validate_namespace_type(&{tmp}, {ns_lit}, {ty_lit}, {line})?; ",
+                        ns_lit = rust_string_literal(ns),
+                        ty_lit = rust_string_literal(type_name),
+                    )
+                }
+            }
             None => String::new(),
         };
         // Compile-time validation: set matches exactly, no dups.
@@ -3436,13 +3624,24 @@ impl Emitter {
         // same as a bare construct, so the check is purely a guard
         // matching walker + VM semantics.
         let ns_check = match namespace {
-            Some(ns) => format!(
-                "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
-                ns_ident = rust_user_ident(ns),
-                ns_lit = rust_string_literal(ns),
-                ty_lit = rust_string_literal(type_name),
-                line = line,
-            ),
+            Some(ns) => {
+                if self.is_local(ns) {
+                    format!(
+                        "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
+                        ns_ident = rust_user_ident(ns),
+                        ns_lit = rust_string_literal(ns),
+                        ty_lit = rust_string_literal(type_name),
+                    )
+                } else {
+                    let value = self.ident_value_src(ns, line)?;
+                    let tmp = self.fresh_tmp();
+                    format!(
+                        "let {tmp} = {value}; __bop_validate_namespace_type(&{tmp}, {ns_lit}, {ty_lit}, {line})?; ",
+                        ns_lit = rust_string_literal(ns),
+                        ty_lit = rust_string_literal(type_name),
+                    )
+                }
+            }
             None => String::new(),
         };
         let mp_lit = rust_string_literal(&module_path);
@@ -3576,13 +3775,8 @@ impl Emitter {
         parts: &[StringPart],
         line: u32,
     ) -> Result<String, BopError> {
-        // Mirror the tree-walker: for each Variable part, format the
-        // current value of the Bop ident into the buffer. Missing
-        // idents surface as a Rust compile error ("cannot find value
-        // X"), which is strictly sooner than the tree-walker's
-        // runtime "Variable X not found" — acceptable; the program
-        // still fails with a clear message.
-        let _ = line;
+        // Mirror the tree-walker: for each Variable part, resolve the
+        // current Bop value at the point where that part executes.
         let mut body = String::from("{ let mut __s = ::std::string::String::new(); ");
         for part in parts {
             match part {
@@ -3590,13 +3784,14 @@ impl Emitter {
                     write!(body, "__s.push_str({}); ", rust_string_literal(s)).unwrap();
                 }
                 StringPart::Variable(name) => {
+                    let value = self.ident_value_src(name, line)?;
                     // The cloned Value lives only for the duration
                     // of the format call; its Drop tracks the
                     // de-alloc correctly against `bop::memory`.
                     write!(
                         body,
-                        "__s.push_str(&format!(\"{{}}\", {}.clone())); ",
-                        rust_user_ident(name)
+                        "__s.push_str(&format!(\"{{}}\", {})); ",
+                        value
                     )
                     .unwrap();
                 }
@@ -3654,7 +3849,7 @@ impl Emitter {
         );
         let ident_target = if mutating {
             match &object.kind {
-                ExprKind::Ident(n) => Some(rust_user_ident(n)),
+                ExprKind::Ident(n) => Some(n.clone()),
                 _ => None,
             }
         } else {
@@ -3674,13 +3869,56 @@ impl Emitter {
         // named `push`, so non-arrays still clone once and go through the full
         // user-method-before-builtin dispatcher. Only the built-in Array arm
         // takes the in-place path.
-        if let Some(target) = ident_target {
+        if let Some(target_name) = ident_target {
             let owned_args = if arg_tmps.is_empty() {
                 "::std::vec::Vec::new()".to_string()
             } else {
                 format!("::std::vec![{}]", arg_tmps.join(", "))
             };
             let obj_tmp = self.fresh_tmp();
+            if !self.is_local(&target_name) {
+                if let Some(overlay) = self.declaration_alias_overlay(&target_name) {
+                    let read = self
+                        .declaration_alias_read_src(&target_name, line)
+                        .expect("overlay checked above");
+                    let mut body = String::new();
+                    write!(
+                        body,
+                        "{{ {}let __ret = if let ::std::option::Option::Some(::bop::value::Value::Array(__bop_array)) = {}.overlay.as_mut() {{ \
+                            ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                        }} else {{ \
+                            let {} = {}; \
+                            match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
+                                Some(v) => v, \
+                                None => {{ \
+                                    let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
+                                    if let Some(__new_obj) = __mutated {{ {}.overlay = ::std::option::Option::Some(__new_obj); }} \
+                                    __r \
+                                }}, \
+                            }} \
+                        }}; __ret }}",
+                        arg_lets,
+                        overlay,
+                        method_lit,
+                        owned_args,
+                        line,
+                        obj_tmp,
+                        read,
+                        obj_tmp,
+                        method_lit,
+                        args_arr,
+                        line,
+                        obj_tmp,
+                        method_lit,
+                        args_arr,
+                        line,
+                        overlay,
+                    )
+                    .unwrap();
+                    return Ok(body);
+                }
+            }
+            let target = rust_user_ident(&target_name);
             let mut body = String::new();
             write!(
                 body,
@@ -3796,6 +4034,17 @@ impl Emitter {
         for cap in &captures_ordered {
             self.bind_local(cap);
         }
+        let declaration_aliases =
+            self.declaration_aliases_for_callable(params, body);
+        let mut alias_initializers = HashMap::new();
+        let mut alias_captures = Vec::new();
+        for (index, alias) in declaration_aliases.iter().enumerate() {
+            if let Some(parent_overlay) = self.declaration_alias_overlay(alias) {
+                let capture = format!("__alias_cap_{}", index);
+                alias_initializers.insert(alias.clone(), format!("{}.clone()", capture));
+                alias_captures.push((capture, parent_overlay));
+            }
+        }
 
         // Emit body into a side buffer so we can splice it into
         // the closure literal without disturbing indentation or
@@ -3813,9 +4062,14 @@ impl Emitter {
         self.tmp_counter = 0;
         self.in_top_level = false;
         self.in_callable_body = true;
+        let declaration_alias_overlays =
+            self.emit_declaration_alias_overlays(&declaration_aliases, &alias_initializers);
+        self.declaration_alias_overlays
+            .push(declaration_alias_overlays);
         for s in body {
             self.emit_stmt(s)?;
         }
+        self.declaration_alias_overlays.pop();
         let body_src = core::mem::replace(&mut self.out, saved_out);
         self.indent = saved_indent;
         self.tmp_counter = saved_tmp;
@@ -3850,12 +4104,24 @@ impl Emitter {
             )
             .unwrap();
         }
-        let opaque_body_depth = captures_ordered
+        for (capture, parent_overlay) in &alias_captures {
+            writeln!(
+                capture_prelude,
+                "let {capture} = {parent_overlay}.overlay.clone();"
+            )
+            .unwrap();
+        }
+        let mut opaque_body_depth = captures_ordered
             .iter()
             .enumerate()
             .fold(String::from("0u16"), |depth, (i, _)| {
                 format!("{depth}.max(__cap_{i}.ownership_depth())")
             });
+        for (capture, _) in &alias_captures {
+            opaque_body_depth = format!(
+                "{opaque_body_depth}.max({capture}.as_ref().map_or(0u16, ::bop::value::Value::ownership_depth))"
+            );
+        }
 
         let arity = params.len();
         let arity_suffix = if arity == 1 { "" } else { "s" };
@@ -3913,6 +4179,19 @@ struct FreeVarDependencies {
     /// this set are resolved lazily by the pattern resolver, while a lambda
     /// still promotes outer locals/params from this set into real captures.
     pattern_namespaces: std::collections::BTreeSet<String>,
+    /// Nested named functions have their own declaration context and do not
+    /// capture a caller's alias overlay. Nested lambdas do capture it and must
+    /// continue to propagate through arbitrarily deep closure chains.
+    skip_nested_named_functions: bool,
+}
+
+impl FreeVarDependencies {
+    fn for_declaration_aliases() -> Self {
+        Self {
+            skip_nested_named_functions: true,
+            ..Self::default()
+        }
+    }
 }
 
 fn scan_free_vars_stmts(
@@ -4005,6 +4284,9 @@ fn scan_free_vars_stmt(
             // analysed with only its params in scope — matches
             // how the walker / VM treat nested fns.
             known.insert(name.clone());
+            if free.skip_nested_named_functions {
+                return;
+            }
             let mut inner_known = HashSet::new();
             for p in params {
                 inner_known.insert(p.clone());
@@ -4424,6 +4706,14 @@ fn rust_user_ident(name: &str) -> String {
     format!("__bop_user_value_{}", user_name_component(name))
 }
 
+fn declaration_alias_overlay_ident(name: &str) -> String {
+    format!("__bop_declaration_alias_{}", user_name_component(name))
+}
+
+fn declaration_alias_pattern_snapshot_ident(name: &str) -> String {
+    format!("__bop_pattern_alias_{}", user_name_component(name))
+}
+
 /// Render a Bop user-fn name as a Rust function name under a
 /// specific module prefix (`""` for the root program). Kept
 /// prefixed to avoid clashes with built-ins, and extended with
@@ -4639,6 +4929,82 @@ const RUNTIME_SHARED: &str = r#"/// Sentinel type inserted into `module_cache` w
 /// error and halts.
 pub struct __ModuleLoading;
 
+struct __BopDeclarationAliasBinding {
+    overlay: ::std::option::Option<::bop::value::Value>,
+    cached: ::std::option::Option<::bop::value::Value>,
+}
+
+fn __bop_declaration_alias_optional(
+    ctx: &Ctx<'_>,
+    binding: &mut __BopDeclarationAliasBinding,
+    module: &str,
+    alias: &str,
+) -> ::std::option::Option<::bop::value::Value> {
+    if let ::std::option::Option::Some(value) = &binding.overlay {
+        return ::std::option::Option::Some(value.clone());
+    }
+    if let ::std::option::Option::Some(value) = &binding.cached {
+        return ::std::option::Option::Some(value.clone());
+    }
+    let value = ctx
+        .module_aliases
+        .get(&(module.to_string(), alias.to_string()))
+        .cloned()?;
+    binding.cached = ::std::option::Option::Some(value.clone());
+    ::std::option::Option::Some(value)
+}
+
+fn __bop_declaration_alias_read(
+    ctx: &Ctx<'_>,
+    binding: &mut __BopDeclarationAliasBinding,
+    module: &str,
+    alias: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    __bop_declaration_alias_optional(ctx, binding, module, alias).ok_or_else(|| {
+            ::bop::error::BopError::runtime(
+                ::bop::error_messages::variable_not_found(alias),
+                line,
+            )
+        })
+}
+
+fn __bop_declaration_alias_assign(
+    ctx: &Ctx<'_>,
+    binding: &mut __BopDeclarationAliasBinding,
+    value: ::bop::value::Value,
+    module: &str,
+    alias: &str,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    if binding.overlay.is_none()
+        && binding.cached.is_none()
+        && !ctx
+            .module_aliases
+            .contains_key(&(module.to_string(), alias.to_string()))
+    {
+        return Err(::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(alias),
+            line,
+        ));
+    }
+    binding.overlay = ::std::option::Option::Some(value);
+    Ok(())
+}
+
+fn __bop_declaration_alias_mut<'v>(
+    binding: &'v mut __BopDeclarationAliasBinding,
+    alias: &str,
+    line: u32,
+) -> Result<&'v mut ::bop::value::Value, ::bop::error::BopError> {
+    binding.overlay.as_mut().ok_or_else(|| {
+        ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(alias),
+            line,
+        )
+    })
+}
+
 /// Opaque body that a `Value::Fn` carries around in AOT-emitted
 /// code. The callable is a higher-ranked `Fn` so the same Rc can
 /// satisfy any lifetime of `Ctx`, which lets us store closures in
@@ -4714,6 +5080,22 @@ fn __bop_call_value(
             line,
         )),
     }
+}
+
+fn __bop_call_named_value(
+    ctx: &mut Ctx<'_>,
+    callee: ::bop::value::Value,
+    args: ::std::vec::Vec<::bop::value::Value>,
+    name: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    if !matches!(&callee, ::bop::value::Value::Fn(_)) {
+        return Err(::bop::error::BopError::runtime(
+            format!("`{}` is a {}, not a function", name, callee.type_name()),
+            line,
+        ));
+    }
+    __bop_call_value(ctx, callee, args, line)
 }
 
 /// `try_call(f)` implementation. Invokes `f` with no args via

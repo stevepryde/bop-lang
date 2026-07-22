@@ -2114,6 +2114,21 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     if let Some(v) = self.get_var(name).cloned() {
                         return self.call_value(v, eval_args, expr.line, Some(name));
                     }
+                    let declaration_alias = self.active_lexical_contexts.last().and_then(|context| {
+                        if context.module_aliases.is_empty() {
+                            None
+                        } else {
+                            context.module_aliases.get(name).cloned()
+                        }
+                    });
+                    if let Some(module) = declaration_alias {
+                        return self.call_value(
+                            Value::Module(module),
+                            eval_args,
+                            expr.line,
+                            Some(name),
+                        );
+                    }
                     // Otherwise fall through to the original
                     // name-based dispatch (builtins → host → named
                     // fns). This is what keeps `print(x)` /
