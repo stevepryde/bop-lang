@@ -54,6 +54,8 @@ pub use evaluator::pattern_matches;
 /// on the matcher side, but the scope lookup is identical
 /// across engines.
 pub use evaluator::resolve_type_in;
+#[doc(hidden)]
+pub use evaluator::resolve_type_in_scoped;
 
 /// Type alias for the resolver closure `pattern_matches` expects.
 pub use evaluator::TypeResolveFn;

@@ -1540,6 +1540,71 @@ print(x)"#,
         &[("m", "let x = 42")],
     ),
     (
+        "import_plain_glob_idempotency_is_lexical",
+        r#"if true {
+    use m
+    print(x)
+}
+if true {
+    use m
+    print(x)
+}
+use m
+print(x)"#,
+        &[("m", "let x = 42")],
+    ),
+    (
+        "import_alias_shadow_restores_outer",
+        r#"use first as t
+if true {
+    use second as t
+    print(t.Point { second: 2 }.second)
+}
+print(t.Point { first: 1 }.first)"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+        ],
+    ),
+    (
+        "import_selective_function_preserves_named_fn",
+        r#"fn pick() { return 1 }
+use dep.{pick}
+print(pick())"#,
+        &[("dep", "fn pick() { return 42 }")],
+    ),
+    (
+        "import_glob_function_preserves_named_fn",
+        r#"fn pick() { return 1 }
+use dep
+print(pick())"#,
+        &[("dep", "fn pick() { return 42 }")],
+    ),
+    (
+        "import_local_callable_shadows_then_restores",
+        r#"use outer
+fn local() {
+    use inner.{helper}
+    return helper()
+}
+print(local())
+print(helper())"#,
+        &[
+            ("outer", "fn helper() { return 1 }"),
+            ("inner", "fn helper() { return 2 }"),
+        ],
+    ),
+    (
+        "import_function_local_callable_does_not_leak",
+        r#"fn seed() {
+    use inner.{helper}
+    return helper()
+}
+seed()
+print(helper())"#,
+        &[("inner", "fn helper() { return 2 }")],
+    ),
+    (
         "import_nested_every_runtime_body",
         r#"fn function_use() {
     use nested_shared as unused_alias

@@ -1583,7 +1583,9 @@ impl Emitter {
                     .map(|t| format!("{}.to_string()", rust_string_literal(t)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if self.is_local_in_current_scope(alias_name) {
+                if self.is_local_in_current_scope(alias_name)
+                    || self.fn_info.all_fns.contains_key(alias_name)
+                {
                     return Err(BopError::runtime(
                         format!(
                             "Alias `{}` in `use {} as {}` would shadow an existing binding",
@@ -1620,7 +1622,9 @@ impl Emitter {
                     // the current frame. An outer-frame binding is
                     // not a clash: this new Rust block should shadow
                     // it just like the walker and VM value scopes.
-                    if self.is_local_in_current_scope(name) {
+                    if self.is_local_in_current_scope(name)
+                        || self.fn_info.all_fns.contains_key(name)
+                    {
                         continue;
                     }
                     self.line(&format!(

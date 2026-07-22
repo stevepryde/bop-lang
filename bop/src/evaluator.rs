@@ -380,7 +380,11 @@ pub struct Evaluator<'h, H: BopHost> {
     /// (where `self.scopes` is fresh per call). Field access /
     /// method dispatch on `m.foo` falls back to this map when
     /// `m` isn't a local binding.
-    module_aliases: BTreeMap<String, Rc<crate::value::BopModule>>,
+    module_aliases: Vec<BTreeMap<String, Rc<crate::value::BopModule>>>,
+    /// Callable exports introduced by non-aliased `use`, paired with lexical
+    /// value scopes. This keeps direct calls fast without publishing a local
+    /// import in the evaluator-wide named-function registry.
+    imported_functions: Vec<BTreeMap<String, FnDef>>,
     host: &'h mut H,
     steps: u64,
     call_depth: usize,
@@ -388,6 +392,9 @@ pub struct Evaluator<'h, H: BopHost> {
     /// sibling lookup private to that function instead of leaking aliased
     /// functions into the caller-visible `functions` map.
     function_modules: Vec<String>,
+    /// First alias-frame index visible to the active function, excluding the
+    /// always-visible module/root frame at index 0.
+    alias_scope_floors: Vec<usize>,
     limits: BopLimits,
     rand_state: u64,
     /// Shared across nested evaluators so recursive imports see
@@ -398,7 +405,7 @@ pub struct Evaluator<'h, H: BopHost> {
     /// shared with sub-evaluators). Re-importing the same path at
     /// the same level is a no-op — matches Python's `import x;
     /// import x` behaviour.
-    imported_here: alloc_import::collections::BTreeSet<String>,
+    imported_here: Vec<alloc_import::collections::BTreeSet<String>>,
     /// Set by `try` when it sees an `Err(...)` variant and wants
     /// the enclosing fn to early-return with that value. The
     /// expression that raised stuffs the value here and returns
@@ -426,15 +433,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             enum_defs,
             methods: BTreeMap::new(),
             type_bindings: vec![builtin_bindings],
-            module_aliases: BTreeMap::new(),
+            module_aliases: vec![BTreeMap::new()],
+            imported_functions: vec![BTreeMap::new()],
             host,
             steps: 0,
             call_depth: 0,
             function_modules: Vec::new(),
+            alias_scope_floors: Vec::new(),
             limits,
             rand_state: 0,
             imports: Rc::new(RefCell::new(alloc_import::collections::BTreeMap::new())),
-            imported_here: alloc_import::collections::BTreeSet::new(),
+            imported_here: vec![alloc_import::collections::BTreeSet::new()],
             pending_try_return: None,
             runtime_warnings: Vec::new(),
         }
@@ -461,15 +470,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             enum_defs,
             methods: BTreeMap::new(),
             type_bindings: vec![builtin_bindings],
-            module_aliases: BTreeMap::new(),
+            module_aliases: vec![BTreeMap::new()],
+            imported_functions: vec![BTreeMap::new()],
             host,
             steps: 0,
             call_depth: 0,
             function_modules: Vec::new(),
+            alias_scope_floors: Vec::new(),
             limits,
             rand_state: 0,
             imports,
-            imported_here: alloc_import::collections::BTreeSet::new(),
+            imported_here: vec![alloc_import::collections::BTreeSet::new()],
             pending_try_return: None,
             runtime_warnings: Vec::new(),
         }
@@ -531,11 +542,42 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // Type bindings parallel the value scopes — same push /
         // pop rhythm keeps `use`-injected type names stack-scoped.
         self.type_bindings.push(BTreeMap::new());
+        self.module_aliases.push(BTreeMap::new());
+        self.imported_functions.push(BTreeMap::new());
+        self.imported_here
+            .push(alloc_import::collections::BTreeSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.type_bindings.pop();
+        self.module_aliases.pop();
+        self.imported_functions.pop();
+        self.imported_here.pop();
+    }
+
+    fn module_alias(&self, name: &str) -> Option<&Rc<crate::value::BopModule>> {
+        let floor = self.alias_scope_floors.last().copied();
+        self.module_aliases
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .find_map(|(_, frame)| frame.get(name))
+    }
+
+    fn imported_function(&self, name: &str) -> Option<&FnDef> {
+        let floor = self.alias_scope_floors.last().copied();
+        self.imported_functions
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .find_map(|(_, frame)| frame.get(name))
+    }
+
+    fn is_module_top_scope(&self) -> bool {
+        self.call_depth == 0 && self.scopes.len() == 1
     }
 
     /// Resolve a type reference to the module it was declared
@@ -546,10 +588,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     /// `validate_namespaced_type` and its backing module path
     /// returned. Returns `None` when no matching type is visible.
     fn resolve_type_ref(&self, namespace: Option<&str>, type_name: &str) -> Option<String> {
-        resolve_type_in(
+        resolve_type_in_scoped(
             &self.scopes,
             &self.type_bindings,
             &self.module_aliases,
+            self.alias_scope_floors.last().copied(),
             namespace,
             type_name,
         )
@@ -657,7 +700,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 }
             }
         }
-        self.functions.get(name).cloned()
+        self.imported_function(name)
+            .cloned()
+            .or_else(|| self.functions.get(name).cloned())
     }
 
     // ─── Statements ────────────────────────────────────────────────
@@ -1059,7 +1104,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // the same module imported with different shapes can
         // legitimately produce different scope effects.
         let is_plain_glob = items.is_none() && alias.is_none();
-        if is_plain_glob && self.imported_here.contains(path) {
+        if is_plain_glob
+            && self
+                .imported_here
+                .last()
+                .is_some_and(|imports| imports.contains(path))
+        {
             return Ok(());
         }
 
@@ -1199,6 +1249,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 .map(|s| s.contains_key(alias_name))
                 .unwrap_or(false)
                 || self.functions.contains_key(alias_name)
+                || self
+                    .imported_functions
+                    .last()
+                    .is_some_and(|functions| functions.contains_key(alias_name))
             {
                 return Err(error(
                     line,
@@ -1234,6 +1288,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 Value::Module(Rc::clone(&module_rc)),
             );
             self.module_aliases
+                .last_mut()
+                .expect("module alias scope")
                 .insert(alias_name.to_string(), Rc::clone(&module_rc));
             if let Some(scope) = self.type_bindings.last_mut() {
                 scope.insert(alias_name.to_string(), path.to_string());
@@ -1244,6 +1300,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             // Selective lets the user reach into private
             // bindings explicitly.
             let skip_private = items.is_none();
+            let module_top_scope = self.is_module_top_scope();
+            let mut blocked_function_values =
+                alloc_import::collections::BTreeSet::new();
             for (name, fn_def) in fn_entries {
                 if skip_private && crate::naming::is_private(&name) {
                     continue;
@@ -1253,8 +1312,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     .last()
                     .map(|s| s.contains_key(&name))
                     .unwrap_or(false)
-                    || self.functions.contains_key(&name)
+                    || (module_top_scope && self.functions.contains_key(&name))
                 {
+                    blocked_function_values.insert(name.clone());
                     self.runtime_warnings.push(crate::error::BopWarning::at(
                         format!(
                             "`{}` from `{}` shadowed by an existing binding — the first definition wins",
@@ -1264,10 +1324,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     ));
                     continue;
                 }
-                self.functions.insert(name, fn_def);
+                self.imported_functions
+                    .last_mut()
+                    .expect("imported function scope")
+                    .insert(name, fn_def);
             }
             for (name, value) in exports {
                 if skip_private && crate::naming::is_private(&name) {
+                    continue;
+                }
+                if blocked_function_values.contains(&name) {
                     continue;
                 }
                 if self
@@ -1310,7 +1376,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         }
 
         if is_plain_glob {
-            self.imported_here.insert(path.to_string());
+            self.imported_here
+                .last_mut()
+                .expect("import scope")
+                .insert(path.to_string());
         }
         Ok(())
     }
@@ -1488,7 +1557,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
             return Ok(());
         }
-        if let Some(module) = self.module_aliases.get(ns) {
+        if let Some(module) = self.module_alias(ns) {
             if !module.types.iter().any(|t| t == type_name) {
                 return Err(error(
                     line,
@@ -2393,8 +2462,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             let scopes = &self.scopes;
             let type_bindings = &self.type_bindings;
             let module_aliases = &self.module_aliases;
+            let alias_scope_floor = self.alias_scope_floors.last().copied();
             let resolver = |ns: Option<&str>, tn: &str| -> Option<String> {
-                resolve_type_in(scopes, type_bindings, module_aliases, ns, tn)
+                resolve_type_in_scoped(
+                    scopes,
+                    type_bindings,
+                    module_aliases,
+                    alias_scope_floor,
+                    ns,
+                    tn,
+                )
             };
             if !pattern_matches(&arm.pattern, &value, &mut bindings, &resolver) {
                 continue;
@@ -2560,6 +2637,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         );
         let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
         self.type_bindings.push(BTreeMap::new());
+        let alias_scope_floor = self.module_aliases.len();
+        self.module_aliases.push(BTreeMap::new());
+        self.imported_functions.push(BTreeMap::new());
+        self.alias_scope_floors.push(alias_scope_floor);
+        self.imported_here
+            .push(alloc_import::collections::BTreeSet::new());
 
         // Captures go in first so parameters shadow them on
         // collision (matches the lexical snapshot semantics).
@@ -2579,6 +2662,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let result = self.exec_block(body);
         self.scopes = saved_scopes;
         self.type_bindings.pop();
+        self.module_aliases.truncate(alias_scope_floor);
+        self.imported_functions.truncate(alias_scope_floor);
+        self.alias_scope_floors.pop();
+        self.imported_here.truncate(alias_scope_floor);
         self.function_modules.pop();
         self.call_depth -= 1;
 
@@ -3052,6 +3139,28 @@ pub fn resolve_type_in(
     namespace: Option<&str>,
     type_name: &str,
 ) -> Option<String> {
+    resolve_type_in_scoped(
+        value_scopes,
+        type_scopes,
+        core::slice::from_ref(module_aliases),
+        None,
+        namespace,
+        type_name,
+    )
+}
+
+/// Scoped variant used by evaluators that retain one module-alias frame per
+/// lexical value scope. Frame zero remains visible across function calls;
+/// `alias_scope_floor` hides active caller-local frames below the callee.
+#[doc(hidden)]
+pub fn resolve_type_in_scoped(
+    value_scopes: &[BTreeMap<String, Value>],
+    type_scopes: &[BTreeMap<String, String>],
+    module_aliases: &[BTreeMap<String, Rc<crate::value::BopModule>>],
+    alias_scope_floor: Option<usize>,
+    namespace: Option<&str>,
+    type_name: &str,
+) -> Option<String> {
     if let Some(ns) = namespace {
         // First: look the alias up in value scopes (catches
         // locally-bound modules, if any). Then fall back to
@@ -3059,16 +3168,24 @@ pub fn resolve_type_in(
         // reach module-level aliases even when their own value
         // scope is empty.
         for scope in value_scopes.iter().rev() {
-            if let Some(Value::Module(m)) = scope.get(ns) {
-                if m.types.iter().any(|t| t == type_name) {
-                    return Some(m.path.clone());
+            if let Some(value) = scope.get(ns) {
+                if let Value::Module(module) = value {
+                    if module.types.iter().any(|ty| ty == type_name) {
+                        return Some(module.path.clone());
+                    }
                 }
                 return None;
             }
         }
-        if let Some(m) = module_aliases.get(ns) {
-            if m.types.iter().any(|t| t == type_name) {
-                return Some(m.path.clone());
+        for (index, frame) in module_aliases.iter().enumerate().rev() {
+            if alias_scope_floor.is_some_and(|floor| index != 0 && index < floor) {
+                continue;
+            }
+            if let Some(module) = frame.get(ns) {
+                if module.types.iter().any(|ty| ty == type_name) {
+                    return Some(module.path.clone());
+                }
+                return None;
             }
         }
         return None;
@@ -3319,9 +3436,10 @@ pub struct ReplSession {
     enum_defs: BTreeMap<(String, String), Vec<VariantDecl>>,
     methods: BTreeMap<(String, String), BTreeMap<String, FnDef>>,
     type_bindings: Vec<BTreeMap<String, String>>,
-    module_aliases: BTreeMap<String, Rc<crate::value::BopModule>>,
+    module_aliases: Vec<BTreeMap<String, Rc<crate::value::BopModule>>>,
+    imported_functions: Vec<BTreeMap<String, FnDef>>,
     imports: ImportCache,
-    imported_here: alloc_import::collections::BTreeSet<String>,
+    imported_here: Vec<alloc_import::collections::BTreeSet<String>>,
     rand_state: u64,
 }
 
@@ -3345,11 +3463,12 @@ impl ReplSession {
             enum_defs,
             methods: BTreeMap::new(),
             type_bindings: vec![builtin_bindings],
-            module_aliases: BTreeMap::new(),
+            module_aliases: vec![BTreeMap::new()],
+            imported_functions: vec![BTreeMap::new()],
             imports: Rc::new(RefCell::new(
                 alloc_import::collections::BTreeMap::new(),
             )),
-            imported_here: alloc_import::collections::BTreeSet::new(),
+            imported_here: vec![alloc_import::collections::BTreeSet::new()],
             rand_state: 0,
         }
     }
@@ -3517,6 +3636,7 @@ impl ReplSession {
             methods: core::mem::take(&mut self.methods),
             type_bindings: core::mem::take(&mut self.type_bindings),
             module_aliases: core::mem::take(&mut self.module_aliases),
+            imported_functions: core::mem::take(&mut self.imported_functions),
             imports: Rc::clone(&self.imports),
             imported_here: core::mem::take(&mut self.imported_here),
             rand_state: self.rand_state,
@@ -3524,6 +3644,7 @@ impl ReplSession {
             steps: 0,
             call_depth: 0,
             function_modules: Vec::new(),
+            alias_scope_floors: Vec::new(),
             limits,
             pending_try_return: None,
             runtime_warnings: Vec::new(),
@@ -3558,8 +3679,30 @@ impl ReplSession {
         self.enum_defs = eval.enum_defs;
         self.methods = eval.methods;
         self.type_bindings = type_bindings;
-        self.module_aliases = eval.module_aliases;
-        self.imported_here = eval.imported_here;
+        let mut module_aliases = eval.module_aliases;
+        if module_aliases.len() > 1 {
+            module_aliases.truncate(1);
+        }
+        if module_aliases.is_empty() {
+            module_aliases.push(BTreeMap::new());
+        }
+        self.module_aliases = module_aliases;
+        let mut imported_functions = eval.imported_functions;
+        if imported_functions.len() > 1 {
+            imported_functions.truncate(1);
+        }
+        if imported_functions.is_empty() {
+            imported_functions.push(BTreeMap::new());
+        }
+        self.imported_functions = imported_functions;
+        let mut imported_here = eval.imported_here;
+        if imported_here.len() > 1 {
+            imported_here.truncate(1);
+        }
+        if imported_here.is_empty() {
+            imported_here.push(alloc_import::collections::BTreeSet::new());
+        }
+        self.imported_here = imported_here;
         self.rand_state = eval.rand_state;
         // `imports` is shared via `Rc` — nothing to do; the
         // cache the Evaluator wrote into is the same one the

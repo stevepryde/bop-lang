@@ -1018,6 +1018,19 @@ fn lacks_import() {
 }
 
 #[test]
+fn module_alias_conflicting_with_named_function_is_rejected() {
+    let error = compile_with_modules(
+        r#"fn dep() { return 1 }
+use dep as dep"#,
+        &[("dep", "let value = 42")],
+    )
+    .expect_err("a module alias must not replace a named function");
+
+    assert!(error.message.contains("would shadow an existing binding"));
+    assert_eq!(error.line, Some(2));
+}
+
+#[test]
 fn block_local_module_alias_does_not_leak_into_the_enclosing_scope() {
     let error = compile_with_modules(
         r#"if true {
