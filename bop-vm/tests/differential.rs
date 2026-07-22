@@ -251,6 +251,44 @@ fn assert_both_value_depth_errors(code: &str, expected_line: u32) {
     }
 }
 
+#[test]
+fn targeted_parse_diagnostics_match_walker_and_vm_entry_points() {
+    let cases = [
+        (
+            "let label = match 1 {\n  1 => { print(\"one\") },\n  _ => \"other\",\n}",
+            "`{ ... }` after `=>` is a dictionary expression, not a match-arm block",
+            2,
+            8,
+            "`match` arm bodies must be a single expression; put it directly after `=>`, or quote dictionary keys if you meant to return a dictionary.",
+        ),
+        (
+            "for i in 0..3 {}",
+            "`..` range syntax is not supported in expressions",
+            1,
+            11,
+            "use `range(start, end)` instead, for example `range(0, 3)`.",
+        ),
+    ];
+
+    for (source, message, line, column, hint) in cases {
+        for engine in ["tree-walker", "bytecode vm"] {
+            let mut host = RecordHost::new();
+            let error = if engine == "tree-walker" {
+                bop::run(source, &mut host, &standard())
+            } else {
+                bop_vm::run(source, &mut host, &standard())
+            }
+            .expect_err("invalid syntax must fail before execution");
+
+            assert!(host.prints.borrow().is_empty(), "{engine} printed");
+            assert_eq!(error.message, message, "engine: {engine}");
+            assert_eq!(error.line, Some(line), "engine: {engine}");
+            assert_eq!(error.column, Some(column), "engine: {engine}");
+            assert_eq!(error.friendly_hint.as_deref(), Some(hint), "engine: {engine}");
+        }
+    }
+}
+
 // ─── Automatic semicolon insertion ────────────────────────────────
 
 #[test]

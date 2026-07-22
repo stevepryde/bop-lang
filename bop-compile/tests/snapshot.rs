@@ -33,6 +33,35 @@ fn inconsistent_or_pattern_is_rejected_before_aot_emission() {
 }
 
 #[test]
+fn targeted_parser_diagnostics_are_preserved_at_the_aot_boundary() {
+    let cases = [
+        (
+            "let label = match 1 {\n  1 => { print(\"one\") },\n  _ => \"other\",\n}",
+            "`{ ... }` after `=>` is a dictionary expression, not a match-arm block",
+            2,
+            8,
+            "`match` arm bodies must be a single expression; put it directly after `=>`, or quote dictionary keys if you meant to return a dictionary.",
+        ),
+        (
+            "for i in 0..3 {}",
+            "`..` range syntax is not supported in expressions",
+            1,
+            11,
+            "use `range(start, end)` instead, for example `range(0, 3)`.",
+        ),
+    ];
+
+    for (source, message, line, column, hint) in cases {
+        let error = transpile(source, &Options::default())
+            .expect_err("parse error must stop AOT emission");
+        assert_eq!(error.message, message, "source: {source}");
+        assert_eq!(error.line, Some(line), "source: {source}");
+        assert_eq!(error.column, Some(column), "source: {source}");
+        assert_eq!(error.friendly_hint.as_deref(), Some(hint), "source: {source}");
+    }
+}
+
+#[test]
 fn top_level_try_uses_the_shared_diagnostic_constructor() {
     let source = r#"enum Result { Ok(value), Err(error) }
 let value = try Result::Err("boom")"#;
