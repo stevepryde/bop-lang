@@ -54,11 +54,11 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
 
 // ─── Type / method registry ────────────────────────────────────────
 //
-// The pre-pass catalogues every user-defined type declaration site across the
-// root program and transitively imported modules. It never folds sites or
-// diagnoses clashes: generated code registers a site's static descriptor only
-// when execution reaches that declaration. Methods remain direct-list
-// metadata until their separate source-order publication work in #86.
+// The pre-pass catalogues every user-defined type and method declaration site
+// across the root program and transitively imported modules. It never folds
+// sites or diagnoses clashes: generated code registers a site's static
+// descriptor only when execution reaches that declaration. Method bodies are
+// lifted once, but their adapters are published only at the source site.
 
 pub(crate) struct TypeRegistry {
     /// Every syntactic struct declaration, including sites nested in
@@ -73,12 +73,12 @@ pub(crate) struct TypeRegistry {
     /// emitted ahead of source execution and may resolve these names, but must
     /// never inherit declarations owned by a block or another callable.
     top_level_types: HashMap<String, BTreeSet<String>>,
-    /// User methods, keyed by the *full receiver-type identity*
-    /// `(module_path, type_name, method_name)`. A method
-    /// declared for `paint.Color` doesn't fire on
-    /// `other.Color`; dispatch threads the receiver's own
-    /// module path into the lookup.
-    pub methods: HashMap<(String, String, String), MethodEntry>,
+    /// Every syntactic method declaration. Sites are never folded by key:
+    /// source execution selects which uniquely lifted adapter is active.
+    pub method_sites: Vec<MethodSite>,
+    /// Dense, deterministic slot keys shared by all sites with the same full
+    /// receiver identity `(declaring module, type, method)`.
+    pub method_slots: Vec<(String, String, String)>,
 }
 
 #[derive(Clone)]
@@ -113,15 +113,41 @@ impl TypeRegistry {
                 .iter()
                 .any(|site| site.module_path == module_path)
     }
+
+    fn method_slot(
+        &self,
+        module_path: &str,
+        type_name: &str,
+        method_name: &str,
+    ) -> usize {
+        self.method_slots
+            .binary_search_by(|(module, ty, method)| {
+                (module.as_str(), ty.as_str(), method.as_str())
+                    .cmp(&(module_path, type_name, method_name))
+            })
+            .expect("every method site has a dense slot")
+    }
+
+    fn module_method_slots(&self, module_path: &str) -> Vec<usize> {
+        self.method_slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, (module, _, _))| (module == module_path).then_some(slot))
+            .collect()
+    }
 }
 
 #[derive(Clone)]
-pub(crate) struct MethodEntry {
+pub(crate) struct MethodSite {
+    pub id: usize,
+    pub module_path: String,
+    pub type_name: String,
+    pub method_name: String,
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
-    /// Module prefix the method came from (empty for root). Only
-    /// used to mangle the Rust fn name; doesn't affect dispatch.
     pub module_prefix: String,
+    pub line: u32,
+    pub column: Option<core::num::NonZeroU32>,
 }
 
 fn collect_type_registry(
@@ -132,7 +158,8 @@ fn collect_type_registry(
         struct_sites: Vec::new(),
         enum_sites: Vec::new(),
         top_level_types: HashMap::new(),
-        methods: HashMap::new(),
+        method_sites: Vec::new(),
+        method_slots: Vec::new(),
     };
 
     // Engine-wide builtins (`Result`, `RuntimeError`) go into
@@ -166,6 +193,19 @@ fn collect_type_registry(
             collect_types_from_stmts(&entry.ast, &prefix, name, &mut reg);
         }
     }
+    reg.method_slots = reg
+        .method_sites
+        .iter()
+        .map(|site| {
+            (
+                site.module_path.clone(),
+                site.type_name.clone(),
+                site.method_name.clone(),
+            )
+        })
+        .collect();
+    reg.method_slots.sort();
+    reg.method_slots.dedup();
     Ok(reg)
 }
 
@@ -175,25 +215,52 @@ fn collect_types_from_stmts(
     module_path: &str,
     reg: &mut TypeRegistry,
 ) {
-    visit_type_declaration_sites(
+    let mut struct_names = Vec::new();
+    let mut enum_names = Vec::new();
+    let mut methods = Vec::new();
+    visit_declaration_sites(
         stmts,
-        &mut |name, _fields, _line| {
-            reg.struct_sites.push(StructSite {
-                module_path: module_path.to_string(),
-                name: name.to_string(),
-            });
-        },
-        &mut |name, _variants, _line| {
-            reg.enum_sites.push(EnumSite {
-                module_path: module_path.to_string(),
-                name: name.to_string(),
-            });
+        &mut DeclarationVisitor {
+            on_struct: &mut |name, _fields, _line| struct_names.push(name.to_string()),
+            on_enum: &mut |name, _variants, _line| enum_names.push(name.to_string()),
+            on_method: &mut |type_name, method_name, params, body, line, column| {
+                methods.push((
+                    type_name.to_string(),
+                    method_name.to_string(),
+                    params.to_vec(),
+                    body.to_vec(),
+                    line,
+                    column,
+                ));
+            },
         },
     );
+    reg.struct_sites.extend(struct_names.into_iter().map(|name| StructSite {
+        module_path: module_path.to_string(),
+        name,
+    }));
+    reg.enum_sites.extend(enum_names.into_iter().map(|name| EnumSite {
+        module_path: module_path.to_string(),
+        name,
+    }));
+    for (type_name, method_name, params, body, line, column) in methods {
+        let id = reg.method_sites.len();
+        reg.method_sites.push(MethodSite {
+            id,
+            module_path: module_path.to_string(),
+            type_name,
+            method_name,
+            params,
+            body,
+            module_prefix: prefix.to_string(),
+            line,
+            column,
+        });
+    }
 
-    // #86 will make method publication source-ordered. Until then preserve
-    // the existing direct-list collection; recursive type discovery must not
-    // accidentally hoist methods from dead branches or nested callables.
+    // Only declarations directly in the module statement list are visible to
+    // lifted callables before source execution. Recursive declaration sites
+    // deliberately do not enter this lexical-name seed.
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::StructDecl { name, .. } | StmtKind::EnumDecl { name, .. } => {
@@ -202,55 +269,32 @@ fn collect_types_from_stmts(
                     .or_default()
                     .insert(name.clone());
             }
-            StmtKind::MethodDecl {
-                type_name,
-                method_name,
-                params,
-                body,
-            } => {
-                // Methods attach to the *full* receiver-type
-                // identity. `fn Color.area(self)` inside paint
-                // registers under `(paint, Color, area)` and
-                // doesn't leak to other modules' same-named
-                // types. Last-write-wins on same key to match
-                // walker's insert-without-shape-check rule.
-                reg.methods.insert(
-                    (
-                        module_path.to_string(),
-                        type_name.clone(),
-                        method_name.clone(),
-                    ),
-                    MethodEntry {
-                        params: params.clone(),
-                        body: body.clone(),
-                        module_prefix: prefix.to_string(),
-                    },
-                );
-            }
             _ => {}
         }
     }
 }
 
-/// Walk every expression-bearing edge in the AST and report declaration
-/// sites in source order. Keeping this independent from method collection is
-/// intentional: #86 can reuse the traversal when method publication becomes
-/// runtime-driven without #85 hoisting nested methods today.
-fn visit_type_declaration_sites(
-    stmts: &[Stmt],
-    on_struct: &mut dyn FnMut(&str, &[String], u32),
-    on_enum: &mut dyn FnMut(&str, &[VariantDecl], u32),
-) {
+type MethodDeclarationCallback<'a> =
+    dyn FnMut(&str, &str, &[String], &[Stmt], u32, Option<core::num::NonZeroU32>) + 'a;
+
+struct DeclarationVisitor<'a> {
+    on_struct: &'a mut dyn FnMut(&str, &[String], u32),
+    on_enum: &'a mut dyn FnMut(&str, &[VariantDecl], u32),
+    on_method: &'a mut MethodDeclarationCallback<'a>,
+}
+
+/// Walk every statement and expression edge in source order. Type and method
+/// site discovery intentionally share this one exhaustive traversal so a new
+/// AST edge cannot make one form silently less dynamic than the others.
+fn visit_declaration_sites(stmts: &[Stmt], visitor: &mut DeclarationVisitor<'_>) {
     for stmt in stmts {
         match &stmt.kind {
-            StmtKind::StructDecl { name, fields } => on_struct(name, fields, stmt.line),
-            StmtKind::EnumDecl { name, variants } => on_enum(name, variants, stmt.line),
-            StmtKind::Let { value, .. } => {
-                visit_type_declaration_sites_in_expr(value, on_struct, on_enum)
-            }
+            StmtKind::StructDecl { name, fields } => (visitor.on_struct)(name, fields, stmt.line),
+            StmtKind::EnumDecl { name, variants } => (visitor.on_enum)(name, variants, stmt.line),
+            StmtKind::Let { value, .. } => visit_declaration_sites_in_expr(value, visitor),
             StmtKind::Assign { target, value, .. } => {
-                visit_type_declaration_sites_in_target(target, on_struct, on_enum);
-                visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                visit_declaration_sites_in_target(target, visitor);
+                visit_declaration_sites_in_expr(value, visitor);
             }
             StmtKind::If {
                 condition,
@@ -258,66 +302,68 @@ fn visit_type_declaration_sites(
                 else_ifs,
                 else_body,
             } => {
-                visit_type_declaration_sites_in_expr(condition, on_struct, on_enum);
-                visit_type_declaration_sites(body, on_struct, on_enum);
+                visit_declaration_sites_in_expr(condition, visitor);
+                visit_declaration_sites(body, visitor);
                 for (condition, body) in else_ifs {
-                    visit_type_declaration_sites_in_expr(condition, on_struct, on_enum);
-                    visit_type_declaration_sites(body, on_struct, on_enum);
+                    visit_declaration_sites_in_expr(condition, visitor);
+                    visit_declaration_sites(body, visitor);
                 }
                 if let Some(body) = else_body {
-                    visit_type_declaration_sites(body, on_struct, on_enum);
+                    visit_declaration_sites(body, visitor);
                 }
             }
             StmtKind::While { condition, body } => {
-                visit_type_declaration_sites_in_expr(condition, on_struct, on_enum);
-                visit_type_declaration_sites(body, on_struct, on_enum);
+                visit_declaration_sites_in_expr(condition, visitor);
+                visit_declaration_sites(body, visitor);
             }
             StmtKind::Repeat { count, body } => {
-                visit_type_declaration_sites_in_expr(count, on_struct, on_enum);
-                visit_type_declaration_sites(body, on_struct, on_enum);
+                visit_declaration_sites_in_expr(count, visitor);
+                visit_declaration_sites(body, visitor);
             }
             StmtKind::ForIn { iterable, body, .. } => {
-                visit_type_declaration_sites_in_expr(iterable, on_struct, on_enum);
-                visit_type_declaration_sites(body, on_struct, on_enum);
+                visit_declaration_sites_in_expr(iterable, visitor);
+                visit_declaration_sites(body, visitor);
             }
-            StmtKind::FnDecl { body, .. } | StmtKind::MethodDecl { body, .. } => {
-                visit_type_declaration_sites(body, on_struct, on_enum);
+            StmtKind::FnDecl { body, .. } => visit_declaration_sites(body, visitor),
+            StmtKind::MethodDecl {
+                type_name,
+                method_name,
+                params,
+                body,
+            } => {
+                (visitor.on_method)(
+                    type_name,
+                    method_name,
+                    params,
+                    body,
+                    stmt.line,
+                    stmt.column,
+                );
+                visit_declaration_sites(body, visitor);
             }
             StmtKind::Return { value } => {
                 if let Some(value) = value {
-                    visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                    visit_declaration_sites_in_expr(value, visitor);
                 }
             }
-            StmtKind::ExprStmt(expr) => {
-                visit_type_declaration_sites_in_expr(expr, on_struct, on_enum)
-            }
+            StmtKind::ExprStmt(expr) => visit_declaration_sites_in_expr(expr, visitor),
             StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
         }
     }
 }
 
-fn visit_type_declaration_sites_in_target(
-    target: &AssignTarget,
-    on_struct: &mut dyn FnMut(&str, &[String], u32),
-    on_enum: &mut dyn FnMut(&str, &[VariantDecl], u32),
-) {
+fn visit_declaration_sites_in_target(target: &AssignTarget, visitor: &mut DeclarationVisitor<'_>) {
     match target {
         AssignTarget::Variable(_) => {}
         AssignTarget::Index { object, index } => {
-            visit_type_declaration_sites_in_expr(object, on_struct, on_enum);
-            visit_type_declaration_sites_in_expr(index, on_struct, on_enum);
+            visit_declaration_sites_in_expr(object, visitor);
+            visit_declaration_sites_in_expr(index, visitor);
         }
-        AssignTarget::Field { object, .. } => {
-            visit_type_declaration_sites_in_expr(object, on_struct, on_enum)
-        }
+        AssignTarget::Field { object, .. } => visit_declaration_sites_in_expr(object, visitor),
     }
 }
 
-fn visit_type_declaration_sites_in_expr(
-    expr: &Expr,
-    on_struct: &mut dyn FnMut(&str, &[String], u32),
-    on_enum: &mut dyn FnMut(&str, &[VariantDecl], u32),
-) {
+fn visit_declaration_sites_in_expr(expr: &Expr, visitor: &mut DeclarationVisitor<'_>) {
     match &expr.kind {
         ExprKind::Int(_)
         | ExprKind::Number(_)
@@ -327,57 +373,55 @@ fn visit_type_declaration_sites_in_expr(
         | ExprKind::None
         | ExprKind::Ident(_) => {}
         ExprKind::BinaryOp { left, right, .. } => {
-            visit_type_declaration_sites_in_expr(left, on_struct, on_enum);
-            visit_type_declaration_sites_in_expr(right, on_struct, on_enum);
+            visit_declaration_sites_in_expr(left, visitor);
+            visit_declaration_sites_in_expr(right, visitor);
         }
         ExprKind::UnaryOp { expr, .. } | ExprKind::Try(expr) => {
-            visit_type_declaration_sites_in_expr(expr, on_struct, on_enum)
+            visit_declaration_sites_in_expr(expr, visitor)
         }
         ExprKind::Call { callee, args } => {
-            visit_type_declaration_sites_in_expr(callee, on_struct, on_enum);
+            visit_declaration_sites_in_expr(callee, visitor);
             for arg in args {
-                visit_type_declaration_sites_in_expr(arg, on_struct, on_enum);
+                visit_declaration_sites_in_expr(arg, visitor);
             }
         }
         ExprKind::MethodCall { object, args, .. } => {
-            visit_type_declaration_sites_in_expr(object, on_struct, on_enum);
+            visit_declaration_sites_in_expr(object, visitor);
             for arg in args {
-                visit_type_declaration_sites_in_expr(arg, on_struct, on_enum);
+                visit_declaration_sites_in_expr(arg, visitor);
             }
         }
-        ExprKind::FieldAccess { object, .. } => {
-            visit_type_declaration_sites_in_expr(object, on_struct, on_enum)
-        }
+        ExprKind::FieldAccess { object, .. } => visit_declaration_sites_in_expr(object, visitor),
         ExprKind::StructConstruct { fields, .. } => {
             for (_, value) in fields {
-                visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                visit_declaration_sites_in_expr(value, visitor);
             }
         }
         ExprKind::EnumConstruct { payload, .. } => match payload {
             VariantPayload::Unit => {}
             VariantPayload::Tuple(values) => {
                 for value in values {
-                    visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                    visit_declaration_sites_in_expr(value, visitor);
                 }
             }
             VariantPayload::Struct(fields) => {
                 for (_, value) in fields {
-                    visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                    visit_declaration_sites_in_expr(value, visitor);
                 }
             }
         },
         ExprKind::Index { object, index } => {
-            visit_type_declaration_sites_in_expr(object, on_struct, on_enum);
-            visit_type_declaration_sites_in_expr(index, on_struct, on_enum);
+            visit_declaration_sites_in_expr(object, visitor);
+            visit_declaration_sites_in_expr(index, visitor);
         }
         ExprKind::Array(values) => {
             for value in values {
-                visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                visit_declaration_sites_in_expr(value, visitor);
             }
         }
         ExprKind::Dict(entries) => {
             for (_, value) in entries {
-                visit_type_declaration_sites_in_expr(value, on_struct, on_enum);
+                visit_declaration_sites_in_expr(value, visitor);
             }
         }
         ExprKind::IfExpr {
@@ -385,20 +429,18 @@ fn visit_type_declaration_sites_in_expr(
             then_expr,
             else_expr,
         } => {
-            visit_type_declaration_sites_in_expr(condition, on_struct, on_enum);
-            visit_type_declaration_sites_in_expr(then_expr, on_struct, on_enum);
-            visit_type_declaration_sites_in_expr(else_expr, on_struct, on_enum);
+            visit_declaration_sites_in_expr(condition, visitor);
+            visit_declaration_sites_in_expr(then_expr, visitor);
+            visit_declaration_sites_in_expr(else_expr, visitor);
         }
-        ExprKind::Lambda { body, .. } => {
-            visit_type_declaration_sites(body, on_struct, on_enum)
-        }
+        ExprKind::Lambda { body, .. } => visit_declaration_sites(body, visitor),
         ExprKind::Match { scrutinee, arms } => {
-            visit_type_declaration_sites_in_expr(scrutinee, on_struct, on_enum);
+            visit_declaration_sites_in_expr(scrutinee, visitor);
             for arm in arms {
                 if let Some(guard) = &arm.guard {
-                    visit_type_declaration_sites_in_expr(guard, on_struct, on_enum);
+                    visit_declaration_sites_in_expr(guard, visitor);
                 }
-                visit_type_declaration_sites_in_expr(&arm.body, on_struct, on_enum);
+                visit_declaration_sites_in_expr(&arm.body, visitor);
             }
         }
     }
@@ -1257,6 +1299,11 @@ struct Emitter {
     /// with `scope_stack` depth to distinguish a module's direct use-site from
     /// a nested lexical import when applying named-function first-win rules.
     in_callable_body: bool,
+    /// Method definitions retain declaration module context but never capture
+    /// surrounding value bindings. Unknown identifiers must therefore compile
+    /// to the same runtime lookup error as walker/VM, not an undefined Rust
+    /// local. Nested lambdas still capture method params through `is_local`.
+    in_non_capturing_method: bool,
     /// Aliased top-level imports owned by the module whose lifted callables are
     /// currently being emitted. Their runtime values are resolved lazily from
     /// `Ctx::module_aliases` because lifted Rust functions cannot capture the
@@ -1317,6 +1364,7 @@ impl Emitter {
             scope_stack: Vec::new(),
             in_top_level: false,
             in_callable_body: false,
+            in_non_capturing_method: false,
             declaration_aliases: Vec::new(),
             declaration_alias_overlays: Vec::new(),
             callable_mutations: Vec::new(),
@@ -1743,6 +1791,12 @@ impl Emitter {
                 ),
                 line,
             ))
+        } else if self.in_non_capturing_method {
+            Ok(format!(
+                "::std::result::Result::<::bop::value::Value, ::bop::error::BopError>::Err(::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({}), {}))?",
+                rust_string_literal(name),
+                line,
+            ))
         } else {
             Ok(format!("{}.clone()", rust_user_ident(name)))
         }
@@ -1927,11 +1981,10 @@ impl Emitter {
         // wrappers (also at module scope) can reference them, and
         // `let g = fib` works even before `fib` is called.
         self.emit_top_level_fn_decls(stmts)?;
-        // User methods and the runtime dispatcher go at module
-        // scope. Methods can live in different Bop modules; the
-        // emitter mangles their Rust fn names by the source
-        // module's slug so there's never a collision.
-        self.emit_user_methods()?;
+        // Every method statement gets a unique lifted body and uniform
+        // adapter. Runtime declaration statements publish those adapters into
+        // dense slots; lifting itself does not make a method visible.
+        self.emit_method_sites()?;
         self.emit_method_dispatcher();
         self.emit_run_program(stmts)?;
         self.emit_fn_value_wrappers();
@@ -2305,6 +2358,7 @@ impl Emitter {
         entry: &ModuleEntry,
     ) -> Result<(), BopError> {
         let has_type_sites = self.types.module_has_type_sites(name);
+        let method_slots = self.types.module_method_slots(name);
         let load = module_load_fn_name(name);
         let exports = module_exports_type_name(name);
         writeln!(
@@ -2341,6 +2395,16 @@ impl Emitter {
             self.line(&format!(
                 "let __saved_type_defs = __bop_take_module_type_defs(ctx, {});",
                 rust_string_literal(name)
+            ));
+        }
+        if !method_slots.is_empty() {
+            self.line(&format!(
+                "let __saved_method_slots = [{}];",
+                method_slots
+                    .iter()
+                    .map(|slot| format!("ctx.method_slots[{slot}]"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         self.line(&format!(
@@ -2442,6 +2506,11 @@ impl Emitter {
             self.line(&format!(
                 "__bop_restore_module_type_defs(ctx, {}, __saved_type_defs);",
                 rust_string_literal(name)
+            ));
+        }
+        for (saved, slot) in method_slots.iter().enumerate() {
+            self.line(&format!(
+                "ctx.method_slots[{slot}] = __saved_method_slots[{saved}];"
             ));
         }
         self.line(&format!(
@@ -2562,40 +2631,27 @@ impl Emitter {
         }
     }
 
-    /// Emit each user-defined method as a Rust fn with a mangled
-    /// name, so module prefix + receiver type + method name don't
-    /// collide.
-    fn emit_user_methods(&mut self) -> Result<(), BopError> {
-        // Sort for deterministic output.
-        let mut entries: Vec<((String, String, String), MethodEntry)> = self
-            .types
-            .methods
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for ((module_path, type_name, method_name), entry) in &entries {
-            let method_fn_name = rust_fn_name_with(
-                &method_fn_prefix(&entry.module_prefix, type_name),
-                method_name,
-            );
+    fn emit_method_sites(&mut self) -> Result<(), BopError> {
+        let sites = self.types.method_sites.clone();
+        for site in &sites {
+            let method_fn_name = method_site_fn_name(site.id);
             let saved_prefix = std::mem::replace(
                 &mut self.module_prefix,
-                entry.module_prefix.clone(),
+                site.module_prefix.clone(),
             );
-            let saved_module_context = if module_path == bop::value::ROOT_MODULE_PATH {
+            let saved_module_context = if site.module_path == bop::value::ROOT_MODULE_PATH {
                 None
             } else {
                 let module_entry = self
                     .modules
                     .modules
-                    .get(module_path)
+                    .get(&site.module_path)
                     .expect("method's declaring module must be in the module graph")
                     .clone();
                 let module_ast = module_entry.ast.clone();
                 let saved_module = std::mem::replace(
                     &mut self.current_module,
-                    module_path.clone(),
+                    site.module_path.clone(),
                 );
                 let mut builtin_types = HashMap::new();
                 for name in ["Result", "RuntimeError", "Iter"] {
@@ -2616,7 +2672,7 @@ impl Emitter {
                     &mut self.declaration_aliases,
                     module_imports_from_exports(&module_entry.module_alias_candidates),
                 );
-                self.seed_types_for_module(module_path);
+                self.seed_types_for_module(&site.module_path);
                 self.seed_uses(&module_ast);
                 self.seed_module_alias_candidates(&module_entry.module_alias_candidates);
                 Some((
@@ -2626,16 +2682,16 @@ impl Emitter {
                     saved_declaration_aliases,
                 ))
             };
-            let mut method_fn_info = collect_fn_info(&entry.body);
+            let mut method_fn_info = collect_fn_info(&site.body);
             // The method's Rust symbol stays type-qualified, while calls in
             // its body resolve against the declaring module's functions.
-            let module_fn_info = if module_path == bop::value::ROOT_MODULE_PATH {
+            let module_fn_info = if site.module_path == bop::value::ROOT_MODULE_PATH {
                 self.fn_info.clone()
             } else {
                 let module = self
                     .modules
                     .modules
-                    .get(module_path)
+                    .get(&site.module_path)
                     .expect("method's declaring module must be in the module graph");
                 collect_fn_info(&module.ast)
             };
@@ -2649,7 +2705,11 @@ impl Emitter {
                 &mut self.fn_info,
                 method_fn_info,
             );
-            self.emit_fn_decl_as(&method_fn_name, &entry.params, &entry.body, 0)?;
+            let saved_non_capturing_method = self.in_non_capturing_method;
+            self.in_non_capturing_method = true;
+            self.emit_fn_decl_as(&method_fn_name, &site.params, &site.body, site.line)?;
+            self.in_non_capturing_method = saved_non_capturing_method;
+            self.emit_method_adapter(site);
             self.fn_info = saved_fn_info;
             self.module_prefix = saved_prefix;
             if let Some((module, type_bindings, module_aliases, declaration_aliases)) =
@@ -2664,6 +2724,38 @@ impl Emitter {
         Ok(())
     }
 
+    fn emit_method_adapter(&mut self, site: &MethodSite) {
+        let adapter = method_site_adapter_name(site.id);
+        let body = method_site_fn_name(site.id);
+        let arity = site.params.len();
+        writeln!(
+            self.out,
+            "fn {adapter}(ctx: &mut Ctx<'_>, obj: &::bop::value::Value, args: &[::bop::value::Value], line: u32) -> Result<::bop::value::Value, ::bop::error::BopError> {{"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "    if args.len() + 1 != {arity} {{ return Err(::bop::error::BopError::runtime(format!({message}, args.len() + 1), line)); }}",
+            message = rust_string_literal(&format!(
+                "`{}.{}` expects {} argument{} (including `self`), but got {{}}",
+                site.type_name,
+                site.method_name,
+                arity,
+                if arity == 1 { "" } else { "s" },
+            )),
+        )
+        .unwrap();
+        if arity == 0 {
+            writeln!(self.out, "    {body}(ctx)").unwrap();
+        } else {
+            let args = (0..arity - 1)
+                .map(|index| format!(", args[{index}].clone()"))
+                .collect::<String>();
+            writeln!(self.out, "    {body}(ctx, obj.clone(){args})").unwrap();
+        }
+        self.out.push_str("}\n\n");
+    }
+
     /// Emit a runtime dispatcher that maps `(type_name,
     /// method_name)` pairs to their compiled user-method Rust fns.
     /// The method-call emitter calls this first; on `None` it
@@ -2675,9 +2767,11 @@ impl Emitter {
         self.out.push_str(
             "    ctx: &mut Ctx<'_>,\n    obj: &::bop::value::Value,\n    method: &str,\n    args: &[::bop::value::Value],\n    line: u32,\n) -> Result<::std::option::Option<::bop::value::Value>, ::bop::error::BopError> {\n",
         );
-        self.out.push_str(
-            "    let type_key: ::std::option::Option<(&str, &str)> = match obj {\n",
-        );
+        if self.types.method_slots.is_empty() {
+            self.out.push_str("    let _ = (ctx, obj, method, args, line);\n    Ok(None)\n}\n\n");
+            return;
+        }
+        self.out.push_str("    let type_key: ::std::option::Option<(&str, &str)> = match obj {\n");
         self.out.push_str(
             "        ::bop::value::Value::Struct(s) => Some((s.module_path(), s.type_name())),\n",
         );
@@ -2690,39 +2784,15 @@ impl Emitter {
         );
         self.out.push_str("    match (type_mp, type_name, method) {\n");
 
-        let mut entries: Vec<((String, String, String), MethodEntry)> = self
-            .types
-            .methods
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for ((module_path, type_name, method_name), entry) in &entries {
-            let method_prefix = method_fn_prefix(&entry.module_prefix, type_name);
-            let fn_name = rust_fn_name_with(&method_prefix, method_name);
-            let arity = entry.params.len();
-            let arity_minus_one = arity.saturating_sub(1);
-            let arity_check = format!(
-                "if args.len() != {expected} {{ return Err(::bop::error::BopError::runtime(format!(\"`{type_name}.{method_name}` expects {arity} argument{s} (including `self`), but got {{}}\", args.len() + 1), line)); }}",
-                expected = arity_minus_one,
-                type_name = type_name,
-                method_name = method_name,
-                arity = arity,
-                s = if arity == 1 { "" } else { "s" },
-            );
-            let args_pass: String = (0..arity_minus_one)
-                .map(|i| format!(", args[{}].clone()", i))
-                .collect::<Vec<_>>()
-                .join("");
+        for (slot, (module_path, type_name, method_name)) in
+            self.types.method_slots.iter().enumerate()
+        {
             writeln!(
                 self.out,
-                "        ({mp_lit}, {type_lit}, {method_lit}) => {{ {arity_check} Ok(Some({fn_name}(ctx, obj.clone(){args_pass})?)) }}",
+                "        ({mp_lit}, {type_lit}, {method_lit}) => match ctx.method_slots[{slot}] {{ Some(adapter) => Ok(Some(adapter(ctx, obj, args, line)?)), None => Ok(None) }},",
                 mp_lit = rust_string_literal(module_path),
                 type_lit = rust_string_literal(type_name),
                 method_lit = rust_string_literal(method_name),
-                arity_check = arity_check,
-                fn_name = fn_name,
-                args_pass = args_pass,
             )
             .unwrap();
         }
@@ -2745,11 +2815,22 @@ impl Emitter {
     /// strings drifted every time a new helper was added.
     fn emit_runtime_preamble(&mut self) {
         self.out.push_str(RUNTIME_HEADER);
-        self.out.push_str(if self.opts.sandbox {
+        let ctx_template = if self.opts.sandbox {
             CTX_SANDBOX
         } else {
             CTX_BASE
-        });
+        };
+        let method_field = if self.types.method_slots.is_empty() {
+            String::new()
+        } else {
+            self.out.push_str("type __BopMethodFn = for<'a> fn(&mut Ctx<'a>, &::bop::value::Value, &[::bop::value::Value], u32) -> Result<::bop::value::Value, ::bop::error::BopError>;\n\n");
+            format!(
+                "    pub method_slots: [::std::option::Option<__BopMethodFn>; {}],\n",
+                self.types.method_slots.len()
+            )
+        };
+        self.out
+            .push_str(&ctx_template.replace("/*__BOP_METHOD_SLOTS__*/", &method_field));
         self.out.push_str(RUNTIME_SHARED);
         if self.opts.sandbox {
             self.out.push_str(TICK_HELPER);
@@ -2757,11 +2838,21 @@ impl Emitter {
     }
 
     fn emit_public_entry(&mut self) {
-        if self.opts.sandbox {
-            self.out.push_str(PUBLIC_ENTRY_SANDBOX);
+        let entry = if self.opts.sandbox {
+            PUBLIC_ENTRY_SANDBOX
         } else {
-            self.out.push_str(PUBLIC_ENTRY);
-        }
+            PUBLIC_ENTRY
+        };
+        let method_slots = if self.types.method_slots.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "        method_slots: [::std::option::Option::None; {}],\n",
+                self.types.method_slots.len()
+            )
+        };
+        self.out
+            .push_str(&entry.replace("/*__BOP_METHOD_SLOTS_INIT__*/", &method_slots));
     }
 
     fn emit_main(&mut self) {
@@ -3060,11 +3151,33 @@ impl Emitter {
                 self.bind_type(name, &mp);
                 self.emit_type_context_publish();
             }
-            StmtKind::MethodDecl { .. } => {
-                // Methods are compile-time only too — the
-                // pre-pass registered them by full receiver
-                // identity. Nothing to emit at the decl site.
-                let _ = line;
+            StmtKind::MethodDecl {
+                type_name,
+                method_name,
+                ..
+            } => {
+                let mut matches = self.types.method_sites.iter().filter(|site| {
+                    site.module_path == self.current_module
+                        && site.type_name == *type_name
+                        && site.method_name == *method_name
+                        && site.line == line
+                        && site.column == stmt.column
+                });
+                let site = matches
+                    .next()
+                    .expect("method declaration must have a preassigned site");
+                assert!(
+                    matches.next().is_none(),
+                    "parsed method declaration source positions must be unique"
+                );
+                let site_id = site.id;
+                let slot = self
+                    .types
+                    .method_slot(&self.current_module, type_name, method_name);
+                self.line(&format!(
+                    "ctx.method_slots[{slot}] = ::std::option::Option::Some({});",
+                    method_site_adapter_name(site_id)
+                ));
             }
 
             StmtKind::ExprStmt(expr) => {
@@ -5382,8 +5495,12 @@ fn module_fn_prefix(path: &str) -> String {
     format!("m{}_", user_name_component(path))
 }
 
-fn method_fn_prefix(module_prefix: &str, type_name: &str) -> String {
-    format!("{}t{}_", module_prefix, user_name_component(type_name))
+fn method_site_fn_name(site: usize) -> String {
+    format!("__bop_method_site_{site}")
+}
+
+fn method_site_adapter_name(site: usize) -> String {
+    format!("__bop_method_adapter_{site}")
 }
 
 /// Turn a Bop module path into a collision-free Rust-safe slug.
@@ -5524,6 +5641,7 @@ const CTX_BASE: &str = r#"pub struct Ctx<'h> {
             &'static [(&'static str, __BopDynamicVariantShape)],
         >,
     >,
+/*__BOP_METHOD_SLOTS__*/
 }
 
 "#;
@@ -5563,6 +5681,7 @@ const CTX_SANDBOX: &str = r#"pub struct Ctx<'h> {
             &'static [(&'static str, __BopDynamicVariantShape)],
         >,
     >,
+/*__BOP_METHOD_SLOTS__*/
 }
 
 "#;
@@ -6663,6 +6782,7 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         module_type_bindings: ::std::collections::HashMap::new(),
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),
+/*__BOP_METHOD_SLOTS_INIT__*/
     };
     __bop_seed_builtin_type_defs(&mut ctx)?;
     run_program(&mut ctx)
@@ -6713,6 +6833,7 @@ pub fn run<H: ::bop::BopHost>(
         module_type_bindings: ::std::collections::HashMap::new(),
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),
+/*__BOP_METHOD_SLOTS_INIT__*/
     };
     __bop_seed_builtin_type_defs(&mut ctx)?;
     run_program(&mut ctx)

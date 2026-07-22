@@ -939,6 +939,48 @@ print(unguarded, guarded)"#,
 
 #[test]
 #[ignore]
+fn e2e_dynamic_method_sites_compile_without_rustc_warnings() {
+    if !cargo_available() {
+        eprintln!("cargo not available — skipping");
+        return;
+    }
+    assert_aot_compiles_without_warnings_with_modules(
+        "warning_free_dynamic_method_sites",
+        r#"use methods as api
+let value = api.Item { value: 4 }
+print(try_call(fn() { return value.read() }).is_err())
+install()
+print(value.read())"#,
+        &[(
+            "methods",
+            r#"struct Item { value }
+fn install() {
+    if true { fn Item.read(self) { return self.value + 1 } }
+}"#,
+        )],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_dynamic_method_sites_compile_and_run_in_sandbox_mode() {
+    let code = r#"struct Item { value }
+fn Item.read(self) { return self.value + 1 }
+print(Item { value: 4 }.read())"#;
+    let run = run_aot_with_opts(
+        code,
+        "sandbox_dynamic_method_sites",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(run.status, Some(0), "sandbox method program failed: {}", run.stderr);
+    assert_eq!(run.stdout, walker_output(code));
+}
+
+#[test]
+#[ignore]
 fn e2e_import_basic_let() {
     assert_aot_matches_with_modules(
         "import_basic_let",
