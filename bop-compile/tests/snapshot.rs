@@ -720,6 +720,84 @@ fn aliased_use_constructs_a_depth_checked_module_value() {
 }
 
 #[test]
+fn diamond_imports_emit_shared_dependency_bindings_in_each_module_scope() {
+    let out = compile_with_modules(
+        "use left\nuse right\nprint(one, two)",
+        &[
+            ("shared", "fn helper(n) { return n + 10 }"),
+            ("left", "use shared\nlet one = helper(1)"),
+            ("right", "use shared\nlet two = helper(2)"),
+        ],
+    )
+    .expect("transpile diamond import");
+
+    assert_eq!(
+        out.matches("= __mod_736861726564__load(ctx)?;").count(),
+        2,
+        "each dependent module needs its own shared-import binding declarations:\n{out}"
+    );
+}
+
+#[test]
+fn import_idempotency_is_local_to_the_generated_binding_scope() {
+    let repeated = compile_with_modules(
+        "use shared\nuse shared\nprint(helper(1))",
+        &[("shared", "fn helper(n) { return n + 10 }")],
+    )
+    .expect("transpile repeated plain import");
+    assert_eq!(
+        repeated
+            .matches("= __mod_736861726564__load(ctx)?;")
+            .count(),
+        1,
+        "a repeated plain glob in one scope should remain a no-op:\n{repeated}"
+    );
+
+    let distinct_functions = compile_with_modules(
+        r#"use shared as shared_module
+fn one() { use shared; return helper(1) }
+fn two() { use shared; return helper(2) }"#,
+        &[("shared", "fn helper(n) { return n + 10 }")],
+    )
+    .expect("transpile function-local imports");
+    assert_eq!(
+        distinct_functions
+            .matches("= __mod_736861726564__load(ctx)?;")
+            .count(),
+        3,
+        "the root alias and both function scopes must each emit their own load/bind site:\n{distinct_functions}"
+    );
+
+    let distinct_lambdas = compile_with_modules(
+        r#"use shared as shared_module
+let one = fn() { use shared; return helper(1) }
+let two = fn() { use shared; return helper(2) }"#,
+        &[("shared", "fn helper(n) { return n + 10 }")],
+    )
+    .expect("transpile lambda-local imports");
+    assert_eq!(
+        distinct_lambdas
+            .matches("= __mod_736861726564__load(ctx)?;")
+            .count(),
+        3,
+        "the root alias and both lambda scopes must each emit their own load/bind site:\n{distinct_lambdas}"
+    );
+
+    let aliases = compile_with_modules(
+        "use shared as first\nuse shared as second",
+        &[("shared", "let value = 1")],
+    )
+    .expect("transpile repeated aliases");
+    assert_eq!(
+        aliases
+            .matches("= __mod_736861726564__load(ctx)?;")
+            .count(),
+        2,
+        "aliases are shaped bindings and must never enter the plain-glob idempotency cache:\n{aliases}"
+    );
+}
+
+#[test]
 fn same_named_struct_same_shape_across_modules_is_ok() {
     // Two different modules both declare `struct Point { x, y }`.
     // Same shape → idempotent, mirrors the walker's re-import

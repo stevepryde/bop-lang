@@ -1290,6 +1290,34 @@ print(doubled)"#,
         ],
     ),
     (
+        "import_shared_dependency_diamond",
+        r#"use left
+use right
+print(one, two)"#,
+        &[
+            (
+                "shared",
+                "print(\"shared init\")\nfn helper(n) { return n + 10 }",
+            ),
+            ("left", "use shared\nlet one = helper(1)"),
+            ("right", "use shared\nlet two = helper(2)"),
+        ],
+    ),
+    (
+        "import_shared_dependency_alias_diamond",
+        r#"use left as l
+use right as r
+print(l.one, r.two)"#,
+        &[
+            (
+                "shared",
+                "print(\"shared alias init\")\nfn helper(n) { return n + 20 }",
+            ),
+            ("left", "use shared\nlet one = helper(1)"),
+            ("right", "use shared\nlet two = helper(2)"),
+        ],
+    ),
+    (
         "import_idempotent_cache",
         r#"use m
 use m
