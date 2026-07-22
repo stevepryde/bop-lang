@@ -604,13 +604,14 @@ enum BopIterKind {
     Dict { keys: Vec<String>, pos: usize },
 }
 
-impl Iterator for BopIter {
-    type Item = Value;
-
+impl BopIter {
     /// Advance by one and return the next item, or `None` when
     /// the iterator is exhausted. Caller wraps the result in
     /// `Iter::Next(v)` / `Iter::Done` for user code.
-    fn next(&mut self) -> Option<Self::Item> {
+    // This predates the Iterator impl below and remains an inherent method for
+    // source compatibility; the trait method delegates here explicitly.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<Value> {
         match &mut self.kind {
             BopIterKind::Array { items, pos } => {
                 if *pos < items.len() {
@@ -640,6 +641,14 @@ impl Iterator for BopIter {
                 }
             }
         }
+    }
+}
+
+impl Iterator for BopIter {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        BopIter::next(self)
     }
 }
 
@@ -1659,9 +1668,18 @@ mod display_tests {
     }
 
     #[test]
-    fn builtin_iter_is_a_standard_rust_iterator() {
+    fn builtin_iter_preserves_inherent_and_trait_next_calls() {
         fn assert_iterator<I: Iterator<Item = Value>>() {}
         assert_iterator::<BopIter>();
+
+        let value = Value::new_array_iter(vec![Value::Int(1), Value::Int(2)]);
+        let Value::Iter(iter) = &value else {
+            panic!("expected a built-in iterator");
+        };
+        let mut iter = iter.borrow_mut();
+        assert!(matches!(BopIter::next(&mut iter), Some(Value::Int(1))));
+        assert!(matches!(Iterator::next(&mut *iter), Some(Value::Int(2))));
+        assert!(BopIter::next(&mut iter).is_none());
     }
 }
 
