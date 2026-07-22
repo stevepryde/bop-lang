@@ -509,12 +509,12 @@ impl Parser {
     }
 
     fn enter(&mut self) -> Result<(), BopError> {
-        self.depth += 1;
-        if self.depth > MAX_PARSE_DEPTH {
-            Err(self.error(self.peek_line(), "Code is nested too deeply"))
-        } else {
-            Ok(())
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(self.error(self.peek_line(), "Code is nested too deeply"));
         }
+
+        self.depth += 1;
+        Ok(())
     }
 
     fn leave(&mut self) {
@@ -1805,8 +1805,17 @@ impl Parser {
 
     fn parse_pattern_single(&mut self) -> Result<Pattern, BopError> {
         self.enter()?;
+        let result = self.parse_pattern_single_inner();
+        self.leave();
+        result
+    }
+
+    /// Parse one pattern after its nesting-budget entry has been acquired.
+    /// Keeping the budget owner outside the parsing body ensures every `?`
+    /// and early `return` below is balanced by [`Self::leave`].
+    fn parse_pattern_single_inner(&mut self) -> Result<Pattern, BopError> {
         let (line, _column) = self.peek_pos();
-        let result = match self.peek().clone() {
+        match self.peek().clone() {
             Token::Int(n) => {
                 self.advance();
                 Ok(Pattern::Literal(LiteralPattern::Int(n)))
@@ -1932,9 +1941,7 @@ impl Parser {
                 line,
                 format!("Expected a pattern, got `{}`", fmt_token(&other)),
             )),
-        };
-        self.leave();
-        result
+        }
     }
 
     fn parse_pattern_array(&mut self) -> Result<Pattern, BopError> {
@@ -2291,5 +2298,67 @@ pub fn fmt_token(token: &Token) -> &'static str {
         Token::Semicolon => ";",
         Token::Newline => "newline",
         Token::Eof => "end of code",
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    fn pattern_parser(source: &str) -> Parser {
+        Parser::new(crate::lexer::lex(source).expect("test pattern should lex"))
+    }
+
+    fn nested_result_pattern(wrappers: usize) -> String {
+        let mut source = String::new();
+        for index in 0..wrappers {
+            source.push_str(if index % 2 == 0 { "Ok(" } else { "Err(" });
+        }
+        source.push('_');
+        for _ in 0..wrappers {
+            source.push(')');
+        }
+        source
+    }
+
+    #[test]
+    fn pattern_depth_limit_accepts_boundary_and_rejects_next_level() {
+        // The leaf pattern also owns one depth level, so 127 wrappers plus
+        // `_` exactly reaches MAX_PARSE_DEPTH.
+        let mut at_limit = pattern_parser(&nested_result_pattern(MAX_PARSE_DEPTH - 1));
+        at_limit
+            .parse_pattern()
+            .expect("pattern at the nesting limit should parse");
+        assert_eq!(at_limit.depth, 0);
+
+        let mut over_limit = pattern_parser(&nested_result_pattern(MAX_PARSE_DEPTH));
+        let error = over_limit
+            .parse_pattern()
+            .expect_err("one level beyond the nesting limit should fail");
+        assert_eq!(error.message, "Code is nested too deeply");
+        assert_eq!(over_limit.depth, 0);
+    }
+
+    #[test]
+    fn malformed_result_shorthand_restores_pattern_depth() {
+        let mut parser = pattern_parser("Ok(");
+        parser
+            .parse_pattern()
+            .expect_err("incomplete shorthand should fail");
+        assert_eq!(parser.depth, 0);
+    }
+
+    #[test]
+    fn namespaced_pattern_error_restores_pattern_depth() {
+        // This path contains both a fallible identifier parse and an explicit
+        // validation return; keep both covered alongside the reported Ok/Err
+        // shorthand path.
+        for source in ["module.", "module.lowercase"] {
+            let mut parser = pattern_parser(source);
+            parser
+                .parse_pattern()
+                .expect_err("the namespaced pattern should be malformed");
+            assert_eq!(parser.depth, 0, "source: {source}");
+        }
     }
 }

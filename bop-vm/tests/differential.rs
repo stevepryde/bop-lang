@@ -2899,6 +2899,23 @@ print(classify(Err("x")))"#),
 }
 
 #[test]
+fn many_flat_ok_err_patterns_do_not_exhaust_parse_depth_diff() {
+    // Regression for #6: pattern depth is lexical nesting, not a cumulative
+    // budget. Each flat match has two shorthand patterns, so this exercises
+    // far more than MAX_PARSE_DEPTH patterns in one program.
+    set_modules(&[]);
+    let mut program = String::from("let result = Ok(7)\nlet total = 0\n");
+    for _ in 0..160 {
+        program.push_str(
+            "total += match result { Ok(value) => value, Err(_) => 0 }\n",
+        );
+    }
+    program.push_str("print(total)");
+
+    assert_eq!(say(&program), "1120");
+}
+
+#[test]
 fn iter_protocol_array_yields_each_item_diff() {
     // `.iter()` + `.next()` must produce the same Iter::Next /
     // Iter::Done sequence on both engines.
