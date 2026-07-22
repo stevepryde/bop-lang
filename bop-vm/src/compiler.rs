@@ -698,7 +698,7 @@ impl Compiler {
                 }
             }
 
-            StmtKind::FnDecl { name, params, body } => {
+            StmtKind::FnDecl { name, params, body, .. } => {
                 let def = self.compile_function(name, params, body)?;
                 let idx = self.add_function(def);
                 self.emit(Instr::DefineFn(idx), line);

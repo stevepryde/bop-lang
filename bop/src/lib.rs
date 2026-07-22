@@ -30,6 +30,7 @@ pub mod host;
 pub mod methods;
 pub mod suggest;
 pub mod check;
+mod instance;
 /// Bundled Bop standard library (`use std.math`, `std.json`,
 /// `std.collections`, `std.iter`, `std.string`, `std.result`,
 /// `std.test`). Feature-gated behind `bop-std` (on by default).
@@ -47,6 +48,7 @@ mod evaluator;
 pub use error::BopError;
 pub use error::BopWarning;
 pub use parser::{Stmt, count_instructions};
+pub use instance::{BopInstance, EntryPoint};
 pub use value::Value;
 pub use value_conversion::{FromValue, IntoValue, ValueConversionError, ValuePathSegment};
 
@@ -724,12 +726,13 @@ print(noop().type())"#),
     }
 
     #[test]
-    fn fn_scope_isolation() {
+    fn fn_uses_defining_root_but_not_caller_locals() {
+        assert_eq!(say("let secret = 42\nfn peek() { return secret }\nprint(peek())"), "42");
         assert!(
             run_err(
-                r#"let secret = 42
-fn peek() { return secret }
-peek()"#
+                r#"fn peek() { return caller_local }
+fn caller() { let caller_local = 42; return peek() }
+caller()"#
             )
             .contains("not found")
         );

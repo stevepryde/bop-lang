@@ -2386,8 +2386,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 self.push_value(result.0);
                 return Ok(Next::Continue);
             }
-            if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == method) {
-                let callee = v.clone();
+            if let Some(callee) = m.__binding(method) {
                 drop(obj);
                 return self.invoke_value(callee, args, line);
             }
@@ -3111,8 +3110,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 )
             }),
             Value::Module(m) => {
-                if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
-                    return Ok(v.clone());
+                if let Some(v) = m.__binding(field) {
+                    return Ok(v);
                 }
                 if m.has_type(field) {
                     return Err(error(

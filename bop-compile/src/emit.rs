@@ -987,7 +987,7 @@ fn collect_fn_info(stmts: &[Stmt]) -> FnInfo {
     let mut all_fns = HashMap::new();
     let mut top_level_fns = HashSet::new();
     for stmt in stmts {
-        if let StmtKind::FnDecl { name, params, body } = &stmt.kind {
+        if let StmtKind::FnDecl { name, params, body, .. } = &stmt.kind {
             all_fns.insert(name.clone(), params.clone());
             top_level_fns.insert(name.clone());
             collect_nested_fns(body, &mut all_fns);
@@ -1009,7 +1009,7 @@ fn collect_nested_fns(stmts: &[Stmt], all: &mut HashMap<String, Vec<String>>) {
 
 fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<String>>) {
     match &stmt.kind {
-        StmtKind::FnDecl { name, params, body } => {
+        StmtKind::FnDecl { name, params, body, .. } => {
             all.insert(name.clone(), params.clone());
             collect_nested_fns(body, all);
         }
@@ -2402,7 +2402,7 @@ impl Emitter {
     /// emit twice.
     fn emit_top_level_fn_decls(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
         for stmt in stmts {
-            if let StmtKind::FnDecl { name, params, body } = &stmt.kind {
+            if let StmtKind::FnDecl { name, params, body, .. } = &stmt.kind {
                 self.emit_fn_decl(name, params, body, stmt.line)?;
             }
         }
@@ -2912,7 +2912,7 @@ impl Emitter {
                 self.close_block();
             }
 
-            StmtKind::FnDecl { name, params, body } => {
+            StmtKind::FnDecl { name, params, body, .. } => {
                 self.emit_fn_decl(name, params, body, line)?;
             }
 
@@ -4775,7 +4775,7 @@ fn scan_free_vars_stmt(
             scan_free_vars_stmts(body, known, free, outer_scopes, fn_info);
             *known = saved;
         }
-        StmtKind::FnDecl { name, params, body } => {
+        StmtKind::FnDecl { name, params, body, .. } => {
             // A nested fn decl introduces `name` into the body's
             // scope (so recursive refs work) but its own body is
             // analysed with only its params in scope — matches
@@ -6249,8 +6249,8 @@ fn __bop_field_get(
             )
         }),
         ::bop::value::Value::Module(m) => {
-            if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
-                return Ok(v.clone());
+            if let Some(v) = m.__binding(field) {
+                return Ok(v);
             }
             if m.has_type(field) {
                 return Err(::bop::error::BopError::runtime(

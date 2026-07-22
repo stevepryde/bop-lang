@@ -550,6 +550,7 @@ pub enum StmtKind {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        visibility: Visibility,
     },
     /// `fn Type.method(self, ...) { body }` — declares a method
     /// on a user-defined struct or enum. At call time
@@ -612,6 +613,16 @@ pub enum StmtKind {
         variants: Vec<VariantDecl>,
     },
     ExprStmt(Expr),
+}
+
+/// Host-ABI visibility for a named function declaration.
+///
+/// `pub` deliberately affects only root instance entry points. It does not
+/// change Bop's module export or in-language lookup rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Private,
+    Public,
 }
 
 /// One variant of an `enum` declaration.
@@ -679,6 +690,7 @@ struct Parser {
     /// `for x in arr { body }`). Flipped off while parsing `if`
     /// / `while` conditions and `for-in` iterables.
     allow_struct_literal: bool,
+    block_depth: usize,
 }
 
 impl Parser {
@@ -688,6 +700,7 @@ impl Parser {
             pos: 0,
             depth: 0,
             allow_struct_literal: true,
+            block_depth: 0,
         }
     }
 
@@ -899,15 +912,20 @@ impl Parser {
     fn parse_block(&mut self) -> Result<Vec<Stmt>, BopError> {
         self.enter()?;
         self.expect(&Token::LBrace)?;
-        let mut stmts = Vec::new();
-        self.skip_semicolons();
-        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            stmts.push(self.with_struct_literal(true, |p| p.parse_statement())?);
+        self.block_depth += 1;
+        let result = (|| {
+            let mut stmts = Vec::new();
             self.skip_semicolons();
-        }
-        self.expect(&Token::RBrace)?;
+            while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+                stmts.push(self.with_struct_literal(true, |p| p.parse_statement())?);
+                self.skip_semicolons();
+            }
+            self.expect(&Token::RBrace)?;
+            Ok(stmts)
+        })();
+        self.block_depth -= 1;
         self.leave();
-        Ok(stmts)
+        result
     }
 
     // ─── Statements ────────────────────────────────────────────────────
@@ -928,8 +946,9 @@ impl Parser {
                 if matches!(self.peek_at(1), Token::Ident(_))
                     || self.peek_at(1).keyword_name().is_some() =>
             {
-                self.parse_fn_decl()
+                self.parse_fn_decl(Visibility::Private)
             }
+            Token::Pub => self.parse_public_fn_decl(),
             Token::Return => self.parse_return(),
             Token::Break => {
                 self.advance();
@@ -1233,7 +1252,30 @@ impl Parser {
         })
     }
 
-    fn parse_fn_decl(&mut self) -> Result<Stmt, BopError> {
+    fn parse_public_fn_decl(&mut self) -> Result<Stmt, BopError> {
+        let (line, column) = self.peek_pos();
+        self.advance();
+        if self.block_depth != 0 {
+            return Err(self.error(
+                line,
+                "`pub fn` is only meaningful at the program root",
+            ));
+        }
+        if !matches!(self.peek(), Token::Fn) {
+            return Err(self.error(line, "`pub` must be followed by `fn`"));
+        }
+        if !matches!(self.peek_at(1), Token::Ident(_))
+            && self.peek_at(1).keyword_name().is_none()
+        {
+            return Err(self.error(line, "`pub` can only mark a named function"));
+        }
+        let mut stmt = self.parse_fn_decl(Visibility::Public)?;
+        stmt.line = line;
+        stmt.column = column;
+        Ok(stmt)
+    }
+
+    fn parse_fn_decl(&mut self, visibility: Visibility) -> Result<Stmt, BopError> {
         let (line, column) = self.peek_pos();
         self.advance(); // consume 'fn'
         let (name, name_line) = self.expect_ident()?;
@@ -1243,6 +1285,12 @@ impl Parser {
         // method's name. Everything else matches a regular fn
         // decl.
         if matches!(self.peek(), Token::Dot) {
+            if visibility == Visibility::Public {
+                return Err(self.error(
+                    line,
+                    "`pub` can only mark a root named function, not a method",
+                ));
+            }
             ensure_type_name(&name, "method receiver", name_line)?;
             self.advance();
             let (method_name, method_line) = self.expect_ident()?;
@@ -1265,7 +1313,12 @@ impl Parser {
         let params = self.parse_parameters("function parameter")?;
         let body = self.parse_block()?;
         Ok(Stmt {
-            kind: StmtKind::FnDecl { name, params, body },
+            kind: StmtKind::FnDecl {
+                name,
+                params,
+                body,
+                visibility,
+            },
             line,
                     column,
         })
@@ -2645,6 +2698,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         | Token::Try
         | Token::True
         | Token::False
+        | Token::Pub
         | Token::None => unreachable!("keyword tokens return before punctuation formatting"),
     }
 }
