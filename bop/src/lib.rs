@@ -14,6 +14,8 @@ use alloc::{string::String, vec::Vec};
 
 pub mod error;
 pub mod error_messages;
+#[doc(hidden)]
+pub mod ast_visit;
 pub mod value;
 pub mod value_conversion;
 pub mod lexer;

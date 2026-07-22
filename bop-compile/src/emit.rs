@@ -31,6 +31,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
+use bop::ast_visit::{DeclarationSiteVisitor, visit_declaration_sites};
 use bop::error::BopError;
 use bop::lexer::StringPart;
 use bop::parser::{
@@ -215,46 +216,28 @@ fn collect_types_from_stmts(
     module_path: &str,
     reg: &mut TypeRegistry,
 ) {
-    let mut struct_names = Vec::new();
-    let mut enum_names = Vec::new();
-    let mut methods = Vec::new();
-    visit_declaration_sites(
-        stmts,
-        &mut DeclarationVisitor {
-            on_struct: &mut |name, _fields, _line| struct_names.push(name.to_string()),
-            on_enum: &mut |name, _variants, _line| enum_names.push(name.to_string()),
-            on_method: &mut |type_name, method_name, params, body, line, column| {
-                methods.push((
-                    type_name.to_string(),
-                    method_name.to_string(),
-                    params.to_vec(),
-                    body.to_vec(),
-                    line,
-                    column,
-                ));
-            },
-        },
-    );
-    reg.struct_sites.extend(struct_names.into_iter().map(|name| StructSite {
+    let mut collector = RegistryDeclarationCollector::default();
+    visit_declaration_sites(stmts, &mut collector);
+    reg.struct_sites.extend(collector.struct_names.into_iter().map(|name| StructSite {
         module_path: module_path.to_string(),
         name,
     }));
-    reg.enum_sites.extend(enum_names.into_iter().map(|name| EnumSite {
+    reg.enum_sites.extend(collector.enum_names.into_iter().map(|name| EnumSite {
         module_path: module_path.to_string(),
         name,
     }));
-    for (type_name, method_name, params, body, line, column) in methods {
+    for method in collector.methods {
         let id = reg.method_sites.len();
         reg.method_sites.push(MethodSite {
             id,
             module_path: module_path.to_string(),
-            type_name,
-            method_name,
-            params,
-            body,
+            type_name: method.type_name,
+            method_name: method.method_name,
+            params: method.params,
+            body: method.body,
             module_prefix: prefix.to_string(),
-            line,
-            column,
+            line: method.line,
+            column: method.column,
         });
     }
 
@@ -274,175 +257,47 @@ fn collect_types_from_stmts(
     }
 }
 
-type MethodDeclarationCallback<'a> =
-    dyn FnMut(&str, &str, &[String], &[Stmt], u32, Option<core::num::NonZeroU32>) + 'a;
-
-struct DeclarationVisitor<'a> {
-    on_struct: &'a mut dyn FnMut(&str, &[String], u32),
-    on_enum: &'a mut dyn FnMut(&str, &[VariantDecl], u32),
-    on_method: &'a mut MethodDeclarationCallback<'a>,
+#[derive(Default)]
+struct RegistryDeclarationCollector {
+    struct_names: Vec<String>,
+    enum_names: Vec<String>,
+    methods: Vec<CollectedMethodSite>,
 }
 
-/// Walk every statement and expression edge in source order. Type and method
-/// site discovery intentionally share this one exhaustive traversal so a new
-/// AST edge cannot make one form silently less dynamic than the others.
-fn visit_declaration_sites(stmts: &[Stmt], visitor: &mut DeclarationVisitor<'_>) {
-    for stmt in stmts {
-        match &stmt.kind {
-            StmtKind::StructDecl { name, fields } => (visitor.on_struct)(name, fields, stmt.line),
-            StmtKind::EnumDecl { name, variants } => (visitor.on_enum)(name, variants, stmt.line),
-            StmtKind::Let { value, .. } => visit_declaration_sites_in_expr(value, visitor),
-            StmtKind::Assign { target, value, .. } => {
-                visit_declaration_sites_in_target(target, visitor);
-                visit_declaration_sites_in_expr(value, visitor);
-            }
-            StmtKind::If {
-                condition,
-                body,
-                else_ifs,
-                else_body,
-            } => {
-                visit_declaration_sites_in_expr(condition, visitor);
-                visit_declaration_sites(body, visitor);
-                for (condition, body) in else_ifs {
-                    visit_declaration_sites_in_expr(condition, visitor);
-                    visit_declaration_sites(body, visitor);
-                }
-                if let Some(body) = else_body {
-                    visit_declaration_sites(body, visitor);
-                }
-            }
-            StmtKind::While { condition, body } => {
-                visit_declaration_sites_in_expr(condition, visitor);
-                visit_declaration_sites(body, visitor);
-            }
-            StmtKind::Repeat { count, body } => {
-                visit_declaration_sites_in_expr(count, visitor);
-                visit_declaration_sites(body, visitor);
-            }
-            StmtKind::ForIn { iterable, body, .. } => {
-                visit_declaration_sites_in_expr(iterable, visitor);
-                visit_declaration_sites(body, visitor);
-            }
-            StmtKind::FnDecl { body, .. } => visit_declaration_sites(body, visitor),
-            StmtKind::MethodDecl {
-                type_name,
-                method_name,
-                params,
-                body,
-            } => {
-                (visitor.on_method)(
-                    type_name,
-                    method_name,
-                    params,
-                    body,
-                    stmt.line,
-                    stmt.column,
-                );
-                visit_declaration_sites(body, visitor);
-            }
-            StmtKind::Return { value } => {
-                if let Some(value) = value {
-                    visit_declaration_sites_in_expr(value, visitor);
-                }
-            }
-            StmtKind::ExprStmt(expr) => visit_declaration_sites_in_expr(expr, visitor),
-            StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
-        }
+struct CollectedMethodSite {
+    type_name: String,
+    method_name: String,
+    params: Vec<String>,
+    body: Vec<Stmt>,
+    line: u32,
+    column: Option<core::num::NonZeroU32>,
+}
+
+impl DeclarationSiteVisitor for RegistryDeclarationCollector {
+    fn visit_struct(&mut self, name: &str, _fields: &[String], _stmt: &Stmt) {
+        self.struct_names.push(name.to_string());
     }
-}
 
-fn visit_declaration_sites_in_target(target: &AssignTarget, visitor: &mut DeclarationVisitor<'_>) {
-    match target {
-        AssignTarget::Variable(_) => {}
-        AssignTarget::Index { object, index } => {
-            visit_declaration_sites_in_expr(object, visitor);
-            visit_declaration_sites_in_expr(index, visitor);
-        }
-        AssignTarget::Field { object, .. } => visit_declaration_sites_in_expr(object, visitor),
+    fn visit_enum(&mut self, name: &str, _variants: &[VariantDecl], _stmt: &Stmt) {
+        self.enum_names.push(name.to_string());
     }
-}
 
-fn visit_declaration_sites_in_expr(expr: &Expr, visitor: &mut DeclarationVisitor<'_>) {
-    match &expr.kind {
-        ExprKind::Int(_)
-        | ExprKind::Number(_)
-        | ExprKind::Str(_)
-        | ExprKind::StringInterp(_)
-        | ExprKind::Bool(_)
-        | ExprKind::None
-        | ExprKind::Ident(_) => {}
-        ExprKind::BinaryOp { left, right, .. } => {
-            visit_declaration_sites_in_expr(left, visitor);
-            visit_declaration_sites_in_expr(right, visitor);
-        }
-        ExprKind::UnaryOp { expr, .. } | ExprKind::Try(expr) => {
-            visit_declaration_sites_in_expr(expr, visitor)
-        }
-        ExprKind::Call { callee, args } => {
-            visit_declaration_sites_in_expr(callee, visitor);
-            for arg in args {
-                visit_declaration_sites_in_expr(arg, visitor);
-            }
-        }
-        ExprKind::MethodCall { object, args, .. } => {
-            visit_declaration_sites_in_expr(object, visitor);
-            for arg in args {
-                visit_declaration_sites_in_expr(arg, visitor);
-            }
-        }
-        ExprKind::FieldAccess { object, .. } => visit_declaration_sites_in_expr(object, visitor),
-        ExprKind::StructConstruct { fields, .. } => {
-            for (_, value) in fields {
-                visit_declaration_sites_in_expr(value, visitor);
-            }
-        }
-        ExprKind::EnumConstruct { payload, .. } => match payload {
-            VariantPayload::Unit => {}
-            VariantPayload::Tuple(values) => {
-                for value in values {
-                    visit_declaration_sites_in_expr(value, visitor);
-                }
-            }
-            VariantPayload::Struct(fields) => {
-                for (_, value) in fields {
-                    visit_declaration_sites_in_expr(value, visitor);
-                }
-            }
-        },
-        ExprKind::Index { object, index } => {
-            visit_declaration_sites_in_expr(object, visitor);
-            visit_declaration_sites_in_expr(index, visitor);
-        }
-        ExprKind::Array(values) => {
-            for value in values {
-                visit_declaration_sites_in_expr(value, visitor);
-            }
-        }
-        ExprKind::Dict(entries) => {
-            for (_, value) in entries {
-                visit_declaration_sites_in_expr(value, visitor);
-            }
-        }
-        ExprKind::IfExpr {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            visit_declaration_sites_in_expr(condition, visitor);
-            visit_declaration_sites_in_expr(then_expr, visitor);
-            visit_declaration_sites_in_expr(else_expr, visitor);
-        }
-        ExprKind::Lambda { body, .. } => visit_declaration_sites(body, visitor),
-        ExprKind::Match { scrutinee, arms } => {
-            visit_declaration_sites_in_expr(scrutinee, visitor);
-            for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    visit_declaration_sites_in_expr(guard, visitor);
-                }
-                visit_declaration_sites_in_expr(&arm.body, visitor);
-            }
-        }
+    fn visit_method(
+        &mut self,
+        type_name: &str,
+        method_name: &str,
+        params: &[String],
+        body: &[Stmt],
+        stmt: &Stmt,
+    ) {
+        self.methods.push(CollectedMethodSite {
+            type_name: type_name.to_string(),
+            method_name: method_name.to_string(),
+            params: params.to_vec(),
+            body: body.to_vec(),
+            line: stmt.line,
+            column: stmt.column,
+        });
     }
 }
 

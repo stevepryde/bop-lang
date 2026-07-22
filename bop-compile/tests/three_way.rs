@@ -367,6 +367,25 @@ fn parse_envelope(stdout: &str) -> Vec<(String, Outcome)> {
 
 const CORPUS: &[(&str, &str)] = &[
     (
+        "branch_local_enum_site_then",
+        r#"if true {
+    enum Choice { Left }
+    print(match Choice::Left { Choice::Left => "left" })
+} else {
+    enum Choice { Right }
+    print(match Choice::Right { Choice::Right => "right" })
+}"#,
+    ),
+    (
+        "branch_local_enum_site_else",
+        r#"if false {
+    enum Choice { Wrong, Extra }
+} else if true {
+    enum Choice { Right }
+    print(match Choice::Right { Choice::Right => "right" })
+}"#,
+    ),
+    (
         "asi_multiline_delimiters",
         r#"fn add(a, b) { return a + b }
 let values = [
