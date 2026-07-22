@@ -726,6 +726,14 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 return true;
             }
         }
+        if self
+            .active_lexical_contexts
+            .last()
+            .is_some_and(|context| context.module_aliases.contains_key(name))
+        {
+            self.define(name.to_string(), value);
+            return true;
+        }
         false
     }
 
@@ -1844,11 +1852,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     AssignOp::Eq => new_val,
                     _ => {
                         let current = self
-                            .get_var(name)
+                            .get_var_value(name)
                             .ok_or_else(|| {
                                 error(line, format!("Variable `{}` doesn't exist yet", name))
-                            })?
-                            .clone();
+                            })?;
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };

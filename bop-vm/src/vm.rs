@@ -898,6 +898,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 return true;
             }
         }
+        if frame.is_function && frame.lexical_context.module_aliases.contains_key(name) {
+            let name = name.to_string();
+            if frame.scopes.is_empty() {
+                frame.scopes.push(BTreeMap::new());
+            }
+            frame
+                .scopes
+                .last_mut()
+                .expect("alias overlay scope")
+                .insert(name, value);
+            return true;
+        }
         false
     }
 

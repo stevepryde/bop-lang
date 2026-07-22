@@ -1429,6 +1429,28 @@ print(build(1))"#,
         &[("types", "struct Point { value }")],
     ),
     (
+        "declaration_alias_assignment_creates_call_local_overlay",
+        r#"use types as dep
+fn replace() {
+    dep = 1
+    return dep
+}
+print(replace(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_compound_assignment_uses_local_overlay",
+        r#"use types as dep
+fn increment() {
+    dep = 1
+    dep += 2
+    return dep
+}
+fn invalid() { dep += 1 }
+print(increment(), try_call(invalid).is_err(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
         "declaration_alias_is_source_ordered_at_call_time",
         r#"fn build() { return t.Point { value: 42 } }
 let before = try_call(build)
