@@ -130,6 +130,68 @@ impl BopHost for MyHost {
 
 Bop scripts now call `square(5)` as if it were built-in.
 
+### Typed `Value` conversions
+
+Use `IntoValue` and `Value::to_rust` at the host boundary instead of manually
+matching every nested array or dictionary. Extraction borrows the input, so
+targets such as `&str` do not copy; owned targets such as `String`, `Vec<T>`,
+`Option<T>`, `Result<T, E>`, and `BTreeMap<String, T>` are supported too.
+
+```rust
+use bop::{BopError, BopHost, IntoValue, Value};
+
+struct MathHost;
+
+impl BopHost for MathHost {
+    fn call(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        line: u32,
+    ) -> Option<Result<Value, BopError>> {
+        if name != "sum_values" {
+            return None;
+        }
+        Some((|| {
+            let values: Vec<i64> = args
+                .first()
+                .ok_or_else(|| BopError::runtime("missing array", line))?
+                .to_rust()
+                .map_err(|error| BopError::runtime(error.to_string(), line))?;
+            values
+                .into_iter()
+                .sum::<i64>()
+                .into_value()
+                .map_err(|error| BopError::runtime(error.to_string(), line))
+        })())
+    }
+}
+```
+
+Infallible scalars also implement standard `From`. Recursive values use the
+fallible trait because Bop enforces a maximum safe value depth. Integer
+conversion is strict (`Int` is not silently accepted as `Number`, or vice
+versa), and nested errors include paths such as `$[0]["stats"]["hp"]`.
+
+For literals, `bop_value!` provides JSON-like array/dict syntax and returns a
+`Result` for the same reason:
+
+```rust
+use bop::bop_value;
+
+let request = bop_value!({
+    "name": "Ada",
+    "scores": [10, 20, 30],
+    "nickname": none,
+})?;
+# Ok::<(), bop::ValueConversionError>(())
+```
+
+`Result<T, E>` maps to the engine's canonical built-in `Result::Ok(value)` or
+`Result::Err(error)`. Deterministic dictionary conversion deliberately uses
+`BTreeMap`; no `std::collections::HashMap` implementation is provided, keeping
+the API available under `no_std` and its output order stable.
+
 ### `on_print` — Capturing output
 
 Override `on_print` to redirect `print()` output to a buffer, log, UI widget — anywhere that isn't stdout:

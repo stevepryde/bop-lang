@@ -103,7 +103,7 @@ fn main() {
 Custom sandboxed host — Bop can only reach the fns you expose:
 
 ```rust
-use bop::{BopError, BopHost, BopLimits, Value};
+use bop::{BopError, BopHost, BopLimits, IntoValue, Value};
 
 struct SandboxedHost;
 
@@ -114,7 +114,7 @@ impl BopHost for SandboxedHost {
         match name {
             // Expose exactly the primitives your program wants to
             // let scripts reach. Everything else is invisible.
-            "now" => Some(Ok(Value::Int(42))),
+            "now" => Some(42_i64.into_value()),
             _ => None,
         }
     }
@@ -123,6 +123,12 @@ impl BopHost for SandboxedHost {
     }
 }
 ```
+
+For structured arguments and return values, `Value::to_rust` and `IntoValue`
+convert strict Rust scalars plus `Vec<T>`, `Option<T>`, `Result<T, E>`, and
+deterministic `BTreeMap<String, T>`. The JSON-like `bop_value!` macro builds
+nested arrays and dictionaries and returns a conversion `Result`, preserving
+Bop's value-depth checks and nested error paths.
 
 ## WASM / no_std
 

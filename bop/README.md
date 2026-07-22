@@ -34,7 +34,7 @@ bop-lang = "0.3"
 ```
 
 ```rust
-use bop::{run, BopError, BopHost, BopLimits, Value};
+use bop::{run, BopError, BopHost, BopLimits, IntoValue, Value};
 
 struct MyHost;
 
@@ -45,7 +45,7 @@ impl BopHost for MyHost {
         // Return Some(Ok(...)) to handle a custom function call,
         // Some(Err(...)) to raise, None to defer to builtins.
         match name {
-            "greet" => Some(Ok(Value::new_str("hello!".to_string()))),
+            "greet" => Some("hello!".into_value()),
             _ => None,
         }
     }
@@ -61,6 +61,11 @@ fn main() {
     run(r#"print(greet())"#, &mut host, &limits).unwrap();
 }
 ```
+
+Host arguments support borrowed or owned typed extraction through
+`Value::to_rust` (`&str`, integers, `Vec<T>`, `Option<T>`, `Result<T, E>`, and
+deterministic `BTreeMap<String, T>`). Use the fallible, JSON-like `bop_value!`
+macro to construct nested values while retaining Bop's depth checks.
 
 ## Features
 
