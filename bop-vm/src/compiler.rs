@@ -117,6 +117,14 @@ pub fn compile(program: &[Stmt]) -> Result<Chunk, BopError> {
 
 struct Compiler {
     chunk: Chunk,
+    /// Lowest instruction offset that a trailing peephole rewrite may consume.
+    ///
+    /// Every control-flow landing point raises this floor. A rewrite may begin
+    /// at the landing point (the fused instruction then remains the target),
+    /// but it must never consume instructions from before it. Because emission
+    /// and target discovery are monotonic within a chunk, retaining only the
+    /// latest target is sufficient to protect every earlier one as well.
+    fusion_floor: usize,
     loops: Vec<LoopCtx>,
     /// Stack of active resolvers. Empty at module top-level. A
     /// fn/lambda compile pushes a fresh resolver; nested fn/lambda
@@ -156,6 +164,7 @@ impl Compiler {
     fn new() -> Self {
         Self {
             chunk: Chunk::new(),
+            fusion_floor: 0,
             loops: Vec::new(),
             resolvers: Vec::new(),
             free_vars: None,
@@ -202,11 +211,8 @@ impl Compiler {
     fn emit(&mut self, instr: Instr, line: u32) -> CodeOffset {
         // Peephole: fuse a short trailing sequence with the
         // instruction we're about to emit when it matches a
-        // known hot pattern. Rewriting is always at the current
-        // tail, so no jump target can be pointing into the
-        // collapsed range (loop / `&&` / `||` patch sites target
-        // either before the sub-expression or after the
-        // collapse, never inside it).
+        // known hot pattern. `fusion_floor` prevents a rewrite
+        // from consuming across a control-flow landing point.
         if let Some(folded) = self.try_peephole(&instr) {
             self.chunk.code.push(folded);
             self.chunk.lines.push(line);
@@ -229,7 +235,7 @@ impl Compiler {
             Instr::Add => {
                 // `LoadLocal a; LoadLocal b; Add` →
                 // `AddLocals(a, b)`
-                if code.len() >= 2 {
+                if self.can_fuse_tail(2) {
                     if let (Instr::LoadLocal(a), Instr::LoadLocal(b)) =
                         (code[code.len() - 2], code[code.len() - 1])
                     {
@@ -262,7 +268,7 @@ impl Compiler {
             Instr::Sub => {
                 // `LoadLocal s; LoadConst(Int k); Sub` →
                 // `LoadLocalAddInt(s, -k)`.
-                if code.len() >= 2 {
+                if self.can_fuse_tail(2) {
                     if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
                         (code[code.len() - 2], code[code.len() - 1])
                     {
@@ -285,7 +291,7 @@ impl Compiler {
             }
             Instr::Lt => {
                 // `LoadLocal a; LoadLocal b; Lt` → `LtLocals(a, b)`
-                if code.len() >= 2 {
+                if self.can_fuse_tail(2) {
                     if let (Instr::LoadLocal(a), Instr::LoadLocal(b)) =
                         (code[code.len() - 2], code[code.len() - 1])
                     {
@@ -335,7 +341,7 @@ impl Compiler {
                 // `LoadLocal + LoadConst + Add` the peephole
                 // above didn't fire, so the trailing sequence is
                 // still `LoadLocal(slot), LoadConst(k), Add`.
-                if code.len() >= 3 {
+                if self.can_fuse_tail(3) {
                     let n = code.len();
                     if let (
                         Instr::LoadLocal(ls),
@@ -365,11 +371,31 @@ impl Compiler {
         }
     }
 
-    fn current_offset(&self) -> CodeOffset {
-        CodeOffset(self.chunk.code.len() as u32)
+    /// Whether consuming `tail_len` existing instructions preserves every
+    /// registered control-flow landing point.
+    fn can_fuse_tail(&self, tail_len: usize) -> bool {
+        self.chunk.code.len() >= tail_len
+            && self.chunk.code.len() - tail_len >= self.fusion_floor
+    }
+
+    /// Capture the current offset as a control-flow landing point.
+    ///
+    /// Registering at capture time is important: delaying this until a jump is
+    /// patched would allow intervening emission to collapse the target itself.
+    fn mark_jump_target(&mut self) -> CodeOffset {
+        let target = CodeOffset(self.chunk.code.len() as u32);
+        self.protect_jump_target(target);
+        target
+    }
+
+    fn protect_jump_target(&mut self, target: CodeOffset) {
+        self.fusion_floor = self.fusion_floor.max(target.0 as usize);
     }
 
     fn patch_jump(&mut self, site: CodeOffset, target: CodeOffset) {
+        // Keep patching defensive even when callers registered a prospective
+        // target with `mark_jump_target` before emitting its instructions.
+        self.protect_jump_target(target);
         let idx = site.0 as usize;
         self.chunk.code[idx] = match self.chunk.code[idx].clone() {
             Instr::Jump(_) => Instr::Jump(target),
@@ -508,7 +534,7 @@ impl Compiler {
             }
 
             StmtKind::While { condition, body } => {
-                let loop_start = self.current_offset();
+                let loop_start = self.mark_jump_target();
                 self.compile_expr(condition)?;
                 let exit_jmp = self.emit(Instr::JumpIfFalse(CodeOffset(0)), line);
 
@@ -520,7 +546,7 @@ impl Compiler {
                 self.compile_scoped_block(body, line)?;
                 self.emit(Instr::Jump(loop_start), line);
 
-                let end = self.current_offset();
+                let end = self.mark_jump_target();
                 self.patch_jump(exit_jmp, end);
                 let ctx = self.loops.pop().expect("loop ctx");
                 for patch in ctx.break_patches {
@@ -531,7 +557,7 @@ impl Compiler {
             StmtKind::Repeat { count, body } => {
                 self.compile_expr(count)?;
                 self.emit(Instr::MakeRepeatCount, line);
-                let loop_start = self.current_offset();
+                let loop_start = self.mark_jump_target();
                 let exit_jmp =
                     self.emit(Instr::RepeatNext { target: CodeOffset(0) }, line);
 
@@ -543,7 +569,7 @@ impl Compiler {
                 self.compile_scoped_block(body, line)?;
                 self.emit(Instr::Jump(loop_start), line);
 
-                let end = self.current_offset();
+                let end = self.mark_jump_target();
                 self.patch_jump(exit_jmp, end);
                 let ctx = self.loops.pop().expect("loop ctx");
                 for patch in ctx.break_patches {
@@ -558,7 +584,7 @@ impl Compiler {
             } => {
                 self.compile_expr(iterable)?;
                 self.emit(Instr::MakeIter, line);
-                let loop_start = self.current_offset();
+                let loop_start = self.mark_jump_target();
                 let exit_jmp =
                     self.emit(Instr::IterNext { target: CodeOffset(0) }, line);
 
@@ -593,7 +619,7 @@ impl Compiler {
                 }
                 self.emit(Instr::Jump(loop_start), line);
 
-                let end = self.current_offset();
+                let end = self.mark_jump_target();
                 self.patch_jump(exit_jmp, end);
                 let ctx = self.loops.pop().expect("loop ctx");
                 for patch in ctx.break_patches {
@@ -745,7 +771,7 @@ impl Compiler {
             if needs_skip {
                 end_patches.push(self.emit(Instr::Jump(CodeOffset(0)), line));
             }
-            let next_target = self.current_offset();
+            let next_target = self.mark_jump_target();
             self.patch_jump(next_patch, next_target);
         }
 
@@ -753,7 +779,7 @@ impl Compiler {
             self.compile_scoped_block(else_body, line)?;
         }
 
-        let end = self.current_offset();
+        let end = self.mark_jump_target();
         for patch in end_patches {
             self.patch_jump(patch, end);
         }
@@ -1137,11 +1163,11 @@ impl Compiler {
                 self.compile_expr(then_expr)?;
                 let end_jmp = self.emit(Instr::Jump(CodeOffset(0)), line);
 
-                let else_start = self.current_offset();
+                let else_start = self.mark_jump_target();
                 self.patch_jump(else_jmp, else_start);
                 self.compile_expr(else_expr)?;
 
-                let end = self.current_offset();
+                let end = self.mark_jump_target();
                 self.patch_jump(end_jmp, end);
             }
 
@@ -1328,14 +1354,14 @@ impl Compiler {
             // the stack because `MatchFail` consumed the `Dup`'d
             // copy, not the original.
             if let Some(gf) = guard_fail_site {
-                let here = self.current_offset();
+                let here = self.mark_jump_target();
                 self.patch_jump(gf, here);
                 self.emit(Instr::PopScope, arm_line);
             }
 
             // Pattern-mismatch landing pad: same unwind, then
             // fall through to the next arm.
-            let fail_target = self.current_offset();
+            let fail_target = self.mark_jump_target();
             self.patch_match_fail(match_fail_site, fail_target);
             self.emit(Instr::PopScope, arm_line);
         }
@@ -1344,7 +1370,7 @@ impl Compiler {
         self.emit(Instr::Pop, line);
         self.emit(Instr::MatchExhausted, line);
 
-        let end = self.current_offset();
+        let end = self.mark_jump_target();
         for site in end_patches {
             self.patch_jump(site, end);
         }
@@ -1352,6 +1378,7 @@ impl Compiler {
     }
 
     fn patch_match_fail(&mut self, site: CodeOffset, target: CodeOffset) {
+        self.protect_jump_target(target);
         let idx = site.0 as usize;
         self.chunk.code[idx] = match self.chunk.code[idx].clone() {
             Instr::MatchFail { pattern, .. } => Instr::MatchFail {
@@ -1377,7 +1404,7 @@ impl Compiler {
                 self.emit(Instr::Pop, line);
                 self.compile_expr(right)?;
                 self.emit(Instr::TruthyToBool, line);
-                let end = self.current_offset();
+                let end = self.mark_jump_target();
                 self.patch_jump(short, end);
                 return Ok(());
             }
@@ -1388,7 +1415,7 @@ impl Compiler {
                 self.emit(Instr::Pop, line);
                 self.compile_expr(right)?;
                 self.emit(Instr::TruthyToBool, line);
-                let end = self.current_offset();
+                let end = self.mark_jump_target();
                 self.patch_jump(short, end);
                 return Ok(());
             }
@@ -1436,6 +1463,7 @@ impl Compiler {
         // Save outer compile state so the body's chunk / loops /
         // free-var list stays isolated.
         let saved_chunk = core::mem::take(&mut self.chunk);
+        let saved_fusion_floor = core::mem::replace(&mut self.fusion_floor, 0);
         let saved_loops = core::mem::take(&mut self.loops);
         let saved_free = self.free_vars.take();
         let saved_runtime_bindings = core::mem::take(&mut self.runtime_bindings);
@@ -1458,6 +1486,7 @@ impl Compiler {
         let resolver = self.resolvers.pop().expect("resolver pushed above");
         let free = self.free_vars.take().expect("free-vars set above");
         let mut chunk = core::mem::replace(&mut self.chunk, saved_chunk);
+        self.fusion_floor = saved_fusion_floor;
         self.loops = saved_loops;
         self.free_vars = saved_free;
         self.runtime_bindings = saved_runtime_bindings;

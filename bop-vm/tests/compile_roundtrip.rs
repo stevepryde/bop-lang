@@ -8,7 +8,7 @@
 //! diff.
 
 use bop::parse;
-use bop_vm::{LoopStateKind, compile, disassemble};
+use bop_vm::{Instr, LoopStateKind, compile, disassemble};
 
 fn disasm(source: &str) -> String {
     let ast = parse(source).expect("parse");
@@ -469,6 +469,94 @@ fn if_expression_leaves_value_on_stack() {
         6: Halt
         "#,
     );
+}
+
+#[test]
+fn peephole_fusion_stops_at_if_expression_jump_targets() {
+    let source = r#"
+fn add_const(c, a, b) { return (if c { a } else { b }) + 1 }
+fn add_local(c, a, b, d) { return (if c { a } else { b }) + d }
+fn sub_const(c, a, b) { return (if c { a } else { b }) - 1 }
+fn lt_const(c, a, b) { return (if c { a } else { b }) < 15 }
+fn lt_local(c, a, b, d) { return (if c { a } else { b }) < d }
+"#;
+    let ast = parse(source).expect("parse");
+    let chunk = compile(&ast).expect("compile");
+
+    for (name, operator) in [
+        ("add_const", Instr::Add),
+        ("add_local", Instr::Add),
+        ("sub_const", Instr::Sub),
+        ("lt_const", Instr::Lt),
+        ("lt_local", Instr::Lt),
+    ] {
+        let function = chunk
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let operator_offset = function
+            .chunk
+            .code
+            .iter()
+            .position(|instr| *instr == operator)
+            .unwrap_or_else(|| panic!("{name} lost its generic operator"));
+        let end_target = function
+            .chunk
+            .code
+            .iter()
+            .find_map(|instr| match instr {
+                Instr::Jump(target) => Some(target.0 as usize),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} missing if-expression end jump"));
+
+        assert_eq!(
+            end_target + 1,
+            operator_offset,
+            "{name} must land on the right operand immediately before the operator"
+        );
+        assert!(
+            matches!(
+                function.chunk.code[end_target],
+                Instr::LoadConst(_) | Instr::LoadLocal(_)
+            ),
+            "{name} jump target must remain an independently executable operand"
+        );
+    }
+}
+
+#[test]
+fn peephole_fusion_resumes_after_a_jump_target_and_is_chunk_local() {
+    let ast = parse(
+        r#"
+let module_value = if true { 1 } else { 2 }
+fn select_then_add(c, a, b, d) {
+    let selected = if c { a } else { b }
+    return selected + d
+}
+fn plain_add(a, b) { return a + b }
+"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+
+    for name in ["select_then_add", "plain_add"] {
+        let function = chunk
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        assert!(
+            function
+                .chunk
+                .code
+                .iter()
+                .any(|instr| matches!(instr, Instr::AddLocals(_, _))),
+            "{name} should retain a valid local-local fusion: {:?}",
+            function.chunk.code
+        );
+    }
 }
 
 #[test]
