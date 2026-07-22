@@ -20,12 +20,12 @@ pub fn array_method(
             }
             let mut new_arr = arr.to_vec();
             new_arr.push(args[0].clone());
-            Ok((Value::None, Some(Value::new_array(new_arr))))
+            Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
         }
         "pop" => {
             let mut new_arr = arr.to_vec();
             let popped = new_arr.pop().unwrap_or(Value::None);
-            Ok((popped, Some(Value::new_array(new_arr))))
+            Ok((popped, Some(Value::try_new_array(new_arr, line)?)))
         }
         "has" => {
             if args.len() != 1 {
@@ -51,7 +51,7 @@ pub fn array_method(
                 return Err(error(line, format!("Insert index {} is out of bounds", i)));
             }
             new_arr.insert(i, args[1].clone());
-            Ok((Value::None, Some(Value::new_array(new_arr))))
+            Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
         }
         "remove" => {
             if args.len() != 1 {
@@ -63,7 +63,7 @@ pub fn array_method(
                 return Err(error(line, format!("Remove index {} is out of bounds", i)));
             }
             let removed = new_arr.remove(i);
-            Ok((removed, Some(Value::new_array(new_arr))))
+            Ok((removed, Some(Value::try_new_array(new_arr, line)?)))
         }
         "slice" => {
             if args.len() != 2 {
@@ -73,12 +73,12 @@ pub fn array_method(
             let end = (expect_number("slice", &args[1], line)? as usize).min(arr.len());
             let start = start.min(end);
             let slice = arr[start..end].to_vec();
-            Ok((Value::new_array(slice), None))
+            Ok((Value::try_new_array(slice, line)?, None))
         }
         "reverse" => {
             let mut new_arr = arr.to_vec();
             new_arr.reverse();
-            Ok((Value::None, Some(Value::new_array(new_arr))))
+            Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
         }
         "sort" => {
             let mut new_arr = arr.to_vec();
@@ -99,7 +99,7 @@ pub fn array_method(
                 (Value::Str(x), Value::Str(y)) => x.cmp(y),
                 _ => core::cmp::Ordering::Equal,
             });
-            Ok((Value::None, Some(Value::new_array(new_arr))))
+            Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
         }
         "join" => {
             if args.len() != 1 {
@@ -122,7 +122,7 @@ pub fn array_method(
             // source array must not poke the iterator. Cheap
             // because every inner Value::Clone is either a
             // primitive copy or an Rc bump.
-            Ok((Value::new_array_iter(arr.to_vec()), None))
+            Ok((Value::try_new_array_iter(arr.to_vec(), line)?, None))
         }
         _ => Err(error(line, format!("Array doesn't have a .{}() method", method))),
     }
@@ -189,7 +189,7 @@ pub fn string_method(
                 .split(sep)
                 .map(|p| Value::new_str(p.to_string()))
                 .collect();
-            Ok((Value::new_array(parts), None))
+            Ok((Value::try_new_array(parts, line)?, None))
         }
         "replace" => {
             if args.len() != 2 {
@@ -276,11 +276,11 @@ pub fn dict_method(
                 .iter()
                 .map(|(k, _)| Value::new_str(k.clone()))
                 .collect();
-            Ok((Value::new_array(keys), None))
+            Ok((Value::try_new_array(keys, line)?, None))
         }
         "values" => {
             let vals: Vec<Value> = entries.iter().map(|(_, v)| v.clone()).collect();
-            Ok((Value::new_array(vals), None))
+            Ok((Value::try_new_array(vals, line)?, None))
         }
         "has" => {
             if args.len() != 1 {
@@ -709,22 +709,24 @@ pub fn result_method(
 /// which module the receiver came from. Mirror of the helper in
 /// `builtins` but specialised to the "wrap a value" case each
 /// engine's callable dispatch uses.
-pub fn make_result_ok(value: Value) -> Value {
-    Value::new_enum_tuple(
+pub fn make_result_ok(value: Value, line: u32) -> Result<Value, BopError> {
+    Value::try_new_enum_tuple(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Ok"),
         alloc_vec_of(value),
+        line,
     )
 }
 
 /// Same as [`make_result_ok`] but for `Err`.
-pub fn make_result_err(value: Value) -> Value {
-    Value::new_enum_tuple(
+pub fn make_result_err(value: Value, line: u32) -> Result<Value, BopError> {
+    Value::try_new_enum_tuple(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Err"),
         alloc_vec_of(value),
+        line,
     )
 }
 
@@ -767,7 +769,7 @@ pub fn iter_method(
             expect_args("next", args, 0, line)?;
             let mut inner = cell.borrow_mut();
             match inner.next() {
-                Some(v) => Ok((make_iter_next(v), None)),
+                Some(v) => Ok((make_iter_next(v, line)?, None)),
                 None => Ok((make_iter_done(), None)),
             }
         }

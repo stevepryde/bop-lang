@@ -94,6 +94,282 @@ struct FnDef {
     body: Vec<Stmt>,
 }
 
+/// Lexical free-variable analysis for walker-created lambdas.
+///
+/// The VM performs the same analysis while compiling a lambda. The walker
+/// needs an explicit pass because evaluating a lambda only has the AST and
+/// the current runtime scopes available. Declarations take effect in source
+/// order, while control-flow bodies and match arms introduce child scopes.
+struct FreeVariableCollector {
+    scopes: Vec<alloc_import::collections::BTreeSet<String>>,
+    free: alloc_import::collections::BTreeSet<String>,
+}
+
+impl FreeVariableCollector {
+    fn for_lambda(params: &[String]) -> Self {
+        Self {
+            scopes: vec![params.iter().cloned().collect()],
+            free: alloc_import::collections::BTreeSet::new(),
+        }
+    }
+
+    fn finish(mut self, body: &[Stmt]) -> alloc_import::collections::BTreeSet<String> {
+        self.visit_statements(body);
+        self.free
+    }
+
+    fn is_bound(&self, name: &str) -> bool {
+        self.scopes.iter().rev().any(|scope| scope.contains(name))
+    }
+
+    fn reference(&mut self, name: &str) {
+        if !self.is_bound(name) {
+            self.free.insert(name.to_string());
+        }
+    }
+
+    fn declare(&mut self, name: &str) {
+        self.scopes
+            .last_mut()
+            .expect("free-variable scope")
+            .insert(name.to_string());
+    }
+
+    fn visit_scoped_block(
+        &mut self,
+        bindings: impl IntoIterator<Item = String>,
+        body: &[Stmt],
+    ) {
+        self.scopes.push(bindings.into_iter().collect());
+        self.visit_statements(body);
+        self.scopes.pop();
+    }
+
+    fn visit_statements(&mut self, statements: &[Stmt]) {
+        for statement in statements {
+            self.visit_statement(statement);
+        }
+    }
+
+    fn visit_statement(&mut self, statement: &Stmt) {
+        match &statement.kind {
+            StmtKind::Let { name, value, .. } => {
+                // The initializer runs before the new name is visible.
+                self.visit_expr(value);
+                self.declare(name);
+            }
+            StmtKind::Assign { target, value, .. } => {
+                self.visit_expr(value);
+                self.visit_assign_target(target);
+            }
+            StmtKind::If {
+                condition,
+                body,
+                else_ifs,
+                else_body,
+            } => {
+                self.visit_expr(condition);
+                self.visit_scoped_block(core::iter::empty(), body);
+                for (condition, body) in else_ifs {
+                    self.visit_expr(condition);
+                    self.visit_scoped_block(core::iter::empty(), body);
+                }
+                if let Some(body) = else_body {
+                    self.visit_scoped_block(core::iter::empty(), body);
+                }
+            }
+            StmtKind::While { condition, body } => {
+                self.visit_expr(condition);
+                self.visit_scoped_block(core::iter::empty(), body);
+            }
+            StmtKind::Repeat { count, body } => {
+                self.visit_expr(count);
+                self.visit_scoped_block(core::iter::empty(), body);
+            }
+            StmtKind::ForIn {
+                var,
+                iterable,
+                body,
+            } => {
+                self.visit_expr(iterable);
+                self.visit_scoped_block(core::iter::once(var.clone()), body);
+            }
+            // Named functions and methods have their own call-time scope and
+            // are not closures in either the walker or VM.
+            StmtKind::FnDecl { .. } | StmtKind::MethodDecl { .. } => {}
+            StmtKind::Return { value } => {
+                if let Some(value) = value {
+                    self.visit_expr(value);
+                }
+            }
+            StmtKind::Use { items, alias, .. } => {
+                if let Some(alias) = alias {
+                    self.declare(alias);
+                } else if let Some(items) = items {
+                    for item in items {
+                        self.declare(item);
+                    }
+                }
+            }
+            StmtKind::ExprStmt(expr) => self.visit_expr(expr),
+            StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::StructDecl { .. }
+            | StmtKind::EnumDecl { .. } => {}
+        }
+    }
+
+    fn visit_assign_target(&mut self, target: &AssignTarget) {
+        match target {
+            AssignTarget::Variable(name) => self.reference(name),
+            AssignTarget::Index { object, index } => {
+                self.visit_expr(index);
+                self.visit_expr(object);
+            }
+            AssignTarget::Field { object, .. } => self.visit_expr(object),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        match &expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::Number(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::None => {}
+            ExprKind::StringInterp(parts) => {
+                for part in parts {
+                    if let StringPart::Variable(name) = part {
+                        self.reference(name);
+                    }
+                }
+            }
+            ExprKind::Ident(name) => self.reference(name),
+            ExprKind::BinaryOp { left, right, .. } => {
+                self.visit_expr(left);
+                self.visit_expr(right);
+            }
+            ExprKind::UnaryOp { expr, .. } | ExprKind::Try(expr) => self.visit_expr(expr),
+            ExprKind::Call { callee, args } => {
+                self.visit_expr(callee);
+                for arg in args {
+                    self.visit_expr(arg);
+                }
+            }
+            ExprKind::MethodCall { object, args, .. } => {
+                self.visit_expr(object);
+                for arg in args {
+                    self.visit_expr(arg);
+                }
+            }
+            ExprKind::FieldAccess { object, .. } => self.visit_expr(object),
+            ExprKind::StructConstruct { fields, .. } => {
+                for (_, value) in fields {
+                    self.visit_expr(value);
+                }
+            }
+            ExprKind::EnumConstruct { payload, .. } => match payload {
+                VariantPayload::Unit => {}
+                VariantPayload::Tuple(values) => {
+                    for value in values {
+                        self.visit_expr(value);
+                    }
+                }
+                VariantPayload::Struct(fields) => {
+                    for (_, value) in fields {
+                        self.visit_expr(value);
+                    }
+                }
+            },
+            ExprKind::Index { object, index } => {
+                self.visit_expr(object);
+                self.visit_expr(index);
+            }
+            ExprKind::Array(values) => {
+                for value in values {
+                    self.visit_expr(value);
+                }
+            }
+            ExprKind::Dict(entries) => {
+                for (_, value) in entries {
+                    self.visit_expr(value);
+                }
+            }
+            ExprKind::IfExpr {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.visit_expr(condition);
+                self.visit_expr(then_expr);
+                self.visit_expr(else_expr);
+            }
+            ExprKind::Lambda { params, body } => {
+                let nested = FreeVariableCollector::for_lambda(params).finish(body);
+                for name in nested {
+                    self.reference(&name);
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.visit_expr(scrutinee);
+                for arm in arms {
+                    let mut bindings = alloc_import::collections::BTreeSet::new();
+                    collect_pattern_binding_names(&arm.pattern, &mut bindings);
+                    self.scopes.push(bindings);
+                    if let Some(guard) = &arm.guard {
+                        self.visit_expr(guard);
+                    }
+                    self.visit_expr(&arm.body);
+                    self.scopes.pop();
+                }
+            }
+        }
+    }
+}
+
+fn collect_pattern_binding_names(
+    pattern: &Pattern,
+    names: &mut alloc_import::collections::BTreeSet<String>,
+) {
+    match pattern {
+        Pattern::Binding(name) => {
+            names.insert(name.clone());
+        }
+        Pattern::EnumVariant { payload, .. } => match payload {
+            VariantPatternPayload::Unit => {}
+            VariantPatternPayload::Tuple(patterns) => {
+                for pattern in patterns {
+                    collect_pattern_binding_names(pattern, names);
+                }
+            }
+            VariantPatternPayload::Struct { fields, .. } => {
+                for (_, pattern) in fields {
+                    collect_pattern_binding_names(pattern, names);
+                }
+            }
+        },
+        Pattern::Struct { fields, .. } => {
+            for (_, pattern) in fields {
+                collect_pattern_binding_names(pattern, names);
+            }
+        }
+        Pattern::Array { elements, rest } => {
+            for pattern in elements {
+                collect_pattern_binding_names(pattern, names);
+            }
+            if let Some(ArrayRest::Named(name)) = rest {
+                names.insert(name.clone());
+            }
+        }
+        Pattern::Or(alternatives) => {
+            for pattern in alternatives {
+                collect_pattern_binding_names(pattern, names);
+            }
+        }
+        Pattern::Literal(_) | Pattern::Wildcard => {}
+    }
+}
+
 // ─── Evaluator ─────────────────────────────────────────────────────────────
 
 pub struct Evaluator<'h, H: BopHost> {
@@ -842,12 +1118,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let mut fn_entries: Vec<(String, FnDef)> =
             Vec::with_capacity(bindings.fn_decls.len());
         for (name, fn_def) in &bindings.fn_decls {
-            let value = Value::new_fn(
+            let value = Value::try_new_fn(
                 fn_def.params.clone(),
                 Vec::new(),
                 fn_def.body.clone(),
                 Some(name.clone()),
-            );
+                line,
+            )?;
             exports.push((name.clone(), value));
             fn_entries.push((name.clone(), fn_def.clone()));
         }
@@ -943,11 +1220,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     self.functions.insert(name, fn_def);
                 }
             }
-            let module_rc = Rc::new(crate::value::BopModule {
-                path: path.to_string(),
-                bindings: exports,
-                types: exposed_types,
-            });
+            let module_rc = crate::value::BopModule::try_new(
+                path.to_string(),
+                exports,
+                exposed_types,
+                line,
+            )?;
             // Bind the alias three ways:
             //   1. as a Value::Module in the current value
             //      scope (for `m.helper(x)` style calls that
@@ -1303,12 +1581,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 for arg in args {
                     items.push(self.eval_expr(arg)?);
                 }
-                Ok(Value::new_enum_tuple(
+                Value::try_new_enum_tuple(
                     module_path,
                     type_name.to_string(),
                     variant.to_string(),
                     items,
-                ))
+                    line,
+                )
             }
             (VariantKind::Struct(decl_fields), VariantPayload::Struct(provided)) => {
                 let mut seen = alloc_import::collections::BTreeSet::new();
@@ -1349,12 +1628,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         }
                     }
                 }
-                Ok(Value::new_enum_struct(
+                Value::try_new_enum_struct(
                     module_path,
                     type_name.to_string(),
                     variant.to_string(),
                     values,
-                ))
+                    line,
+                )
             }
             (VariantKind::Unit, _) => Err(error(
                 line,
@@ -1487,7 +1767,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 match &mut obj {
                     Value::Struct(s) => {
                         let struct_type = s.type_name().to_string();
-                        if !s.set_field(field, val_to_set) {
+                        if !s.try_set_field(field, val_to_set, line)? {
                             return Err(error(
                                 line,
                                 crate::error_messages::struct_has_no_field(&struct_type, field),
@@ -1568,12 +1848,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 // recursive lookups inside the body still resolve
                 // through `self.functions` (see `call_bop_fn`).
                 if let Some(f) = self.functions.get(name) {
-                    return Ok(Value::new_fn(
+                    return Value::try_new_fn(
                         f.params.clone(),
                         Vec::new(),
                         f.body.clone(),
                         Some(name.to_string()),
-                    ));
+                        expr.line,
+                    );
                 }
                 // Typo? Offer a "did you mean" hint if something
                 // close is visible in the current scope / fn
@@ -1651,13 +1932,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
 
             ExprKind::Lambda { params, body } => {
-                let captures = self.snapshot_captures();
-                Ok(Value::new_fn(
+                let free_variables = FreeVariableCollector::for_lambda(params).finish(body);
+                let captures = self.snapshot_captures(&free_variables);
+                Value::try_new_fn(
                     params.clone(),
                     captures,
                     body.clone(),
                     None,
-                ))
+                    expr.line,
+                )
             }
 
             ExprKind::MethodCall {
@@ -1745,12 +2028,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         let mut full_args = Vec::with_capacity(eval_args.len() + 1);
                         full_args.push(obj_val);
                         full_args.extend(eval_args);
-                        let bop_fn = Rc::new(BopFn {
-                            params: m.params,
-                            captures: Vec::new(),
-                            body: FnBody::Ast(m.body),
-                            self_name: None,
-                        });
+                        let bop_fn = BopFn::try_new_ast(
+                            m.params,
+                            Vec::new(),
+                            m.body,
+                            None,
+                            expr.line,
+                        )?;
                         return self.call_bop_fn(&bop_fn, full_args, expr.line);
                     }
                 }
@@ -1947,7 +2231,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         }
                     }
                 }
-                Ok(Value::new_struct(module_path, type_name.clone(), values))
+                Value::try_new_struct(module_path, type_name.clone(), values, expr.line)
             }
 
             ExprKind::Array(elements) => {
@@ -1955,7 +2239,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 for elem in elements {
                     items.push(self.eval_expr(elem)?);
                 }
-                Ok(Value::new_array(items))
+                Value::try_new_array(items, expr.line)
             }
 
             ExprKind::Dict(entries) => {
@@ -1964,7 +2248,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     let val = self.eval_expr(value_expr)?;
                     result.push((key.clone(), val));
                 }
-                Ok(Value::new_dict(result))
+                Value::try_new_dict(result, expr.line)
             }
 
             ExprKind::IfExpr {
@@ -2124,19 +2408,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
     // ─── Function calls ────────────────────────────────────────────
 
-    /// Collapse the current scope stack into a flat list of
-    /// `(name, value)` pairs — the snapshot used as a lambda's
-    /// captures. Inner scopes shadow outer ones, so the resulting
-    /// list is deduplicated by name with the innermost binding
-    /// winning.
-    fn snapshot_captures(&self) -> Vec<(String, Value)> {
-        let mut flat = BTreeMap::new();
-        for scope in &self.scopes {
-            for (k, v) in scope {
-                flat.insert(k.clone(), v.clone());
-            }
-        }
-        flat.into_iter().collect()
+    /// Snapshot only the referenced free variables that currently resolve to
+    /// lexical values. Names belonging to builtins, hosts, or declared
+    /// functions deliberately remain absent so call-time fallback can resolve
+    /// them through their owning registries.
+    fn snapshot_captures(
+        &self,
+        free_variables: &alloc_import::collections::BTreeSet<String>,
+    ) -> Vec<(String, Value)> {
+        free_variables
+            .iter()
+            .filter_map(|name| self.get_var(name).cloned().map(|value| (name.clone(), value)))
+            .collect()
     }
 
     /// Call a value directly. Non-`Value::Fn` payloads are an
@@ -2321,7 +2604,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         };
         drop(callable);
         match self.call_bop_fn(&func, Vec::new(), line) {
-            Ok(value) => Ok(builtins::make_try_call_ok(value)),
+            Ok(value) => builtins::make_try_call_ok(value, line),
             Err(err) => {
                 if err.is_fatal {
                     Err(err)
@@ -2396,12 +2679,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
         })?;
 
-        let bop_fn = Rc::new(BopFn {
-            params: func.params,
-            captures: Vec::new(),
-            body: FnBody::Ast(func.body),
-            self_name: Some(name.to_string()),
-        });
+        let bop_fn = BopFn::try_new_ast(
+            func.params,
+            Vec::new(),
+            func.body,
+            Some(name.to_string()),
+            line,
+        )?;
         self.call_bop_fn(&bop_fn, args, line)
     }
 
@@ -2456,12 +2740,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let mut full_args = Vec::with_capacity(args.len() + 1);
                 full_args.push(obj.clone());
                 full_args.extend(args);
-                let bop_fn = Rc::new(BopFn {
-                    params: m.params,
-                    captures: Vec::new(),
-                    body: FnBody::Ast(m.body),
-                    self_name: None,
-                });
+                let bop_fn = BopFn::try_new_ast(
+                    m.params,
+                    Vec::new(),
+                    m.body,
+                    None,
+                    line,
+                )?;
                 return self.call_bop_fn(&bop_fn, full_args, line);
             }
         }
@@ -2546,20 +2831,20 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             ResultCallableKind::Map => {
                 if is_ok {
                     let new_value = self.call_value(callable, vec![payload], line, Some(method))?;
-                    Ok(make_result_ok(new_value))
+                    make_result_ok(new_value, line)
                 } else {
                     // Err passes through unchanged. Rebuild it so
                     // the caller sees the same type identity —
                     // matches the pure-Bop combinator's behaviour.
-                    Ok(make_result_err(payload))
+                    make_result_err(payload, line)
                 }
             }
             ResultCallableKind::MapErr => {
                 if !is_ok {
                     let new_value = self.call_value(callable, vec![payload], line, Some(method))?;
-                    Ok(make_result_err(new_value))
+                    make_result_err(new_value, line)
                 } else {
-                    Ok(make_result_ok(payload))
+                    make_result_ok(payload, line)
                 }
             }
             ResultCallableKind::AndThen => {
@@ -2570,7 +2855,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     // site catches misuse.
                     self.call_value(callable, vec![payload], line, Some(method))
                 } else {
-                    Ok(make_result_err(payload))
+                    make_result_err(payload, line)
                 }
             }
         }

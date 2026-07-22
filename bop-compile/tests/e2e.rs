@@ -133,6 +133,17 @@ fn run_aot_with_opts(code: &str, test_name: &str, opts: &Options) -> AotRun {
     }
 }
 
+fn run_aot_with_modules_and_opts(
+    code: &str,
+    test_name: &str,
+    modules: &[(&str, &str)],
+    opts: &Options,
+) -> AotRun {
+    let mut opts = opts.clone();
+    opts.module_resolver = Some(modules_from_map(modules.iter().map(|(k, v)| (*k, *v))));
+    run_aot_with_opts(code, test_name, &opts)
+}
+
 struct AotRun {
     status: Option<i32>,
     stdout: String,
@@ -442,6 +453,79 @@ fn e2e_sandbox_recursion_halts() {
         run.stderr.contains("too many steps"),
         "expected 'too many steps' in stderr; got:\n{}",
         run.stderr
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_rejects_deep_value_hidden_in_lambda_without_aborting() {
+    // AOT lambdas retain captures inside the generated Rust callable rather
+    // than in `BopFn::captures`. Build a value at depth 63, capture it (making
+    // the function depth 64), then try to wrap that fn in an array (depth 65).
+    // The generated binary must return the fatal Bop diagnostic with a normal
+    // exit code, not overflow the native stack or abort by signal.
+    let run = run_aot_with_opts(
+        r#"let value = none
+repeat 63 { value = [value] }
+let f = fn() { return value }
+let too_deep = [f]
+print(too_deep)"#,
+        "sandbox_deep_opaque_capture",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        run.status,
+        Some(1),
+        "expected a clean Bop error exit, not an abort; stderr:\n{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(bop::value::VALUE_DEPTH_ERROR_MESSAGE),
+        "expected value-depth diagnostic; got:\n{}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_counts_namespaced_module_capture_in_lambda_depth() {
+    let run = run_aot_with_modules_and_opts(
+        "use shapes as s\nlet f = fn() { return s.Box { value: none } }\nprint(f)",
+        "sandbox_deep_namespaced_module_capture",
+        &[(
+            "shapes",
+            "struct Box { value }\nlet deep = none\nrepeat 63 { deep = [deep] }",
+        )],
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        run.status,
+        Some(1),
+        "expected a clean depth error exit; stderr:\n{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(bop::value::VALUE_DEPTH_ERROR_MESSAGE),
+        "expected value-depth diagnostic; got:\n{}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_nested_lambda_param_shadow_does_not_capture_deep_outer_value() {
+    assert_aot_matches(
+        "nested_lambda_param_shadow_depth",
+        r#"let x = none
+repeat 64 { x = [x] }
+let outer = fn(x) { return fn() { return x } }
+print(outer(none)())"#,
     );
 }
 

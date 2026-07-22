@@ -191,12 +191,107 @@ fn index_read_uses_ops_index_get() {
 }
 
 #[test]
-fn array_and_dict_literals_use_new_constructors() {
+fn array_and_dict_literals_use_fallible_line_aware_constructors() {
     let arr = compile("let a = [1, 2, 3]");
-    contains_all(&arr, &["::bop::value::Value::new_array(vec!["]);
+    contains_all(
+        &arr,
+        &["::bop::value::Value::try_new_array(vec![", "], 1)?"],
+    );
 
-    let dct = compile(r#"let d = {"a": 1, "b": 2}"#);
-    contains_all(&dct, &["::bop::value::Value::new_dict(vec!["]);
+    let dct = compile("\nlet d = {\"a\": 1, \"b\": 2}");
+    contains_all(&dct, &["::bop::value::Value::try_new_dict(vec![", "], 2)?"]);
+}
+
+#[test]
+fn composite_values_propagate_depth_errors_with_source_lines() {
+    let out = compile(
+        r#"struct Point { x }
+enum Shape { Circle(r), Rect { w } }
+let p = Point { x: [1] }
+let c = Shape::Circle({"r": 2})
+let r = Shape::Rect { w: [3] }"#,
+    );
+    contains_all(
+        &out,
+        &[
+            "Value::try_new_struct(",
+            "], 3)?",
+            "Value::try_new_enum_tuple(",
+            "], 4)?",
+            "Value::try_new_enum_struct(",
+            "], 5)?",
+        ],
+    );
+}
+
+#[test]
+fn lambda_records_opaque_capture_depth_before_move() {
+    let out = compile("let captured = [1]\nlet f = fn() { return captured }");
+    let depth = out
+        .find("let __opaque_body_depth = 0u16.max(__cap_0.ownership_depth())")
+        .expect("capture depth should be computed");
+    let closure = out[depth..]
+        .find("Rc::new(move")
+        .map(|offset| depth + offset)
+        .expect("capture should move into the callable");
+    assert!(
+        depth < closure,
+        "capture depth must be computed before captures move into the opaque callable"
+    );
+    contains_all(
+        &out,
+        &[
+            "__bop_wrap_callable(",
+            "__opaque_body_depth, 2, __callable)?",
+            "Value::try_new_compiled_fn(",
+            "opaque_body_depth,",
+            "line,",
+        ],
+    );
+}
+
+#[test]
+fn lambda_captures_namespaced_constructors_for_depth_accounting() {
+    let out = compile_with_modules(
+        "use shapes as s\nlet f = fn() { return [s.Point { x: 1 }, s.Maybe::Some(2)] }",
+        &[(
+            "shapes",
+            "struct Point { x }\nenum Maybe { Some(value), None }",
+        )],
+    )
+    .expect("transpile namespaced constructors in lambda");
+    assert_eq!(
+        out.matches("let __cap_0 = s.clone();").count(),
+        1,
+        "the module alias should be captured exactly once:\n{out}"
+    );
+    contains_all(
+        &out,
+        &[
+            "let __opaque_body_depth = 0u16.max(__cap_0.ownership_depth())",
+            "__bop_validate_namespace_type(&s, \"s\", \"Point\", 2)?",
+            "__bop_validate_namespace_type(&s, \"s\", \"Maybe\", 2)?",
+        ],
+    );
+}
+
+#[test]
+fn nested_lambda_shadowing_does_not_capture_same_named_outer_scope_value() {
+    let out = compile(
+        "let x = [1]\nlet outer = fn(x) { return fn() { return x } }",
+    );
+    assert_eq!(
+        out.matches("let __cap_0 = x.clone();").count(),
+        1,
+        "only the inner lambda should capture the outer lambda parameter:\n{out}"
+    );
+    contains_all(
+        &out,
+        &[
+            "let __opaque_body_depth = 0u16; let __callable",
+            "let __opaque_body_depth = 0u16.max(__cap_0.ownership_depth())",
+        ],
+    );
 }
 
 #[test]
@@ -507,6 +602,20 @@ fn compile_with_modules(
             module_resolver: Some(resolver),
         },
     )
+}
+
+#[test]
+fn aliased_use_constructs_a_depth_checked_module_value() {
+    let out = compile_with_modules("\nuse helpers as h", &[("helpers", "let x = [1]")])
+        .expect("transpile aliased module");
+    contains_all(
+        &out,
+        &["Value::new_module(\"helpers\".to_string()", ", 2)?;"],
+    );
+    assert!(
+        !out.contains("BopModule {"),
+        "generated code must not bypass BopModule's checked constructor:\n{out}"
+    );
 }
 
 #[test]

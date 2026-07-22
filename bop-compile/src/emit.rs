@@ -1257,11 +1257,12 @@ impl Emitter {
                     ));
                 }
                 self.line(&format!(
-                    "let mut {alias}: ::bop::value::Value = ::bop::value::Value::Module(::std::rc::Rc::new(::bop::value::BopModule {{ path: {path_lit}.to_string(), bindings: ::std::vec![{bindings}], types: ::std::vec![{types}] }}));",
+                    "let mut {alias}: ::bop::value::Value = ::bop::value::Value::new_module({path_lit}.to_string(), ::std::vec![{bindings}], ::std::vec![{types}], {line})?;",
                     alias = rust_ident(alias_name),
                     path_lit = rust_string_literal(path),
                     bindings = bindings_src,
                     types = types_src,
+                    line = line,
                 ));
                 self.bind_local(alias_name);
                 // Track the alias for compile-time resolution
@@ -1398,7 +1399,7 @@ impl Emitter {
             if entry.own_fns.contains_key(export) {
                 writeln!(
                     self.out,
-                    "    {ident}: {wrapper}(),",
+                    "    {ident}: {wrapper}(0)?,",
                     ident = rust_ident(export),
                     wrapper = self.wrapper_fn_name(export)
                 )
@@ -1467,7 +1468,7 @@ impl Emitter {
 
             writeln!(
                 self.out,
-                "fn {wrapper}() -> ::bop::value::Value {{",
+                "fn {wrapper}(line: u32) -> Result<::bop::value::Value, ::bop::error::BopError> {{",
                 wrapper = self.wrapper_fn_name(&name)
             )
             .unwrap();
@@ -1510,7 +1511,7 @@ impl Emitter {
             writeln!(self.out, "    }});").unwrap();
             writeln!(
                 self.out,
-                "    __bop_wrap_callable(vec![{params}], ::std::vec::Vec::new(), Some(\"{name}\".to_string()), callable)",
+                "    __bop_wrap_callable(vec![{params}], ::std::vec::Vec::new(), Some(\"{name}\".to_string()), 0u16, line, callable)",
                 params = params_list,
                 name = name
             )
@@ -2146,7 +2147,7 @@ impl Emitter {
                     // Top-level fn used as a value — hand back the
                     // wrapper that reifies the Rust fn as a
                     // `Value::Fn`.
-                    format!("{}()", self.wrapper_fn_name(name))
+                    format!("{}({})?", self.wrapper_fn_name(name), line)
                 } else if self.fn_info.all_fns.contains_key(name) {
                     // A nested fn isn't reachable as a value from
                     // outside its outer fn's Rust scope — document
@@ -2234,9 +2235,9 @@ impl Emitter {
                 )
             }
 
-            ExprKind::Array(items) => self.array_src(items)?,
+            ExprKind::Array(items) => self.array_src(items, line)?,
 
-            ExprKind::Dict(entries) => self.dict_src(entries)?,
+            ExprKind::Dict(entries) => self.dict_src(entries, line)?,
 
             ExprKind::IfExpr {
                 condition,
@@ -2682,9 +2683,12 @@ impl Emitter {
         Ok(format!("{{ {}{} }}", arg_lets, body))
     }
 
-    fn array_src(&mut self, items: &[Expr]) -> Result<String, BopError> {
+    fn array_src(&mut self, items: &[Expr], line: u32) -> Result<String, BopError> {
         if items.is_empty() {
-            return Ok("::bop::value::Value::new_array(::std::vec::Vec::new())".to_string());
+            return Ok(format!(
+                "::bop::value::Value::try_new_array(::std::vec::Vec::new(), {})?",
+                line
+            ));
         }
         let mut lets = String::new();
         let mut names = Vec::with_capacity(items.len());
@@ -2695,17 +2699,19 @@ impl Emitter {
             names.push(tmp);
         }
         Ok(format!(
-            "{{ {}::bop::value::Value::new_array(vec![{}]) }}",
+            "{{ {}::bop::value::Value::try_new_array(vec![{}], {})? }}",
             lets,
-            names.join(", ")
+            names.join(", "),
+            line
         ))
     }
 
-    fn dict_src(&mut self, entries: &[(String, Expr)]) -> Result<String, BopError> {
+    fn dict_src(&mut self, entries: &[(String, Expr)], line: u32) -> Result<String, BopError> {
         if entries.is_empty() {
-            return Ok(
-                "::bop::value::Value::new_dict(::std::vec::Vec::new())".to_string(),
-            );
+            return Ok(format!(
+                "::bop::value::Value::try_new_dict(::std::vec::Vec::new(), {})?",
+                line
+            ));
         }
         let mut lets = String::new();
         let mut pairs = Vec::with_capacity(entries.len());
@@ -2716,9 +2722,10 @@ impl Emitter {
             pairs.push(format!("({}.to_string(), {})", rust_string_literal(key), tmp));
         }
         Ok(format!(
-            "{{ {}::bop::value::Value::new_dict(vec![{}]) }}",
+            "{{ {}::bop::value::Value::try_new_dict(vec![{}], {})? }}",
             lets,
-            pairs.join(", ")
+            pairs.join(", "),
+            line
         ))
     }
 
@@ -2821,12 +2828,13 @@ impl Emitter {
             })
             .collect();
         Ok(format!(
-            "{{ {ns_check}{lets}::bop::value::Value::new_struct({mp}.to_string(), {tn}.to_string(), vec![{fields}]) }}",
+            "{{ {ns_check}{lets}::bop::value::Value::try_new_struct({mp}.to_string(), {tn}.to_string(), vec![{fields}], {line})? }}",
             ns_check = ns_check,
             lets = lets,
             mp = rust_string_literal(&module_path),
             tn = rust_string_literal(type_name),
-            fields = ordered.join(", ")
+            fields = ordered.join(", "),
+            line = line,
         ))
     }
 
@@ -2924,13 +2932,14 @@ impl Emitter {
                     names.push(tmp);
                 }
                 Ok(format!(
-                    "{{ {ns_check}{lets}::bop::value::Value::new_enum_tuple({mp}.to_string(), {tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    "{{ {ns_check}{lets}::bop::value::Value::try_new_enum_tuple({mp}.to_string(), {tn}.to_string(), {vn}.to_string(), vec![{items}], {line})? }}",
                     ns_check = ns_check,
                     lets = lets,
                     mp = mp_lit,
                     tn = tn_lit,
                     vn = vn_lit,
-                    items = names.join(", ")
+                    items = names.join(", "),
+                    line = line,
                 ))
             }
             (VariantKind::Struct(decl_fields), VariantPayload::Struct(provided)) => {
@@ -2986,13 +2995,14 @@ impl Emitter {
                     })
                     .collect();
                 Ok(format!(
-                    "{{ {ns_check}{lets}::bop::value::Value::new_enum_struct({mp}.to_string(), {tn}.to_string(), {vn}.to_string(), vec![{items}]) }}",
+                    "{{ {ns_check}{lets}::bop::value::Value::try_new_enum_struct({mp}.to_string(), {tn}.to_string(), {vn}.to_string(), vec![{items}], {line})? }}",
                     ns_check = ns_check,
                     lets = lets,
                     mp = mp_lit,
                     tn = tn_lit,
                     vn = vn_lit,
-                    items = ordered.join(", ")
+                    items = ordered.join(", "),
+                    line = line,
                 ))
             }
             (VariantKind::Unit, _) => Err(BopError::runtime(
@@ -3233,6 +3243,12 @@ impl Emitter {
             )
             .unwrap();
         }
+        let opaque_body_depth = captures_ordered
+            .iter()
+            .enumerate()
+            .fold(String::from("0u16"), |depth, (i, _)| {
+                format!("{depth}.max(__cap_{i}.ownership_depth())")
+            });
 
         let arity = params.len();
         let arity_suffix = if arity == 1 { "" } else { "s" };
@@ -3259,8 +3275,9 @@ impl Emitter {
         };
 
         Ok(format!(
-            "{{ {prelude}let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {moves}{param_binds}{body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }}); __bop_wrap_callable({params_array}, ::std::vec::Vec::new(), None, __callable) }}",
+            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {moves}{param_binds}{body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }}); __bop_wrap_callable({params_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
             prelude = capture_prelude,
+            opaque_body_depth = opaque_body_depth,
             arity = arity,
             suffix = arity_suffix,
             line = line,
@@ -3689,8 +3706,11 @@ fn scan_free_vars_expr(
             // A nested lambda's captures are *its* concern — but
             // anything it references from *our* outer scope still
             // needs to bubble up to be captured here so the inner
-            // closure gets the value when it's constructed.
-            let mut inner_known = HashSet::new();
+            // closure gets the value when it's constructed. Seed
+            // the nested scan with our current bindings so a nested
+            // reference to an outer-lambda param/local doesn't get
+            // mistaken for a same-named binding outside both lambdas.
+            let mut inner_known = known.clone();
             for p in params {
                 inner_known.insert(p.clone());
             }
@@ -3699,12 +3719,33 @@ fn scan_free_vars_expr(
         ExprKind::FieldAccess { object, .. } => {
             scan_free_vars_expr(object, known, free, outer_scopes, fn_info);
         }
-        ExprKind::StructConstruct { fields, .. } => {
+        ExprKind::StructConstruct {
+            namespace,
+            fields,
+            ..
+        } => {
+            // Namespaced construction emits a runtime validation
+            // against the module Value. Record that otherwise-hidden
+            // Rust closure capture so opaque ownership depth includes it.
+            if let Some(name) = namespace {
+                if !known.contains(name) && is_outer_local(name, outer_scopes) {
+                    free.insert(name.clone());
+                }
+            }
             for (_, v) in fields {
                 scan_free_vars_expr(v, known, free, outer_scopes, fn_info);
             }
         }
-        ExprKind::EnumConstruct { payload, .. } => {
+        ExprKind::EnumConstruct {
+            namespace,
+            payload,
+            ..
+        } => {
+            if let Some(name) = namespace {
+                if !known.contains(name) && is_outer_local(name, outer_scopes) {
+                    free.insert(name.clone());
+                }
+            }
             use bop::parser::VariantPayload;
             match payload {
                 VariantPayload::Unit => {}
@@ -4039,16 +4080,25 @@ fn __bop_wrap_callable(
     params: ::std::vec::Vec<String>,
     captures: ::std::vec::Vec<(String, ::bop::value::Value)>,
     self_name: ::std::option::Option<String>,
+    opaque_body_depth: u16,
+    line: u32,
     callable: ::std::rc::Rc<
         dyn for<'__a> Fn(
             &mut Ctx<'__a>,
             ::std::vec::Vec<::bop::value::Value>,
         ) -> Result<::bop::value::Value, ::bop::error::BopError>,
     >,
-) -> ::bop::value::Value {
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
     let closure = ::std::rc::Rc::new(AotClosure { callable });
     let body: ::std::rc::Rc<dyn ::core::any::Any + 'static> = closure;
-    ::bop::value::Value::new_compiled_fn(params, captures, body, self_name)
+    ::bop::value::Value::try_new_compiled_fn(
+        params,
+        captures,
+        body,
+        self_name,
+        opaque_body_depth,
+        line,
+    )
 }
 
 /// Runtime dispatch for a value-based call: the callee is a
@@ -4132,7 +4182,7 @@ fn __bop_try_call(
     };
     drop(func);
     match callable_fn(ctx, ::std::vec::Vec::new()) {
-        Ok(value) => Ok(::bop::builtins::make_try_call_ok(value)),
+        Ok(value) => ::bop::builtins::make_try_call_ok(value, line),
         Err(err) => {
             if err.is_fatal {
                 Err(err)
@@ -4190,9 +4240,9 @@ fn __bop_result_callable_method(
     // Short-circuit: these branches don't invoke the callable,
     // they just rebuild the Result with the existing payload.
     match kind {
-        ResultCallableKind::Map if !is_ok => return Ok(make_result_err(payload)),
-        ResultCallableKind::MapErr if is_ok => return Ok(make_result_ok(payload)),
-        ResultCallableKind::AndThen if !is_ok => return Ok(make_result_err(payload)),
+        ResultCallableKind::Map if !is_ok => return make_result_err(payload, line),
+        ResultCallableKind::MapErr if is_ok => return make_result_ok(payload, line),
+        ResultCallableKind::AndThen if !is_ok => return make_result_err(payload, line),
         _ => {}
     }
 
@@ -4226,8 +4276,8 @@ fn __bop_result_callable_method(
     drop(func);
     let result = callable_fn(ctx, ::std::vec![payload])?;
     match kind {
-        ResultCallableKind::Map => Ok(make_result_ok(result)),
-        ResultCallableKind::MapErr => Ok(make_result_err(result)),
+        ResultCallableKind::Map => make_result_ok(result, line),
+        ResultCallableKind::MapErr => make_result_err(result, line),
         // `and_then` trusts the closure to have produced a
         // Result already — pass it through untouched.
         ResultCallableKind::AndThen => Ok(result),
@@ -4349,7 +4399,7 @@ fn __bop_field_set(
     match &mut obj {
         ::bop::value::Value::Struct(s) => {
             let type_name = s.type_name().to_string();
-            if !s.set_field(field, value) {
+            if !s.try_set_field(field, value, line)? {
                 return Err(::bop::error::BopError::runtime(
                     ::bop::error_messages::struct_has_no_field(&type_name, field),
                     line,
@@ -4650,4 +4700,3 @@ const MAIN_FN_SANDBOX: &str = r#"fn main() {
     }
 }
 "#;
-

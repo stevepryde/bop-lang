@@ -72,14 +72,15 @@ pub fn builtin_iter_variants() -> Vec<VariantDecl> {
 /// Build `Iter::Next(value)` with the builtin module path so the
 /// caller's pattern against `Iter::Next(v)` fires regardless of
 /// which module the iterator's `.next()` was declared in.
-pub fn make_iter_next(value: Value) -> Value {
+pub fn make_iter_next(value: Value, line: u32) -> Result<Value, BopError> {
     let mut items: Vec<Value> = Vec::with_capacity(1);
     items.push(value);
-    Value::new_enum_tuple(
+    Value::try_new_enum_tuple(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Iter"),
         String::from("Next"),
         items,
+        line,
     )
 }
 
@@ -152,7 +153,7 @@ pub fn builtin_range(
             };
         }
     }
-    Ok(Value::new_array(result))
+    Value::try_new_array(result, line)
 }
 
 /// Convert a finite `f64` that's already integer-valued into a
@@ -385,14 +386,15 @@ pub fn error_fatal(line: u32, message: impl Into<String>) -> BopError {
 /// carries `<builtin>` as its module path — any program that
 /// matches it via `Result::Ok(v)` resolves `Result` to the same
 /// builtin in its own type-binding scope.
-pub fn make_try_call_ok(value: Value) -> Value {
+pub fn make_try_call_ok(value: Value, line: u32) -> Result<Value, BopError> {
     let mut items: Vec<Value> = Vec::with_capacity(1);
     items.push(value);
-    Value::new_enum_tuple(
+    Value::try_new_enum_tuple(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Ok"),
         items,
+        line,
     )
 }
 

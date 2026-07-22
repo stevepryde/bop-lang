@@ -234,6 +234,23 @@ fn assert_both_resource_limit(tw: &str, vm: &str) {
     }
 }
 
+#[track_caller]
+fn assert_both_value_depth_errors(code: &str, expected_line: u32) {
+    for engine in ["tree-walker", "bytecode vm"] {
+        let mut host = RecordHost::new();
+        let result = if engine == "tree-walker" {
+            bop::run(code, &mut host, &BopLimits::standard())
+        } else {
+            bop_vm::run(code, &mut host, &BopLimits::standard())
+        };
+        assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+        let err = result.unwrap_err();
+        assert!(err.is_fatal, "{} returned non-fatal error: {}", engine, err);
+        assert_eq!(err.message, bop::value::VALUE_DEPTH_ERROR_MESSAGE);
+        assert_eq!(err.line, Some(expected_line));
+    }
+}
+
 // ─── Arithmetic ───────────────────────────────────────────────────
 
 #[test]
@@ -1565,6 +1582,34 @@ print("should never run")"#;
     assert!(vm_msg.contains("too many steps"), "vm msg: {}", vm_msg);
 }
 
+#[test]
+fn try_call_value_depth_limit_is_fatal_diff() {
+    assert_both_value_depth_errors(
+        r#"let r = try_call(fn() {
+    let a = [1]
+    repeat 128 { a = [a] }
+})
+print("should never run")"#,
+        3,
+    );
+}
+
+#[test]
+fn try_call_value_depth_wrapper_uses_call_site_line_diff() {
+    // Returning a maximum-depth value succeeds; wrapping it in Result::Ok
+    // adds the level that fails. The diagnostic belongs to the initiating
+    // try_call expression, not the callee's return instruction.
+    assert_both_value_depth_errors(
+        r#"fn deep() {
+    let value = none
+    repeat 64 { value = [value] }
+    return value
+}
+let r = try_call(deep)"#,
+        6,
+    );
+}
+
 // ─── Modules / use ─────────────────────────────────────────────
 
 #[test]
@@ -1734,6 +1779,85 @@ let add_n = fn(x) { return x + n }
 n = 100
 print(add_n(3))"#),
         "8"
+    );
+}
+
+#[test]
+fn closure_ignores_unreferenced_max_depth_binding_diff() {
+    assert_eq!(
+        say(r#"let unrelated = none
+repeat 64 { unrelated = [unrelated] }
+let answer = fn() { return 42 }
+print(answer())"#),
+        "42"
+    );
+}
+
+#[test]
+fn closure_free_vars_respect_lexical_scopes_diff() {
+    assert_eq!(
+        say(r#"let outer = 10
+let build = fn(param) {
+    let sequential = param + outer
+    if true {
+        let block = sequential + 1
+        return match [block] {
+            [bound] => fn(extra) {
+                let local = extra
+                return bound + local
+            },
+        }
+    }
+    return fn(extra) { return extra }
+}
+let add = build(1)
+outer = 100
+print(add(2))"#),
+        "14"
+    );
+}
+
+#[test]
+fn closure_match_binding_shadows_unrelated_deep_name_diff() {
+    assert_eq!(
+        say(r#"let bound = none
+repeat 64 { bound = [bound] }
+let build = fn() {
+    return match [7] {
+        [bound] => fn() { return bound },
+    }
+}
+let read = build()
+print(read())"#),
+        "7"
+    );
+}
+
+#[test]
+fn closure_captures_string_interpolation_variables_diff() {
+    assert_eq!(
+        say(r#"let name = "world"
+let greet = fn() { return "hello {name}" }
+name = "later"
+print(greet())"#),
+        "hello world"
+    );
+}
+
+#[test]
+fn closure_assignment_targets_are_captured_diff() {
+    assert_eq!(
+        say(r#"let counter = 1
+let values = [0]
+let mutate = fn() {
+    counter += 2
+    values[0] = counter
+    return values[0]
+}
+counter = 100
+values = [99]
+print(mutate())"#),
+        "3"
     );
 }
 
@@ -2480,6 +2604,15 @@ fn safety_deep_recursion_halts() {
         msg.contains("nested function calls") || msg.contains("recursion"),
         "got: {}",
         msg
+    );
+}
+
+#[test]
+fn safety_runtime_value_nesting_halts_cleanly() {
+    assert_both_value_depth_errors(
+        r#"let a = [1]
+repeat 128 { a = [a] }"#,
+        2,
     );
 }
 
