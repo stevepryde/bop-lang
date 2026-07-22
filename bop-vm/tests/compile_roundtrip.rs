@@ -331,6 +331,27 @@ print(double(5))"#,
 }
 
 #[test]
+fn match_in_named_fn_emits_runtime_scope_pair() {
+    let ast = parse(
+        r#"fn read(value) {
+  return match value { bound => bound }
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let body = &chunk.functions[0].chunk.code;
+
+    assert!(
+        body.iter().any(|instr| matches!(instr, bop_vm::Instr::PushScope)),
+        "named-function match must open a runtime binding scope"
+    );
+    assert!(
+        body.iter().any(|instr| matches!(instr, bop_vm::Instr::PopScope)),
+        "named-function match must close its runtime binding scope"
+    );
+}
+
+#[test]
 fn method_call_records_back_assign_for_ident() {
     // `arr.push(1)` is mutating; the compiler records the live binding as an
     // in-place target instead of deep-cloning it through `LoadVar`.
