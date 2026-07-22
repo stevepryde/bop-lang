@@ -2355,11 +2355,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
             Value::EnumVariant(ev) if ev.variant() == "Err" => {
                 if self.call_depth == 0 {
-                    return Err(error_with_hint(
-                        line,
-                        "try encountered Err at top-level",
-                        "Wrap the calling code in a fn, or use `match` to handle both arms explicitly.",
-                    ));
+                    return Err(crate::error_messages::top_level_try_error(line));
                 }
                 self.pending_try_return = Some(value);
                 // Sentinel error whose only job is to unwind up
