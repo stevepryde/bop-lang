@@ -741,6 +741,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 }
             }
+            if let Some(function) = self
+                .functions
+                .get(name)
+                .filter(|function| function.module_path == *module_path)
+            {
+                return Some(function.clone());
+            }
         }
         self.imported_function(name).cloned().or_else(|| {
             let defining_module = self.function_modules.last().map(String::as_str);

@@ -964,6 +964,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     }
                 }
             }
+            if let Some(entry) = self
+                .functions
+                .get(name)
+                .filter(|entry| entry.module_path == module_path)
+            {
+                return Some(entry.clone());
+            }
         }
         self.imported_function(name).cloned().or_else(|| {
             let defining_module = self
