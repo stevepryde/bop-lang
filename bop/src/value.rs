@@ -934,6 +934,14 @@ impl BopModule {
                     .map(|(_, value)| value.clone())
             })
     }
+
+    #[doc(hidden)]
+    pub fn __binding_origin(&self, name: &str) -> (String, String) {
+        self.live_bindings
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| (self.path.clone(), name.to_string()))
+    }
 }
 
 // ─── Tracked constructors ──────────────────────────────────────────────────

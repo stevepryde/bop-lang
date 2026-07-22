@@ -239,6 +239,18 @@ mod tests {
     }
 
     #[test]
+    fn top_level_return_skips_a_stripped_tail_expression() {
+        let mut host = Host;
+        let mut instance = BopInstance::load(
+            "pub fn ok() { return 1 }\nreturn\npanic(\"must not run\")",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(instance.call("ok", &[], &mut host).unwrap().inspect(), "1");
+    }
+
+    #[test]
     fn callbacks_are_bound_to_the_creating_instance() {
         let source = "pub fn make() { return fn() { return 7 } }";
         let mut host = Host;
@@ -270,18 +282,120 @@ mod tests {
         let mut modules = BTreeMap::new();
         modules.insert(
             "leaf".to_string(),
-            "let count = 0\nfn bump() { count += 1; return count }".to_string(),
+            "let count = 0\nlet items = [1]\nfn bump() { count += 1; return count }"
+                .to_string(),
         );
-        modules.insert("facade".to_string(), "use leaf".to_string());
+        modules.insert(
+            "facade".to_string(),
+            "use leaf\nfn read() { return count }\nfn inc() { count += 1; return count }\nfn add() { items.push(2); return items }"
+                .to_string(),
+        );
         let mut host = ModuleHost { modules };
         let mut instance = BopInstance::load(
-            "use facade as f\npub fn next() { let value = f.bump(); return [value, f.count] }",
+            "use facade as f\npub fn next() { let before = f.read(); let value = f.inc(); let after = f.read(); let items = f.add(); return [before, value, after, f.count, items, f.items] }",
             &mut host,
             &BopLimits::standard(),
         )
         .unwrap();
-        assert_eq!(instance.call("next", &[], &mut host).unwrap().inspect(), "[1, 1]");
-        assert_eq!(instance.call("next", &[], &mut host).unwrap().inspect(), "[2, 2]");
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "[0, 1, 1, 1, [1, 2], [1, 2]]"
+        );
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "[1, 2, 2, 2, [1, 2, 2], [1, 2, 2]]"
+        );
+    }
+
+    #[test]
+    fn callbacks_keep_module_globals_live_instead_of_capturing_snapshots() {
+        let mut host = Host;
+        let mut instance = BopInstance::load(
+            "let count = 0\npub fn make() { return fn() { count += 1; return count } }\npub fn inc() { count += 1; return count }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        let callback = instance.call("make", &[], &mut host).unwrap();
+        assert_eq!(instance.call_value(&callback, &[], &mut host).unwrap().inspect(), "1");
+        assert_eq!(instance.call("inc", &[], &mut host).unwrap().inspect(), "2");
+        assert_eq!(instance.call_value(&callback, &[], &mut host).unwrap().inspect(), "3");
+    }
+
+    #[test]
+    fn module_handles_read_the_active_defining_environment() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "state".to_string(),
+            "let count = 0\nlet items = [1]\nfn via(handle) { count += 1; items.push(2); return [handle.count, handle.items] }"
+                .to_string(),
+        );
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "use state as state\npub fn next() { return state.via(state) }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "[1, [1, 2]]"
+        );
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "[2, [1, 2, 2]]"
+        );
+    }
+
+    #[test]
+    fn facade_handles_read_forwarded_bindings_from_the_active_facade() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "leaf".to_string(),
+            "let count = 0\nlet items = [1]".to_string(),
+        );
+        modules.insert(
+            "facade".to_string(),
+            "use leaf\nfn via(handle) { count += 1; items.push(2); return [handle.count, handle.items] }"
+                .to_string(),
+        );
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "use facade as facade\npub fn next() { return facade.via(facade) }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "[1, [1, 2]]"
+        );
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "[2, [1, 2, 2]]"
+        );
+    }
+
+    #[test]
+    fn origin_module_handles_find_values_moved_into_an_active_importer() {
+        let mut modules = BTreeMap::new();
+        modules.insert("leaf".to_string(), "let count = 0".to_string());
+        modules.insert("facade".to_string(), "use leaf".to_string());
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "use leaf as leaf\nuse facade\npub fn next() { count += 1; return [count, leaf.count] }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "[1, 1]"
+        );
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "[2, 2]"
+        );
     }
 
     struct RetainingHost {
