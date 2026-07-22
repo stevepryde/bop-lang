@@ -1372,33 +1372,15 @@ impl Emitter {
 
     /// Emit Rust source for a `__resolver` closure that turns
     /// `(namespace, type_name)` pairs into the declaring
-    /// module's path, baked from the emitter's current
-    /// `type_bindings` and `module_aliases` state. Inlined at
-    /// every `pattern_matches` call site so the matcher can
-    /// compare the value's full identity against what the
-    /// source-level reference resolves to *at that point in
-    /// the program*.
-    fn emit_resolver_closure_src(&self, pattern_namespaces: &[String]) -> String {
-        let mut bare_arms = String::new();
-        // Flatten bare-name bindings inside-out so the
-        // innermost shadow wins. A HashSet tracks which names
-        // we've already emitted an arm for.
-        let mut seen: HashSet<String> = HashSet::new();
-        for frame in self.type_bindings.iter().rev() {
-            let mut keys: Vec<&String> = frame.keys().collect();
-            keys.sort();
-            for name in keys {
-                if !seen.insert(name.clone()) {
-                    continue;
-                }
-                let mp = frame.get(name).unwrap();
-                bare_arms.push_str(&format!(
-                    "                        (::std::option::Option::None, {tn}) => ::std::option::Option::Some({mp}.to_string()),\n",
-                    tn = rust_string_literal(name),
-                    mp = rust_string_literal(mp),
-                ));
-            }
-        }
+    /// module's path. Bare names consult the generated runtime
+    /// binding stack so lifted bodies observe declarations and
+    /// imports only after execution reaches them. Namespaces
+    /// continue to resolve through live module values.
+    fn emit_resolver_closure_src(
+        &self,
+        pattern_namespaces: &[String],
+        resolve_bare: bool,
+    ) -> String {
         // Module aliases resolve from runtime Values. A local/parameter binding
         // hard-shadows declaration context; otherwise a lifted callable checks
         // the defining module's source-ordered alias map.
@@ -1462,14 +1444,19 @@ impl Emitter {
                 value = rust_user_ident(&namespace),
             ));
         }
+        let bare_arm = if resolve_bare {
+            "                        (::std::option::Option::None, __tn) => __bop_type_bindings.iter().rev().find_map(|__frame| __frame.get(__tn).cloned()),\n"
+        } else {
+            ""
+        };
         format!(
             "{prelude}            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
              \x20                   match (__ns, __tn) {{\n\
-             {bare}{alias}                        _ => ::std::option::Option::None,\n\
+             {alias}{bare}                        _ => ::std::option::Option::None,\n\
              \x20                   }}\n\
              \x20           }};\n",
-            bare = bare_arms,
             alias = alias_arms,
+            bare = bare_arm,
             prelude = alias_prelude,
         )
     }
@@ -1489,6 +1476,104 @@ impl Emitter {
             value = rust_user_ident(name),
             module = rust_string_literal(&self.current_module),
             name = rust_string_literal(name),
+        ));
+    }
+
+    fn emit_runtime_type_scope(&mut self) {
+        self.line("let mut __bop_type_bindings = __bop_type_bindings.clone();");
+        self.line("__bop_type_bindings.push(__BopTypeFrame::new());");
+    }
+
+    fn statements_bind_runtime_types(&self, stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|stmt| match &stmt.kind {
+            StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => true,
+            StmtKind::Use {
+                path,
+                items,
+                alias: None,
+            } => !self
+                .imported_type_names(path, items.as_deref(), false)
+                .is_empty(),
+            _ => false,
+        })
+    }
+
+    fn statements_use_runtime_type_bindings(&self, stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|stmt| match &stmt.kind {
+            StmtKind::Let { value, .. } => expr_uses_runtime_type_bindings(value),
+            StmtKind::Assign { target, value, .. } => {
+                let target_uses_types = match target {
+                    AssignTarget::Variable(_) => false,
+                    AssignTarget::Index { object, index } => {
+                        expr_uses_runtime_type_bindings(object)
+                            || expr_uses_runtime_type_bindings(index)
+                    }
+                    AssignTarget::Field { object, .. } => {
+                        expr_uses_runtime_type_bindings(object)
+                    }
+                };
+                target_uses_types || expr_uses_runtime_type_bindings(value)
+            }
+            StmtKind::If {
+                condition,
+                body,
+                else_ifs,
+                else_body,
+            } => {
+                expr_uses_runtime_type_bindings(condition)
+                    || self.statements_use_runtime_type_bindings(body)
+                    || else_ifs.iter().any(|(condition, body)| {
+                        expr_uses_runtime_type_bindings(condition)
+                            || self.statements_use_runtime_type_bindings(body)
+                    })
+                    || else_body
+                        .as_deref()
+                        .is_some_and(|body| self.statements_use_runtime_type_bindings(body))
+            }
+            StmtKind::While { condition, body } => {
+                expr_uses_runtime_type_bindings(condition)
+                    || self.statements_use_runtime_type_bindings(body)
+            }
+            StmtKind::Repeat { count, body } => {
+                expr_uses_runtime_type_bindings(count)
+                    || self.statements_use_runtime_type_bindings(body)
+            }
+            StmtKind::ForIn { iterable, body, .. } => {
+                expr_uses_runtime_type_bindings(iterable)
+                    || self.statements_use_runtime_type_bindings(body)
+            }
+            // Nested named functions own their call-time context.
+            StmtKind::FnDecl { .. } | StmtKind::MethodDecl { .. } => false,
+            StmtKind::Return { value } => value
+                .as_ref()
+                .is_some_and(expr_uses_runtime_type_bindings),
+            StmtKind::Break | StmtKind::Continue => false,
+            StmtKind::Use {
+                path,
+                items,
+                alias: None,
+            } => !self
+                .imported_type_names(path, items.as_deref(), false)
+                .is_empty(),
+            StmtKind::Use { alias: Some(_), .. } => false,
+            StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => true,
+            StmtKind::ExprStmt(expr) => expr_uses_runtime_type_bindings(expr),
+        })
+    }
+
+    fn emit_runtime_type_scope_for(&mut self, stmts: &[Stmt]) {
+        if self.statements_bind_runtime_types(stmts) {
+            self.emit_runtime_type_scope();
+        }
+    }
+
+    fn emit_type_context_publish(&mut self) {
+        if !self.is_module_top_scope() {
+            return;
+        }
+        self.line(&format!(
+            "__bop_publish_type_bindings(ctx, {}, &__bop_type_bindings);",
+            rust_string_literal(&self.current_module),
         ));
     }
 
@@ -2141,7 +2226,15 @@ impl Emitter {
                     }
                 }
                 for (type_name, origin) in &expose_types {
+                    self.line(&format!(
+                        "__bop_bind_imported_type(&mut __bop_type_bindings, {}, {});",
+                        rust_string_literal(type_name),
+                        rust_string_literal(origin),
+                    ));
                     self.bind_imported_type(type_name, origin);
+                }
+                if !expose_types.is_empty() {
+                    self.emit_type_context_publish();
                 }
                 if items.is_none() {
                     self.scope_stack
@@ -2202,6 +2295,15 @@ impl Emitter {
         ));
         self.line(&format!(
             "ctx.module_aliases.retain(|(module, _), _| module != {});",
+            rust_string_literal(name)
+        ));
+        self.line(&format!(
+            "let __saved_type_bindings = ctx.module_type_bindings.get({}).cloned();",
+            rust_string_literal(name)
+        ));
+        self.line("let mut __bop_type_bindings = __bop_fresh_module_type_bindings();");
+        self.line(&format!(
+            "__bop_publish_type_bindings(ctx, {}, &__bop_type_bindings);",
             rust_string_literal(name)
         ));
         self.line(&format!(
@@ -2286,6 +2388,18 @@ impl Emitter {
             "ctx.module_aliases.retain(|(module, _), _| module != {});",
             rust_string_literal(name)
         ));
+        self.line("match __saved_type_bindings {");
+        self.indent += 1;
+        self.line(&format!(
+            "::std::option::Option::Some(__bindings) => {{ ctx.module_type_bindings.insert({}.to_string(), __bindings); }}",
+            rust_string_literal(name)
+        ));
+        self.line(&format!(
+            "::std::option::Option::None => {{ ctx.module_type_bindings.remove({}); }}",
+            rust_string_literal(name)
+        ));
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
         self.line("__load_result");
@@ -2604,6 +2718,11 @@ impl Emitter {
         let saved_top_level = self.in_top_level;
         self.in_top_level = true;
         self.emit_tick(0);
+        self.line("let mut __bop_type_bindings = __bop_fresh_module_type_bindings();");
+        self.line(&format!(
+            "__bop_publish_type_bindings(ctx, {}, &__bop_type_bindings);",
+            rust_string_literal(bop::value::ROOT_MODULE_PATH),
+        ));
         self.callable_mutations
             .push(callable_assignment_names(stmts));
         self.push_scope();
@@ -2704,6 +2823,7 @@ impl Emitter {
                 let cond_src = self.expr_src(condition)?;
                 self.open_block(&format!("while ({}).is_truthy()", cond_src));
                 self.emit_tick(line);
+                self.emit_runtime_type_scope_for(body);
                 self.push_scope();
                 for s in body {
                     self.emit_stmt(s)?;
@@ -2729,6 +2849,7 @@ impl Emitter {
                 self.out.push_str("};\n");
                 self.open_block(&format!("for _ in 0..({}.max(0))", n_tmp));
                 self.emit_tick(line);
+                self.emit_runtime_type_scope_for(body);
                 self.push_scope();
                 for s in body {
                     self.emit_stmt(s)?;
@@ -2771,6 +2892,7 @@ impl Emitter {
                     "let mut {}: ::bop::value::Value = match __bop_iter_step(ctx, &mut {}, {})? {{ Some(__v) => __v, None => break, }};",
                     ident, state_tmp, line
                 ));
+                self.emit_runtime_type_scope_for(body);
                 self.push_scope();
                 self.bind_local(var);
                 for s in body {
@@ -2805,15 +2927,16 @@ impl Emitter {
 
             StmtKind::StructDecl { name, .. }
             | StmtKind::EnumDecl { name, .. } => {
-                // Type declarations are compile-time only in the
-                // AOT. The pre-pass collected them into
-                // `self.types` keyed by full identity; here we
-                // just record the bare name → module path
-                // mapping in the current scope so bare
-                // construction / pattern sites further down
-                // resolve correctly.
+                // The whole-program registry owns static shape metadata, while
+                // this runtime transition controls source-ordered availability.
                 let mp = self.current_module.clone();
+                self.line(&format!(
+                    "__bop_bind_type(&mut __bop_type_bindings, {}, {});",
+                    rust_string_literal(name),
+                    rust_string_literal(&mp),
+                ));
                 self.bind_type(name, &mp);
+                self.emit_type_context_publish();
                 let _ = line;
             }
             StmtKind::MethodDecl { .. } => {
@@ -2840,6 +2963,7 @@ impl Emitter {
     ) -> Result<(), BopError> {
         let cond_src = self.expr_src(cond)?;
         self.open_block(&format!("if ({}).is_truthy()", cond_src));
+        self.emit_runtime_type_scope_for(body);
         self.push_scope();
         for s in body {
             self.emit_stmt(s)?;
@@ -2851,6 +2975,7 @@ impl Emitter {
             self.pad();
             self.out.push_str(&format!("}} else if ({}).is_truthy() {{\n", c));
             self.indent += 1;
+            self.emit_runtime_type_scope_for(elif_body);
             self.push_scope();
             for s in elif_body {
                 self.emit_stmt(s)?;
@@ -2862,6 +2987,7 @@ impl Emitter {
             self.pad();
             self.out.push_str("} else {\n");
             self.indent += 1;
+            self.emit_runtime_type_scope_for(else_body);
             self.push_scope();
             for s in else_body {
                 self.emit_stmt(s)?;
@@ -3098,6 +3224,7 @@ impl Emitter {
         body: &[Stmt],
         line: u32,
     ) -> Result<(), BopError> {
+        let uses_runtime_type_bindings = self.statements_use_runtime_type_bindings(body);
         let param_list = params
             .iter()
             .enumerate()
@@ -3130,6 +3257,12 @@ impl Emitter {
         // checks at loop backedges / function entry". No-op outside
         // sandbox mode.
         self.emit_tick(line);
+        if uses_runtime_type_bindings {
+            self.line(&format!(
+                "let mut __bop_type_bindings = __bop_callable_type_bindings(ctx, {});",
+                rust_string_literal(&self.current_module),
+            ));
+        }
         // Rust item functions cannot capture locals from `run_program` or a
         // module loader. Give each alias required by this callable or one of
         // its descendant lambdas a lazy call-local binding. No context lookup
@@ -3431,7 +3564,10 @@ impl Emitter {
             // Patterns reaching this point use the same lexical
             // scope we're in *right now*, so statically baking
             // the mapping is both correct and efficient.
-            src.push_str(&self.emit_resolver_closure_src(&namespaces));
+            src.push_str(&self.emit_resolver_closure_src(
+                &namespaces,
+                pattern_uses_bare_type(&arm.pattern),
+            ));
             src.push_str(&format!(
                 "            if ::bop::pattern_matches(&__pat, &{}, &mut __bindings, &__resolver) {{\n",
                 sc_name
@@ -3787,9 +3923,28 @@ impl Emitter {
                 self.declaration_alias_namespace_src(namespace, line)
                     .expect("dynamic declaration namespace has an overlay")
             };
-            return self.dynamic_struct_construct_src(
-                namespace,
-                &namespace_value,
+            let module_path_src = format!(
+                "__bop_validate_namespace_type(&{}, {}, {}, {})?",
+                namespace_value,
+                rust_string_literal(namespace),
+                rust_string_literal(type_name),
+                line,
+            );
+            return self.runtime_struct_construct_src(
+                &module_path_src,
+                type_name,
+                fields,
+                line,
+            );
+        }
+        if namespace.is_none() {
+            let module_path_src = format!(
+                "__bop_resolve_bare_type(&__bop_type_bindings, {}, true, {})?",
+                rust_string_literal(type_name),
+                line,
+            );
+            return self.runtime_struct_construct_src(
+                &module_path_src,
                 type_name,
                 fields,
                 line,
@@ -3914,10 +4069,9 @@ impl Emitter {
         ))
     }
 
-    fn dynamic_struct_construct_src(
+    fn runtime_struct_construct_src(
         &mut self,
-        namespace: &str,
-        namespace_value: &str,
+        module_path_src: &str,
         type_name: &str,
         fields: &[(String, Expr)],
         line: u32,
@@ -3971,14 +4125,13 @@ impl Emitter {
             ));
         }
         Ok(format!(
-            "{{ let __module_path = __bop_validate_namespace_type(&{namespace}, {alias}, {type_name}, {line})?; \
+            "{{ let __module_path = {module_path_src}; \
                 let __declared_fields: &'static [&'static str] = match __module_path.as_str() {{ {shape_arms} _ => return Err(::bop::error::BopError::runtime(::bop::error_messages::struct_not_declared({type_name}), {line})), }}; \
                 __bop_validate_named_fields(__declared_fields, &[{provided_names}], {type_name}, ::std::option::Option::None, {line})?; \
                 {lets}let __provided = vec![{provided}]; \
                 let __ordered = __bop_order_named_fields(__declared_fields, __provided); \
                 ::bop::value::Value::try_new_struct(__module_path, {type_name}.to_string(), __ordered, {line})? }}",
-            namespace = namespace_value,
-            alias = rust_string_literal(namespace),
+            module_path_src = module_path_src,
             type_name = rust_string_literal(type_name),
             shape_arms = shape_arms,
             provided_names = provided_names,
@@ -4005,9 +4158,29 @@ impl Emitter {
                 self.declaration_alias_namespace_src(namespace, line)
                     .expect("dynamic declaration namespace has an overlay")
             };
-            return self.dynamic_enum_construct_src(
-                namespace,
-                &namespace_value,
+            let module_path_src = format!(
+                "__bop_validate_namespace_type(&{}, {}, {}, {})?",
+                namespace_value,
+                rust_string_literal(namespace),
+                rust_string_literal(type_name),
+                line,
+            );
+            return self.runtime_enum_construct_src(
+                &module_path_src,
+                type_name,
+                variant,
+                payload,
+                line,
+            );
+        }
+        if namespace.is_none() {
+            let module_path_src = format!(
+                "__bop_resolve_bare_type(&__bop_type_bindings, {}, false, {})?",
+                rust_string_literal(type_name),
+                line,
+            );
+            return self.runtime_enum_construct_src(
+                &module_path_src,
                 type_name,
                 variant,
                 payload,
@@ -4211,10 +4384,9 @@ impl Emitter {
         }
     }
 
-    fn dynamic_enum_construct_src(
+    fn runtime_enum_construct_src(
         &mut self,
-        namespace: &str,
-        namespace_value: &str,
+        module_path_src: &str,
         type_name: &str,
         variant: &str,
         payload: &VariantPayload,
@@ -4268,12 +4440,9 @@ impl Emitter {
         }
 
         let namespace_check = format!(
-            "let __module_path = __bop_validate_namespace_type(&{}, {}, {}, {})?; \
+            "let __module_path = {}; \
              let __variant_shape = match __module_path.as_str() {{ {} _ => return Err(::bop::error::BopError::runtime(::bop::error_messages::enum_not_declared({}), {})), }}; ",
-            namespace_value,
-            rust_string_literal(namespace),
-            rust_string_literal(type_name),
-            line,
+            module_path_src,
             shape_arms,
             rust_string_literal(type_name),
             line,
@@ -4575,6 +4744,7 @@ impl Emitter {
         body: &[Stmt],
         line: u32,
     ) -> Result<String, BopError> {
+        let uses_runtime_type_bindings = self.statements_use_runtime_type_bindings(body);
         // Free-variable analysis against the outer scope stack.
         let mut dependencies = FreeVarDependencies::default();
         let mut body_known = HashSet::new();
@@ -4720,13 +4890,23 @@ impl Emitter {
             )
         };
 
+        let type_bindings_init = if uses_runtime_type_bindings {
+            format!(
+                "let mut __bop_type_bindings = __bop_callable_type_bindings(ctx, {}); ",
+                rust_string_literal(&self.current_module),
+            )
+        } else {
+            String::new()
+        };
+
         Ok(format!(
-            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {moves}{param_binds}{body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }}); __bop_wrap_callable({params_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
+            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{moves}{param_binds}{body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }}); __bop_wrap_callable({params_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
             prelude = capture_prelude,
             opaque_body_depth = opaque_body_depth,
             arity = arity,
             suffix = arity_suffix,
             line = line,
+            type_bindings_init = type_bindings_init,
             moves = capture_moves,
             param_binds = param_binds,
             body = body_src,
@@ -5045,6 +5225,117 @@ fn variant_payload_rust(payload: &bop::parser::VariantPatternPayload) -> String 
                 "::bop::parser::VariantPatternPayload::Struct {{ fields: {}, rest: {} }}",
                 fields_src, rest,
             )
+        }
+    }
+}
+
+fn pattern_uses_bare_type(pattern: &bop::parser::Pattern) -> bool {
+    use bop::parser::{Pattern, VariantPatternPayload};
+    match pattern {
+        Pattern::EnumVariant {
+            namespace,
+            payload,
+            ..
+        } => {
+            namespace.is_none()
+                || match payload {
+                    VariantPatternPayload::Unit => false,
+                    VariantPatternPayload::Tuple(items) => {
+                        items.iter().any(pattern_uses_bare_type)
+                    }
+                    VariantPatternPayload::Struct { fields, .. } => {
+                        fields.iter().any(|(_, field)| pattern_uses_bare_type(field))
+                    }
+                }
+        }
+        Pattern::Struct {
+            namespace, fields, ..
+        } => {
+            namespace.is_none()
+                || fields.iter().any(|(_, field)| pattern_uses_bare_type(field))
+        }
+        Pattern::Array { elements, .. } | Pattern::Or(elements) => {
+            elements.iter().any(pattern_uses_bare_type)
+        }
+        Pattern::Wildcard | Pattern::Binding(_) | Pattern::Literal(_) => false,
+    }
+}
+
+fn expr_uses_runtime_type_bindings(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::None
+        | ExprKind::Ident(_)
+        | ExprKind::StringInterp(_) => false,
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_uses_runtime_type_bindings(left) || expr_uses_runtime_type_bindings(right)
+        }
+        ExprKind::UnaryOp { expr, .. } | ExprKind::Try(expr) => {
+            expr_uses_runtime_type_bindings(expr)
+        }
+        ExprKind::Call { callee, args } => {
+            expr_uses_runtime_type_bindings(callee)
+                || args.iter().any(expr_uses_runtime_type_bindings)
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            expr_uses_runtime_type_bindings(object)
+                || args.iter().any(expr_uses_runtime_type_bindings)
+        }
+        ExprKind::Index { object, index } => {
+            expr_uses_runtime_type_bindings(object) || expr_uses_runtime_type_bindings(index)
+        }
+        ExprKind::Array(items) => items.iter().any(expr_uses_runtime_type_bindings),
+        ExprKind::Dict(entries) => entries
+            .iter()
+            .any(|(_, value)| expr_uses_runtime_type_bindings(value)),
+        ExprKind::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_runtime_type_bindings(condition)
+                || expr_uses_runtime_type_bindings(then_expr)
+                || expr_uses_runtime_type_bindings(else_expr)
+        }
+        // Nested callables initialize from their defining module when invoked;
+        // their type requirements do not force an allocation in the creator.
+        ExprKind::Lambda { .. } => false,
+        ExprKind::FieldAccess { object, .. } => expr_uses_runtime_type_bindings(object),
+        ExprKind::StructConstruct {
+            namespace, fields, ..
+        } => {
+            namespace.is_none()
+                || fields
+                    .iter()
+                    .any(|(_, value)| expr_uses_runtime_type_bindings(value))
+        }
+        ExprKind::EnumConstruct {
+            namespace, payload, ..
+        } => {
+            namespace.is_none()
+                || match payload {
+                    VariantPayload::Unit => false,
+                    VariantPayload::Tuple(values) => {
+                        values.iter().any(expr_uses_runtime_type_bindings)
+                    }
+                    VariantPayload::Struct(fields) => fields
+                        .iter()
+                        .any(|(_, value)| expr_uses_runtime_type_bindings(value)),
+                }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            expr_uses_runtime_type_bindings(scrutinee)
+                || arms.iter().any(|arm| {
+                    pattern_uses_bare_type(&arm.pattern)
+                        || arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(expr_uses_runtime_type_bindings)
+                        || expr_uses_runtime_type_bindings(&arm.body)
+                })
         }
     }
 }
@@ -5442,6 +5733,10 @@ const CTX_BASE: &str = r#"pub struct Ctx<'h> {
         (::std::string::String, ::std::string::String),
         ::bop::value::Value,
     >,
+    pub module_type_bindings: ::std::collections::HashMap<
+        ::std::string::String,
+        ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
+    >,
 }
 
 "#;
@@ -5465,6 +5760,10 @@ const CTX_SANDBOX: &str = r#"pub struct Ctx<'h> {
     pub module_aliases: ::std::collections::HashMap<
         (::std::string::String, ::std::string::String),
         ::bop::value::Value,
+    >,
+    pub module_type_bindings: ::std::collections::HashMap<
+        ::std::string::String,
+        ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
     >,
 }
 
@@ -5501,6 +5800,88 @@ const RUNTIME_SHARED: &str = r#"/// Sentinel type inserted into `module_cache` w
 /// state it means a circular import — the runtime returns a clear
 /// error and halts.
 pub struct __ModuleLoading;
+
+type __BopTypeFrame =
+    ::std::collections::BTreeMap<::std::string::String, ::std::string::String>;
+type __BopTypeBindings = ::std::vec::Vec<__BopTypeFrame>;
+
+fn __bop_builtin_type_frame() -> __BopTypeFrame {
+    let mut bindings = __BopTypeFrame::new();
+    bindings.insert("Result".to_string(), "<builtin>".to_string());
+    bindings.insert("RuntimeError".to_string(), "<builtin>".to_string());
+    bindings.insert("Iter".to_string(), "<builtin>".to_string());
+    bindings
+}
+
+fn __bop_fresh_module_type_bindings() -> __BopTypeBindings {
+    ::std::vec![__bop_builtin_type_frame()]
+}
+
+fn __bop_callable_type_bindings(ctx: &Ctx<'_>, module: &str) -> __BopTypeBindings {
+    let committed = ctx
+        .module_type_bindings
+        .get(module)
+        .cloned()
+        .unwrap_or_else(__bop_builtin_type_frame);
+    ::std::vec![committed, __BopTypeFrame::new()]
+}
+
+fn __bop_flatten_type_bindings(bindings: &__BopTypeBindings) -> __BopTypeFrame {
+    let mut flattened = __BopTypeFrame::new();
+    for frame in bindings {
+        for (name, origin) in frame {
+            flattened.insert(name.clone(), origin.clone());
+        }
+    }
+    flattened
+}
+
+fn __bop_publish_type_bindings(
+    ctx: &mut Ctx<'_>,
+    module: &str,
+    bindings: &__BopTypeBindings,
+) {
+    ctx.module_type_bindings
+        .insert(module.to_string(), __bop_flatten_type_bindings(bindings));
+}
+
+fn __bop_bind_type(bindings: &mut __BopTypeBindings, name: &str, origin: &str) {
+    bindings
+        .last_mut()
+        .expect("type bindings always have a frame")
+        .insert(name.to_string(), origin.to_string());
+}
+
+fn __bop_bind_imported_type(
+    bindings: &mut __BopTypeBindings,
+    name: &str,
+    origin: &str,
+) {
+    bindings
+        .last_mut()
+        .expect("type bindings always have a frame")
+        .entry(name.to_string())
+        .or_insert_with(|| origin.to_string());
+}
+
+fn __bop_resolve_bare_type(
+    bindings: &__BopTypeBindings,
+    type_name: &str,
+    is_struct: bool,
+    line: u32,
+) -> Result<::std::string::String, ::bop::error::BopError> {
+    for frame in bindings.iter().rev() {
+        if let ::std::option::Option::Some(origin) = frame.get(type_name) {
+            return Ok(origin.clone());
+        }
+    }
+    let message = if is_struct {
+        ::bop::error_messages::struct_not_declared(type_name)
+    } else {
+        ::bop::error_messages::enum_not_declared(type_name)
+    };
+    Err(::bop::error::BopError::runtime(message, line))
+}
 
 struct __BopDeclarationAliasBinding {
     overlay: ::std::option::Option<::bop::value::Value>,
@@ -6255,6 +6636,7 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         rand_state: 0,
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
+        module_type_bindings: ::std::collections::HashMap::new(),
     };
     run_program(&mut ctx)
 }
@@ -6301,6 +6683,7 @@ pub fn run<H: ::bop::BopHost>(
         max_steps: limits.max_steps,
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
+        module_type_bindings: ::std::collections::HashMap::new(),
     };
     run_program(&mut ctx)
 }

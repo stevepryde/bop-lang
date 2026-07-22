@@ -1076,6 +1076,79 @@ fn module_loader_clears_declaration_alias_context_after_failure() {
     assert!(loader.contains(
         "ctx.module_aliases.retain(|(module, _), _| module != \"holder\")"
     ));
+    assert!(loader.contains(
+        "let __saved_type_bindings = ctx.module_type_bindings.get(\"holder\").cloned()"
+    ));
+    assert!(loader.contains("ctx.module_type_bindings.remove(\"holder\")"));
+}
+
+#[test]
+fn bare_types_resolve_from_source_ordered_runtime_context() {
+    let output = compile(
+        r#"fn build() { return Point { value: 42 } }
+fn label(value) { return match value { Point { value } => value, _ => 0 } }
+let before = try_call(build)
+struct Point { value }
+let after = build()"#,
+    );
+
+    contains_all(
+        &output,
+        &[
+            "let mut __bop_type_bindings = __bop_callable_type_bindings(ctx, \"<root>\")",
+            "__bop_resolve_bare_type(&__bop_type_bindings, \"Point\", true, 1)",
+            "__bop_bind_type(&mut __bop_type_bindings, \"Point\", \"<root>\")",
+            "__bop_publish_type_bindings(ctx, \"<root>\", &__bop_type_bindings)",
+            "(::std::option::Option::None, __tn) => __bop_type_bindings.iter().rev()",
+        ],
+    );
+}
+
+#[test]
+fn bare_type_imports_publish_declaration_origins_at_the_use_site() {
+    let output = compile_with_modules(
+        r#"fn build() { return Point { value: 42 } }
+let before = try_call(build)
+use facade.{Point}
+let after = build()"#,
+        &[
+            ("types", "struct Point { value }"),
+            ("facade", "use types"),
+        ],
+    )
+    .expect("transpile source-ordered type import");
+
+    contains_all(
+        &output,
+        &[
+            "__bop_bind_imported_type(&mut __bop_type_bindings, \"Point\", \"types\")",
+            "__bop_publish_type_bindings(ctx, \"<root>\", &__bop_type_bindings)",
+        ],
+    );
+}
+
+#[test]
+fn type_free_callables_and_loops_do_not_clone_runtime_type_context() {
+    let output = compile(
+        r#"fn hot(n) {
+    let total = 0
+    repeat n { total += 1 }
+    return match total { 0 => 0, value => value }
+}
+let closure = fn(n) {
+    let total = 0
+    repeat n { total += 1 }
+    return total
+}
+print(hot(3), closure(2))"#,
+    );
+
+    assert!(!output.contains(
+        "let mut __bop_type_bindings = __bop_callable_type_bindings"
+    ));
+    assert!(!output.contains(
+        "let mut __bop_type_bindings = __bop_type_bindings.clone()"
+    ));
 }
 
 #[test]

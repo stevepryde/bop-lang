@@ -601,6 +601,26 @@ for point in [Point { x: 11, y: 0 }] { print(point.x) }
 repeat [Point { x: 12, y: 0 }].len() { print("repeat") }"#,
     ),
     (
+        "type_bindings_direct_source_order",
+        r#"fn direct() { return Point { value: 1 } }
+fn direct_enum() { return Signal::Idle }
+fn direct_pattern() {
+    return match (Point { value: 5 }) { Point { value } => value, _ => 0 }
+}
+struct Runner { marker }
+fn Runner.build(self) { return Point { value: self.marker } }
+let runner = Runner { marker: 7 }
+let delayed = fn() { return Point { value: 6 } }
+print(try_call(direct).is_err(), try_call(direct_enum).is_err(), try_call(delayed).is_err())
+print(try_call(fn() { return runner.build() }).is_err())
+struct Point { value }
+enum Signal { Idle, Pair(left, right), Named { value } }
+print(direct().value, direct_pattern(), delayed().value, runner.build().value)
+print(match direct_enum() { Signal::Idle => "idle", _ => "bad" })
+print(match Signal::Pair(7, 8) { Signal::Pair(left, right) => left + right, _ => 0 })
+print(match (Signal::Named { value: 9 }) { Signal::Named { value } => value, _ => 0 })"#,
+    ),
+    (
         "while_loop",
         "let i = 0\nwhile i < 5 { i += 1 }\nprint(i)",
     ),
@@ -2679,6 +2699,61 @@ print(match s {
             "shapes",
             r#"enum Shape { Circle(r), Rect { w, h } }"#,
         )],
+    ),
+    (
+        "type_bindings_selective_and_glob_source_order",
+        r#"fn imported() { return Imported { value: 2 } }
+fn imported_enum() { return ImportedSignal::Pair(3, 4) }
+print(try_call(imported).is_err(), try_call(imported_enum).is_err())
+use types.{Imported}
+print(imported().value)
+use types
+print(match imported_enum() { ImportedSignal::Pair(left, right) => left + right, _ => 0 })"#,
+        &[(
+            "types",
+            r#"struct Imported { value }
+enum ImportedSignal { Idle, Pair(left, right), Named { value } }"#,
+        )],
+    ),
+    (
+        "type_bindings_dead_branch_import_does_not_publish",
+        r#"fn build() { return Point { value: 14 } }
+if false {
+    use types.{Point}
+    print(build().value)
+}
+print(try_call(build).is_err())
+use types.{Point}
+print(build().value)"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "type_bindings_module_init_and_retry_cleanup",
+        r#"use timing
+fn load_bad() { use bad }
+print(try_call(load_bad).is_err())
+print(try_call(load_bad).is_err())"#,
+        &[
+            ("dep", "print(\"dep\")\nstruct P { value }"),
+            (
+                "timing",
+                r#"fn build() { return P { value: 10 } }
+fn matches() { return match (P { value: 11 }) { P { value } => value, _ => 0 } }
+print(try_call(build).is_err(), try_call(matches).is_err())
+use dep.{P}
+print(build().value, matches())"#,
+            ),
+            (
+                "bad",
+                r#"fn bare() { return P { value: 12 } }
+fn qualified() { return api.P { value: 13 } }
+print(try_call(bare).is_err(), try_call(qualified).is_err())
+use dep.{P}
+use dep as api
+print(try_call(bare).is_ok(), try_call(qualified).is_ok())
+let boom = 1 / 0"#,
+            ),
+        ],
     ),
 ];
 
