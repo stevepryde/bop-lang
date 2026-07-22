@@ -15,10 +15,9 @@
 //!   their sub-expressions in a `{ let __a = ...; ... }` block so
 //!   that sequential evaluation is explicit and the borrow checker
 //!   is happy when sub-expressions both borrow `ctx`.
-//! - Variables lower to Rust locals. `let x = ...` becomes
-//!   `let mut x: Value = ...;` (always `mut` — we don't know if
-//!   a later statement will reassign, and `#![allow(unused_mut)]`
-//!   silences the warning).
+//! - Variables lower to hygienically-mangled Rust locals (always
+//!   `mut` — we don't know if a later statement will reassign, and
+//!   `#![allow(unused_mut)]` silences the warning).
 //! - User functions take `&mut Ctx<'_>` plus their Bop parameters
 //!   as `Value`. Recursion and nested fns work because Rust allows
 //!   both fn-in-fn definitions and forward references within a
@@ -179,14 +178,13 @@ fn collect_type_registry(
         &mut struct_origins,
         &mut enum_origins,
     )?;
-    // Then every module's AST. Module prefix matches the emitter's
-    // slug scheme (dots → underscores, trailing `__`). The `name`
-    // string (pre-slug) is what shows up in error messages so users
-    // can find the file they wrote, and is also the runtime
-    // module path for type identity.
+    // Then every module's AST. The function prefix uses the same
+    // injective component encoding as the emitter. The source `name`
+    // is still what shows up in errors and at runtime as the module's
+    // type identity.
     for name in &modules.order {
         if let Some(entry) = modules.modules.get(name) {
-            let prefix = format!("{}__", module_slug(name));
+            let prefix = module_fn_prefix(name);
             collect_types_from_stmts(
                 &entry.ast,
                 &prefix,
@@ -665,8 +663,8 @@ struct Emitter {
     /// short.
     tmp_counter: usize,
     /// Non-empty while emitting an imported module's body — the
-    /// prefix (e.g. `"foo__bar__"`) is applied to every user fn
-    /// name so modules can't collide on function identifiers.
+    /// collision-free prefix is applied to every user fn name so
+    /// modules can't collide on function identifiers.
     module_prefix: String,
     /// Source-level path of the module whose body we're currently
     /// emitting. `<root>` while emitting the top-level program,
@@ -999,7 +997,7 @@ impl Emitter {
         // the time the root program's code references them.
         self.emit_imported_modules()?;
         // Top-level fn declarations move out of `run_program`'s
-        // body to module scope. That way the `__bop_fn_value_*`
+        // body to module scope. That way the `__bop_user_fn_value_*`
         // wrappers (also at module scope) can reference them, and
         // `let g = fib` works even before `fib` is called.
         self.emit_top_level_fn_decls(stmts)?;
@@ -1053,7 +1051,7 @@ impl Emitter {
         // body tag their values correctly.
         let saved_prefix = std::mem::replace(
             &mut self.module_prefix,
-            format!("{}__", module_slug(name)),
+            module_fn_prefix(name),
         );
         let saved_fn_info =
             std::mem::replace(&mut self.fn_info, collect_fn_info(&entry.ast));
@@ -1112,7 +1110,7 @@ impl Emitter {
             writeln!(
                 self.out,
                 "    {ident}: ::bop::value::Value,",
-                ident = rust_ident(export)
+                ident = rust_user_ident(export)
             )
             .unwrap();
         }
@@ -1237,7 +1235,7 @@ impl Emitter {
                             "({}.to_string(), {tmp}.{ident}.clone())",
                             rust_string_literal(n),
                             tmp = tmp,
-                            ident = rust_ident(n)
+                            ident = rust_user_ident(n)
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1258,7 +1256,7 @@ impl Emitter {
                 }
                 self.line(&format!(
                     "let mut {alias}: ::bop::value::Value = ::bop::value::Value::new_module({path_lit}.to_string(), ::std::vec![{bindings}], ::std::vec![{types}], {line})?;",
-                    alias = rust_ident(alias_name),
+                    alias = rust_user_ident(alias_name),
                     path_lit = rust_string_literal(path),
                     bindings = bindings_src,
                     types = types_src,
@@ -1303,7 +1301,7 @@ impl Emitter {
                     }
                     self.line(&format!(
                         "let mut {ident}: ::bop::value::Value = {tmp}.{ident}.clone();",
-                        ident = rust_ident(name),
+                        ident = rust_user_ident(name),
                         tmp = tmp
                     ));
                     self.bind_local(name);
@@ -1400,7 +1398,7 @@ impl Emitter {
                 writeln!(
                     self.out,
                     "    {ident}: {wrapper}(0)?,",
-                    ident = rust_ident(export),
+                    ident = rust_user_ident(export),
                     wrapper = self.wrapper_fn_name(export)
                 )
                 .unwrap();
@@ -1408,7 +1406,7 @@ impl Emitter {
                 writeln!(
                     self.out,
                     "    {ident}: {ident}.clone(),",
-                    ident = rust_ident(export)
+                    ident = rust_user_ident(export)
                 )
                 .unwrap();
             }
@@ -1535,7 +1533,7 @@ impl Emitter {
         for ((_module_path, type_name, method_name), entry) in &entries {
             let saved_prefix = std::mem::replace(
                 &mut self.module_prefix,
-                format!("{}method_{}__", entry.module_prefix, type_name),
+                method_fn_prefix(&entry.module_prefix, type_name),
             );
             let saved_fn_info = std::mem::replace(
                 &mut self.fn_info,
@@ -1587,10 +1585,8 @@ impl Emitter {
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         for ((module_path, type_name, method_name), entry) in &entries {
-            let fn_name = format!(
-                "bop_fn_{}method_{}__{}",
-                entry.module_prefix, type_name, method_name
-            );
+            let method_prefix = method_fn_prefix(&entry.module_prefix, type_name);
+            let fn_name = rust_fn_name_with(&method_prefix, method_name);
             let arity = entry.params.len();
             let arity_minus_one = arity.saturating_sub(1);
             let arity_check = format!(
@@ -1741,7 +1737,7 @@ impl Emitter {
         match &stmt.kind {
             StmtKind::Let { name, value, is_const: _ } => {
                 let rhs = self.expr_src(value)?;
-                let ident = rust_ident(name);
+                let ident = rust_user_ident(name);
                 self.line(&format!("let mut {}: ::bop::value::Value = {};", ident, rhs));
                 self.bind_local(name);
             }
@@ -1823,7 +1819,7 @@ impl Emitter {
                     "let mut {}: __BopIterState = __bop_iter_start(ctx, {}, {})?;",
                     state_tmp, iter_tmp, line
                 ));
-                let ident = rust_ident(var);
+                let ident = rust_user_ident(var);
                 self.open_block("loop");
                 self.emit_tick(line);
                 self.line(&format!(
@@ -1942,7 +1938,7 @@ impl Emitter {
     ) -> Result<(), BopError> {
         match target {
             AssignTarget::Variable(name) => {
-                let ident = rust_ident(name);
+                let ident = rust_user_ident(name);
                 let rhs_src = self.expr_src(value)?;
                 match op {
                     AssignOp::Eq => {
@@ -1964,7 +1960,7 @@ impl Emitter {
                 // Tree-walker requires the object to be a bare ident;
                 // anything else is a compile-time error here too.
                 let target = match &object.kind {
-                    ExprKind::Ident(n) => rust_ident(n),
+                    ExprKind::Ident(n) => rust_user_ident(n),
                     _ => {
                         return Err(BopError::runtime(
                             "Can only assign to indexed variables (like `arr[0] = val`)",
@@ -2010,7 +2006,7 @@ impl Emitter {
             }
             AssignTarget::Field { object, field } => {
                 let target = match &object.kind {
-                    ExprKind::Ident(n) => rust_ident(n),
+                    ExprKind::Ident(n) => rust_user_ident(n),
                     _ => {
                         return Err(BopError::runtime(
                             "Can only assign to fields of named variables (like `p.x = val`)",
@@ -2072,7 +2068,7 @@ impl Emitter {
         let fn_name = self.rust_fn_name(name);
         let param_list = params
             .iter()
-            .map(|p| format!("mut {}: ::bop::value::Value", rust_ident(p)))
+            .map(|p| format!("mut {}: ::bop::value::Value", rust_user_ident(p)))
             .collect::<Vec<_>>()
             .join(", ");
         let sig = if params.is_empty() {
@@ -2142,7 +2138,7 @@ impl Emitter {
 
             ExprKind::Ident(name) => {
                 if self.is_local(name) {
-                    format!("{}.clone()", rust_ident(name))
+                    format!("{}.clone()", rust_user_ident(name))
                 } else if self.fn_info.top_level_fns.contains(name) {
                     // Top-level fn used as a value — hand back the
                     // wrapper that reifies the Rust fn as a
@@ -2166,7 +2162,7 @@ impl Emitter {
                     // actually resolve. Matches the existing
                     // "undefined at compile time" behaviour for
                     // plain `print(nope)` and the like.
-                    format!("{}.clone()", rust_ident(name))
+                    format!("{}.clone()", rust_user_ident(name))
                 }
             }
 
@@ -2415,7 +2411,7 @@ impl Emitter {
                 self.bind_local(name);
                 src.push_str(&format!(
                     "                let {}: ::bop::value::Value = __bindings.iter().rev().find(|(k, _)| k == {}).map(|(_, v)| v.clone()).unwrap_or(::bop::value::Value::None);\n",
-                    rust_ident(name),
+                    rust_user_ident(name),
                     rust_string_literal(name)
                 ));
             }
@@ -2429,7 +2425,7 @@ impl Emitter {
             for name in &names {
                 src.push_str(&format!(
                     "                let _ = &{};\n",
-                    rust_ident(name)
+                    rust_user_ident(name)
                 ));
             }
 
@@ -2570,7 +2566,7 @@ impl Emitter {
             return Ok(format!(
                 "{{ {}__bop_call_value(ctx, {}.clone(), {}, {})? }}",
                 arg_lets,
-                rust_ident(&name),
+                rust_user_ident(&name),
                 args_vec,
                 line
             ));
@@ -2765,7 +2761,7 @@ impl Emitter {
         let ns_check = match namespace {
             Some(ns) => format!(
                 "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
-                ns_ident = rust_ident(ns),
+                ns_ident = rust_user_ident(ns),
                 ns_lit = rust_string_literal(ns),
                 ty_lit = rust_string_literal(type_name),
                 line = line,
@@ -2893,7 +2889,7 @@ impl Emitter {
         let ns_check = match namespace {
             Some(ns) => format!(
                 "__bop_validate_namespace_type(&{ns_ident}, {ns_lit}, {ty_lit}, {line})?; ",
-                ns_ident = rust_ident(ns),
+                ns_ident = rust_user_ident(ns),
                 ns_lit = rust_string_literal(ns),
                 ty_lit = rust_string_literal(type_name),
                 line = line,
@@ -3051,7 +3047,7 @@ impl Emitter {
                     write!(
                         body,
                         "__s.push_str(&format!(\"{{}}\", {}.clone())); ",
-                        rust_ident(name)
+                        rust_user_ident(name)
                     )
                     .unwrap();
                 }
@@ -3109,7 +3105,7 @@ impl Emitter {
         );
         let ident_target = if mutating {
             match &object.kind {
-                ExprKind::Ident(n) => Some(rust_ident(n)),
+                ExprKind::Ident(n) => Some(rust_user_ident(n)),
                 _ => None,
             }
         } else {
@@ -3287,7 +3283,7 @@ impl Emitter {
                 capture_prelude,
                 "let __cap_{i} = {ident}.clone();",
                 i = i,
-                ident = rust_ident(cap)
+                ident = rust_user_ident(cap)
             )
             .unwrap();
             // `Fn` closures can be invoked repeatedly, so captures
@@ -3296,7 +3292,7 @@ impl Emitter {
             writeln!(
                 capture_moves,
                 "let mut {ident}: ::bop::value::Value = __cap_{i}.clone();",
-                ident = rust_ident(cap),
+                ident = rust_user_ident(cap),
                 i = i
             )
             .unwrap();
@@ -3315,7 +3311,7 @@ impl Emitter {
             writeln!(
                 param_binds,
                 "let mut {ident}: ::bop::value::Value = args.remove(0);",
-                ident = rust_ident(p)
+                ident = rust_user_ident(p)
             )
             .unwrap();
         }
@@ -3881,19 +3877,24 @@ fn build_arg_array(arg_names: &[String]) -> String {
     }
 }
 
-/// Render a Bop identifier as a Rust identifier, escaping Rust
-/// keywords with the raw-identifier prefix when needed. `self` is
-/// special-cased: Rust reserves it for method receivers and
-/// refuses to raw-escape it, so we remap to `bop_self`
-/// consistently across param lists and body references.
-fn rust_ident(name: &str) -> String {
-    if name == "self" {
-        "bop_self".to_string()
-    } else if is_rust_keyword(name) {
-        format!("r#{}", name)
-    } else {
-        name.to_string()
+/// Encode arbitrary UTF-8 source text into an injective,
+/// Rust-identifier-safe component. Hex is deliberately used instead
+/// of a character substitution: `a.b`, `a_b`, and names that already
+/// look mangled must remain distinct.
+fn user_name_component(name: &str) -> String {
+    let mut encoded = String::with_capacity(name.len() * 2);
+    for byte in name.as_bytes() {
+        write!(encoded, "{byte:02x}").unwrap();
     }
+    encoded
+}
+
+/// The sole lowering boundary for source-level value identifiers.
+/// Every Bop binding and reference passes through this namespace, so
+/// it cannot collide with emitter temporaries (`__t0`, `__l`, `ctx`,
+/// ...), Rust keywords, or another source name.
+fn rust_user_ident(name: &str) -> String {
+    format!("__bop_user_value_{}", user_name_component(name))
 }
 
 /// Render a Bop user-fn name as a Rust function name under a
@@ -3902,19 +3903,35 @@ fn rust_ident(name: &str) -> String {
 /// the module slug so `foo.bar::square` and root::square can
 /// coexist in the same emitted Rust file.
 fn rust_fn_name_with(module_prefix: &str, name: &str) -> String {
-    format!("bop_fn_{}{}", module_prefix, name)
+    format!(
+        "__bop_user_fn_{}n{}",
+        module_prefix,
+        user_name_component(name)
+    )
 }
 
 fn wrapper_fn_name_with(module_prefix: &str, name: &str) -> String {
-    format!("__bop_fn_value_{}{}", module_prefix, name)
+    format!(
+        "__bop_user_fn_value_{}n{}",
+        module_prefix,
+        user_name_component(name)
+    )
 }
 
-/// Turn a Bop module path (`std.math.extra`) into a Rust-safe
-/// identifier slug (`std_math_extra`). Used as the prefix for
-/// everything a module emits — fns, wrappers, the load fn, the
-/// exports struct.
+/// Prefix user functions emitted from an imported module. The
+/// leading non-hex marker keeps root, module, and method namespaces
+/// structurally distinct.
+fn module_fn_prefix(path: &str) -> String {
+    format!("m{}_", user_name_component(path))
+}
+
+fn method_fn_prefix(module_prefix: &str, type_name: &str) -> String {
+    format!("{}t{}_", module_prefix, user_name_component(type_name))
+}
+
+/// Turn a Bop module path into a collision-free Rust-safe slug.
 fn module_slug(path: &str) -> String {
-    path.replace('.', "_")
+    user_name_component(path)
 }
 
 fn module_load_fn_name(path: &str) -> String {
@@ -3932,37 +3949,6 @@ fn is_mutating_method(method: &str) -> bool {
     matches!(
         method,
         "push" | "pop" | "insert" | "remove" | "reverse" | "sort"
-    )
-}
-
-fn is_rust_keyword(s: &str) -> bool {
-    // Raw-identifier-escapable Rust keywords. `self`, `Self`,
-    // `crate`, `super`, `extern` can't be raw-escaped, but those
-    // wouldn't survive a reasonable Bop program either.
-    matches!(
-        s,
-        "as" | "async"
-            | "await"
-            | "const"
-            | "dyn"
-            | "enum"
-            | "gen"
-            | "impl"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "pub"
-            | "ref"
-            | "static"
-            | "struct"
-            | "trait"
-            | "try"
-            | "type"
-            | "unsafe"
-            | "use"
-            | "where"
     )
 }
 
@@ -4133,7 +4119,7 @@ pub struct AotClosure {
 }
 
 /// Build a `Value::Fn` around an `AotClosure`. Used by the emitted
-/// `__bop_fn_value_<name>` wrappers and by `MakeLambda` emission.
+/// `__bop_user_fn_value_*` wrappers and by `MakeLambda` emission.
 fn __bop_wrap_callable(
     params: ::std::vec::Vec<String>,
     captures: ::std::vec::Vec<(String, ::bop::value::Value)>,
@@ -4773,7 +4759,9 @@ mod tests {
         let output = emitted("let a = [1]\na.push(2)");
 
         assert!(
-            output.contains("if let ::bop::value::Value::Array(__bop_array) = &mut a"),
+            output.contains(
+                "if let ::bop::value::Value::Array(__bop_array) = &mut __bop_user_value_61"
+            ),
             "missing direct mutable Array binding:\n{output}"
         );
         assert!(
@@ -4782,7 +4770,9 @@ mod tests {
         );
         assert!(
             output.contains("} else { let ")
-                && output.contains("= a.clone(); match __bop_try_user_method"),
+                && output.contains(
+                    "= __bop_user_value_61.clone(); match __bop_try_user_method"
+                ),
             "dynamic non-array fallback must retain user-method dispatch:\n{output}"
         );
     }

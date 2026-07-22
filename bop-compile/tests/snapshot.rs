@@ -63,7 +63,7 @@ fn let_emits_mut_binding() {
     contains_all(
         &out,
         &[
-            "let mut x: ::bop::value::Value = ::bop::value::Value::Int(10",
+            "let mut __bop_user_value_78: ::bop::value::Value = ::bop::value::Value::Int(10",
         ],
     );
 }
@@ -71,7 +71,10 @@ fn let_emits_mut_binding() {
 #[test]
 fn compound_assign_routes_through_ops() {
     let out = compile("let x = 1\nx += 5");
-    contains_all(&out, &["x = ::bop::ops::add(&x,"]);
+    contains_all(
+        &out,
+        &["__bop_user_value_78 = ::bop::ops::add(&__bop_user_value_78,"],
+    );
 }
 
 #[test]
@@ -152,9 +155,9 @@ fn fn_decl_emits_bop_prefixed_fn() {
     contains_all(
         &out,
         &[
-            "fn bop_fn_double(ctx: &mut Ctx<'_>, mut x: ::bop::value::Value)",
+            "fn __bop_user_fn_n646f75626c65(ctx: &mut Ctx<'_>, mut __bop_user_value_78: ::bop::value::Value)",
             "Result<::bop::value::Value, ::bop::error::BopError>",
-            "bop_fn_double(ctx,",
+            "__bop_user_fn_n646f75626c65(ctx,",
         ],
     );
 }
@@ -176,9 +179,9 @@ fn unknown_call_falls_back_to_host() {
             "::bop::error_messages::function_not_found(\"readline\")",
         ],
     );
-    // It should NOT try to call a nonexistent bop_fn_readline.
+    // It should NOT try to call a nonexistent user-fn symbol.
     assert!(
-        !out.contains("bop_fn_readline"),
+        !out.contains("__bop_user_fn_n726561646c696e65"),
         "unknown name should not emit a user-fn dispatch:\n{}",
         out
     );
@@ -261,7 +264,7 @@ fn lambda_captures_namespaced_constructors_for_depth_accounting() {
     )
     .expect("transpile namespaced constructors in lambda");
     assert_eq!(
-        out.matches("let __cap_0 = s.clone();").count(),
+        out.matches("let __cap_0 = __bop_user_value_73.clone();").count(),
         1,
         "the module alias should be captured exactly once:\n{out}"
     );
@@ -269,8 +272,8 @@ fn lambda_captures_namespaced_constructors_for_depth_accounting() {
         &out,
         &[
             "let __opaque_body_depth = 0u16.max(__cap_0.ownership_depth())",
-            "__bop_validate_namespace_type(&s, \"s\", \"Point\", 2)?",
-            "__bop_validate_namespace_type(&s, \"s\", \"Maybe\", 2)?",
+            "__bop_validate_namespace_type(&__bop_user_value_73, \"s\", \"Point\", 2)?",
+            "__bop_validate_namespace_type(&__bop_user_value_73, \"s\", \"Maybe\", 2)?",
         ],
     );
 }
@@ -281,7 +284,7 @@ fn nested_lambda_shadowing_does_not_capture_same_named_outer_scope_value() {
         "let x = [1]\nlet outer = fn(x) { return fn() { return x } }",
     );
     assert_eq!(
-        out.matches("let __cap_0 = x.clone();").count(),
+        out.matches("let __cap_0 = __bop_user_value_78.clone();").count(),
         1,
         "only the inner lambda should capture the outer lambda parameter:\n{out}"
     );
@@ -295,9 +298,68 @@ fn nested_lambda_shadowing_does_not_capture_same_named_outer_scope_value() {
 }
 
 #[test]
-fn rust_keyword_idents_are_raw_escaped() {
+fn rust_keyword_idents_are_mangled() {
     let out = compile("let type = 5\nprint(type)");
-    contains_all(&out, &["let mut r#type:"]);
+    contains_all(&out, &["let mut __bop_user_value_74797065:"]);
+    assert!(!out.contains("let mut r#type:"));
+}
+
+#[test]
+fn every_user_identifier_uses_one_collision_free_namespace() {
+    let out = compile(
+        r#"fn yield(crate, super, ctx, bop_self) {
+    return crate + super + ctx + bop_self
+}
+let __t0 = 1
+let __l = 2
+let ctx = 3
+let bop_self = 4
+let crate = 5
+let super = 6
+let __bop_user_value_5f5f7430 = 7
+print(yield(crate, super, ctx, bop_self), __t0, __l, __bop_user_value_5f5f7430)"#,
+    );
+
+    contains_all(
+        &out,
+        &[
+            "fn __bop_user_fn_n7969656c64(",
+            "mut __bop_user_value_6372617465:",
+            "mut __bop_user_value_7375706572:",
+            "mut __bop_user_value_637478:",
+            "mut __bop_user_value_626f705f73656c66:",
+            "let mut __bop_user_value_5f5f7430:",
+            "let mut __bop_user_value_5f5f6c:",
+            "let mut __bop_user_value_5f5f626f705f757365725f76616c75655f3566356637343330:",
+        ],
+    );
+    assert!(!out.contains("let mut __t0:"));
+    assert!(!out.contains("let mut __l:"));
+    assert!(!out.contains("mut crate: ::bop::value::Value"));
+    assert!(!out.contains("mut super: ::bop::value::Value"));
+    assert!(!out.contains("r#yield"));
+}
+
+#[test]
+fn module_paths_that_only_differ_by_dot_and_underscore_do_not_collide() {
+    let out = compile_with_modules(
+        "use a.b as dotted\nuse a_b as underscored\nprint(dotted.helper(), dotted.ctx, underscored.helper(), underscored.yield)",
+        &[
+            ("a.b", "let ctx = 10\nfn helper() { return 1 }"),
+            ("a_b", "let yield = 20\nfn helper() { return 2 }"),
+        ],
+    )
+    .expect("transpile both formerly-colliding modules");
+
+    contains_all(
+        &out,
+        &[
+            "fn __mod_612e62__load(",
+            "fn __mod_615f62__load(",
+            "fn __bop_user_fn_m612e62_n68656c706572(",
+            "fn __bop_user_fn_m615f62_n68656c706572(",
+        ],
+    );
 }
 
 #[test]
@@ -311,7 +373,7 @@ fn method_call_on_ident_emits_back_assign_for_mutating() {
             "__bop_call_method(ctx, &",
             "\"push\"",
             "if let Some(__new_obj) = __mutated",
-            "a = __new_obj",
+            "__bop_user_value_61 = __new_obj",
         ],
     );
 }
@@ -356,7 +418,7 @@ print("hi {name}!")"#);
         &[
             "::std::string::String::new()",
             "__s.push_str(\"hi \")",
-            "__s.push_str(&format!(\"{}\", name.clone()))",
+            "__s.push_str(&format!(\"{}\", __bop_user_value_6e616d65.clone()))",
             "__s.push_str(\"!\")",
             "::bop::value::Value::new_str(__s)",
         ],
@@ -369,7 +431,7 @@ fn index_assign_routes_through_ops_index_set() {
     contains_all(
         &out,
         &[
-            "::bop::ops::index_set(&mut a,",
+            "::bop::ops::index_set(&mut __bop_user_value_61,",
         ],
     );
 }
@@ -380,9 +442,9 @@ fn compound_index_assign_reads_then_writes() {
     contains_all(
         &out,
         &[
-            "::bop::ops::index_get(&a,",
+            "::bop::ops::index_get(&__bop_user_value_61,",
             "::bop::ops::add(",
-            "::bop::ops::index_set(&mut a,",
+            "::bop::ops::index_set(&mut __bop_user_value_61,",
         ],
     );
 }
@@ -431,9 +493,9 @@ fn const_index_reads_in_mutable_targets_still_emit_aot() {
     contains_all(
         &out,
         &[
-            "INDEX.clone()",
-            "::bop::ops::index_get(&values,",
-            "::bop::ops::index_set(&mut values,",
+            "__bop_user_value_494e444558.clone()",
+            "::bop::ops::index_get(&__bop_user_value_76616c756573,",
+            "::bop::ops::index_set(&mut __bop_user_value_76616c756573,",
         ],
     );
 }
@@ -541,7 +603,7 @@ fn sandbox_emits_tick_at_fn_entry() {
     let out = norm(&compile_sandbox("fn foo() { return 1 }\nprint(foo())"));
     assert!(
         out.contains(
-            "fn bop_fn_foo(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_tick(ctx,"
+            "fn __bop_user_fn_n666f6f(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_tick(ctx,"
         ),
         "expected tick at function entry:\n{}",
         out
