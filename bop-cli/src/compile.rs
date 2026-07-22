@@ -154,7 +154,12 @@ fn build_native(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("script");
-    let scratch = scratch_dir(stem);
+    // Cargo package/bin names are identifiers, not display
+    // names. Keep them independent from the user's filename so
+    // spaces, quotes, Unicode, and other path-safe characters
+    // cannot produce an invalid or malformed manifest.
+    let target_name = cargo_target_name(stem);
+    let scratch = scratch_dir(&target_name);
     if let Err(e) = std::fs::create_dir_all(scratch.join("src")) {
         eprintln!(
             "error creating scratch dir `{}`: {e}",
@@ -163,7 +168,7 @@ fn build_native(
         return Err(ExitCode::from(1));
     }
 
-    let manifest = manifest_for_output(stem);
+    let manifest = manifest_for_output(&target_name);
     if let Err(e) = std::fs::write(scratch.join("Cargo.toml"), manifest) {
         eprintln!("error writing scratch Cargo.toml: {e}");
         return Err(ExitCode::from(1));
@@ -197,7 +202,7 @@ fn build_native(
     }
 
     // Copy the produced binary to the user-facing output.
-    let mut built = scratch.join("target/release").join(stem);
+    let mut built = scratch.join("target/release").join(&target_name);
     if cfg!(windows) {
         built.set_extension("exe");
     }
@@ -260,6 +265,38 @@ fn scratch_dir(stem: &str) -> PathBuf {
     p
 }
 
+/// Derive a guaranteed-safe internal Cargo package and binary
+/// name from the user-visible filename. The `bop_` prefix keeps
+/// leading digits and Rust keywords valid; limiting the body to
+/// ASCII identifier characters also prevents TOML quoting and
+/// platform-specific filename surprises.
+fn cargo_target_name(stem: &str) -> String {
+    let mut body = String::with_capacity(stem.len().min(48));
+    let mut previous_was_separator = false;
+
+    for ch in stem.chars() {
+        if body.len() == 48 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            body.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !body.is_empty() && !previous_was_separator {
+            body.push('_');
+            previous_was_separator = true;
+        }
+    }
+
+    while body.ends_with('_') {
+        body.pop();
+    }
+    if body.is_empty() {
+        body.push_str("script");
+    }
+
+    format!("bop_{body}")
+}
+
 /// Manifest for the scratch cargo crate we feed the transpiled
 /// Rust into. Declares `bop-lang` + `bop-sys` at the current
 /// `bop` CLI's version — the CLI and libraries ship together,
@@ -315,4 +352,40 @@ opt-level = 3
 lto = "thin"
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_target_name_sanitizes_user_filename_stems() {
+        assert_eq!(cargo_target_name("my prog"), "bop_my_prog");
+        assert_eq!(cargo_target_name("quoted\" name"), "bop_quoted_name");
+        assert_eq!(cargo_target_name("123 🚀"), "bop_123");
+        assert_eq!(cargo_target_name("\" 🚀 \""), "bop_script");
+        assert_eq!(cargo_target_name("type"), "bop_type");
+    }
+
+    #[test]
+    fn manifest_uses_only_the_safe_internal_target_name() {
+        let unsafe_stem = "my \"program\"";
+        let target_name = cargo_target_name(unsafe_stem);
+        let manifest = manifest_for_output(&target_name);
+
+        assert!(manifest.contains("name = \"bop_my_program\""));
+        assert!(!manifest.contains(unsafe_stem));
+    }
+
+    #[test]
+    fn default_output_path_preserves_the_user_visible_stem() {
+        assert_eq!(
+            default_binary_path(Path::new("my program.bop")),
+            PathBuf::from(if cfg!(windows) {
+                "my program.exe"
+            } else {
+                "my program"
+            })
+        );
+    }
 }
