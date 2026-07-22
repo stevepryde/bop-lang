@@ -42,6 +42,11 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   mutation. Index and field receivers that cannot yet be written back must
   raise an actionable runtime error; genuine by-value temporaries may still be
   mutated and discarded intentionally.
+- **RUN-011 — Container value semantics.** Assignment, argument passing,
+  capture, and return preserve independent value semantics for arrays, dicts,
+  structs, and enum payloads. Implementations may share backing storage until
+  mutation, but changing one value must not change another. Iterators are the
+  deliberate exception: cloned iterator handles share their cursor.
 
 ## Acceptance criteria
 
@@ -57,6 +62,10 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   `no_std`, and WASM configurations documented by the project.
 - **AC-RUN-005:** Parser, runtime, and CLI errors identify the real failure and
   do not replace I/O, binding, or limit failures with misleading results.
+- **AC-RUN-006:** Cloning a container handle does not charge a second backing
+  allocation; unique mutation does not copy its backing storage; the first
+  mutation of shared storage detaches exactly once; and tracked storage is
+  released when its last owner drops.
 
 ## Design notes
 

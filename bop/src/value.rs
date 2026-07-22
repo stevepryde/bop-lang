@@ -8,7 +8,6 @@
 
 #[cfg(feature = "no_std")]
 use alloc::{
-    boxed::Box,
     format,
     rc::Rc,
     string::{String, ToString},
@@ -68,8 +67,15 @@ fn trusted<T>(result: Result<T, BopError>) -> T {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BopStr(String);
 
+#[derive(Debug, Clone)]
+pub struct BopArray(Rc<ArrayData>);
+
 #[derive(Debug)]
-pub struct BopArray(Vec<Value>, u16, Box<ArrayDepthCounts>);
+struct ArrayData {
+    items: Vec<Value>,
+    depth: u16,
+    depth_counts: ArrayDepthCounts,
+}
 
 /// Exact child-depth frequencies for an array. Flat values dominate normal
 /// programs, so depth zero stays inline; only nested values allocate entries.
@@ -87,7 +93,7 @@ struct ArrayDepthCounts {
 }
 
 impl ArrayDepthCounts {
-    fn from_values(values: &[Value], line: u32) -> Result<Box<Self>, BopError> {
+    fn from_values(values: &[Value], line: u32) -> Result<Self, BopError> {
         let mut counts = Self {
             flat: 0,
             nested: Vec::new(),
@@ -116,7 +122,7 @@ impl ArrayDepthCounts {
                 counts.nested.push((depth, 1));
             }
         }
-        Ok(Box::new(counts))
+        Ok(counts)
     }
 
     fn tracked_bytes(&self) -> usize {
@@ -199,8 +205,14 @@ impl ArrayDepthCounts {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BopDict(Rc<DictData>);
+
 #[derive(Debug)]
-pub struct BopDict(Vec<(String, Value)>, u16);
+struct DictData {
+    entries: Vec<(String, Value)>,
+    depth: u16,
+}
 
 /// A user-defined struct value. Carries the module it was
 /// declared in plus the bare type name, so two modules that
@@ -211,8 +223,11 @@ pub struct BopDict(Vec<(String, Value)>, u16);
 /// `RuntimeError`; for user modules it's the dot-joined `use`
 /// path (`"std.math"`, `"game.entity"`, …). Fields are stored
 /// in declaration order so iteration and `Display` stay stable.
+#[derive(Debug, Clone)]
+pub struct BopStruct(Rc<StructData>);
+
 #[derive(Debug)]
-pub struct BopStruct {
+struct StructData {
     module_path: String,
     type_name: String,
     fields: Vec<(String, Value)>,
@@ -225,8 +240,11 @@ pub struct BopStruct {
 /// name and payload. Two enums declared in different modules with
 /// the same type name and even the same variants still compare
 /// as distinct types.
+#[derive(Debug, Clone)]
+pub struct BopEnumVariant(Rc<EnumVariantData>);
+
 #[derive(Debug)]
-pub struct BopEnumVariant {
+struct EnumVariantData {
     module_path: String,
     type_name: String,
     variant: String,
@@ -249,11 +267,127 @@ pub const ROOT_MODULE_PATH: &str = "<root>";
 /// Runtime payload attached to a `BopEnumVariant`. Mirrors the
 /// three variant shapes the parser recognises
 /// (`VariantKind::{Unit, Tuple, Struct}`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EnumPayload {
     Unit,
     Tuple(Vec<Value>),
     Struct(Vec<(String, Value)>),
+}
+
+impl ArrayData {
+    fn tracked_bytes(&self) -> usize {
+        self.items.capacity() * core::mem::size_of::<Value>()
+            + self.depth_counts.tracked_bytes()
+    }
+}
+
+impl Clone for ArrayData {
+    fn clone(&self) -> Self {
+        let cloned = Self {
+            items: self.items.clone(),
+            depth: self.depth,
+            depth_counts: self.depth_counts.clone(),
+        };
+        bop_alloc(cloned.tracked_bytes());
+        cloned
+    }
+}
+
+impl Drop for ArrayData {
+    fn drop(&mut self) {
+        bop_dealloc(self.tracked_bytes());
+    }
+}
+
+impl DictData {
+    fn tracked_bytes(&self) -> usize {
+        let key_bytes: usize = self.entries.iter().map(|(key, _)| key.capacity()).sum();
+        self.entries.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes
+    }
+}
+
+impl Clone for DictData {
+    fn clone(&self) -> Self {
+        let cloned = Self {
+            entries: self.entries.clone(),
+            depth: self.depth,
+        };
+        bop_alloc(cloned.tracked_bytes());
+        cloned
+    }
+}
+
+impl Drop for DictData {
+    fn drop(&mut self) {
+        bop_dealloc(self.tracked_bytes());
+    }
+}
+
+impl StructData {
+    fn tracked_bytes(&self) -> usize {
+        let key_bytes: usize = self.fields.iter().map(|(key, _)| key.capacity()).sum();
+        self.module_path.capacity()
+            + self.type_name.capacity()
+            + self.fields.capacity() * core::mem::size_of::<(String, Value)>()
+            + key_bytes
+    }
+}
+
+impl Clone for StructData {
+    fn clone(&self) -> Self {
+        let cloned = Self {
+            module_path: self.module_path.clone(),
+            type_name: self.type_name.clone(),
+            fields: self.fields.clone(),
+            depth: self.depth,
+        };
+        bop_alloc(cloned.tracked_bytes());
+        cloned
+    }
+}
+
+impl Drop for StructData {
+    fn drop(&mut self) {
+        bop_dealloc(self.tracked_bytes());
+    }
+}
+
+impl EnumVariantData {
+    fn tracked_bytes(&self) -> usize {
+        let base = self.module_path.capacity() + self.type_name.capacity() + self.variant.capacity();
+        match &self.payload {
+            EnumPayload::Unit => base,
+            EnumPayload::Tuple(items) => {
+                base + items.capacity() * core::mem::size_of::<Value>()
+            }
+            EnumPayload::Struct(fields) => {
+                let key_bytes: usize = fields.iter().map(|(key, _)| key.capacity()).sum();
+                base
+                    + fields.capacity() * core::mem::size_of::<(String, Value)>()
+                    + key_bytes
+            }
+        }
+    }
+}
+
+impl Clone for EnumVariantData {
+    fn clone(&self) -> Self {
+        let cloned = Self {
+            module_path: self.module_path.clone(),
+            type_name: self.type_name.clone(),
+            variant: self.variant.clone(),
+            payload: self.payload.clone(),
+            depth: self.depth,
+        };
+        bop_alloc(cloned.tracked_bytes());
+        cloned
+    }
+}
+
+impl Drop for EnumVariantData {
+    fn drop(&mut self) {
+        bop_dealloc(self.tracked_bytes());
+    }
 }
 
 /// A Bop function value — the runtime representation of a closure
@@ -385,14 +519,11 @@ pub enum Value {
     Array(BopArray),
     Dict(BopDict),
     Fn(Rc<BopFn>),
-    // `Struct` and `EnumVariant` live behind a `Box` so the
-    // `Value` enum stays compact (roughly the size of a `Vec`
-    // header) rather than ballooning to the size of the widest
-    // user-type variant. Keeps per-call stack frames small
-    // enough for deep recursion to halt on the call-depth
-    // counter before overflowing the native stack.
-    Struct(Box<BopStruct>),
-    EnumVariant(Box<BopEnumVariant>),
+    // Composite user values are small CoW handles. Their backing data stays
+    // behind `Rc`, keeping `Value` compact while assignment, argument passing,
+    // capture, and return only bump a reference count.
+    Struct(BopStruct),
+    EnumVariant(BopEnumVariant),
     /// Namespace value produced by an aliased `use` statement
     /// (`use std.math as m` binds `m` as a `Module`). Field
     /// access dispatches to the module's exported `let` / `fn`
@@ -543,11 +674,11 @@ impl Value {
     /// within a known-safe native stack bound.
     pub fn ownership_depth(&self) -> u16 {
         match self {
-            Value::Array(value) => value.1,
-            Value::Dict(value) => value.1,
+            Value::Array(value) => value.0.depth,
+            Value::Dict(value) => value.0.depth,
             Value::Fn(value) => value.depth,
-            Value::Struct(value) => value.depth,
-            Value::EnumVariant(value) => value.depth,
+            Value::Struct(value) => value.0.depth,
+            Value::EnumVariant(value) => value.0.depth,
             Value::Module(value) => value.depth,
             // A host may ask for the depth while it holds a mutable iterator
             // borrow. Treat that conservatively as already-at-the-limit
@@ -575,10 +706,13 @@ impl Value {
     pub fn try_new_array(items: Vec<Value>, line: u32) -> Result<Self, BopError> {
         let depth = checked_owner_depth(&items, 1, line)?;
         let depth_counts = ArrayDepthCounts::from_values(&items, line)?;
-        bop_alloc(
-            items.capacity() * core::mem::size_of::<Value>() + depth_counts.tracked_bytes(),
-        );
-        Ok(Value::Array(BopArray(items, depth, depth_counts)))
+        let data = ArrayData {
+            items,
+            depth,
+            depth_counts,
+        };
+        bop_alloc(data.tracked_bytes());
+        Ok(Value::Array(BopArray(Rc::new(data))))
     }
 
     pub fn new_dict(entries: Vec<(String, Value)>) -> Self {
@@ -587,9 +721,9 @@ impl Value {
 
     pub fn try_new_dict(entries: Vec<(String, Value)>, line: u32) -> Result<Self, BopError> {
         let depth = checked_owner_depth(entries.iter().map(|(_, value)| value), 1, line)?;
-        let key_bytes: usize = entries.iter().map(|(k, _)| k.capacity()).sum();
-        bop_alloc(entries.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
-        Ok(Value::Dict(BopDict(entries, depth)))
+        let data = DictData { entries, depth };
+        bop_alloc(data.tracked_bytes());
+        Ok(Value::Dict(BopDict(Rc::new(data))))
     }
 
     /// Build a user-defined struct value. `module_path` is the
@@ -615,19 +749,14 @@ impl Value {
         line: u32,
     ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(fields.iter().map(|(_, value)| value), 1, line)?;
-        let key_bytes: usize = fields.iter().map(|(k, _)| k.capacity()).sum();
-        bop_alloc(
-            module_path.capacity()
-                + type_name.capacity()
-                + fields.capacity() * core::mem::size_of::<(String, Value)>()
-                + key_bytes,
-        );
-        Ok(Value::Struct(Box::new(BopStruct {
+        let data = StructData {
             module_path,
             type_name,
             fields,
             depth,
-        })))
+        };
+        bop_alloc(data.tracked_bytes());
+        Ok(Value::Struct(BopStruct(Rc::new(data))))
     }
 
     /// Build a built-in iterator that yields each item of
@@ -669,14 +798,15 @@ impl Value {
     }
 
     pub fn new_enum_unit(module_path: String, type_name: String, variant: String) -> Self {
-        bop_alloc(module_path.capacity() + type_name.capacity() + variant.capacity());
-        Value::EnumVariant(Box::new(BopEnumVariant {
+        let data = EnumVariantData {
             module_path,
             type_name,
             variant,
             payload: EnumPayload::Unit,
             depth: 1,
-        }))
+        };
+        bop_alloc(data.tracked_bytes());
+        Value::EnumVariant(BopEnumVariant(Rc::new(data)))
     }
 
     pub fn new_enum_tuple(
@@ -702,19 +832,15 @@ impl Value {
         line: u32,
     ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(&items, 1, line)?;
-        bop_alloc(
-            module_path.capacity()
-                + type_name.capacity()
-                + variant.capacity()
-                + items.capacity() * core::mem::size_of::<Value>(),
-        );
-        Ok(Value::EnumVariant(Box::new(BopEnumVariant {
+        let data = EnumVariantData {
             module_path,
             type_name,
             variant,
             payload: EnumPayload::Tuple(items),
             depth,
-        })))
+        };
+        bop_alloc(data.tracked_bytes());
+        Ok(Value::EnumVariant(BopEnumVariant(Rc::new(data))))
     }
 
     pub fn new_enum_struct(
@@ -740,21 +866,15 @@ impl Value {
         line: u32,
     ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(fields.iter().map(|(_, value)| value), 1, line)?;
-        let key_bytes: usize = fields.iter().map(|(k, _)| k.capacity()).sum();
-        bop_alloc(
-            module_path.capacity()
-                + type_name.capacity()
-                + variant.capacity()
-                + fields.capacity() * core::mem::size_of::<(String, Value)>()
-                + key_bytes,
-        );
-        Ok(Value::EnumVariant(Box::new(BopEnumVariant {
+        let data = EnumVariantData {
             module_path,
             type_name,
             variant,
             payload: EnumPayload::Struct(fields),
             depth,
-        })))
+        };
+        bop_alloc(data.tracked_bytes());
+        Ok(Value::EnumVariant(BopEnumVariant(Rc::new(data))))
     }
 
     /// Build a tree-walker-ready closure value. The AST body moves
@@ -823,10 +943,9 @@ impl Value {
 
 // ─── Clone (tracks allocations) ────────────────────────────────────────────
 //
-// For Array and Dict, the inner .clone() recursively clones each element,
-// and each element's Clone impl calls bop_alloc for itself. We then ALSO
-// bop_alloc for the Vec buffer. This is correct — the buffer and the elements
-// are separate allocations that both need tracking.
+// Composite containers are CoW handles. Cloning them only bumps an `Rc`;
+// backing storage is cloned and charged by `Rc::make_mut` on the first shared
+// mutation. Strings retain their existing owned-copy behaviour.
 
 impl Clone for Value {
     fn clone(&self) -> Self {
@@ -840,39 +959,9 @@ impl Clone for Value {
                 bop_alloc(cloned.capacity());
                 Value::Str(BopStr(cloned))
             }
-            Value::Array(arr) => {
-                let cloned = arr.0.clone(); // each element's Clone tracks itself
-                let depth_counts = Box::new((*arr.2).clone());
-                bop_alloc(
-                    cloned.capacity() * core::mem::size_of::<Value>()
-                        + depth_counts.tracked_bytes(),
-                );
-                Value::Array(BopArray(cloned, arr.1, depth_counts))
-            }
-            Value::Dict(d) => {
-                let cloned = d.0.clone(); // each Value's Clone tracks itself
-                let key_bytes: usize = cloned.iter().map(|(k, _)| k.capacity()).sum();
-                bop_alloc(cloned.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
-                Value::Dict(BopDict(cloned, d.1))
-            }
-            Value::Struct(s) => {
-                let cloned_mp = s.module_path.clone();
-                let cloned_tn = s.type_name.clone();
-                let cloned_fields = s.fields.clone();
-                let key_bytes: usize = cloned_fields.iter().map(|(k, _)| k.capacity()).sum();
-                bop_alloc(
-                    cloned_mp.capacity()
-                        + cloned_tn.capacity()
-                        + cloned_fields.capacity() * core::mem::size_of::<(String, Value)>()
-                        + key_bytes,
-                );
-                Value::Struct(Box::new(BopStruct {
-                    module_path: cloned_mp,
-                    type_name: cloned_tn,
-                    fields: cloned_fields,
-                    depth: s.depth,
-                }))
-            }
+            Value::Array(arr) => Value::Array(arr.clone()),
+            Value::Dict(dict) => Value::Dict(dict.clone()),
+            Value::Struct(value) => Value::Struct(value.clone()),
             // Closures are reference-counted: cloning a Value::Fn
             // is O(1) and doesn't duplicate the body or captures.
             // Tracking the captures' memory happens once, at the
@@ -890,39 +979,7 @@ impl Clone for Value {
             // by the constructor and is dealloc'd by BopIter's
             // Drop when the last clone goes away.
             Value::Iter(it) => Value::Iter(Rc::clone(it)),
-            Value::EnumVariant(e) => {
-                let mp = e.module_path.clone();
-                let tn = e.type_name.clone();
-                let vn = e.variant.clone();
-                let base = mp.capacity() + tn.capacity() + vn.capacity();
-                let payload = match &e.payload {
-                    EnumPayload::Unit => {
-                        bop_alloc(base);
-                        EnumPayload::Unit
-                    }
-                    EnumPayload::Tuple(items) => {
-                        let cloned = items.clone();
-                        bop_alloc(base + cloned.capacity() * core::mem::size_of::<Value>());
-                        EnumPayload::Tuple(cloned)
-                    }
-                    EnumPayload::Struct(fields) => {
-                        let cloned = fields.clone();
-                        let key_bytes: usize = cloned.iter().map(|(k, _)| k.capacity()).sum();
-                        bop_alloc(
-                            base + cloned.capacity() * core::mem::size_of::<(String, Value)>()
-                                + key_bytes,
-                        );
-                        EnumPayload::Struct(cloned)
-                    }
-                };
-                Value::EnumVariant(Box::new(BopEnumVariant {
-                    module_path: mp,
-                    type_name: tn,
-                    variant: vn,
-                    payload,
-                    depth: e.depth,
-                }))
-            }
+            Value::EnumVariant(value) => Value::EnumVariant(value.clone()),
         }
     }
 }
@@ -933,44 +990,9 @@ impl Drop for Value {
     fn drop(&mut self) {
         match self {
             Value::Str(s) => bop_dealloc(s.0.capacity()),
-            Value::Array(arr) => {
-                bop_dealloc(
-                    arr.0.capacity() * core::mem::size_of::<Value>()
-                        + arr.2.tracked_bytes(),
-                );
-            }
-            Value::Dict(d) => {
-                let key_bytes: usize = d.0.iter().map(|(k, _)| k.capacity()).sum();
-                bop_dealloc(d.0.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes);
-            }
-            Value::Struct(s) => {
-                let key_bytes: usize = s.fields.iter().map(|(k, _)| k.capacity()).sum();
-                bop_dealloc(
-                    s.module_path.capacity()
-                        + s.type_name.capacity()
-                        + s.fields.capacity() * core::mem::size_of::<(String, Value)>()
-                        + key_bytes,
-                );
-            }
-            Value::EnumVariant(e) => {
-                let base = e.module_path.capacity() + e.type_name.capacity() + e.variant.capacity();
-                match &e.payload {
-                    EnumPayload::Unit => bop_dealloc(base),
-                    EnumPayload::Tuple(items) => {
-                        bop_dealloc(base + items.capacity() * core::mem::size_of::<Value>())
-                    }
-                    EnumPayload::Struct(fields) => {
-                        let key_bytes: usize = fields.iter().map(|(k, _)| k.capacity()).sum();
-                        bop_dealloc(
-                            base + fields.capacity() * core::mem::size_of::<(String, Value)>()
-                                + key_bytes,
-                        );
-                    }
-                }
-            }
-            // Value::Fn drops by releasing its Rc. The inner
-            // captures' Drop impls fire only when the refcount
-            // reaches zero; no per-Value accounting here.
+            // Composite values, fns, modules, and iterators release an `Rc`.
+            // Their owned backing storage accounts for itself exactly once
+            // when the final handle drops.
             _ => {}
         }
     }
@@ -994,7 +1016,7 @@ impl core::fmt::Display for Value {
             Value::None => write!(f, "none"),
             Value::Array(items) => {
                 write!(f, "[")?;
-                for (i, item) in items.0.iter().enumerate() {
+                for (i, item) in items.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -1004,7 +1026,7 @@ impl core::fmt::Display for Value {
             }
             Value::Dict(entries) => {
                 write!(f, "{{")?;
-                for (i, (k, v)) in entries.0.iter().enumerate() {
+                for (i, (k, v)) in entries.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -1039,22 +1061,22 @@ impl core::fmt::Display for Value {
                 }
             }
             Value::Struct(s) => {
-                write!(f, "{} {{", s.type_name)?;
-                for (i, (k, v)) in s.fields.iter().enumerate() {
+                write!(f, "{} {{", s.type_name())?;
+                for (i, (k, v)) in s.fields().iter().enumerate() {
                     if i > 0 {
                         write!(f, ",")?;
                     }
                     write!(f, " {}: {}", k, v.inspect())?;
                 }
-                if !s.fields.is_empty() {
+                if !s.fields().is_empty() {
                     write!(f, " ")?;
                 }
                 write!(f, "}}")
             }
-            Value::EnumVariant(e) => match &e.payload {
-                EnumPayload::Unit => write!(f, "{}::{}", e.type_name, e.variant),
+            Value::EnumVariant(e) => match e.payload() {
+                EnumPayload::Unit => write!(f, "{}::{}", e.type_name(), e.variant()),
                 EnumPayload::Tuple(items) => {
-                    write!(f, "{}::{}(", e.type_name, e.variant)?;
+                    write!(f, "{}::{}(", e.type_name(), e.variant())?;
                     for (i, v) in items.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
@@ -1064,7 +1086,7 @@ impl core::fmt::Display for Value {
                     write!(f, ")")
                 }
                 EnumPayload::Struct(fields) => {
-                    write!(f, "{}::{} {{", e.type_name, e.variant)?;
+                    write!(f, "{}::{} {{", e.type_name(), e.variant())?;
                     for (i, (k, v)) in fields.iter().enumerate() {
                         if i > 0 {
                             write!(f, ",")?;
@@ -1124,8 +1146,8 @@ impl Value {
     /// variants it matches [`Self::type_name`].
     pub fn display_type_name(&self) -> String {
         match self {
-            Value::Struct(s) => s.type_name.clone(),
-            Value::EnumVariant(e) => e.type_name.clone(),
+            Value::Struct(s) => s.type_name().to_string(),
+            Value::EnumVariant(e) => e.type_name().to_string(),
             other => other.type_name().to_string(),
         }
     }
@@ -1137,8 +1159,8 @@ impl Value {
             Value::Int(n) => *n != 0,
             Value::Number(n) => *n != 0.0,
             Value::Str(s) => !s.0.is_empty(),
-            Value::Array(a) => !a.0.is_empty(),
-            Value::Dict(d) => !d.0.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            Value::Dict(d) => !d.is_empty(),
             // A callable is always a "thing" — match other
             // non-empty runtime objects.
             Value::Fn(_) => true,
@@ -1179,14 +1201,14 @@ impl core::ops::Deref for BopStr {
 impl core::ops::Deref for BopArray {
     type Target = [Value];
     fn deref(&self) -> &[Value] {
-        &self.0
+        &self.0.items
     }
 }
 
 impl core::ops::Deref for BopDict {
     type Target = [(String, Value)];
     fn deref(&self) -> &[(String, Value)] {
-        &self.0
+        &self.0.entries
     }
 }
 
@@ -1196,10 +1218,11 @@ impl BopArray {
     /// Take the inner Vec, leaving an empty array. Deallocates the buffer
     /// from the memory tracker since it's leaving Value's control.
     pub fn take(&mut self) -> Vec<Value> {
-        let taken = core::mem::take(&mut self.0);
+        let data = Rc::make_mut(&mut self.0);
+        let taken = core::mem::take(&mut data.items);
         bop_dealloc(taken.capacity() * core::mem::size_of::<Value>());
-        self.1 = 1;
-        self.2.clear();
+        data.depth = 1;
+        data.depth_counts.clear();
         taken
     }
 
@@ -1212,42 +1235,47 @@ impl BopArray {
         }
     }
 
-    fn try_reserve_item(&mut self, line: u32) -> Result<(), BopError> {
-        let old_capacity = self.0.capacity();
-        self.0
+    fn try_reserve_item(data: &mut ArrayData, line: u32) -> Result<(), BopError> {
+        let old_capacity = data.items.capacity();
+        data.items
             .try_reserve(1)
             .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
-        let new_capacity = self.0.capacity();
+        let new_capacity = data.items.capacity();
         if new_capacity > old_capacity {
             bop_alloc((new_capacity - old_capacity) * core::mem::size_of::<Value>());
         }
         Ok(())
     }
 
-    fn refresh_depth(&mut self) {
-        self.1 = self.2.owner_depth();
+    fn refresh_depth(data: &mut ArrayData) {
+        data.depth = data.depth_counts.owner_depth();
     }
 
     /// Append one value without cloning the existing array. Capacity growth is
     /// charged exactly once and all fallible checks happen before insertion.
     pub fn try_push(&mut self, value: Value, line: u32) -> Result<(), BopError> {
         let child_depth = Self::check_child_depth(&value, line)?;
-        self.2.ensure_depth(child_depth, line)?;
-        self.2.try_reserve_child(line)?;
-        self.try_reserve_item(line)?;
-        self.0.push(value);
-        self.2.child_depths.push(child_depth);
-        self.2.add(child_depth);
-        self.refresh_depth();
+        let data = Rc::make_mut(&mut self.0);
+        data.depth_counts.ensure_depth(child_depth, line)?;
+        data.depth_counts.try_reserve_child(line)?;
+        Self::try_reserve_item(data, line)?;
+        data.items.push(value);
+        data.depth_counts.child_depths.push(child_depth);
+        data.depth_counts.add(child_depth);
+        Self::refresh_depth(data);
         Ok(())
     }
 
     /// Remove and return the final value, if any.
     pub fn pop(&mut self) -> Option<Value> {
-        let child_depth = self.2.child_depths.pop()?;
-        let value = self.0.pop()?;
-        self.2.remove(child_depth);
-        self.refresh_depth();
+        if self.is_empty() {
+            return None;
+        }
+        let data = Rc::make_mut(&mut self.0);
+        let child_depth = data.depth_counts.child_depths.pop()?;
+        let value = data.items.pop()?;
+        data.depth_counts.remove(child_depth);
+        Self::refresh_depth(data);
         Some(value)
     }
 
@@ -1259,34 +1287,38 @@ impl BopArray {
         line: u32,
     ) -> Result<(), BopError> {
         let child_depth = Self::check_child_depth(&value, line)?;
-        self.2.ensure_depth(child_depth, line)?;
-        self.2.try_reserve_child(line)?;
-        self.try_reserve_item(line)?;
-        self.0.insert(index, value);
-        self.2.child_depths.insert(index, child_depth);
-        self.2.add(child_depth);
-        self.refresh_depth();
+        let data = Rc::make_mut(&mut self.0);
+        data.depth_counts.ensure_depth(child_depth, line)?;
+        data.depth_counts.try_reserve_child(line)?;
+        Self::try_reserve_item(data, line)?;
+        data.items.insert(index, value);
+        data.depth_counts.child_depths.insert(index, child_depth);
+        data.depth_counts.add(child_depth);
+        Self::refresh_depth(data);
         Ok(())
     }
 
     /// Remove and return a value at an already-normalized element index.
     pub fn remove(&mut self, index: usize) -> Value {
-        let child_depth = self.2.child_depths.remove(index);
-        let value = self.0.remove(index);
-        self.2.remove(child_depth);
-        self.refresh_depth();
+        let data = Rc::make_mut(&mut self.0);
+        let child_depth = data.depth_counts.child_depths.remove(index);
+        let value = data.items.remove(index);
+        data.depth_counts.remove(child_depth);
+        Self::refresh_depth(data);
         value
     }
 
     pub fn reverse(&mut self) {
-        self.0.reverse();
-        self.2.child_depths.reverse();
+        let data = Rc::make_mut(&mut self.0);
+        data.items.reverse();
+        data.depth_counts.child_depths.reverse();
     }
 
     pub fn sort_by(&mut self, compare: impl FnMut(&Value, &Value) -> core::cmp::Ordering) {
+        let data = Rc::make_mut(&mut self.0);
         let mut compare = compare;
-        let mut order: Vec<usize> = (0..self.0.len()).collect();
-        order.sort_by(|a, b| compare(&self.0[*a], &self.0[*b]));
+        let mut order: Vec<usize> = (0..data.items.len()).collect();
+        order.sort_by(|a, b| compare(&data.items[*a], &data.items[*b]));
 
         // Convert `new position -> old position` into `old position -> new
         // position`, then apply that permutation to values and cached depths
@@ -1300,8 +1332,8 @@ impl BopArray {
         for position in 0..target.len() {
             while target[position] != position {
                 let destination = target[position];
-                self.0.swap(position, destination);
-                self.2.child_depths.swap(position, destination);
+                data.items.swap(position, destination);
+                data.depth_counts.child_depths.swap(position, destination);
                 target.swap(position, destination);
             }
         }
@@ -1317,16 +1349,17 @@ impl BopArray {
     /// left untouched if the replacement would exceed [`MAX_VALUE_DEPTH`].
     pub fn try_set(&mut self, index: usize, val: Value, line: u32) -> Result<(), BopError> {
         let new_child_depth = Self::check_child_depth(&val, line)?;
-        let old_child_depth = self.2.child_depths[index];
+        let old_child_depth = self.0.depth_counts.child_depths[index];
+        let data = Rc::make_mut(&mut self.0);
         if new_child_depth != old_child_depth {
-            self.2.ensure_depth(new_child_depth, line)?;
+            data.depth_counts.ensure_depth(new_child_depth, line)?;
         }
-        self.0[index] = val;
-        self.2.child_depths[index] = new_child_depth;
+        data.items[index] = val;
+        data.depth_counts.child_depths[index] = new_child_depth;
         if new_child_depth != old_child_depth {
-            self.2.remove(old_child_depth);
-            self.2.add(new_child_depth);
-            self.refresh_depth();
+            data.depth_counts.remove(old_child_depth);
+            data.depth_counts.add(new_child_depth);
+            Self::refresh_depth(data);
         }
         Ok(())
     }
@@ -1334,23 +1367,27 @@ impl BopArray {
 
 impl BopStruct {
     pub fn type_name(&self) -> &str {
-        &self.type_name
+        &self.0.type_name
     }
 
     /// Module this struct type was declared in. Forms one half
     /// of the type's identity — the other half is the bare
     /// [`Self::type_name`].
     pub fn module_path(&self) -> &str {
-        &self.module_path
+        &self.0.module_path
     }
 
     pub fn fields(&self) -> &[(String, Value)] {
-        &self.fields
+        &self.0.fields
     }
 
     /// Look up a field by name. `None` if no such field.
     pub fn field(&self, name: &str) -> Option<&Value> {
-        self.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+        self.0
+            .fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
     }
 
     /// Replace the value of an existing field. Returns `true` if
@@ -1363,11 +1400,12 @@ impl BopStruct {
 
     /// Line-aware, atomic variant of [`Self::set_field`].
     pub fn try_set_field(&mut self, name: &str, value: Value, line: u32) -> Result<bool, BopError> {
-        let Some(index) = self.fields.iter().position(|(key, _)| key == name) else {
+        let Some(index) = self.0.fields.iter().position(|(key, _)| key == name) else {
             return Ok(false);
         };
         let depth = checked_owner_depth(
-            self.fields
+            self.0
+                .fields
                 .iter()
                 .enumerate()
                 .filter_map(|(i, (_, value))| (i != index).then_some(value))
@@ -1375,29 +1413,30 @@ impl BopStruct {
             1,
             line,
         )?;
-        self.fields[index].1 = value;
-        self.depth = depth;
+        let data = Rc::make_mut(&mut self.0);
+        data.fields[index].1 = value;
+        data.depth = depth;
         Ok(true)
     }
 }
 
 impl BopEnumVariant {
     pub fn type_name(&self) -> &str {
-        &self.type_name
+        &self.0.type_name
     }
 
     /// Module this enum type was declared in. Paired with
     /// [`Self::type_name`] to form the type's identity.
     pub fn module_path(&self) -> &str {
-        &self.module_path
+        &self.0.module_path
     }
 
     pub fn variant(&self) -> &str {
-        &self.variant
+        &self.0.variant
     }
 
     pub fn payload(&self) -> &EnumPayload {
-        &self.payload
+        &self.0.payload
     }
 
     /// Field access for struct-variant payloads — mirrors
@@ -1405,7 +1444,7 @@ impl BopEnumVariant {
     /// variants or when the field isn't in this variant's
     /// payload.
     pub fn field(&self, name: &str) -> Option<&Value> {
-        match &self.payload {
+        match &self.0.payload {
             EnumPayload::Struct(fields) => fields.iter().find(|(k, _)| k == name).map(|(_, v)| v),
             _ => None,
         }
@@ -1422,9 +1461,14 @@ impl BopDict {
 
     /// Line-aware, atomic variant of [`Self::set_key`].
     pub fn try_set_key(&mut self, key: &str, val: Value, line: u32) -> Result<(), BopError> {
-        let existing = self.0.iter().position(|(entry_key, _)| entry_key == key);
+        let existing = self
+            .0
+            .entries
+            .iter()
+            .position(|(entry_key, _)| entry_key == key);
         let depth = checked_owner_depth(
             self.0
+                .entries
                 .iter()
                 .enumerate()
                 .filter_map(|(i, (_, value))| (Some(i) != existing).then_some(value))
@@ -1433,19 +1477,20 @@ impl BopDict {
             line,
         )?;
 
+        let data = Rc::make_mut(&mut self.0);
         if let Some(index) = existing {
-            self.0[index].1 = val;
+            data.entries[index].1 = val;
         } else {
-            let old_cap = self.0.capacity();
+            let old_cap = data.entries.capacity();
             let key = key.to_string();
             bop_alloc(key.capacity());
-            self.0.push((key, val));
-            let new_cap = self.0.capacity();
+            data.entries.push((key, val));
+            let new_cap = data.entries.capacity();
             if new_cap > old_cap {
                 bop_alloc((new_cap - old_cap) * core::mem::size_of::<(String, Value)>());
             }
         }
-        self.1 = depth;
+        data.depth = depth;
         Ok(())
     }
 }
@@ -1487,22 +1532,22 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         // name declared in different modules deliberately compare
         // as *not equal* — they're distinct types.
         (Value::Struct(a), Value::Struct(b)) => {
-            a.module_path == b.module_path
-                && a.type_name == b.type_name
-                && a.fields.len() == b.fields.len()
-                && a.fields
+            a.module_path() == b.module_path()
+                && a.type_name() == b.type_name()
+                && a.fields().len() == b.fields().len()
+                && a.fields()
                     .iter()
-                    .zip(b.fields.iter())
+                    .zip(b.fields().iter())
                     .all(|((ka, va), (kb, vb))| ka == kb && values_equal(va, vb))
         }
         // Enum variants: same full type identity (module_path +
         // type_name), same variant name, same payload shape +
         // structural equality on payload items.
         (Value::EnumVariant(a), Value::EnumVariant(b)) => {
-            a.module_path == b.module_path
-                && a.type_name == b.type_name
-                && a.variant == b.variant
-                && match (&a.payload, &b.payload) {
+            a.module_path() == b.module_path()
+                && a.type_name() == b.type_name()
+                && a.variant() == b.variant()
+                && match (a.payload(), b.payload()) {
                     (EnumPayload::Unit, EnumPayload::Unit) => true,
                     (EnumPayload::Tuple(ax), EnumPayload::Tuple(bx)) => {
                         ax.len() == bx.len()
@@ -1525,6 +1570,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 #[cfg(test)]
 mod depth_tests {
     use super::*;
+    use crate::memory::{bop_memory_init, bop_memory_used};
 
     fn nested_array(depth: u16) -> Value {
         let mut value = Value::None;
@@ -1655,7 +1701,7 @@ mod depth_tests {
         let error = array_value.try_set(0, child.clone(), 31).unwrap_err();
         assert!(error.is_fatal);
         assert!(matches!(array_value.first(), Some(Value::Int(1))));
-        assert_eq!(array_value.1, 1);
+        assert_eq!(array_value.0.depth, 1);
 
         let mut dict = Value::try_new_dict(vec![("x".into(), Value::Int(1))], 1).unwrap();
         let Value::Dict(dict_value) = &mut dict else {
@@ -1663,7 +1709,7 @@ mod depth_tests {
         };
         dict_value.try_set_key("x", child.clone(), 32).unwrap_err();
         assert!(matches!(&dict_value[0].1, Value::Int(1)));
-        assert_eq!(dict_value.1, 1);
+        assert_eq!(dict_value.0.depth, 1);
 
         let mut structure =
             Value::try_new_struct("m".into(), "S".into(), vec![("x".into(), Value::Int(1))], 1)
@@ -1673,7 +1719,7 @@ mod depth_tests {
         };
         struct_value.try_set_field("x", child, 33).unwrap_err();
         assert!(matches!(struct_value.field("x"), Some(Value::Int(1))));
-        assert_eq!(struct_value.depth, 1);
+        assert_eq!(struct_value.0.depth, 1);
     }
 
     #[test]
@@ -1685,24 +1731,24 @@ mod depth_tests {
 
         array.try_push(nested_array(4), 1).unwrap();
         array.try_push(nested_array(2), 1).unwrap();
-        assert_eq!(array.1, 5);
-        assert_eq!(array.2.flat, 1);
-        assert_eq!(array.2.nested.len(), 2);
+        assert_eq!(array.0.depth, 5);
+        assert_eq!(array.0.depth_counts.flat, 1);
+        assert_eq!(array.0.depth_counts.nested.len(), 2);
 
         array.try_set(1, Value::Int(2), 1).unwrap();
-        assert_eq!(array.1, 3);
-        assert_eq!(array.2.flat, 2);
+        assert_eq!(array.0.depth, 3);
+        assert_eq!(array.0.depth_counts.flat, 2);
 
         let removed = array.remove(2);
         assert_eq!(removed.ownership_depth(), 2);
-        assert_eq!(array.1, 1);
-        assert!(array.2.nested.is_empty());
+        assert_eq!(array.0.depth, 1);
+        assert!(array.0.depth_counts.nested.is_empty());
 
         assert!(matches!(array.pop(), Some(Value::Int(2))));
         assert!(matches!(array.pop(), Some(Value::Int(1))));
         assert!(array.is_empty());
-        assert_eq!(array.1, 1);
-        assert_eq!(array.2.flat, 0);
+        assert_eq!(array.0.depth, 1);
+        assert_eq!(array.0.depth_counts.flat, 0);
     }
 
     #[test]
@@ -1719,14 +1765,14 @@ mod depth_tests {
         assert_eq!(error.message, VALUE_DEPTH_ERROR_MESSAGE);
         assert_eq!(array.len(), 1);
         assert!(matches!(array.first(), Some(Value::Int(1))));
-        assert_eq!(array.1, 1);
+        assert_eq!(array.0.depth, 1);
 
         let error = array.try_insert(0, child, 42).unwrap_err();
         assert!(error.is_fatal);
         assert_eq!(error.line, Some(42));
         assert_eq!(array.len(), 1);
         assert!(matches!(array.first(), Some(Value::Int(1))));
-        assert_eq!(array.1, 1);
+        assert_eq!(array.0.depth, 1);
     }
 
     #[test]
@@ -1744,7 +1790,7 @@ mod depth_tests {
         let popped = array.pop().expect("iterator should pop");
         assert!(matches!(popped, Value::Iter(_)));
         assert!(array.is_empty());
-        assert_eq!(array.1, 1);
+        assert_eq!(array.0.depth, 1);
         drop(borrow);
 
         let iterator = Value::new_array_iter(vec![Value::Int(1)]);
@@ -1761,7 +1807,7 @@ mod depth_tests {
         assert!(matches!(removed, Value::Iter(_)));
         assert_eq!(array.len(), 1);
         assert!(matches!(array.first(), Some(Value::Int(0))));
-        assert_eq!(array.1, 1);
+        assert_eq!(array.0.depth, 1);
         drop(borrow);
 
         let iterator = Value::new_array_iter(vec![Value::Int(1)]);
@@ -1776,7 +1822,7 @@ mod depth_tests {
         };
         array.try_set(0, Value::Int(9), 51).unwrap();
         assert!(matches!(array.first(), Some(Value::Int(9))));
-        assert_eq!(array.1, 1);
+        assert_eq!(array.0.depth, 1);
         drop(borrow);
     }
 
@@ -1792,23 +1838,162 @@ mod depth_tests {
         };
 
         array.sort_by(|left, right| left.ownership_depth().cmp(&right.ownership_depth()));
-        assert_eq!(array.2.child_depths, [0, 1, 2]);
+        assert_eq!(array.0.depth_counts.child_depths, [0, 1, 2]);
         assert_eq!(
             array
                 .iter()
                 .map(Value::ownership_depth)
                 .collect::<Vec<_>>(),
-            array.2.child_depths
+            array.0.depth_counts.child_depths
         );
 
         array.reverse();
-        assert_eq!(array.2.child_depths, [2, 1, 0]);
+        assert_eq!(array.0.depth_counts.child_depths, [2, 1, 0]);
         assert_eq!(
             array
                 .iter()
                 .map(Value::ownership_depth)
                 .collect::<Vec<_>>(),
-            array.2.child_depths
+            array.0.depth_counts.child_depths
         );
+    }
+
+    #[test]
+    fn array_cow_charges_once_and_unique_pushes_do_not_copy() {
+        bop_memory_init(usize::MAX);
+
+        let mut items = Vec::with_capacity(8);
+        items.extend([Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let mut value = Value::try_new_array(items, 1).unwrap();
+
+        // Leave spare room in both the values buffer and its parallel depth
+        // cache, then prove a unique push neither detaches nor allocates.
+        let Value::Array(array) = &mut value else {
+            unreachable!()
+        };
+        assert!(matches!(array.pop(), Some(Value::Int(3))));
+        let unique_ptr = Rc::as_ptr(&array.0);
+        let before_unique_push = bop_memory_used();
+        array.try_push(Value::Int(3), 1).unwrap();
+        assert_eq!(Rc::as_ptr(&array.0), unique_ptr);
+        assert_eq!(bop_memory_used(), before_unique_push);
+
+        // Recreate spare cache capacity before sharing. The first push through
+        // the original handle must detach exactly once; the next push remains
+        // on that detached allocation.
+        assert!(matches!(array.pop(), Some(Value::Int(3))));
+        let before_clone = bop_memory_used();
+        let snapshot = Value::Array(array.clone());
+        assert_eq!(bop_memory_used(), before_clone, "Rc clone must be O(1)");
+        let shared_ptr = Rc::as_ptr(&array.0);
+
+        array.try_push(Value::Int(4), 1).unwrap();
+        assert_ne!(Rc::as_ptr(&array.0), shared_ptr);
+        let detached_usage = bop_memory_used();
+        assert_eq!(
+            detached_usage - before_clone,
+            array.0.tracked_bytes(),
+            "shared push must charge one detached backing store"
+        );
+        assert!(matches!(&snapshot, Value::Array(old) if old.len() == 2));
+
+        let detached_ptr = Rc::as_ptr(&array.0);
+        array.try_push(Value::Int(5), 1).unwrap();
+        assert_eq!(Rc::as_ptr(&array.0), detached_ptr);
+        assert_eq!(bop_memory_used(), detached_usage);
+
+        drop(snapshot);
+        assert_eq!(bop_memory_used(), array.0.tracked_bytes());
+        drop(value);
+        assert_eq!(bop_memory_used(), 0);
+    }
+
+    #[test]
+    fn dict_and_struct_detach_once_while_enum_clones_stay_shared() {
+        bop_memory_init(usize::MAX);
+
+        let mut dict = Value::try_new_dict(vec![("x".into(), Value::Int(1))], 1).unwrap();
+        let dict_clone = dict.clone();
+        let after_dict_clone = bop_memory_used();
+        let Value::Dict(dict_value) = &mut dict else {
+            unreachable!()
+        };
+        let old_dict_ptr = Rc::as_ptr(&dict_value.0);
+        dict_value.try_set_key("x", Value::Int(2), 1).unwrap();
+        assert_ne!(Rc::as_ptr(&dict_value.0), old_dict_ptr);
+        let after_dict_detach = bop_memory_used();
+        assert_eq!(
+            after_dict_detach - after_dict_clone,
+            dict_value.0.tracked_bytes()
+        );
+        dict_value.try_set_key("x", Value::Int(3), 1).unwrap();
+        assert_eq!(bop_memory_used(), after_dict_detach);
+        assert!(matches!(&dict_clone, Value::Dict(old) if matches!(&old[0].1, Value::Int(1))));
+
+        let mut structure = Value::try_new_struct(
+            "m".into(),
+            "S".into(),
+            vec![("x".into(), Value::Int(1))],
+            1,
+        )
+        .unwrap();
+        let before_struct_clone = bop_memory_used();
+        let struct_clone = structure.clone();
+        assert_eq!(bop_memory_used(), before_struct_clone);
+        let Value::Struct(struct_value) = &mut structure else {
+            unreachable!()
+        };
+        let old_struct_ptr = Rc::as_ptr(&struct_value.0);
+        struct_value
+            .try_set_field("x", Value::Int(2), 1)
+            .unwrap();
+        assert_ne!(Rc::as_ptr(&struct_value.0), old_struct_ptr);
+        let after_struct_detach = bop_memory_used();
+        struct_value
+            .try_set_field("x", Value::Int(3), 1)
+            .unwrap();
+        assert_eq!(bop_memory_used(), after_struct_detach);
+        assert!(matches!(struct_clone, Value::Struct(ref old) if matches!(old.field("x"), Some(Value::Int(1)))));
+
+        let variant = Value::try_new_enum_struct(
+            "m".into(),
+            "E".into(),
+            "V".into(),
+            vec![("x".into(), Value::Int(1))],
+            1,
+        )
+        .unwrap();
+        let before_enum_clone = bop_memory_used();
+        let variant_clone = variant.clone();
+        assert_eq!(bop_memory_used(), before_enum_clone);
+        assert!(matches!(
+            (&variant, &variant_clone),
+            (Value::EnumVariant(a), Value::EnumVariant(b)) if Rc::ptr_eq(&a.0, &b.0)
+        ));
+
+        drop(variant_clone);
+        drop(variant);
+        drop(struct_clone);
+        drop(structure);
+        drop(dict_clone);
+        drop(dict);
+        assert_eq!(bop_memory_used(), 0);
+    }
+
+    #[test]
+    fn shared_container_dag_releases_storage_with_its_last_owner() {
+        bop_memory_init(usize::MAX);
+
+        let child = Value::try_new_array(vec![Value::Int(1)], 1).unwrap();
+        let outer = Value::try_new_array(vec![child.clone(), child.clone()], 1).unwrap();
+        let used_once = bop_memory_used();
+        let outer_clone = outer.clone();
+        assert_eq!(bop_memory_used(), used_once);
+
+        drop(child);
+        drop(outer);
+        assert_eq!(bop_memory_used(), used_once);
+        drop(outer_clone);
+        assert_eq!(bop_memory_used(), 0);
     }
 }
