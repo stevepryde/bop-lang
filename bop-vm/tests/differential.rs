@@ -2063,6 +2063,89 @@ print(add_n(3))"#),
 }
 
 #[test]
+fn unresolved_direct_lambda_capture_reports_variable_not_found_diff() {
+    assert_eq!(
+        run_err(r#"let read = fn() { return missing }
+print(read())"#),
+        "Variable `missing` not found"
+    );
+}
+
+#[test]
+fn named_fn_lambda_does_not_capture_module_let_diff() {
+    assert_eq!(
+        run_err(r#"let g = 5
+fn read_global() {
+    let read = fn() { return g }
+    return read()
+}
+print(read_global())"#),
+        "Variable `g` not found"
+    );
+}
+
+#[test]
+fn unresolved_capture_in_arithmetic_keeps_binding_error_diff() {
+    assert_eq!(
+        run_err(r#"fn calculate() {
+    let add = fn() { return missing + 1 }
+    return add()
+}
+print(calculate())"#),
+        "Variable `missing` not found"
+    );
+}
+
+#[test]
+fn unresolved_capture_propagates_through_nested_lambdas_diff() {
+    assert_eq!(
+        run_err(r#"fn build() {
+    return fn() {
+        return fn() { return missing }
+    }
+}
+let outer = build()
+let inner = outer()
+print(inner())"#),
+        "Variable `missing` not found"
+    );
+}
+
+#[test]
+fn uncaptured_named_functions_remain_reachable_from_lambdas_diff() {
+    assert_eq!(
+        say(r#"fn helper() { return 7 }
+fn call_factory() { return fn() { return helper() } }
+fn value_factory() { return fn() { return helper } }
+let call_helper = call_factory()
+let load_helper = value_factory()
+let helper_value = load_helper()
+print(call_helper() + helper_value())"#),
+        "14"
+    );
+}
+
+#[test]
+fn legitimate_none_captures_remain_present_through_nesting_diff() {
+    assert_eq!(
+        say(r#"let module_none = none
+let read_module = fn() { return module_none }
+fn build_local() {
+    let local_none = none
+    return fn() { return local_none }
+}
+fn build_nested() {
+    let nested_none = none
+    return fn() { return fn() { return nested_none } }
+}
+let read_local = build_local()
+let read_nested = build_nested()()
+print(read_module().is_none() && read_local().is_none() && read_nested().is_none())"#),
+        "true"
+    );
+}
+
+#[test]
 fn closure_captures_array_used_only_by_in_place_method_diff() {
     assert_eq!(
         say(r#"fn make_mutator() {
