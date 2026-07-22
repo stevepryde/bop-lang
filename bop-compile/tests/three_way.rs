@@ -295,6 +295,7 @@ fn run_aot_batch(programs: &[CorpusEntry]) -> Vec<(String, Outcome)> {
         .arg("run")
         .arg("--quiet")
         .arg("--release")
+        .env("RUSTFLAGS", "-D warnings")
         .current_dir(&dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

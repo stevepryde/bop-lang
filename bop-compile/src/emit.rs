@@ -1174,7 +1174,7 @@ impl Emitter {
     }
 
     /// Emit a `use` statement in one of four forms, loading the
-    /// module once (via its `__mod_*__load` fn — which handles
+    /// module once (via its `__mod_*_load` fn — which handles
     /// caching + cycle detection) and then either:
     ///
     /// - **Glob** (`use path`) — injects every public export as a
@@ -2432,7 +2432,7 @@ impl Emitter {
     ///         let <b1>: Value = __bindings.iter().rev().find(...)...;
     ///         // ...
     ///         if (<guard>).is_truthy() {
-    ///           break 'match_arms_N <body>;
+    ///           break 'match_arms_N (<body>);
     ///         }
     ///       }
     ///     }
@@ -2526,14 +2526,14 @@ impl Emitter {
                 ));
                 let body_src = self.expr_src(&arm.body)?;
                 src.push_str(&format!(
-                    "                    break '{} {};\n",
+                    "                    break '{} ({});\n",
                     label, body_src
                 ));
                 src.push_str("                }\n");
             } else {
                 let body_src = self.expr_src(&arm.body)?;
                 src.push_str(&format!(
-                    "                break '{} {};\n",
+                    "                break '{} ({});\n",
                     label, body_src
                 ));
             }
@@ -3978,11 +3978,11 @@ fn module_slug(path: &str) -> String {
 }
 
 fn module_load_fn_name(path: &str) -> String {
-    format!("__mod_{}__load", module_slug(path))
+    format!("__mod_{}_load", module_slug(path))
 }
 
 fn module_exports_type_name(path: &str) -> String {
-    format!("__mod_{}__Exports", module_slug(path))
+    format!("BopModule{}Exports", module_slug(path))
 }
 
 /// Kept in sync with `bop::methods::is_mutating_method` —

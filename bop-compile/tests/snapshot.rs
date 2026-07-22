@@ -86,6 +86,30 @@ fn print_42_emits_on_print_call() {
 }
 
 #[test]
+fn match_block_arm_values_are_parenthesized_for_rustc() {
+    let out = compile(
+        r#"let flag = true
+let value = 40
+let unguarded = match flag { true => value + 1, _ => 0 }
+let guarded = match flag { true if value > 0 => value + 2, _ => 0 }
+print(unguarded, guarded)"#,
+    );
+
+    let block_arm_breaks = out
+        .lines()
+        .filter(|line| line.contains("break 'match_arms_") && line.contains(" ({ let "))
+        .count();
+    assert_eq!(
+        block_arm_breaks, 2,
+        "guarded and unguarded block-expression arms must parenthesize the break value:\n{out}"
+    );
+    assert!(
+        !out.lines().any(|line| line.contains("break 'match_arms_") && line.contains(" { let ")),
+        "a bare block after a labelled break triggers rustc's break_with_label_and_loop lint:\n{out}"
+    );
+}
+
+#[test]
 fn let_emits_mut_binding() {
     let out = compile("let x = 10");
     contains_all(
@@ -382,12 +406,16 @@ fn module_paths_that_only_differ_by_dot_and_underscore_do_not_collide() {
     contains_all(
         &out,
         &[
-            "fn __mod_612e62__load(",
-            "fn __mod_615f62__load(",
+            "fn __mod_612e62_load(",
+            "fn __mod_615f62_load(",
+            "struct BopModule612e62Exports {",
+            "struct BopModule615f62Exports {",
             "fn __bop_user_fn_m612e62_n68656c706572(",
             "fn __bop_user_fn_m615f62_n68656c706572(",
         ],
     );
+    assert!(!out.contains("__load"));
+    assert!(!out.contains("__Exports"));
 }
 
 #[test]
@@ -739,7 +767,7 @@ fn module_export_fields(generated: &str, module: &str) -> Vec<String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let marker = format!("struct __mod_{slug}__Exports {{");
+    let marker = format!("struct BopModule{slug}Exports {{");
     let body = generated
         .split_once(&marker)
         .unwrap_or_else(|| panic!("missing exports struct for `{module}`:\n{generated}"))
@@ -784,7 +812,7 @@ fn diamond_imports_emit_shared_dependency_bindings_in_each_module_scope() {
     .expect("transpile diamond import");
 
     assert_eq!(
-        out.matches("= __mod_736861726564__load(ctx)?;").count(),
+        out.matches("= __mod_736861726564_load(ctx)?;").count(),
         2,
         "each dependent module needs its own shared-import binding declarations:\n{out}"
     );
@@ -799,7 +827,7 @@ fn import_idempotency_is_local_to_the_generated_binding_scope() {
     .expect("transpile repeated plain import");
     assert_eq!(
         repeated
-            .matches("= __mod_736861726564__load(ctx)?;")
+            .matches("= __mod_736861726564_load(ctx)?;")
             .count(),
         1,
         "a repeated plain glob in one scope should remain a no-op:\n{repeated}"
@@ -814,7 +842,7 @@ fn two() { use shared; return helper(2) }"#,
     .expect("transpile function-local imports");
     assert_eq!(
         distinct_functions
-            .matches("= __mod_736861726564__load(ctx)?;")
+            .matches("= __mod_736861726564_load(ctx)?;")
             .count(),
         3,
         "the root alias and both function scopes must each emit their own load/bind site:\n{distinct_functions}"
@@ -829,7 +857,7 @@ let two = fn() { use shared; return helper(2) }"#,
     .expect("transpile lambda-local imports");
     assert_eq!(
         distinct_lambdas
-            .matches("= __mod_736861726564__load(ctx)?;")
+            .matches("= __mod_736861726564_load(ctx)?;")
             .count(),
         3,
         "the root alias and both lambda scopes must each emit their own load/bind site:\n{distinct_lambdas}"
@@ -842,7 +870,7 @@ let two = fn() { use shared; return helper(2) }"#,
     .expect("transpile repeated aliases");
     assert_eq!(
         aliases
-            .matches("= __mod_736861726564__load(ctx)?;")
+            .matches("= __mod_736861726564_load(ctx)?;")
             .count(),
         2,
         "aliases are shaped bindings and must never enter the plain-glob idempotency cache:\n{aliases}"

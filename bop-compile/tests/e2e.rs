@@ -884,6 +884,59 @@ fn assert_aot_matches_with_modules(
     );
 }
 
+fn assert_aot_compiles_without_warnings_with_modules(
+    test_name: &str,
+    code: &str,
+    modules: &[(&str, &str)],
+) {
+    let resolver = modules_from_map(modules.iter().map(|(k, v)| (*k, *v)));
+    let rust_src = transpile(
+        code,
+        &Options {
+            module_resolver: Some(resolver),
+            ..Options::default()
+        },
+    )
+    .expect("transpile");
+    let dir = write_scratch_project(test_name, &rust_src);
+    let output = Command::new("cargo")
+        .arg("rustc")
+        .arg("--quiet")
+        .arg("--release")
+        .arg("--")
+        .arg("-D")
+        .arg("warnings")
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("compile generated Rust with warnings denied");
+    assert!(
+        output.status.success(),
+        "generated Rust failed a native -D warnings compile for {}:\n--- stderr ---\n{}\n--- generated ---\n{}",
+        test_name,
+        String::from_utf8_lossy(&output.stderr),
+        rust_src,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_match_arms_and_imports_compile_without_rustc_warnings() {
+    if !cargo_available() {
+        eprintln!("cargo not available — skipping");
+        return;
+    }
+    assert_aot_compiles_without_warnings_with_modules(
+        "warning_free_match_arms_and_imports",
+        r#"use warning_fixture
+let unguarded = match flag { true => value + 1, _ => 0 }
+let guarded = match flag { true if value > 0 => value + 2, _ => 0 }
+print(unguarded, guarded)"#,
+        &[("warning_fixture", "let flag = true\nlet value = 40")],
+    );
+}
+
 #[test]
 #[ignore]
 fn e2e_import_basic_let() {
@@ -935,7 +988,7 @@ print(doubled)"#,
 #[ignore]
 fn e2e_import_idempotent_reload_cache() {
     // Second use shouldn't re-run the module body. The walker
-    // caches; the AOT caches via the __mod_*__load fn's
+    // caches; the AOT caches via the __mod_*_load fn's
     // module_cache check.
     assert_aot_matches_with_modules(
         "import_idempotent",
