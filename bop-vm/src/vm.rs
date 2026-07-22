@@ -3737,6 +3737,41 @@ mod tests {
     }
 
     #[test]
+    fn loop_control_leaves_value_and_type_scope_stacks_balanced() {
+        let source = r#"repeat 2048 {
+    if true { continue }
+}
+for outer in [1, 2] {
+    repeat 3 {
+        while true {
+            if true { break }
+        }
+        let label = match outer {
+            n if n < 0 => "negative",
+            _ => "positive",
+        }
+        if outer == 1 { continue }
+        break
+    }
+}"#;
+        let program = bop::parse(source).expect("parse");
+        let chunk = crate::compile(&program).expect("compile");
+        let mut host = SilentHost;
+        let mut vm = Vm::new(chunk, &mut host, BopLimits::standard());
+
+        vm.run_internal().expect("execute");
+
+        let frame = vm.frames.last().expect("top frame");
+        assert_eq!(frame.scopes.len(), frame.scope_base);
+        assert_eq!(vm.type_bindings.len(), frame.type_scope_base);
+        assert!(
+            vm.stack.is_empty(),
+            "clean completion left {} values or loop sidecars",
+            vm.stack.len()
+        );
+    }
+
+    #[test]
     fn frame_scope_floors_preserve_base_scopes_and_pair_type_scopes() {
         let mut host = SilentHost;
         let mut vm = Vm::new(Chunk::new(), &mut host, BopLimits::standard());

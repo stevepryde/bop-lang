@@ -731,6 +731,99 @@ print(exercise())"#,
     );
 }
 
+#[test]
+fn break_and_continue_do_not_leak_top_level_bindings_diff() {
+    let break_error = run_err(
+        r#"for item in [1, 2, 3] {
+    if true { break }
+}
+print(item)"#,
+    );
+    assert!(break_error.contains("not found"), "got: {}", break_error);
+
+    let continue_error = run_err(
+        r#"let n = 0
+while n < 3 {
+    n += 1
+    if true {
+        let inner = n
+        continue
+    }
+}
+print(inner)"#,
+    );
+    assert!(continue_error.contains("not found"), "got: {}", continue_error);
+}
+
+#[test]
+fn nested_top_level_loop_control_unwinds_only_innermost_loop_diff() {
+    assert_eq!(
+        say(r#"let visits = 0
+for outer in [1, 2] {
+    repeat 3 {
+        while true {
+            let local = outer
+            break
+        }
+        if outer == 1 { continue }
+        visits += 1
+        break
+    }
+}
+print(visits)"#),
+        "1"
+    );
+}
+
+#[test]
+fn match_scopes_compose_with_loop_control_diff() {
+    assert_eq!(
+        say(r#"let seen = []
+for value in [1, 2, 3] {
+    let label = match value {
+        n if n == 2 => "two",
+        n => n.to_str(),
+    }
+    if value == 2 { continue }
+    seen.push(label)
+}
+print(seen)"#),
+        "[\"1\", \"3\"]"
+    );
+}
+
+#[test]
+fn methods_and_closures_keep_slot_scopes_on_loop_control_diff() {
+    let outcome = run_both(
+        r#"struct Runner { limit }
+fn Runner.run(self) {
+    let i = 0
+    let sum = 0
+    while i < self.limit {
+        i += 1
+        if i % 2 == 0 { continue }
+        sum += i
+    }
+    return sum
+}
+let build = fn(limit) {
+    return fn() {
+        let n = 0
+        repeat limit {
+            if n == 2 { break }
+            n += 1
+        }
+        return n
+    }
+}
+print(Runner { limit: 5 }.run())
+print(build(5)())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["9", "2"]);
+}
+
 // ─── Repeat ───────────────────────────────────────────────────────
 
 #[test]

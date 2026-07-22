@@ -202,21 +202,25 @@ fn while_with_break_and_continue() {
         }"#,
         r#"
         0: LoadTrue
-        1: JumpIfFalse -> 15
+        1: JumpIfFalse -> 19
         2: PushScope
         3: LoadFalse
-        4: JumpIfFalse -> 8
+        4: JumpIfFalse -> 10
         5: PushScope
-        6: Jump -> 0
+        6: PopScope
         7: PopScope
-        8: LoadFalse
-        9: JumpIfFalse -> 13
-        10: PushScope
-        11: Jump -> 15
-        12: PopScope
+        8: Jump -> 0
+        9: PopScope
+        10: LoadFalse
+        11: JumpIfFalse -> 17
+        12: PushScope
         13: PopScope
-        14: Jump -> 0
-        15: Halt
+        14: PopScope
+        15: Jump -> 19
+        16: PopScope
+        17: PopScope
+        18: Jump -> 0
+        19: Halt
         "#,
     );
 }
@@ -290,6 +294,69 @@ fn broken_for_and_repeat_emit_typed_cleanup() {
     assert!(
         d.contains("PopLoopState repeat"),
         "repeat break missing counter cleanup:\n{d}"
+    );
+}
+
+#[test]
+fn top_level_loop_control_unwinds_runtime_scopes_before_transfer() {
+    let break_ast = parse("for item in [1] { if true { break } }").expect("parse");
+    let break_chunk = compile(&break_ast).expect("compile");
+    assert!(
+        break_chunk.code.windows(4).any(|window| matches!(
+            window,
+            [
+                bop_vm::Instr::PopScope,
+                bop_vm::Instr::PopScope,
+                bop_vm::Instr::PopLoopState(LoopStateKind::Iterator),
+                bop_vm::Instr::Jump(_),
+            ]
+        )),
+        "break must unwind nested scopes before its iterator sidecar and jump"
+    );
+
+    let continue_ast = parse("repeat 2 { if true { continue } }").expect("parse");
+    let continue_chunk = compile(&continue_ast).expect("compile");
+    assert!(
+        continue_chunk.code.windows(3).any(|window| matches!(
+            window,
+            [
+                bop_vm::Instr::PopScope,
+                bop_vm::Instr::PopScope,
+                bop_vm::Instr::Jump(_),
+            ]
+        )),
+        "continue must unwind nested scopes before jumping"
+    );
+    assert!(
+        !continue_chunk
+            .code
+            .iter()
+            .any(|instr| matches!(instr, bop_vm::Instr::PopLoopState(_))),
+        "continue must preserve its loop sidecar"
+    );
+}
+
+#[test]
+fn function_loop_blocks_do_not_emit_runtime_scope_cleanup() {
+    let ast = parse(
+        r#"fn stop() {
+  for item in [1] { if true { break } }
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let body = &chunk.functions[0].chunk.code;
+
+    assert!(
+        body.iter().any(|instr| matches!(
+            instr,
+            bop_vm::Instr::PopLoopState(LoopStateKind::Iterator)
+        )),
+        "function break must retain iterator cleanup"
+    );
+    assert!(
+        !body.iter().any(|instr| matches!(instr, bop_vm::Instr::PopScope)),
+        "slot-resolved function blocks must not invent runtime scope cleanup"
     );
 }
 
