@@ -83,9 +83,8 @@ pub enum Instr {
     IncLocalInt(SlotIdx, i32),
     /// Push `frame.slots[slot] + k` (as `Int`), fuses
     /// `LoadLocal(slot) + LoadConst(k) + Add`. Covers the
-    /// `fib(n - 1)` / `array[i + 1]` patterns — `Sub` compiles
-    /// as `Add` with a negated const so this one opcode captures
-    /// both. Non-Int fallback delegates to `ops::add`.
+    /// `array[i + 1]` pattern. Non-Int fallback delegates to
+    /// `ops::add`, preserving the language's generic `+` semantics.
     LoadLocalAddInt(SlotIdx, i32),
     /// Push `frame.slots[slot] < k` (as `Bool`), fuses
     /// `LoadLocal(slot) + LoadConst(k:Int) + Lt`. The `n < 2`

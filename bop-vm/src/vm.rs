@@ -991,10 +991,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 let av = &frame.slots[a.0 as usize];
                 let bv = &frame.slots[b.0 as usize];
                 let result = match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => match x.checked_add(*y) {
-                        Some(v) => Value::Int(v),
-                        None => return Err(error(line, "integer overflow in +")),
-                    },
+                    (Value::Int(x), Value::Int(y)) => x
+                        .checked_add(*y)
+                        .map(Value::Int)
+                        .map_or_else(|| ops::add(av, bv, line), Ok)?,
                     // Cold path: delegate to the generic Value
                     // adder. Covers Number, String concat, array
                     // concat, etc.
@@ -1022,27 +1022,27 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 let i = slot.0 as usize;
                 let current = &frame.slots[i];
                 let new = match current {
-                    Value::Int(x) => match x.checked_add(k as i64) {
-                        Some(v) => Value::Int(v),
-                        None => return Err(error(line, "integer overflow in +")),
-                    },
+                    Value::Int(x) => x
+                        .checked_add(k as i64)
+                        .map(Value::Int)
+                        .map_or_else(
+                            || ops::add(current, &Value::Int(k as i64), line),
+                            Ok,
+                        )?,
                     _ => ops::add(current, &Value::Int(k as i64), line)?,
                 };
                 frame.slots[i] = new;
             }
             Instr::LoadLocalAddInt(slot, k) => {
-                // Push `slots[slot] + k`. Covers `fib(n - 1)` and
-                // `array[i + 1]` after the compiler folds a
-                // small-int literal into the op. `Sub` falls
-                // into the same opcode at compile time by
-                // negating the constant.
+                // Push `slots[slot] + k`. Covers `array[i + 1]` after the
+                // compiler folds a small-int literal into the op.
                 let frame = self.frames.last().expect("frame present");
                 let v = &frame.slots[slot.0 as usize];
                 let result = match v {
-                    Value::Int(x) => match x.checked_add(k as i64) {
-                        Some(v) => Value::Int(v),
-                        None => return Err(error(line, "integer overflow in +")),
-                    },
+                    Value::Int(x) => x
+                        .checked_add(k as i64)
+                        .map(Value::Int)
+                        .map_or_else(|| ops::add(v, &Value::Int(k as i64), line), Ok)?,
                     _ => ops::add(v, &Value::Int(k as i64), line)?,
                 };
                 self.push_value(result);

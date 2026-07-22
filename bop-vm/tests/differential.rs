@@ -793,6 +793,58 @@ print(generic("v"))
     );
 }
 
+#[test]
+fn local_subtraction_preserves_generic_operator_errors_diff() {
+    for source in [
+        r#"fn expression(value) { return value - 1 }
+print(expression("v"))"#,
+        r#"fn direct(value) {
+    value = value - 1
+    return value
+}
+print(direct("v"))"#,
+        r#"fn different_slot(source, target) {
+    target = source - 1
+    return target
+}
+print(different_slot("v", 0))"#,
+        r#"fn compound(value) {
+    value -= 1
+    return value
+}
+print(compound("v"))"#,
+    ] {
+        let outcome = run_both(source, &standard());
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("Can't use `-` with string and int")
+        );
+    }
+}
+
+#[test]
+fn local_add_superinstructions_preserve_canonical_overflow_errors_diff() {
+    for source in [
+        r#"fn expression(value) { return value + 1 }
+print(expression(9223372036854775807))"#,
+        r#"fn direct(value) {
+    value = value + 1
+    return value
+}
+print(direct(9223372036854775807))"#,
+        r#"fn compound(value) {
+    value += 1
+    return value
+}
+print(compound(9223372036854775807))"#,
+        r#"fn local_local(left, right) { return left + right }
+print(local_local(9223372036854775807, 1))"#,
+    ] {
+        let outcome = run_both(source, &standard());
+        assert_eq!(outcome.error.as_deref(), Some("Integer overflow in `+`"));
+    }
+}
+
 // ─── While ────────────────────────────────────────────────────────
 
 #[test]

@@ -281,9 +281,8 @@ impl Compiler {
                         return Some(Instr::AddLocals(a, b));
                     }
                     // `LoadLocal s; LoadConst(Int k); Add` →
-                    // `LoadLocalAddInt(s, k)`. The `fib(n - 1)`
-                    // / `array[i + 1]` pattern — one of the
-                    // hottest sites in recursive benchmarks.
+                    // `LoadLocalAddInt(s, k)`. Covers local values plus
+                    // small integer literals such as `array[i + 1]`.
                     if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
                         (code[code.len() - 2], code[code.len() - 1])
                     {
@@ -296,30 +295,6 @@ impl Compiler {
                                     .lines
                                     .truncate(self.chunk.lines.len() - 2);
                                 return Some(Instr::LoadLocalAddInt(s, k32));
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            Instr::Sub => {
-                // `LoadLocal s; LoadConst(Int k); Sub` →
-                // `LoadLocalAddInt(s, -k)`.
-                if self.can_fuse_tail(2) {
-                    if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
-                        (code[code.len() - 2], code[code.len() - 1])
-                    {
-                        if let crate::chunk::Constant::Int(k) =
-                            self.chunk.constants[c.0 as usize]
-                        {
-                            if let Some(neg) = k.checked_neg() {
-                                if let Ok(k32) = i32::try_from(neg) {
-                                    self.chunk.code.truncate(code.len() - 2);
-                                    self.chunk
-                                        .lines
-                                        .truncate(self.chunk.lines.len() - 2);
-                                    return Some(Instr::LoadLocalAddInt(s, k32));
-                                }
                             }
                         }
                     }
@@ -358,7 +333,7 @@ impl Compiler {
                 None
             }
             Instr::StoreLocal(store_slot) => {
-                // The Add/Sub peepholes run before the store arrives, so the
+                // The Add peephole runs before the store arrives, so the
                 // hot `slot = slot + small_int` tail is normally already one
                 // `LoadLocalAddInt`. Collapse that instruction with a store
                 // back to the same slot. `can_fuse_tail` keeps the rewrite on

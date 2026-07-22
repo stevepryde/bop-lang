@@ -682,12 +682,45 @@ fn plain_add(a, b) { return a + b }
 }
 
 #[test]
-fn store_local_fuses_small_integer_direct_and_compound_updates() {
+fn store_local_fuses_small_integer_direct_and_compound_add_updates() {
     let ast = parse(
         r#"
 fn update(value) {
     value = value + 1
     value += 2
+    return value
+}
+"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let function = chunk
+        .functions
+        .iter()
+        .find(|function| function.name == "update")
+        .expect("update function");
+
+    assert_eq!(
+        &function.chunk.code[..2],
+        &[
+            Instr::IncLocalInt(SlotIdx(0), 1),
+            Instr::IncLocalInt(SlotIdx(0), 2),
+        ]
+    );
+    let output = disassemble(&chunk);
+    for delta in [1, 2] {
+        assert!(
+            output.contains(&format!("IncLocalInt @0, {delta}")),
+            "missing fused delta {delta}:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn subtraction_remains_on_the_generic_operator_path() {
+    let ast = parse(
+        r#"
+fn update(value) {
     value = value - 3
     value -= 4
     return value
@@ -702,22 +735,22 @@ fn update(value) {
         .find(|function| function.name == "update")
         .expect("update function");
 
-    assert_eq!(
-        &function.chunk.code[..4],
-        &[
-            Instr::IncLocalInt(SlotIdx(0), 1),
-            Instr::IncLocalInt(SlotIdx(0), 2),
-            Instr::IncLocalInt(SlotIdx(0), -3),
-            Instr::IncLocalInt(SlotIdx(0), -4),
+    assert!(matches!(
+        function.chunk.code.as_slice(),
+        [
+            Instr::LoadLocal(SlotIdx(0)),
+            Instr::LoadConst(_),
+            Instr::Sub,
+            Instr::StoreLocal(SlotIdx(0)),
+            Instr::LoadLocal(SlotIdx(0)),
+            Instr::LoadConst(_),
+            Instr::Sub,
+            Instr::StoreLocal(SlotIdx(0)),
+            Instr::LoadLocal(SlotIdx(0)),
+            Instr::Return,
+            Instr::ReturnNone,
         ]
-    );
-    let output = disassemble(&chunk);
-    for delta in [1, 2, -3, -4] {
-        assert!(
-            output.contains(&format!("IncLocalInt @0, {delta}")),
-            "missing fused delta {delta}:\n{output}"
-        );
-    }
+    ));
 }
 
 #[test]
