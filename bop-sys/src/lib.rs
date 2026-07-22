@@ -12,4 +12,4 @@ mod host;
 mod stdio;
 mod time;
 
-pub use host::{StandardHost, StdHost};
+pub use host::{resolve_module_from_root, StandardHost, StdHost};

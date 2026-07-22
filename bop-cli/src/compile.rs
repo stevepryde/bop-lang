@@ -126,19 +126,9 @@ fn make_resolver(root: PathBuf) -> ModuleResolver {
         if let Some(src) = bop::stdlib::resolve(name) {
             return Some(Ok(src.to_string()));
         }
-        // Filesystem fallback — look for `<name>.bop` relative
-        // to the input directory. Dots in the module name are
-        // treated as path separators, matching `bop-sys`'s
-        // behaviour (so `use foo.bar` → `root/foo/bar.bop`).
-        let mut path = root.clone();
-        for segment in name.split('.') {
-            path.push(segment);
-        }
-        path.set_extension("bop");
-        match std::fs::read_to_string(&path) {
-            Ok(src) => Some(Ok(src)),
-            Err(_) => None,
-        }
+        // Filesystem fallback shares runtime resolution's path,
+        // validation, and NotFound-vs-I/O-error contract.
+        bop_sys::resolve_module_from_root(&root, name)
     }))
 }
 
@@ -357,6 +347,33 @@ lto = "thin"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    fn resolver_test_root(label: &str) -> PathBuf {
+        let sequence = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "bop_cli_resolver_{}_{}_{}",
+            std::process::id(),
+            label,
+            sequence
+        ));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("stale test resolver root should be removable: {error}"),
+        }
+        std::fs::create_dir_all(&root).expect("test resolver root should be created");
+        root
+    }
+
+    fn resolve_once(
+        resolver: &ModuleResolver,
+        name: &str,
+    ) -> Option<Result<String, bop::BopError>> {
+        (resolver.borrow_mut())(name)
+    }
 
     #[test]
     fn cargo_target_name_sanitizes_user_filename_stems() {
@@ -387,5 +404,69 @@ mod tests {
                 "my program"
             })
         );
+    }
+
+    #[test]
+    fn compile_resolver_reads_filesystem_modules() {
+        let root = resolver_test_root("success");
+        let module_dir = root.join("math");
+        std::fs::create_dir_all(&module_dir).unwrap();
+        std::fs::write(module_dir.join("util.bop"), "let answer = 42").unwrap();
+
+        let resolver = make_resolver(root.clone());
+        let source = resolve_once(&resolver, "math.util")
+            .expect("module should be handled")
+            .expect("module should be readable");
+        assert_eq!(source, "let answer = 42");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compile_resolver_returns_none_only_for_not_found() {
+        let root = resolver_test_root("missing");
+        let resolver = make_resolver(root.clone());
+
+        assert!(resolve_once(&resolver, "does_not_exist").is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compile_resolver_surfaces_non_not_found_read_errors() {
+        let root = resolver_test_root("read_error");
+        // The resolver expects a file here. A directory is deterministic and
+        // unreadable as text without relying on permissions (which root can
+        // bypass in CI containers).
+        std::fs::create_dir(root.join("broken.bop")).unwrap();
+        let resolver = make_resolver(root.clone());
+
+        let error = resolve_once(&resolver, "broken")
+            .expect("non-NotFound failures must be handled")
+            .expect_err("directory read must surface as an I/O error");
+        assert!(
+            error.message.contains("couldn't read module `broken`"),
+            "unexpected error: {}",
+            error.message
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compile_resolver_prefers_bundled_stdlib_over_filesystem() {
+        let root = resolver_test_root("stdlib_precedence");
+        let std_dir = root.join("std");
+        std::fs::create_dir_all(&std_dir).unwrap();
+        std::fs::write(std_dir.join("math.bop"), "let shadow = true").unwrap();
+        let resolver = make_resolver(root.clone());
+
+        let source = resolve_once(&resolver, "std.math")
+            .expect("stdlib module should be handled")
+            .expect("stdlib module should resolve");
+        assert_eq!(source, bop::stdlib::resolve("std.math").unwrap());
+        assert!(!source.contains("let shadow = true"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
