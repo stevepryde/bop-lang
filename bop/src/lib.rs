@@ -271,6 +271,93 @@ mod tests {
         }
     }
 
+    #[test]
+    fn multiline_delimiters_parse_and_run() {
+        let source = r#"fn add(a, b) { return a + b }
+let values = [
+    1,
+    add(
+        2,
+        3
+    ),
+    [
+        6,
+    ][
+        0
+    ],
+]
+let config = {
+    "target": values[
+        1
+    ],
+    "label": "bop"
+}
+if (
+    config[
+        "target"
+    ] == 5 && values.len() == 3
+) {
+    print(
+        values[0] +
+        values[1] +
+        values[2]
+    )
+}
+let length = values
+    // Leading-dot continuation may cross comments and blank lines.
+
+    .len()
+    .to_str()
+print(length)"#;
+
+        parse(source).unwrap();
+        let mut host = TestHost::new();
+        run(source, &mut host, &test_limits()).unwrap();
+        assert_eq!(host.prints.borrow().as_slice(), ["12", "3"]);
+    }
+
+    #[test]
+    fn nested_lambda_blocks_keep_newline_statement_boundaries() {
+        assert_eq!(
+            say(r#"let functions = [
+    fn() {
+        let x = 1
+        let y = 2
+        return x + y
+    },
+]
+let wrapped = (fn() {
+    let x = 4
+    let y = 5
+    return x + y
+})
+print(functions[0]() + wrapped())"#),
+            "12"
+        );
+    }
+
+    #[test]
+    fn return_newline_is_bare_but_parenthesized_return_can_span_lines() {
+        let mut host = TestHost::new();
+        run(
+            r#"fn bare() {
+    return
+    42
+}
+fn grouped() {
+    return (
+        42
+    )
+}
+print(bare())
+print(grouped())"#,
+            &mut host,
+            &test_limits(),
+        )
+        .unwrap();
+        assert_eq!(host.prints.borrow().as_slice(), ["none", "42"]);
+    }
+
     // ─── Arithmetic ────────────────────────────────────────────────
 
     #[test]

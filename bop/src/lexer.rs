@@ -125,12 +125,64 @@ fn triggers_semicolon(token: &Token) -> bool {
     )
 }
 
+fn supports_dot_continuation(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Ident(_)
+            | Token::Int(_)
+            | Token::Number(_)
+            | Token::Str(_)
+            | Token::StringInterp(_)
+            | Token::True
+            | Token::False
+            | Token::None
+            | Token::RParen
+            | Token::RBracket
+            | Token::RBrace
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Delimiter {
+    Paren,
+    Bracket,
+    Brace,
+}
+
 fn insert_semicolons(raw: Vec<SpannedToken>) -> Vec<SpannedToken> {
     let mut result: Vec<SpannedToken> = Vec::new();
-    for token in raw {
+    let mut delimiters: Vec<Delimiter> = Vec::new();
+    let mut tokens = raw.into_iter().peekable();
+    while let Some(token) = tokens.next() {
         if token.token == Token::Newline {
+            // Coalesce the run so next-token lookahead stays linear
+            // even across large blocks of blank lines.
+            while tokens
+                .peek()
+                .is_some_and(|next| next.token == Token::Newline)
+            {
+                tokens.next();
+            }
             if let Some(last) = result.last() {
-                if triggers_semicolon(&last.token) {
+                // The innermost delimiter decides: a function block
+                // inside an array still needs separators between its
+                // statements even though the outer bracket is open.
+                let inside_soft_delimiter = matches!(
+                    delimiters.last(),
+                    Some(Delimiter::Paren | Delimiter::Bracket)
+                );
+                let next = tokens.peek().map(|next| &next.token);
+                let before_closing_delimiter = matches!(
+                    next,
+                    Some(Token::RParen | Token::RBracket | Token::RBrace)
+                );
+                let before_dot_continuation = matches!(next, Some(Token::Dot))
+                    && supports_dot_continuation(&last.token);
+                if !inside_soft_delimiter
+                    && !before_closing_delimiter
+                    && !before_dot_continuation
+                    && triggers_semicolon(&last.token)
+                {
                     result.push(SpannedToken {
                         token: Token::Semicolon,
                         line: token.line,
@@ -139,6 +191,21 @@ fn insert_semicolons(raw: Vec<SpannedToken>) -> Vec<SpannedToken> {
                 }
             }
         } else {
+            match &token.token {
+                Token::LParen => delimiters.push(Delimiter::Paren),
+                Token::LBracket => delimiters.push(Delimiter::Bracket),
+                Token::LBrace => delimiters.push(Delimiter::Brace),
+                Token::RParen if delimiters.last() == Some(&Delimiter::Paren) => {
+                    delimiters.pop();
+                }
+                Token::RBracket if delimiters.last() == Some(&Delimiter::Bracket) => {
+                    delimiters.pop();
+                }
+                Token::RBrace if delimiters.last() == Some(&Delimiter::Brace) => {
+                    delimiters.pop();
+                }
+                _ => {}
+            }
             result.push(token);
         }
     }
@@ -1106,6 +1173,136 @@ mod tests {
                 Token::False,
                 Token::Semicolon,
                 Token::None,
+            ]
+        );
+    }
+
+    #[test]
+    fn no_auto_semi_inside_parentheses_or_brackets() {
+        assert_eq!(
+            toks("[\n1,\n2\n]\nf(\n3,\n4\n)"),
+            vec![
+                Token::LBracket,
+                Token::Int(1),
+                Token::Comma,
+                Token::Int(2),
+                Token::RBracket,
+                Token::Semicolon,
+                Token::Ident("f".into()),
+                Token::LParen,
+                Token::Int(3),
+                Token::Comma,
+                Token::Int(4),
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn braces_inside_parentheses_keep_statement_separation() {
+        assert_eq!(
+            toks("(fn() {\nx\ny\n})"),
+            vec![
+                Token::LParen,
+                Token::Fn,
+                Token::LParen,
+                Token::RParen,
+                Token::LBrace,
+                Token::Ident("x".into()),
+                Token::Semicolon,
+                Token::Ident("y".into()),
+                Token::RBrace,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn braces_inside_brackets_keep_statement_separation() {
+        assert_eq!(
+            toks("[fn() {\nx\ny\n}]"),
+            vec![
+                Token::LBracket,
+                Token::Fn,
+                Token::LParen,
+                Token::RParen,
+                Token::LBrace,
+                Token::Ident("x".into()),
+                Token::Semicolon,
+                Token::Ident("y".into()),
+                Token::RBrace,
+                Token::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn newline_before_closing_delimiter_does_not_insert_semicolon() {
+        assert_eq!(
+            toks("{\nx\ny\n}"),
+            vec![
+                Token::LBrace,
+                Token::Ident("x".into()),
+                Token::Semicolon,
+                Token::Ident("y".into()),
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn leading_dot_continues_a_value_across_comments_and_blank_lines() {
+        assert_eq!(
+            toks("value\n// explain the chain\n\n.len()"),
+            vec![
+                Token::Ident("value".into()),
+                Token::Dot,
+                Token::Ident("len".into()),
+                Token::LParen,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn return_newline_remains_a_bare_return() {
+        assert_eq!(
+            toks("return\nvalue"),
+            vec![
+                Token::Return,
+                Token::Semicolon,
+                Token::Ident("value".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn delimiter_characters_inside_strings_do_not_affect_asi() {
+        assert_eq!(
+            toks("\"([\"\nx\n\"{name}]\"\ny"),
+            vec![
+                Token::Str("([".into()),
+                Token::Semicolon,
+                Token::Ident("x".into()),
+                Token::Semicolon,
+                Token::StringInterp(vec![
+                    StringPart::Variable("name".into()),
+                    StringPart::Literal("]".into()),
+                ]),
+                Token::Semicolon,
+                Token::Ident("y".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unmatched_closing_delimiter_does_not_corrupt_depth() {
+        assert_eq!(
+            toks("]\nx"),
+            vec![
+                Token::RBracket,
+                Token::Semicolon,
+                Token::Ident("x".into()),
             ]
         );
     }

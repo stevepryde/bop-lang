@@ -251,6 +251,93 @@ fn assert_both_value_depth_errors(code: &str, expected_line: u32) {
     }
 }
 
+// ─── Automatic semicolon insertion ────────────────────────────────
+
+#[test]
+fn multiline_delimiters_and_leading_dot_match_both_engines() {
+    let out = run_both(
+        r#"fn add(a, b) { return a + b }
+let values = [
+    1,
+    add(
+        2,
+        3
+    ),
+    [
+        6,
+    ][
+        0
+    ],
+]
+let config = {
+    "target": values[
+        1
+    ],
+    "label": "bop"
+}
+if (
+    config[
+        "target"
+    ] == 5 && values.len() == 3
+) {
+    print(
+        values[0] +
+        values[1] +
+        values[2]
+    )
+}
+let length = values
+    // Leading-dot continuation may cross comments and blank lines.
+
+    .len()
+    .to_str()
+print(length)"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "program errored: {:?}", out.error);
+    assert_eq!(out.prints, ["12", "3"]);
+}
+
+#[test]
+fn nested_lambda_braces_keep_statement_boundaries_in_both_engines() {
+    assert_eq!(
+        say(r#"let functions = [
+    fn() {
+        let x = 1
+        let y = 2
+        return x + y
+    },
+]
+let wrapped = (fn() {
+    let x = 4
+    let y = 5
+    return x + y
+})
+print(functions[0]() + wrapped())"#),
+        "12"
+    );
+}
+
+#[test]
+fn return_newline_semantics_match_both_engines() {
+    let out = run_both(
+        r#"fn bare() {
+    return
+    42
+}
+fn grouped() {
+    return (
+        42
+    )
+}
+print(bare())
+print(grouped())"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "program errored: {:?}", out.error);
+    assert_eq!(out.prints, ["none", "42"]);
+}
+
 // ─── Arithmetic ───────────────────────────────────────────────────
 
 #[test]
