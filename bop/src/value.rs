@@ -69,7 +69,135 @@ fn trusted<T>(result: Result<T, BopError>) -> T {
 pub struct BopStr(String);
 
 #[derive(Debug)]
-pub struct BopArray(Vec<Value>, u16);
+pub struct BopArray(Vec<Value>, u16, Box<ArrayDepthCounts>);
+
+/// Exact child-depth frequencies for an array. Flat values dominate normal
+/// programs, so depth zero stays inline; only nested values allocate entries.
+/// The sparse vector has at most [`MAX_VALUE_DEPTH`] entries, keeping depth
+/// maintenance independent of the array's length without inflating every
+/// `Value` by a fixed 64-element table.
+#[derive(Debug, Clone)]
+struct ArrayDepthCounts {
+    flat: usize,
+    nested: Vec<(u16, usize)>,
+    /// Stable depth recorded when each element enters the array. Re-reading an
+    /// iterator's depth can fail conservatively while a host holds its
+    /// `RefCell` borrow, so removals and replacements use this parallel cache.
+    child_depths: Vec<u16>,
+}
+
+impl ArrayDepthCounts {
+    fn from_values(values: &[Value], line: u32) -> Result<Box<Self>, BopError> {
+        let mut counts = Self {
+            flat: 0,
+            nested: Vec::new(),
+            child_depths: Vec::new(),
+        };
+        counts
+            .child_depths
+            .try_reserve_exact(values.len())
+            .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
+        for value in values {
+            let depth = value.ownership_depth();
+            counts.child_depths.push(depth);
+            if depth == 0 {
+                counts.flat += 1;
+            } else if let Some((_, count)) = counts
+                .nested
+                .iter_mut()
+                .find(|(entry_depth, _)| *entry_depth == depth)
+            {
+                *count += 1;
+            } else {
+                counts
+                    .nested
+                    .try_reserve(1)
+                    .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
+                counts.nested.push((depth, 1));
+            }
+        }
+        Ok(Box::new(counts))
+    }
+
+    fn tracked_bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            + self.nested.capacity() * core::mem::size_of::<(u16, usize)>()
+            + self.child_depths.capacity() * core::mem::size_of::<u16>()
+    }
+
+    fn ensure_depth(&mut self, depth: u16, line: u32) -> Result<(), BopError> {
+        if depth == 0 || self.nested.iter().any(|(entry_depth, _)| *entry_depth == depth) {
+            return Ok(());
+        }
+        let old_capacity = self.nested.capacity();
+        self.nested
+            .try_reserve(1)
+            .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
+        let new_capacity = self.nested.capacity();
+        if new_capacity > old_capacity {
+            bop_alloc((new_capacity - old_capacity) * core::mem::size_of::<(u16, usize)>());
+        }
+        Ok(())
+    }
+
+    fn add(&mut self, depth: u16) {
+        if depth == 0 {
+            self.flat += 1;
+        } else if let Some((_, count)) = self
+            .nested
+            .iter_mut()
+            .find(|(entry_depth, _)| *entry_depth == depth)
+        {
+            *count += 1;
+        } else {
+            // `ensure_depth` reserves this slot before any fallible mutation.
+            self.nested.push((depth, 1));
+        }
+    }
+
+    fn try_reserve_child(&mut self, line: u32) -> Result<(), BopError> {
+        let old_capacity = self.child_depths.capacity();
+        self.child_depths
+            .try_reserve(1)
+            .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
+        let new_capacity = self.child_depths.capacity();
+        if new_capacity > old_capacity {
+            bop_alloc((new_capacity - old_capacity) * core::mem::size_of::<u16>());
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, depth: u16) {
+        if depth == 0 {
+            self.flat -= 1;
+            return;
+        }
+        let index = self
+            .nested
+            .iter()
+            .position(|(entry_depth, _)| *entry_depth == depth)
+            .expect("array depth metadata contains every child");
+        if self.nested[index].1 == 1 {
+            self.nested.remove(index);
+        } else {
+            self.nested[index].1 -= 1;
+        }
+    }
+
+    fn owner_depth(&self) -> u16 {
+        self.nested
+            .iter()
+            .map(|(depth, _)| depth.saturating_add(1))
+            .max()
+            .unwrap_or(1)
+    }
+
+    fn clear(&mut self) {
+        self.flat = 0;
+        self.nested.clear();
+        self.child_depths.clear();
+    }
+}
 
 #[derive(Debug)]
 pub struct BopDict(Vec<(String, Value)>, u16);
@@ -446,8 +574,11 @@ impl Value {
 
     pub fn try_new_array(items: Vec<Value>, line: u32) -> Result<Self, BopError> {
         let depth = checked_owner_depth(&items, 1, line)?;
-        bop_alloc(items.capacity() * core::mem::size_of::<Value>());
-        Ok(Value::Array(BopArray(items, depth)))
+        let depth_counts = ArrayDepthCounts::from_values(&items, line)?;
+        bop_alloc(
+            items.capacity() * core::mem::size_of::<Value>() + depth_counts.tracked_bytes(),
+        );
+        Ok(Value::Array(BopArray(items, depth, depth_counts)))
     }
 
     pub fn new_dict(entries: Vec<(String, Value)>) -> Self {
@@ -711,8 +842,12 @@ impl Clone for Value {
             }
             Value::Array(arr) => {
                 let cloned = arr.0.clone(); // each element's Clone tracks itself
-                bop_alloc(cloned.capacity() * core::mem::size_of::<Value>());
-                Value::Array(BopArray(cloned, arr.1))
+                let depth_counts = Box::new((*arr.2).clone());
+                bop_alloc(
+                    cloned.capacity() * core::mem::size_of::<Value>()
+                        + depth_counts.tracked_bytes(),
+                );
+                Value::Array(BopArray(cloned, arr.1, depth_counts))
             }
             Value::Dict(d) => {
                 let cloned = d.0.clone(); // each Value's Clone tracks itself
@@ -799,7 +934,10 @@ impl Drop for Value {
         match self {
             Value::Str(s) => bop_dealloc(s.0.capacity()),
             Value::Array(arr) => {
-                bop_dealloc(arr.0.capacity() * core::mem::size_of::<Value>());
+                bop_dealloc(
+                    arr.0.capacity() * core::mem::size_of::<Value>()
+                        + arr.2.tracked_bytes(),
+                );
             }
             Value::Dict(d) => {
                 let key_bytes: usize = d.0.iter().map(|(k, _)| k.capacity()).sum();
@@ -1061,7 +1199,112 @@ impl BopArray {
         let taken = core::mem::take(&mut self.0);
         bop_dealloc(taken.capacity() * core::mem::size_of::<Value>());
         self.1 = 1;
+        self.2.clear();
         taken
+    }
+
+    fn check_child_depth(value: &Value, line: u32) -> Result<u16, BopError> {
+        let child_depth = value.ownership_depth();
+        if child_depth.saturating_add(1) > MAX_VALUE_DEPTH {
+            Err(value_depth_error(line))
+        } else {
+            Ok(child_depth)
+        }
+    }
+
+    fn try_reserve_item(&mut self, line: u32) -> Result<(), BopError> {
+        let old_capacity = self.0.capacity();
+        self.0
+            .try_reserve(1)
+            .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
+        let new_capacity = self.0.capacity();
+        if new_capacity > old_capacity {
+            bop_alloc((new_capacity - old_capacity) * core::mem::size_of::<Value>());
+        }
+        Ok(())
+    }
+
+    fn refresh_depth(&mut self) {
+        self.1 = self.2.owner_depth();
+    }
+
+    /// Append one value without cloning the existing array. Capacity growth is
+    /// charged exactly once and all fallible checks happen before insertion.
+    pub fn try_push(&mut self, value: Value, line: u32) -> Result<(), BopError> {
+        let child_depth = Self::check_child_depth(&value, line)?;
+        self.2.ensure_depth(child_depth, line)?;
+        self.2.try_reserve_child(line)?;
+        self.try_reserve_item(line)?;
+        self.0.push(value);
+        self.2.child_depths.push(child_depth);
+        self.2.add(child_depth);
+        self.refresh_depth();
+        Ok(())
+    }
+
+    /// Remove and return the final value, if any.
+    pub fn pop(&mut self) -> Option<Value> {
+        let child_depth = self.2.child_depths.pop()?;
+        let value = self.0.pop()?;
+        self.2.remove(child_depth);
+        self.refresh_depth();
+        Some(value)
+    }
+
+    /// Insert a value at an already-normalized endpoint-inclusive index.
+    pub fn try_insert(
+        &mut self,
+        index: usize,
+        value: Value,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let child_depth = Self::check_child_depth(&value, line)?;
+        self.2.ensure_depth(child_depth, line)?;
+        self.2.try_reserve_child(line)?;
+        self.try_reserve_item(line)?;
+        self.0.insert(index, value);
+        self.2.child_depths.insert(index, child_depth);
+        self.2.add(child_depth);
+        self.refresh_depth();
+        Ok(())
+    }
+
+    /// Remove and return a value at an already-normalized element index.
+    pub fn remove(&mut self, index: usize) -> Value {
+        let child_depth = self.2.child_depths.remove(index);
+        let value = self.0.remove(index);
+        self.2.remove(child_depth);
+        self.refresh_depth();
+        value
+    }
+
+    pub fn reverse(&mut self) {
+        self.0.reverse();
+        self.2.child_depths.reverse();
+    }
+
+    pub fn sort_by(&mut self, compare: impl FnMut(&Value, &Value) -> core::cmp::Ordering) {
+        let mut compare = compare;
+        let mut order: Vec<usize> = (0..self.0.len()).collect();
+        order.sort_by(|a, b| compare(&self.0[*a], &self.0[*b]));
+
+        // Convert `new position -> old position` into `old position -> new
+        // position`, then apply that permutation to values and cached depths
+        // together. This preserves stable sort semantics without re-reading a
+        // potentially borrowed iterator's depth.
+        let mut target = Vec::with_capacity(order.len());
+        target.resize(order.len(), 0usize);
+        for (new_position, old_position) in order.into_iter().enumerate() {
+            target[old_position] = new_position;
+        }
+        for position in 0..target.len() {
+            while target[position] != position {
+                let destination = target[position];
+                self.0.swap(position, destination);
+                self.2.child_depths.swap(position, destination);
+                target.swap(position, destination);
+            }
+        }
     }
 
     /// Set a value at the given index. The old value at that index is dropped
@@ -1073,17 +1316,18 @@ impl BopArray {
     /// Line-aware, atomic variant of [`Self::set`]. The existing element is
     /// left untouched if the replacement would exceed [`MAX_VALUE_DEPTH`].
     pub fn try_set(&mut self, index: usize, val: Value, line: u32) -> Result<(), BopError> {
-        let depth = checked_owner_depth(
-            self.0
-                .iter()
-                .enumerate()
-                .filter_map(|(i, value)| (i != index).then_some(value))
-                .chain(core::iter::once(&val)),
-            1,
-            line,
-        )?;
+        let new_child_depth = Self::check_child_depth(&val, line)?;
+        let old_child_depth = self.2.child_depths[index];
+        if new_child_depth != old_child_depth {
+            self.2.ensure_depth(new_child_depth, line)?;
+        }
         self.0[index] = val;
-        self.1 = depth;
+        self.2.child_depths[index] = new_child_depth;
+        if new_child_depth != old_child_depth {
+            self.2.remove(old_child_depth);
+            self.2.add(new_child_depth);
+            self.refresh_depth();
+        }
         Ok(())
     }
 }
@@ -1430,5 +1674,141 @@ mod depth_tests {
         struct_value.try_set_field("x", child, 33).unwrap_err();
         assert!(matches!(struct_value.field("x"), Some(Value::Int(1))));
         assert_eq!(struct_value.depth, 1);
+    }
+
+    #[test]
+    fn array_mutations_keep_exact_sparse_depth_metadata() {
+        let mut value = Value::try_new_array(vec![Value::Int(1)], 1).unwrap();
+        let Value::Array(array) = &mut value else {
+            unreachable!()
+        };
+
+        array.try_push(nested_array(4), 1).unwrap();
+        array.try_push(nested_array(2), 1).unwrap();
+        assert_eq!(array.1, 5);
+        assert_eq!(array.2.flat, 1);
+        assert_eq!(array.2.nested.len(), 2);
+
+        array.try_set(1, Value::Int(2), 1).unwrap();
+        assert_eq!(array.1, 3);
+        assert_eq!(array.2.flat, 2);
+
+        let removed = array.remove(2);
+        assert_eq!(removed.ownership_depth(), 2);
+        assert_eq!(array.1, 1);
+        assert!(array.2.nested.is_empty());
+
+        assert!(matches!(array.pop(), Some(Value::Int(2))));
+        assert!(matches!(array.pop(), Some(Value::Int(1))));
+        assert!(array.is_empty());
+        assert_eq!(array.1, 1);
+        assert_eq!(array.2.flat, 0);
+    }
+
+    #[test]
+    fn array_growth_rejects_deep_values_without_partial_mutation() {
+        let child = nested_array(MAX_VALUE_DEPTH);
+        let mut value = Value::try_new_array(vec![Value::Int(1)], 1).unwrap();
+        let Value::Array(array) = &mut value else {
+            unreachable!()
+        };
+
+        let error = array.try_push(child.clone(), 41).unwrap_err();
+        assert!(error.is_fatal);
+        assert_eq!(error.line, Some(41));
+        assert_eq!(error.message, VALUE_DEPTH_ERROR_MESSAGE);
+        assert_eq!(array.len(), 1);
+        assert!(matches!(array.first(), Some(Value::Int(1))));
+        assert_eq!(array.1, 1);
+
+        let error = array.try_insert(0, child, 42).unwrap_err();
+        assert!(error.is_fatal);
+        assert_eq!(error.line, Some(42));
+        assert_eq!(array.len(), 1);
+        assert!(matches!(array.first(), Some(Value::Int(1))));
+        assert_eq!(array.1, 1);
+    }
+
+    #[test]
+    fn array_mutation_uses_cached_depth_while_iterator_is_borrowed() {
+        let iterator = Value::new_array_iter(vec![Value::Int(1)]);
+        let handle = match &iterator {
+            Value::Iter(handle) => Rc::clone(handle),
+            _ => unreachable!(),
+        };
+        let mut value = Value::try_new_array(vec![iterator], 1).unwrap();
+        let borrow = handle.borrow_mut();
+        let Value::Array(array) = &mut value else {
+            unreachable!()
+        };
+        let popped = array.pop().expect("iterator should pop");
+        assert!(matches!(popped, Value::Iter(_)));
+        assert!(array.is_empty());
+        assert_eq!(array.1, 1);
+        drop(borrow);
+
+        let iterator = Value::new_array_iter(vec![Value::Int(1)]);
+        let handle = match &iterator {
+            Value::Iter(handle) => Rc::clone(handle),
+            _ => unreachable!(),
+        };
+        let mut value = Value::try_new_array(vec![Value::Int(0), iterator], 1).unwrap();
+        let borrow = handle.borrow_mut();
+        let Value::Array(array) = &mut value else {
+            unreachable!()
+        };
+        let removed = array.remove(1);
+        assert!(matches!(removed, Value::Iter(_)));
+        assert_eq!(array.len(), 1);
+        assert!(matches!(array.first(), Some(Value::Int(0))));
+        assert_eq!(array.1, 1);
+        drop(borrow);
+
+        let iterator = Value::new_array_iter(vec![Value::Int(1)]);
+        let handle = match &iterator {
+            Value::Iter(handle) => Rc::clone(handle),
+            _ => unreachable!(),
+        };
+        let mut value = Value::try_new_array(vec![iterator], 1).unwrap();
+        let borrow = handle.borrow_mut();
+        let Value::Array(array) = &mut value else {
+            unreachable!()
+        };
+        array.try_set(0, Value::Int(9), 51).unwrap();
+        assert!(matches!(array.first(), Some(Value::Int(9))));
+        assert_eq!(array.1, 1);
+        drop(borrow);
+    }
+
+    #[test]
+    fn array_reordering_keeps_child_depths_aligned() {
+        let mut value = Value::try_new_array(
+            vec![nested_array(2), Value::Int(1), nested_array(1)],
+            1,
+        )
+        .unwrap();
+        let Value::Array(array) = &mut value else {
+            unreachable!()
+        };
+
+        array.sort_by(|left, right| left.ownership_depth().cmp(&right.ownership_depth()));
+        assert_eq!(array.2.child_depths, [0, 1, 2]);
+        assert_eq!(
+            array
+                .iter()
+                .map(Value::ownership_depth)
+                .collect::<Vec<_>>(),
+            array.2.child_depths
+        );
+
+        array.reverse();
+        assert_eq!(array.2.child_depths, [2, 1, 0]);
+        assert_eq!(
+            array
+                .iter()
+                .map(Value::ownership_depth)
+                .collect::<Vec<_>>(),
+            array.2.child_depths
+        );
     }
 }

@@ -5,6 +5,7 @@
 use alloc::{string::{String, ToString}, vec, vec::Vec};
 
 use bop::error::BopError;
+use bop::methods;
 use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 
 use crate::chunk::{
@@ -1037,20 +1038,54 @@ impl Compiler {
                     &object.kind,
                     ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
                 );
-                self.compile_expr(object)?;
-                for arg in args {
-                    self.compile_expr(arg)?;
-                }
                 let method_idx = self.add_name(method);
-                self.emit(
-                    Instr::CallMethod {
-                        method: method_idx,
-                        argc: args.len() as u32,
-                        assign_back_to,
-                        nested_place,
-                    },
-                    line,
-                );
+                if methods::is_mutating_method(method) {
+                    if let Some(target) = assign_back_to {
+                        // Walker and AOT evaluate method arguments before a
+                        // bare identifier receiver. Resolve the live binding
+                        // only after the arguments so nested calls such as
+                        // `a.push(a.pop())` observe the same state everywhere.
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit(
+                            Instr::CallMethodInPlace {
+                                target,
+                                method: method_idx,
+                                argc: args.len() as u32,
+                            },
+                            line,
+                        );
+                    } else {
+                        self.compile_expr(object)?;
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit(
+                            Instr::CallMethod {
+                                method: method_idx,
+                                argc: args.len() as u32,
+                                assign_back_to: None,
+                                nested_place,
+                            },
+                            line,
+                        );
+                    }
+                } else {
+                    self.compile_expr(object)?;
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit(
+                        Instr::CallMethod {
+                            method: method_idx,
+                            argc: args.len() as u32,
+                            assign_back_to,
+                            nested_place,
+                        },
+                        line,
+                    );
+                }
             }
 
             ExprKind::Index { object, index } => {

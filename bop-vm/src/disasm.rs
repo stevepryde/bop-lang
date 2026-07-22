@@ -134,6 +134,25 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 None => format!("CallMethod .{}/{}", name, argc),
             }
         }
+        Instr::CallMethodInPlace {
+            target,
+            method,
+            argc,
+        } => {
+            let name = chunk.name(*method);
+            match target {
+                crate::chunk::AssignBack::Name(var) => format!(
+                    "CallMethodInPlace .{}/{} (target {})",
+                    name,
+                    argc,
+                    chunk.name(*var)
+                ),
+                crate::chunk::AssignBack::Slot(slot) => format!(
+                    "CallMethodInPlace .{}/{} (target @{})",
+                    name, argc, slot.0
+                ),
+            }
+        }
 
         Instr::DefineFn(idx) => {
             format!("DefineFn #{} ({})", idx.0, chunk.function(*idx).name)

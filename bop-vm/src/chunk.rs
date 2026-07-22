@@ -178,6 +178,17 @@ pub enum Instr {
         assign_back_to: Option<AssignBack>,
         nested_place: bool,
     },
+    /// Mutating method call on a named receiver. Unlike `CallMethod`, the
+    /// receiver is not copied onto the value stack: after evaluating the
+    /// arguments, the VM resolves `target` and mutates an array binding's
+    /// owned buffer directly. Non-array bindings fall back to ordinary method
+    /// dispatch so user-defined methods named `push`, `pop`, etc. retain their
+    /// existing behaviour.
+    CallMethodInPlace {
+        target: AssignBack,
+        method: NameIdx,
+        argc: u32,
+    },
 
     // ─── Functions ────────────────────────────────────────────────
     /// Register the function at `FnIdx` in the current scope.

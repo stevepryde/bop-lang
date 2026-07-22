@@ -1956,6 +1956,95 @@ print(last)"#),
 }
 
 #[test]
+fn array_mutation_fast_path_preserves_value_semantics_diff() {
+    let outcome = run_both(
+        r#"let original = [1, 2]
+let alias = original
+original.push(3)
+print(original)
+print(alias)
+
+let nested = [1, 2]
+nested.push(nested.pop())
+print(nested)
+
+let transient_source = [7]
+(if true { transient_source } else { [] }).push(8)
+[9].push(10)
+print(transient_source)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["[1, 2, 3]", "[1, 2]", "[1, 2]", "[7]"]);
+}
+
+#[test]
+fn array_push_name_dispatches_by_runtime_receiver_type_diff() {
+    assert_eq!(
+        say(r#"struct Accumulator { total }
+fn Accumulator.push(self, value) { return self.total + value }
+let accumulator = Accumulator { total: 7 }
+print(accumulator.push(5))"#),
+        "12"
+    );
+}
+
+#[test]
+fn array_large_append_loop_and_mutators_diff() {
+    let outcome = run_both(
+        r#"let values = []
+let next = 0
+repeat 2048 {
+    values.push(next)
+    next += 1
+}
+print(values.len())
+print(values[0])
+print(values[-1])
+
+let changed = [4, 1, 3]
+print(changed.push(2))
+print(changed.insert(1, 5))
+print(changed.remove(2))
+print(changed.pop())
+changed.sort()
+changed.reverse()
+print(changed)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        ["2048", "0", "2047", "none", "none", "1", "2", "[5, 4, 3]"]
+    );
+}
+
+#[test]
+fn array_mutation_errors_are_atomic_diff() {
+    let outcome = run_both(
+        r#"let values = [1, 2, 3]
+print(try_call(fn() { return values.push() }).is_err())
+print(try_call(fn() { return values.insert(99, 4) }).is_err())
+print(try_call(fn() { return values.remove(99) }).is_err())
+print(values)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["true", "true", "true", "[1, 2, 3]"]);
+}
+
+#[test]
+fn array_push_rejects_excessive_value_depth_diff() {
+    assert_both_value_depth_errors(
+        r#"let deep = none
+repeat 64 { deep = [deep] }
+let values = []
+values.push(deep)"#,
+        4,
+    );
+}
+
+#[test]
 fn array_has() {
     assert_eq!(say("print([1, 2, 3].has(2))"), "true");
     assert_eq!(say("print([1, 2, 3].has(9))"), "false");
@@ -3010,7 +3099,7 @@ repeat 100 { s = s + s }"#,
 fn safety_memory_bomb_array_growth() {
     let (tw, vm) = run_err_loose(
         r#"let arr = []
-repeat 500 {
+repeat 1000 {
     arr.push("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 }"#,
         tight(),

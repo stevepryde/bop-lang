@@ -6,7 +6,7 @@ use crate::error::BopError;
 use crate::ops::{
     normalize_element_index, normalize_insert_index, normalize_slice_bound, numeric_index,
 };
-use crate::value::{Value, values_equal};
+use crate::value::{BopArray, Value, values_equal};
 
 fn expect_method_index(name: &str, value: &Value, line: u32) -> Result<i64, BopError> {
     numeric_index(value).ok_or_else(|| {
@@ -93,23 +93,7 @@ pub fn array_method(
         }
         "sort" => {
             let mut new_arr = arr.to_vec();
-            new_arr.sort_by(|a, b| match (a, b) {
-                (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                (Value::Number(x), Value::Number(y)) => {
-                    x.partial_cmp(y).unwrap_or(core::cmp::Ordering::Equal)
-                }
-                // Mixed numeric sort — widen through f64 so
-                // `[1, 2.5, 0]` sorts in the obvious numeric
-                // order.
-                (Value::Int(x), Value::Number(y)) => (*x as f64)
-                    .partial_cmp(y)
-                    .unwrap_or(core::cmp::Ordering::Equal),
-                (Value::Number(x), Value::Int(y)) => x
-                    .partial_cmp(&(*y as f64))
-                    .unwrap_or(core::cmp::Ordering::Equal),
-                (Value::Str(x), Value::Str(y)) => x.cmp(y),
-                _ => core::cmp::Ordering::Equal,
-            });
+            new_arr.sort_by(compare_array_values);
             Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
         }
         "join" => {
@@ -136,6 +120,85 @@ pub fn array_method(
             Ok((Value::try_new_array_iter(arr.to_vec(), line)?, None))
         }
         _ => Err(error(line, format!("Array doesn't have a .{}() method", method))),
+    }
+}
+
+/// Execute one of the built-in mutating array methods directly on its owned
+/// receiver. The engines use this only after proving the receiver is a bare
+/// identifier bound to an array; transient/dynamic receivers keep using
+/// [`array_method`] and its value-producing fallback.
+pub fn array_method_mut(
+    arr: &mut BopArray,
+    method: &str,
+    args: Vec<Value>,
+    line: u32,
+) -> Result<Value, BopError> {
+    match method {
+        "push" => {
+            if args.len() != 1 {
+                return Err(error(line, ".push() needs exactly 1 argument"));
+            }
+            let value = args.into_iter().next().expect("length checked");
+            arr.try_push(value, line)?;
+            Ok(Value::None)
+        }
+        "pop" => Ok(arr.pop().unwrap_or(Value::None)),
+        "insert" => {
+            if args.len() != 2 {
+                return Err(error(line, ".insert() needs 2 arguments: index and value"));
+            }
+            let mut args = args.into_iter();
+            let index = args.next().expect("length checked");
+            let value = args.next().expect("length checked");
+            let index = expect_method_index("insert", &index, line)?;
+            let actual = normalize_insert_index(index, arr.len()).ok_or_else(|| {
+                error(line, format!("Insert index {} is out of bounds", index))
+            })?;
+            arr.try_insert(actual, value, line)?;
+            Ok(Value::None)
+        }
+        "remove" => {
+            if args.len() != 1 {
+                return Err(error(line, ".remove() needs exactly 1 argument (index)"));
+            }
+            let index = args.into_iter().next().expect("length checked");
+            let index = expect_method_index("remove", &index, line)?;
+            let actual = normalize_element_index(index, arr.len()).ok_or_else(|| {
+                error(line, format!("Remove index {} is out of bounds", index))
+            })?;
+            Ok(arr.remove(actual))
+        }
+        "reverse" => {
+            arr.reverse();
+            Ok(Value::None)
+        }
+        "sort" => {
+            arr.sort_by(compare_array_values);
+            Ok(Value::None)
+        }
+        _ => Err(error(
+            line,
+            format!("Array doesn't have a .{}() method", method),
+        )),
+    }
+}
+
+fn compare_array_values(a: &Value, b: &Value) -> core::cmp::Ordering {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Number(x), Value::Number(y)) => {
+            x.partial_cmp(y).unwrap_or(core::cmp::Ordering::Equal)
+        }
+        // Mixed numeric sort — widen through f64 so
+        // `[1, 2.5, 0]` sorts in the obvious numeric order.
+        (Value::Int(x), Value::Number(y)) => (*x as f64)
+            .partial_cmp(y)
+            .unwrap_or(core::cmp::Ordering::Equal),
+        (Value::Number(x), Value::Int(y)) => x
+            .partial_cmp(&(*y as f64))
+            .unwrap_or(core::cmp::Ordering::Equal),
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        _ => core::cmp::Ordering::Equal,
     }
 }
 

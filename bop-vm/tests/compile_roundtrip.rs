@@ -282,18 +282,17 @@ print(double(5))"#,
 
 #[test]
 fn method_call_records_back_assign_for_ident() {
-    // `arr.push(1)` is mutating; the compiler records the back-assign
-    // target so the VM knows to write the mutated array back.
+    // `arr.push(1)` is mutating; the compiler records the live binding as an
+    // in-place target instead of deep-cloning it through `LoadVar`.
     assert_disasm(
         "let arr = []\narr.push(1)",
         r#"
         0: MakeArray 0
         1: DefineLocal arr
-        2: LoadVar arr
-        3: LoadConst 1
-        4: CallMethod .push/1 (back to arr)
-        5: Pop
-        6: Halt
+        2: LoadConst 1
+        3: CallMethodInPlace .push/1 (target arr)
+        4: Pop
+        5: Halt
         "#,
     );
 }

@@ -53,6 +53,9 @@
 //!   `assign_back_to` is set, the mutated object is written back to
 //!   that variable (matching the tree-walker's semantics for
 //!   `arr.push(x)` etc.).
+//! - `CallMethodInPlace { target, method, argc }` — mutating method on
+//!   a named receiver. Arguments are evaluated first, then an array binding is
+//!   mutated directly without deep-cloning its buffer.
 //!
 //! ## Functions
 //! - `DefineFn(idx)` — register the compiled function at `idx`.

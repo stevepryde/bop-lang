@@ -1417,7 +1417,7 @@ repeat 100 { s = s + s }"#,
     fn safety_memory_bomb_array_growth() {
         let msg = run_err_with_limits(
             r#"let arr = []
-repeat 500 {
+repeat 1000 {
     arr.push("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 }"#,
             tight_limits(),

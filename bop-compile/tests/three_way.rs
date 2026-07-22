@@ -483,6 +483,59 @@ print(last)
 print(a)"#,
     ),
     (
+        "array_mutation_value_semantics",
+        r#"let original = [1, 2]
+let alias = original
+original.push(3)
+print(original)
+print(alias)
+let nested = [1, 2]
+nested.push(nested.pop())
+print(nested)
+let transient_source = [7]
+(if true { transient_source } else { [] }).push(8)
+[9].push(10)
+print(transient_source)"#,
+    ),
+    (
+        "array_large_append_loop",
+        r#"let values = []
+let next = 0
+repeat 2048 {
+    values.push(next)
+    next += 1
+}
+print(values.len())
+print(values[0])
+print(values[-1])"#,
+    ),
+    (
+        "array_mutation_methods_and_returns",
+        r#"let values = [4, 1, 3]
+print(values.push(2))
+print(values.insert(1, 5))
+print(values.remove(2))
+print(values.pop())
+values.sort()
+values.reverse()
+print(values)"#,
+    ),
+    (
+        "array_mutation_errors_are_atomic",
+        r#"let values = [1, 2, 3]
+print(try_call(fn() { return values.push() }).is_err())
+print(try_call(fn() { return values.insert(99, 4) }).is_err())
+print(try_call(fn() { return values.remove(99) }).is_err())
+print(values)"#,
+    ),
+    (
+        "dynamic_struct_method_named_push",
+        r#"struct Accumulator { total }
+fn Accumulator.push(self, value) { return self.total + value }
+let accumulator = Accumulator { total: 7 }
+print(accumulator.push(5))"#,
+    ),
+    (
         "array_sort_reverse",
         r#"let a = [3, 1, 2]
 a.sort()
