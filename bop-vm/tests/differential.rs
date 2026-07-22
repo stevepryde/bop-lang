@@ -2091,6 +2091,124 @@ print(values)"#,
 }
 
 #[test]
+fn nested_array_mutation_errors_are_nonfatal_and_line_aware_diff() {
+    let outcome = run_both(
+        r#"struct Holder { items }
+let indexed = {"items": [1]}
+let fielded = Holder { items: [1, 2] }
+let index_result = try_call(fn() {
+    indexed["items"].push(2)
+})
+let field_result = try_call(fn() {
+    fielded.items.pop()
+})
+print(index_result.is_err())
+print(match index_result { Result::Err(e) => e.message, _ => "missing" })
+print(match index_result { Result::Err(e) => e.line, _ => -1 })
+print(field_result.is_err())
+print(match field_result { Result::Err(e) => e.message, _ => "missing" })
+print(match field_result { Result::Err(e) => e.line, _ => -1 })"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    let message = bop::error_messages::NESTED_MUTATION_ERROR_MESSAGE;
+    assert_eq!(
+        outcome.prints,
+        [
+            "true".to_string(),
+            message.to_string(),
+            "5".to_string(),
+            "true".to_string(),
+            message.to_string(),
+            "8".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn every_array_mutator_rejects_nested_places_diff() {
+    for call in [
+        "push(3)",
+        "pop()",
+        "insert(0, 3)",
+        "remove(0)",
+        "reverse()",
+        "sort()",
+    ] {
+        let source = format!("let d = {{\"items\": [2, 1]}}\nd[\"items\"].{}", call);
+        assert_eq!(
+            run_err(&source),
+            bop::error_messages::NESTED_MUTATION_ERROR_MESSAGE,
+            "call: {}",
+            call
+        );
+    }
+}
+
+#[test]
+fn nested_array_mutation_direct_errors_include_hint_and_grouped_receivers_diff() {
+    let cases = [
+        (r#"let d = {"items": [1]}
+d["items"].push(2)"#, 2),
+        (r#"struct Holder { items }
+let holder = Holder { items: [1] }
+holder.items.pop()"#, 3),
+        (r#"let d = {"items": [1]}
+(d["items"]).push(2)"#, 2),
+        (r#"struct Holder { items }
+let holder = Holder { items: [1] }
+(holder.items).pop()"#, 3),
+    ];
+
+    for (source, expected_line) in cases {
+        for engine in ["tree-walker", "bytecode vm"] {
+            let mut host = RecordHost::new();
+            let result = if engine == "tree-walker" {
+                bop::run(source, &mut host, &standard())
+            } else {
+                bop_vm::run(source, &mut host, &standard())
+            };
+            assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+            let err = result.unwrap_err();
+            assert_eq!(
+                err.message,
+                bop::error_messages::NESTED_MUTATION_ERROR_MESSAGE,
+                "{} message",
+                engine
+            );
+            assert_eq!(
+                err.friendly_hint.as_deref(),
+                Some(bop::error_messages::NESTED_MUTATION_HINT),
+                "{} hint",
+                engine
+            );
+            assert_eq!(err.line, Some(expected_line), "{} line", engine);
+            assert!(!err.is_fatal, "{} returned a fatal error", engine);
+        }
+    }
+}
+
+#[test]
+fn true_temporaries_and_same_named_user_methods_remain_legal_diff() {
+    let outcome = run_both(
+        r#"fn make_array() { return [7] }
+print([1].push(2))
+print(make_array().pop())
+print((if true { [3, 1] } else { [2] }).sort())
+struct Gadget { n }
+fn Gadget.push(self, amount) { return self.n + amount }
+struct Holder { item }
+let holder = Holder { item: Gadget { n: 10 } }
+let indexed = {"item": Gadget { n: 20 }}
+print(holder.item.push(2))
+print(indexed["item"].push(3))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["none", "7", "none", "12", "23"]);
+}
+
+#[test]
 fn numeric_indices_truncate_toward_zero_diff() {
     let outcome = run_both(
         r#"let values = [10, 20, 30]

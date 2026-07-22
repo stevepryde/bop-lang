@@ -569,6 +569,46 @@ print(try_call(fn() { values[-4] = 0 }).is_err())
 print(values)"#,
     ),
     (
+        "nested_array_mutation_is_catchable",
+        r#"struct Holder { items }
+let indexed = {"items": [1]}
+let fielded = Holder { items: [1, 2] }
+let index_result = try_call(fn() {
+    indexed["items"].push(2)
+})
+let field_result = try_call(fn() {
+    fielded.items.pop()
+})
+print(match index_result { Result::Err(e) => e.message, _ => "missing" })
+print(match index_result { Result::Err(e) => e.line, _ => -1 })
+print(match field_result { Result::Err(e) => e.message, _ => "missing" })
+print(match field_result { Result::Err(e) => e.line, _ => -1 })"#,
+    ),
+    (
+        "nested_array_mutation_index_error",
+        r#"let indexed = {"items": [1]}
+indexed["items"].push(2)"#,
+    ),
+    (
+        "nested_array_mutation_field_error",
+        r#"struct Holder { items }
+let fielded = Holder { items: [1, 2] }
+fielded.items.pop()"#,
+    ),
+    (
+        "temporary_array_mutation_and_dynamic_method_fallback",
+        r#"fn make_array() { return [7] }
+print([1].push(2))
+print(make_array().pop())
+struct Gadget { n }
+fn Gadget.push(self, amount) { return self.n + amount }
+struct Wrapper { item }
+let wrapper = Wrapper { item: Gadget { n: 10 } }
+let dynamic = {"item": Gadget { n: 20 }}
+print(wrapper.item.push(2))
+print(dynamic["item"].push(3))"#,
+    ),
+    (
         "signed_index_i64_extremes",
         r#"let min = -9223372036854775807 - 1
 let max = 9223372036854775807

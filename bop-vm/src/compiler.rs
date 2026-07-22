@@ -1033,6 +1033,10 @@ impl Compiler {
                     }
                     _ => None,
                 };
+                let nested_place = matches!(
+                    &object.kind,
+                    ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
+                );
                 self.compile_expr(object)?;
                 for arg in args {
                     self.compile_expr(arg)?;
@@ -1043,6 +1047,7 @@ impl Compiler {
                         method: method_idx,
                         argc: args.len() as u32,
                         assign_back_to,
+                        nested_place,
                     },
                     line,
                 );

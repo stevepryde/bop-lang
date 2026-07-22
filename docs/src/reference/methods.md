@@ -99,6 +99,14 @@ See [Strings](../data/strings.md) for worked examples.
 
 See [Arrays](../data/arrays.md) for worked examples.
 
+Mutating methods write back when the receiver is a variable (`items.push(x)`).
+Calling one on a genuine temporary, such as `[1].push(2)` or
+`make_items().pop()`, is legal; the temporary is mutated and then discarded.
+An index or field read is not yet a write-back place, so
+`dict["items"].push(x)` and `holder.items.pop()` raise a runtime error instead
+of silently losing the mutation. Assign the nested array to a variable first,
+then explicitly store it back when needed.
+
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `arr.len()` | int | Number of elements. |

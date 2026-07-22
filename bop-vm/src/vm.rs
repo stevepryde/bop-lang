@@ -1040,8 +1040,15 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 method,
                 argc,
                 assign_back_to,
+                nested_place,
             } => {
-                return self.call_method(method, argc as usize, assign_back_to, line);
+                return self.call_method(
+                    method,
+                    argc as usize,
+                    assign_back_to,
+                    nested_place,
+                    line,
+                );
             }
 
             // ─── Functions ────────────────────────────────────────
@@ -1604,6 +1611,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         method_idx: NameIdx,
         argc: usize,
         assign_back_to: Option<crate::chunk::AssignBack>,
+        nested_place: bool,
         line: u32,
     ) -> Result<Next, BopError> {
         let method = self.current_chunk().name(method_idx).to_string();
@@ -1709,6 +1717,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 let _ = assign_back_to;
                 return Ok(Next::Continue);
             }
+        }
+
+        if nested_place {
+            methods::reject_nested_array_mutation(&obj, &method, line)?;
         }
 
         // `type` / `to_str` / `inspect` work on every value —

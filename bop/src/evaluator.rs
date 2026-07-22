@@ -2039,6 +2039,20 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 }
 
+                // Index and field reads currently produce values,
+                // not write-back places. Reject only built-in array
+                // mutations on those syntactic receiver forms so
+                // they cannot silently mutate-and-discard. Genuine
+                // temporaries remain legal, and user methods above
+                // retain precedence even when named `push`, `pop`,
+                // and so on.
+                if matches!(
+                    &object.kind,
+                    ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
+                ) {
+                    methods::reject_nested_array_mutation(&obj_val, method, expr.line)?;
+                }
+
                 // Callable-taking Result methods — `r.map(f)`,
                 // `r.map_err(f)`, `r.and_then(f)`. These need the
                 // evaluator's call primitive to invoke `f`, which

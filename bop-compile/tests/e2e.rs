@@ -162,6 +162,63 @@ fn run_aot(code: &str, test_name: &str) -> String {
     run.stdout
 }
 
+fn assert_aot_nested_mutation_error(code: &str, test_name: &str, expected_line: u32) {
+    let mut rust_src = transpile(
+        code,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            ..Options::default()
+        },
+    )
+    .expect("transpile");
+    rust_src.push_str(&format!(
+        r#"
+struct ErrorHost;
+impl ::bop::BopHost for ErrorHost {{
+    fn call(
+        &mut self,
+        _name: &str,
+        _args: &[::bop::Value],
+        _line: u32,
+    ) -> Option<Result<::bop::Value, ::bop::BopError>> {{
+        None
+    }}
+}}
+
+fn main() {{
+    let mut host = ErrorHost;
+    let err = run(&mut host).expect_err("nested mutation should fail");
+    assert_eq!(err.message, ::bop::error_messages::NESTED_MUTATION_ERROR_MESSAGE);
+    assert_eq!(
+        err.friendly_hint.as_deref(),
+        Some(::bop::error_messages::NESTED_MUTATION_HINT),
+    );
+    assert_eq!(err.line, Some({expected_line}));
+    assert!(!err.is_fatal);
+}}
+"#,
+    ));
+    let dir = write_scratch_project(test_name, &rust_src);
+    let output = Command::new("cargo")
+        .arg("run")
+        .arg("--quiet")
+        .arg("--release")
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run cargo");
+    assert!(
+        output.status.success(),
+        "AOT diagnostic assertion failed for {}:\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- generated ---\n{}",
+        test_name,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        rust_src,
+    );
+}
+
 fn assert_aot_matches(test_name: &str, code: &str) {
     let expected = walker_output(code);
     let actual = run_aot(code, test_name);
@@ -357,6 +414,65 @@ print(unchanged)"#,
             "true\n",
             "[1, 2, 3]"
         )
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_nested_array_mutation_receiver_contract() {
+    let output = run_aot(
+        r#"struct Holder { items }
+let indexed = {"items": [1]}
+let fielded = Holder { items: [1, 2] }
+let index_result = try_call(fn() {
+    indexed["items"].push(2)
+})
+let field_result = try_call(fn() {
+    fielded.items.pop()
+})
+print(index_result.is_err())
+print(match index_result { Result::Err(e) => e.message, _ => "missing" })
+print(match index_result { Result::Err(e) => e.line, _ => -1 })
+print(field_result.is_err())
+print(match field_result { Result::Err(e) => e.message, _ => "missing" })
+print(match field_result { Result::Err(e) => e.line, _ => -1 })
+fn make_array() { return [7] }
+print([1].push(2))
+print(make_array().pop())
+struct Gadget { n }
+fn Gadget.push(self, amount) { return self.n + amount }
+struct Wrapper { item }
+let wrapper = Wrapper { item: Gadget { n: 10 } }
+let dynamic = {"item": Gadget { n: 20 }}
+print(wrapper.item.push(2))
+print(dynamic["item"].push(3))"#,
+        "nested_array_mutation_receiver_contract",
+    );
+    let message = bop::error_messages::NESTED_MUTATION_ERROR_MESSAGE;
+    assert_eq!(
+        output,
+        format!(
+            "true\n{}\n5\ntrue\n{}\n8\nnone\n7\n12\n23",
+            message, message
+        )
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_nested_array_mutation_diagnostic_and_grouped_receivers() {
+    assert_aot_nested_mutation_error(
+        r#"let indexed = {"items": [1]}
+(indexed["items"]).push(2)"#,
+        "nested_array_mutation_grouped_index_diagnostic",
+        2,
+    );
+    assert_aot_nested_mutation_error(
+        r#"struct Holder { items }
+let fielded = Holder { items: [1] }
+(fielded.items).pop()"#,
+        "nested_array_mutation_grouped_field_diagnostic",
+        3,
     );
 }
 
