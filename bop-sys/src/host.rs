@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bop::{BopError, BopHost, Value};
 
@@ -12,6 +12,42 @@ pub struct StandardHost {
 
 /// Short name for the standard host.
 pub use StandardHost as StdHost;
+
+/// Resolve one dot-separated module name beneath a filesystem root.
+///
+/// This is the filesystem-only half of [`BopHost::resolve_module`],
+/// exposed so compile-time resolvers can share the same validation, path
+/// mapping, and I/O semantics as runtime resolution. Callers that bundle the
+/// Bop standard library should check [`bop::stdlib::resolve`] first.
+///
+/// A missing module returns `None`. Every other read failure is returned as a
+/// real [`BopError`], so permission, directory, and device errors cannot be
+/// mistaken for "module not found".
+pub fn resolve_module_from_root(
+    root: &Path,
+    name: &str,
+) -> Option<Result<String, BopError>> {
+    if !is_valid_module_name(name) {
+        return Some(Err(crate::error::io_error(
+            &format!("Invalid module name `{}`", name),
+            None,
+        )));
+    }
+
+    let mut path = root.to_path_buf();
+    for segment in name.split('.') {
+        path.push(segment);
+    }
+    path.set_extension("bop");
+    match std::fs::read_to_string(&path) {
+        Ok(source) => Some(Ok(source)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => Some(Err(crate::error::io_error(
+            &format!("couldn't read module `{}`: {}", name, err),
+            None,
+        ))),
+    }
+}
 
 impl StandardHost {
     pub fn new() -> Self {
@@ -71,12 +107,6 @@ impl BopHost for StandardHost {
                 return Some(Ok(src.to_string()));
             }
         }
-        if !is_valid_module_name(name) {
-            return Some(Err(crate::error::io_error(
-                &format!("Invalid module name `{}`", name),
-                None,
-            )));
-        }
         let root = match self.module_root.clone() {
             Some(r) => r,
             None => match std::env::current_dir() {
@@ -89,19 +119,7 @@ impl BopHost for StandardHost {
                 }
             },
         };
-        let mut path = root;
-        for segment in name.split('.') {
-            path.push(segment);
-        }
-        path.set_extension("bop");
-        match std::fs::read_to_string(&path) {
-            Ok(source) => Some(Ok(source)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-            Err(err) => Some(Err(crate::error::io_error(
-                &format!("couldn't read module `{}`: {}", name, err),
-                None,
-            ))),
-        }
+        resolve_module_from_root(&root, name)
     }
 }
 
@@ -242,6 +260,28 @@ mod tests {
 
         let mut host = StandardHost::new().with_module_root(&dir);
         assert!(host.resolve_module("does_not_exist").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_module_surfaces_non_not_found_read_errors() {
+        let dir = std::env::temp_dir().join(format!(
+            "bop_sys_resolve_error_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("broken.bop")).unwrap();
+
+        let mut host = StandardHost::new().with_module_root(&dir);
+        let error = host
+            .resolve_module("broken")
+            .expect("non-NotFound failures must be handled")
+            .expect_err("reading a directory as module text must fail");
+        assert!(
+            error.message.contains("couldn't read module `broken`"),
+            "unexpected error: {}",
+            error.message
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
