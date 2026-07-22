@@ -22,25 +22,44 @@ use crate::naming;
 // generate, and makes errors read like the compiler wants to
 // help rather than just complain.
 
-fn ident_shape_error(site: &str, expected: &str, actual: &str, line: u32) -> BopError {
+fn ident_shape_error_at(
+    site: &str,
+    expected: &str,
+    actual: &str,
+    line: u32,
+    column: Option<core::num::NonZeroU32>,
+) -> BopError {
     let actual_label = naming::kind_label(naming::classify(actual));
     let message = format!(
         "{} `{}` looks like a {}, but a {} name is required here",
         site, actual, actual_label, expected
     );
-    let mut err = BopError::runtime(message, line);
+    let mut err = BopError::runtime_at(message, line, column);
     err.friendly_hint = Some(naming::hint_for(expected, actual));
     err
+}
+
+fn ident_shape_error(site: &str, expected: &str, actual: &str, line: u32) -> BopError {
+    ident_shape_error_at(site, expected, actual, line, None)
 }
 
 /// Require a lowercase-first (or leading-underscore) identifier
 /// at a `let` / `fn` / param / field / method / alias /
 /// match-binding / `for-in` / `use` alias site.
 fn ensure_value_name(name: &str, site: &str, line: u32) -> Result<(), BopError> {
+    ensure_value_name_at(name, site, line, None)
+}
+
+fn ensure_value_name_at(
+    name: &str,
+    site: &str,
+    line: u32,
+    column: Option<core::num::NonZeroU32>,
+) -> Result<(), BopError> {
     if naming::is_value_name(name) {
         Ok(())
     } else {
-        Err(ident_shape_error(site, "value", name, line))
+        Err(ident_shape_error_at(site, "value", name, line, column))
     }
 }
 
@@ -744,6 +763,32 @@ impl Parser {
         }
     }
 
+    /// Parse a function-style parameter list and enforce the same identifier
+    /// contract at every declaration form that owns one. Keeping this in one
+    /// place prevents anonymous functions from drifting away from named
+    /// functions and methods again.
+    fn parse_parameters(&mut self, site: &str) -> Result<Vec<String>, BopError> {
+        self.expect(&Token::LParen)?;
+
+        let mut params = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            loop {
+                let (_, column) = self.peek_pos();
+                let (param, line) = self.expect_ident()?;
+                ensure_value_name_at(&param, site, line, column)?;
+                params.push(param);
+
+                if !matches!(self.peek(), Token::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+
+        self.expect(&Token::RParen)?;
+        Ok(params)
+    }
+
     fn skip_semicolons(&mut self) {
         while matches!(self.peek(), Token::Semicolon) {
             self.advance();
@@ -1133,20 +1178,7 @@ impl Parser {
             self.advance();
             let (method_name, method_line) = self.expect_ident()?;
             ensure_value_name(&method_name, "method name", method_line)?;
-            self.expect(&Token::LParen)?;
-            let mut params = Vec::new();
-            if !matches!(self.peek(), Token::RParen) {
-                let (p, p_line) = self.expect_ident()?;
-                ensure_value_name(&p, "method parameter", p_line)?;
-                params.push(p);
-                while matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                    let (p, p_line) = self.expect_ident()?;
-                    ensure_value_name(&p, "method parameter", p_line)?;
-                    params.push(p);
-                }
-            }
-            self.expect(&Token::RParen)?;
+            let params = self.parse_parameters("method parameter")?;
             let body = self.parse_block()?;
             return Ok(Stmt {
                 kind: StmtKind::MethodDecl {
@@ -1161,21 +1193,7 @@ impl Parser {
         }
 
         ensure_value_name(&name, "`fn` declaration", name_line)?;
-        self.expect(&Token::LParen)?;
-
-        let mut params = Vec::new();
-        if !matches!(self.peek(), Token::RParen) {
-            let (p, p_line) = self.expect_ident()?;
-            ensure_value_name(&p, "function parameter", p_line)?;
-            params.push(p);
-            while matches!(self.peek(), Token::Comma) {
-                self.advance();
-                let (p, p_line) = self.expect_ident()?;
-                ensure_value_name(&p, "function parameter", p_line)?;
-                params.push(p);
-            }
-        }
-        self.expect(&Token::RParen)?;
+        let params = self.parse_parameters("function parameter")?;
         let body = self.parse_block()?;
         Ok(Stmt {
             kind: StmtKind::FnDecl { name, params, body },
@@ -2283,19 +2301,7 @@ impl Parser {
     fn parse_lambda(&mut self) -> Result<Expr, BopError> {
         let (line, column) = self.peek_pos();
         self.advance(); // consume 'fn'
-        self.expect(&Token::LParen)?;
-
-        let mut params = Vec::new();
-        if !matches!(self.peek(), Token::RParen) {
-            let (p, _) = self.expect_ident()?;
-            params.push(p);
-            while matches!(self.peek(), Token::Comma) {
-                self.advance();
-                let (p, _) = self.expect_ident()?;
-                params.push(p);
-            }
-        }
-        self.expect(&Token::RParen)?;
+        let params = self.parse_parameters("function parameter")?;
         let body = self.parse_block()?;
         Ok(Expr {
             kind: ExprKind::Lambda { params, body },

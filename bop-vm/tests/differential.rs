@@ -2702,6 +2702,25 @@ print(double(5))"#),
 }
 
 #[test]
+fn lambda_parameter_binding_semantics_match_named_functions() {
+    let outcome = run_both(
+        r#"fn named(value, value) { return value }
+struct Holder { n }
+fn Holder.pick(self, value, value) { return self.n + value }
+fn make(value) { return fn(value) { return value } }
+let outer = 40
+let closure = fn(_ignored, value, value) { return outer + value }
+print(closure(1, 2, 3))
+print(named(4, 5))
+print(Holder { n: 6 }.pick(7, 8))
+print(make(9)(10))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "outcome: {outcome:?}");
+    assert_eq!(outcome.prints, ["43", "5", "14", "10"]);
+}
+
+#[test]
 fn closure_captures_value() {
     assert_eq!(
         say(r#"let n = 5

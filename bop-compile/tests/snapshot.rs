@@ -247,11 +247,27 @@ fn fn_decl_emits_bop_prefixed_fn() {
     contains_all(
         &out,
         &[
-            "fn __bop_user_fn_n646f75626c65(ctx: &mut Ctx<'_>, mut __bop_user_value_78: ::bop::value::Value)",
+            "fn __bop_user_fn_n646f75626c65(ctx: &mut Ctx<'_>, __bop_param_0: ::bop::value::Value)",
+            "let mut __bop_user_value_78: ::bop::value::Value = __bop_param_0;",
             "Result<::bop::value::Value, ::bop::error::BopError>",
             "__bop_user_fn_n646f75626c65(ctx,",
         ],
     );
+}
+
+#[test]
+fn duplicate_parameters_rebind_in_order_without_duplicate_rust_arguments() {
+    let out = compile("fn pick(value, value) { return value }");
+    contains_all(
+        &out,
+        &[
+            "__bop_param_0: ::bop::value::Value",
+            "__bop_param_1: ::bop::value::Value",
+            "let mut __bop_user_value_76616c7565: ::bop::value::Value = __bop_param_0;",
+            "let mut __bop_user_value_76616c7565: ::bop::value::Value = __bop_param_1;",
+        ],
+    );
+    assert!(!out.contains("mut __bop_user_value_76616c7565: ::bop::value::Value,"));
 }
 
 #[test]

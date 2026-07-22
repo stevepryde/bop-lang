@@ -3837,6 +3837,65 @@ print(leak())"#,
     }
 
     #[test]
+    fn all_function_forms_use_canonical_parameter_name_diagnostics() {
+        for (source, site, name, line, column) in [
+            ("fn run(BAD) { none }", "function parameter", "BAD", 1, 8),
+            (
+                "fn Thing.run(BAD) { none }",
+                "method parameter",
+                "BAD",
+                1,
+                14,
+            ),
+            (
+                "let f = fn(BAD) { none }",
+                "function parameter",
+                "BAD",
+                1,
+                12,
+            ),
+            (
+                "let f = fn(\n  good,\n  AlsoBad\n) { return good }",
+                "function parameter",
+                "AlsoBad",
+                3,
+                3,
+            ),
+        ] {
+            let error = parse_err_full(source);
+            assert_eq!(error.line, Some(line), "source: {source}");
+            assert_eq!(error.column, Some(column), "source: {source}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "{site} `{name}` looks like a {}, but a value name is required here",
+                    if name == "BAD" { "constant" } else { "type" }
+                ),
+                "source: {source}"
+            );
+            assert!(error.friendly_hint.is_some(), "source: {source}");
+        }
+
+        let reserved = parse_err_full("let f = fn(if) { none }");
+        assert_eq!(reserved.line, Some(1));
+        assert_eq!(reserved.column, Some(12));
+        assert_eq!(reserved.message, "`if` is a reserved word in Bop");
+        assert!(reserved.friendly_hint.is_some());
+    }
+
+    #[test]
+    fn valid_lambda_params_keep_function_binding_semantics() {
+        let source = r#"fn make(value) { return fn(value) { return value } }
+let outer = 40
+let pick = fn(_ignored, value, value) { return outer + value }
+print(pick(1, 2, 3))
+print(make(4)(5))"#;
+        let mut host = TestHost::new();
+        run(source, &mut host, &test_limits()).unwrap();
+        assert_eq!(host.prints.borrow().as_slice(), ["43", "5"]);
+    }
+
+    #[test]
     fn for_loop_var_must_start_lowercase() {
         let err = run_err("for I in range(3) { print(I) }");
         assert!(err.to_lowercase().contains("value"), "got: {err}");
