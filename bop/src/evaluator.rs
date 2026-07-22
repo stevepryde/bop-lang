@@ -313,8 +313,7 @@ impl FreeVariableCollector {
             ExprKind::Match { scrutinee, arms } => {
                 self.visit_expr(scrutinee);
                 for arm in arms {
-                    let mut bindings = alloc_import::collections::BTreeSet::new();
-                    collect_pattern_binding_names(&arm.pattern, &mut bindings);
+                    let bindings = arm.pattern.binding_names();
                     self.scopes.push(bindings);
                     if let Some(guard) = &arm.guard {
                         self.visit_expr(guard);
@@ -324,49 +323,6 @@ impl FreeVariableCollector {
                 }
             }
         }
-    }
-}
-
-fn collect_pattern_binding_names(
-    pattern: &Pattern,
-    names: &mut alloc_import::collections::BTreeSet<String>,
-) {
-    match pattern {
-        Pattern::Binding(name) => {
-            names.insert(name.clone());
-        }
-        Pattern::EnumVariant { payload, .. } => match payload {
-            VariantPatternPayload::Unit => {}
-            VariantPatternPayload::Tuple(patterns) => {
-                for pattern in patterns {
-                    collect_pattern_binding_names(pattern, names);
-                }
-            }
-            VariantPatternPayload::Struct { fields, .. } => {
-                for (_, pattern) in fields {
-                    collect_pattern_binding_names(pattern, names);
-                }
-            }
-        },
-        Pattern::Struct { fields, .. } => {
-            for (_, pattern) in fields {
-                collect_pattern_binding_names(pattern, names);
-            }
-        }
-        Pattern::Array { elements, rest } => {
-            for pattern in elements {
-                collect_pattern_binding_names(pattern, names);
-            }
-            if let Some(ArrayRest::Named(name)) = rest {
-                names.insert(name.clone());
-            }
-        }
-        Pattern::Or(alternatives) => {
-            for pattern in alternatives {
-                collect_pattern_binding_names(pattern, names);
-            }
-        }
-        Pattern::Literal(_) | Pattern::Wildcard => {}
     }
 }
 

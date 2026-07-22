@@ -1019,6 +1019,31 @@ print(match x {
 })"#,
     ),
     (
+        "match_or_pattern_complex_bindings",
+        r#"struct Node { left, right }
+enum Boxed { Pair(left, right), Record { first, second } }
+let values = [
+    Node { left: 1, right: 2 },
+    Boxed::Pair(3, 4),
+    Boxed::Record { first: 5, second: 6 },
+]
+for value in values {
+    print(match value {
+        Node { left, right } | Boxed::Pair(right, left) | Boxed::Record { first: left, second: right } => left * 10 + right,
+    })
+}
+enum Packet { Values(items, marker) }
+let packets = [Packet::Values([1, 2, 3], 9), Packet::Values([7], 8)]
+for packet in packets {
+    print(match packet {
+        Packet::Values([_, head, ..tail] | [head, ..tail], marker) => head * 100 + marker * 10 + tail.len(),
+    })
+}
+for items in [[1, 2], [3]] {
+    print(match items { [x, x] | [x] => x })
+}"#,
+    ),
+    (
         "match_enum_unit",
         r#"enum Light { Red, Green }
 let l = Light::Green

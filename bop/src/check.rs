@@ -599,6 +599,26 @@ let _ = match 1 {
     }
 
     #[test]
+    fn exhaustive_or_pattern_allows_reordered_bindings() {
+        let src = r#"enum Pair { Forward(left, right), Reverse(left, right) }
+fn sum(pair) {
+    return match pair {
+        Pair::Forward(left, right) | Pair::Reverse(right, left) => left + right,
+    }
+}"#;
+        assert!(warnings(src).is_empty());
+    }
+
+    #[test]
+    fn inconsistent_or_pattern_is_rejected_before_advisory_checks() {
+        let error = parse("let value = match 1 { 1 | y => y, _ => 0 }")
+            .expect_err("the parser must keep an invalid pattern out of the checker");
+        assert!(error.message.contains("alternative 2"));
+        assert_eq!(error.line, Some(1));
+        assert!(error.friendly_hint.is_some());
+    }
+
+    #[test]
     fn warning_carries_match_line() {
         let src = r#"enum E { A, B }
 let _ = match E::A {

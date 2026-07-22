@@ -1279,6 +1279,54 @@ print(r)"#),
 }
 
 #[test]
+fn inconsistent_or_pattern_bindings_are_rejected_before_execution_diff() {
+    for source in [
+        "let x = 1\nlet r = match x { 1 | y => y, _ => 0 }\nprint(r)",
+        "let x = 5\nlet r = match x { 1 | y => y, _ => 0 }\nprint(r)",
+    ] {
+        assert_eq!(
+            run_err(source),
+            "`or`-pattern alternative 2 binds `y`, but alternative 1 binds no names"
+        );
+    }
+}
+
+#[test]
+fn complex_or_pattern_bindings_are_consistent_across_engines_diff() {
+    let outcome = run_both(
+        r#"struct Node { left, right }
+enum Boxed { Pair(left, right), Record { first, second } }
+let values = [
+    Node { left: 1, right: 2 },
+    Boxed::Pair(3, 4),
+    Boxed::Record { first: 5, second: 6 },
+]
+for value in values {
+    let encoded = match value {
+        Node { left, right } | Boxed::Pair(right, left) | Boxed::Record { first: left, second: right } => left * 10 + right,
+    }
+    print(encoded)
+}
+
+enum Packet { Values(items, marker) }
+let packets = [Packet::Values([1, 2, 3], 9), Packet::Values([7], 8)]
+for packet in packets {
+    let encoded = match packet {
+        Packet::Values([_, head, ..tail] | [head, ..tail], marker) => head * 100 + marker * 10 + tail.len(),
+    }
+    print(encoded)
+}
+
+for items in [[1, 2], [3]] {
+    print(match items { [x, x] | [x] => x })
+}"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["12", "43", "56", "291", "780", "2", "3"]);
+}
+
+#[test]
 fn match_enum_unit_variant_diff() {
     assert_eq!(
         say(r#"enum Light { Red, Green }

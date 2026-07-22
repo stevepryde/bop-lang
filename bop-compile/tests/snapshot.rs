@@ -16,6 +16,22 @@ fn compile(code: &str) -> String {
     transpile(code, &Options::default()).expect("transpile")
 }
 
+#[test]
+fn inconsistent_or_pattern_is_rejected_before_aot_emission() {
+    let error = transpile(
+        "let value = match 1 { 1 | y => y, _ => 0 }",
+        &Options::default(),
+    )
+    .expect_err("invalid pattern must fail before Rust emission");
+
+    assert_eq!(
+        error.message,
+        "`or`-pattern alternative 2 binds `y`, but alternative 1 binds no names"
+    );
+    assert_eq!(error.line, Some(1));
+    assert!(error.friendly_hint.is_some());
+}
+
 fn contains_all(haystack: &str, needles: &[&str]) {
     for n in needles {
         assert!(

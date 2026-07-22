@@ -1,6 +1,11 @@
 #[cfg(feature = "no_std")]
 use alloc::{boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
 
+#[cfg(feature = "no_std")]
+use alloc::collections::BTreeSet;
+#[cfg(not(feature = "no_std"))]
+use std::collections::BTreeSet;
+
 use crate::error::BopError;
 use crate::lexer::{SpannedToken, StringPart, Token};
 use crate::naming;
@@ -55,6 +60,60 @@ fn ensure_constant_name(name: &str, site: &str, line: u32) -> Result<(), BopErro
     } else {
         Err(ident_shape_error(site, "constant", name, line))
     }
+}
+
+fn format_pattern_binding_names(names: &BTreeSet<String>) -> String {
+    if names.is_empty() {
+        String::from("no names")
+    } else {
+        names
+            .iter()
+            .map(|name| format!("`{}`", name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn inconsistent_or_pattern_bindings_error(
+    expected: &BTreeSet<String>,
+    actual: &BTreeSet<String>,
+    alternative: usize,
+    line: u32,
+    column: Option<core::num::NonZeroU32>,
+) -> BopError {
+    let mut error = BopError::runtime_at(
+        format!(
+            "`or`-pattern alternative {} binds {}, but alternative 1 binds {}",
+            alternative,
+            format_pattern_binding_names(actual),
+            format_pattern_binding_names(expected),
+        ),
+        line,
+        column,
+    );
+
+    let missing: BTreeSet<String> = expected.difference(actual).cloned().collect();
+    let unexpected: BTreeSet<String> = actual.difference(expected).cloned().collect();
+    let mut differences = Vec::new();
+    if !missing.is_empty() {
+        differences.push(format!(
+            "missing from alternative {}: {}",
+            alternative,
+            format_pattern_binding_names(&missing),
+        ));
+    }
+    if !unexpected.is_empty() {
+        differences.push(format!(
+            "only in alternative {}: {}",
+            alternative,
+            format_pattern_binding_names(&unexpected),
+        ));
+    }
+    error.friendly_hint = Some(format!(
+        "make every `|` alternative bind the same names; {}",
+        differences.join("; "),
+    ));
+    error
 }
 
 // ─── AST ───────────────────────────────────────────────────────────────────
@@ -247,6 +306,57 @@ pub enum Pattern {
     /// `p1 | p2 | p3` — match if any alternative matches. Every
     /// alternative must introduce the same set of bindings.
     Or(Vec<Pattern>),
+}
+
+impl Pattern {
+    /// Return every value binding introduced by this pattern in stable name
+    /// order. Duplicate occurrences collapse to one name; valid or-patterns
+    /// therefore expose the same set regardless of alternative order or shape.
+    pub fn binding_names(&self) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        self.collect_binding_names(&mut names);
+        names
+    }
+
+    fn collect_binding_names(&self, names: &mut BTreeSet<String>) {
+        match self {
+            Self::Binding(name) => {
+                names.insert(name.clone());
+            }
+            Self::EnumVariant { payload, .. } => match payload {
+                VariantPatternPayload::Unit => {}
+                VariantPatternPayload::Tuple(patterns) => {
+                    for pattern in patterns {
+                        pattern.collect_binding_names(names);
+                    }
+                }
+                VariantPatternPayload::Struct { fields, .. } => {
+                    for (_, pattern) in fields {
+                        pattern.collect_binding_names(names);
+                    }
+                }
+            },
+            Self::Struct { fields, .. } => {
+                for (_, pattern) in fields {
+                    pattern.collect_binding_names(names);
+                }
+            }
+            Self::Array { elements, rest } => {
+                for pattern in elements {
+                    pattern.collect_binding_names(names);
+                }
+                if let Some(ArrayRest::Named(name)) = rest {
+                    names.insert(name.clone());
+                }
+            }
+            Self::Or(alternatives) => {
+                for pattern in alternatives {
+                    pattern.collect_binding_names(names);
+                }
+            }
+            Self::Literal(_) | Self::Wildcard => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1800,10 +1910,23 @@ impl Parser {
         // tree flat in a single `Or` variant for ergonomic
         // matching later.
         if matches!(self.peek(), Token::Pipe) {
+            let expected_bindings = first.binding_names();
             let mut alts = vec![first];
             while matches!(self.peek(), Token::Pipe) {
                 self.advance();
-                alts.push(self.parse_pattern_single()?);
+                let (alternative_line, alternative_column) = self.peek_pos();
+                let alternative = self.parse_pattern_single()?;
+                let actual_bindings = alternative.binding_names();
+                if actual_bindings != expected_bindings {
+                    return Err(inconsistent_or_pattern_bindings_error(
+                        &expected_bindings,
+                        &actual_bindings,
+                        alts.len() + 1,
+                        alternative_line,
+                        alternative_column,
+                    ));
+                }
+                alts.push(alternative);
             }
             Ok(Pattern::Or(alts))
         } else {
@@ -2423,6 +2546,91 @@ mod struct_literal_context_tests {
                 .parse_expr()
                 .expect_err("the deliberately unclosed delimiter should fail");
             assert!(!parser.allow_struct_literal, "source: {source}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod or_pattern_binding_tests {
+    use super::*;
+
+    fn pattern(source: &str) -> Result<Pattern, BopError> {
+        let mut parser = Parser::new(crate::lexer::lex(source).expect("test pattern should lex"));
+        let pattern = parser.parse_pattern()?;
+        assert!(matches!(parser.peek(), Token::Eof), "source: {source}");
+        Ok(pattern)
+    }
+
+    #[test]
+    fn inconsistent_or_pattern_reports_offending_alternative_location_and_hint() {
+        let source = "match 1 {\n    1 | y => y,\n}";
+        let error = parse(crate::lexer::lex(source).expect("source should lex"))
+            .expect_err("inconsistent alternatives must fail during parsing");
+
+        assert_eq!(error.line, Some(2));
+        assert_eq!(error.column, Some(9));
+        assert_eq!(
+            error.message,
+            "`or`-pattern alternative 2 binds `y`, but alternative 1 binds no names"
+        );
+        assert_eq!(
+            error.friendly_hint.as_deref(),
+            Some(
+                "make every `|` alternative bind the same names; only in alternative 2: `y`"
+            )
+        );
+    }
+
+    #[test]
+    fn inconsistent_nested_pattern_bindings_are_deterministic() {
+        let cases = [
+            (
+                "[x, y] | [x, z]",
+                "missing from alternative 2: `y`; only in alternative 2: `z`",
+            ),
+            (
+                "Node { left: x, right: y, .. } | Node { left: x, .. }",
+                "missing from alternative 2: `y`",
+            ),
+            (
+                "Maybe::Some([x, ..tail]) | Maybe::Some([x, ..])",
+                "missing from alternative 2: `tail`",
+            ),
+        ];
+
+        for (source, expected_hint_tail) in cases {
+            let error = pattern(source).expect_err("binding sets should differ");
+            assert!(
+                error
+                    .friendly_hint
+                    .as_deref()
+                    .is_some_and(|hint| hint.ends_with(expected_hint_tail)),
+                "source: {source}; error: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reordered_relocated_and_duplicate_bindings_are_valid() {
+        let cases = [
+            ("[left, right, ..tail] | [right, left, ..tail]", &["left", "right", "tail"][..]),
+            ("Pair::Both(left, right) | Pair::Both(right, left)", &["left", "right"]),
+            (
+                "Node { left, right, .. } | Node { left: right, right: left, .. }",
+                &["left", "right"],
+            ),
+            (
+                "Maybe::Some { first: left, second: [right, ..tail], .. } | Maybe::Some { first: right, second: [left, ..tail], .. }",
+                &["left", "right", "tail"],
+            ),
+            ("[x, x] | [_, x]", &["x"]),
+        ];
+
+        for (source, expected) in cases {
+            let parsed = pattern(source).expect("matching binding sets should parse");
+            let binding_names = parsed.binding_names();
+            let names: Vec<&str> = binding_names.iter().map(String::as_str).collect();
+            assert_eq!(names, expected, "source: {source}");
         }
     }
 }
