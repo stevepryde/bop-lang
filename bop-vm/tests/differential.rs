@@ -3253,6 +3253,200 @@ print(aliased.bump(), calls.alias_matcher()(aliased))"#,
 }
 
 #[test]
+fn reexported_module_aliases_keep_surface_and_callable_context_diff() {
+    set_modules(&[
+        (
+            "dep",
+            r#"struct Point { value }
+enum Signal { Idle, Count(value), Named { value } }
+fn make(value) { return Point { value: value } }
+fn hidden() { return 99 }"#,
+        ),
+        ("wrapper", "use dep.{Point, Signal, make} as api"),
+        ("middle", "use wrapper"),
+        (
+            "top",
+            r#"use middle.{api}
+struct Runner { offset }
+fn Runner.run(self, value) { return api.make(value + self.offset) }
+fn build(value) {
+    let point = api.Point { value: value }
+    return match point { api.Point { value: found } => api.make(found + 1), _ => none }
+}
+fn matcher() {
+    return fn(value) {
+        return match value { api.Point { value: found } => found, _ => 0 }
+    }
+}"#,
+        ),
+    ]);
+    let outcome = run_both(
+        r#"use top
+fn root_build(value) { return api.Point { value: value } }
+let point = build(4)
+let runner = Runner { offset: 2 }
+let unit = api.Signal::Idle
+let tuple = api.Signal::Count(3)
+let named = api.Signal::Named { value: 5 }
+print(point.value, matcher()(point), runner.run(6).value, root_build(7).value)
+print(match unit { api.Signal::Idle => "idle", _ => "bad" })
+print(match tuple { api.Signal::Count(value) => value, _ => 0 })
+print(match named { api.Signal::Named { value } => value, _ => 0 })
+print(try_call(fn() { return api.hidden() }).is_err())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["5 5 8 7", "idle", "3", "5", "true"]);
+}
+
+#[test]
+fn reexported_module_aliases_obey_order_privacy_and_isolation_diff() {
+    set_modules(&[
+        ("a", "struct Point { a }\nfn make(value) { return Point { a: value } }"),
+        ("b", "struct Point { b }\nfn make(value) { return Point { b: value } }"),
+        ("wa", "use a as api\nfn make_a(value) { return api.make(value) }"),
+        ("wb", "use b as api\nfn make_b(value) { return api.make(value) }"),
+        ("private", "use a as _api"),
+        ("private_glob", "use private"),
+        ("private_selected", "use private.{_api}"),
+        ("values", "let api = 11"),
+        ("module_first", "use wa\nuse values"),
+        ("value_first", "use values\nuse wa"),
+        ("local_after", "use wa\nlet api = 12"),
+        ("local_before", "let api = 13\nuse wa"),
+        ("nested", "fn load() { use a as api; return api.make(1) }"),
+    ]);
+
+    let isolated = run_both(
+        "use wa.{make_a}\nuse wb.{make_b}\nprint(make_a(2).a, make_b(3).b)",
+        &standard(),
+    );
+    assert!(isolated.is_ok(), "unexpected error: {:?}", isolated.error);
+    assert_eq!(isolated.prints, ["2 3"]);
+
+    let selected = run_both(
+        "use private_selected.{_api}\nprint(_api.Point { a: 4 }.a)",
+        &standard(),
+    );
+    assert!(selected.is_ok(), "unexpected error: {:?}", selected.error);
+    assert_eq!(selected.prints, ["4"]);
+
+    for (module, expected) in [
+        ("module_first", "5"),
+        ("value_first", "11"),
+        ("local_after", "12"),
+        ("local_before", "13"),
+    ] {
+        let source = if module == "module_first" {
+            format!("use {module}\nprint(api.Point {{ a: 5 }}.a)")
+        } else {
+            format!("use {module}\nprint(api)")
+        };
+        let outcome = run_both(&source, &standard());
+        assert!(outcome.is_ok(), "{module}: {:?}", outcome.error);
+        assert_eq!(outcome.prints, [expected], "{module}");
+    }
+
+    for source in [
+        "use private_glob.{_api}",
+        "use nested.{api}",
+    ] {
+        let error = run_err(source);
+        assert!(error.contains("isn't exported"), "got: {error}");
+    }
+}
+
+#[test]
+fn reexported_module_aliases_follow_call_and_function_winners_diff() {
+    set_modules(&[
+        ("dep", "struct Point { value }"),
+        ("wrapper", "use dep as api"),
+        (
+            "timing",
+            r#"fn build() { return api.Point { value: 9 } }
+let before = try_call(build)
+use wrapper
+let after = try_call(build)"#,
+        ),
+        (
+            "alias_before_fn",
+            r#"use dep as api
+fn api() { return 99 }
+fn build() { return api.Point { value: 7 } }"#,
+        ),
+        (
+            "fn_before_alias",
+            r#"fn api() { return 99 }
+use dep as api"#,
+        ),
+    ]);
+
+    let timing = run_both(
+        "use timing\nprint(before.is_err(), after.is_ok(), after.unwrap().value)",
+        &standard(),
+    );
+    assert!(timing.is_ok(), "unexpected error: {:?}", timing.error);
+    assert_eq!(timing.prints, ["true true 9"]);
+
+    let winner = run_both(
+        "use alias_before_fn\nprint(build().value, api.Point { value: 8 }.value)",
+        &standard(),
+    );
+    assert!(winner.is_ok(), "unexpected error: {:?}", winner.error);
+    assert_eq!(winner.prints, ["7 8"]);
+
+    let error = run_err("use fn_before_alias");
+    assert!(error.contains("already bound"), "got: {error}");
+}
+
+#[test]
+fn reexported_module_aliases_track_copy_assignment_and_flat_fn_order_diff() {
+    set_modules(&[
+        ("a", "struct Point { value }"),
+        ("b", "struct Other { value }"),
+        ("wrapper", "use a as api"),
+        (
+            "copies",
+            r#"use a as api
+use b as other
+let copy = api
+api = other
+fn from_copy(value) { return copy.Point { value: value } }
+fn from_reassigned(value) { return api.Other { value: value } }"#,
+        ),
+        (
+            "flat_fn_first",
+            r#"fn api() { return 21 }
+use wrapper
+fn result() { return api() }"#,
+        ),
+        (
+            "flat_module_first",
+            r#"use wrapper
+fn api() { return 22 }
+fn result() { return api.Point { value: 23 } }"#,
+        ),
+        (
+            "module_fn_then_value",
+            "use a as api\nfn api() { return 24 }\nlet api = 25",
+        ),
+    ]);
+
+    let outcome = run_both(
+        r#"use copies.{from_copy, from_reassigned}
+use flat_fn_first.{result} as first
+use flat_module_first.{result} as second
+print(from_copy(1).value, from_reassigned(2).value)
+print(first.result(), second.result().value)
+use module_fn_then_value.{api} as final_value
+print(final_value.api)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1 2", "21 23", "25"]);
+}
+
+#[test]
 fn declaration_alias_mutable_places_require_an_overlay_diff() {
     set_modules(&[("types", "struct Point { value }")]);
     let outcome = run_both(

@@ -416,6 +416,9 @@ struct ModuleArtifacts {
     methods: Vec<ModuleMethodDef>,
     /// Public type names exposed by this module and their declaration origins.
     type_exports: BTreeMap<String, String>,
+    /// Exported values that remain module namespaces after value-level winner
+    /// resolution. Values retain their original path and selected surface.
+    module_exports: BTreeMap<String, Rc<bop::value::BopModule>>,
     /// Private module-owned context restored for calls declared in this
     /// module. This is intentionally separate from the exported surface.
     lexical_context: Rc<ModuleLexicalContext>,
@@ -848,6 +851,23 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
     }
 
+    fn sync_top_level_module_alias(
+        &mut self,
+        name: String,
+        module: Option<Rc<bop::value::BopModule>>,
+    ) {
+        if !self.is_module_top_scope() {
+            return;
+        }
+        let aliases = self.module_aliases.last_mut().expect("module alias scope");
+        if let Some(module) = module {
+            aliases.insert(name, module);
+        } else {
+            aliases.remove(&name);
+        }
+        self.refresh_root_lexical_context();
+    }
+
     fn lookup_var(&self, name: &str) -> Option<&Value> {
         for scope in self.current_scopes().iter().rev() {
             if let Some(v) = scope.get(name) {
@@ -1135,12 +1155,24 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 // allocation here.
                 let name = self.current_chunk().name(n).to_string();
                 let v = self.pop_value(line)?;
-                self.define_local(name, v);
+                let module = match &v {
+                    Value::Module(module) => Some(Rc::clone(module)),
+                    _ => None,
+                };
+                self.define_local(name.clone(), v);
+                self.sync_top_level_module_alias(name, module);
             }
             Instr::StoreVar(n) => {
                 // Fast path: look the target up by index so we
                 // neither `Rc::clone` nor allocate the name.
                 let v = self.pop_value(line)?;
+                let module = match &v {
+                    Value::Module(module) => Some(Rc::clone(module)),
+                    _ => None,
+                };
+                let top_level_name = self
+                    .is_module_top_scope()
+                    .then(|| self.current_chunk().name(n).to_string());
                 let runtime_alias_without_value_binding = {
                     let chunk = Rc::clone(
                         &self.frames.last().expect("frame present").chunk,
@@ -1163,6 +1195,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         format!("Variable `{}` doesn't exist yet", name),
                         format!("Use `let` to create a new variable: let {} = ...", name),
                     ));
+                }
+                if let Some(name) = top_level_name {
+                    self.sync_top_level_module_alias(name, module);
                 }
             }
             Instr::CompoundAssign { target, op } => {
@@ -3450,6 +3485,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let mut fn_entries: Vec<(String, Rc<FnEntry>)> =
             Vec::with_capacity(artifacts.fn_decls.len());
         for (name, entry) in &artifacts.fn_decls {
+            if artifacts.bindings.iter().any(|(binding, _)| binding == name) {
+                continue;
+            }
             let chunk_rc: Rc<Chunk> = entry.chunk.clone();
             let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
             let value = Value::try_new_compiled_module_fn(
@@ -3603,14 +3641,22 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     .last()
                     .and_then(|f| f.scopes.last())
                     .map(|s| s.contains_key(&name))
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                    || (module_top_scope && self.functions.contains_key(&name));
                 if clashes {
                     continue;
                 }
+                let module = artifacts.module_exports.get(&name).cloned();
                 if let Some(frame) = self.frames.last_mut() {
                     if let Some(scope) = frame.scopes.last_mut() {
-                        scope.insert(name, value);
+                        scope.insert(name.clone(), value);
                     }
+                }
+                if let Some(module) = module {
+                    self.module_aliases
+                        .last_mut()
+                        .expect("module alias scope")
+                        .insert(name, module);
                 }
             }
             // Bring the module's exposed types in by bare name
@@ -3877,9 +3923,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 methods.push((type_key.clone(), method_name, entry));
             }
         }
+        let module_exports: BTreeMap<String, Rc<bop::value::BopModule>> = bindings
+            .iter()
+            .filter_map(|(name, value)| match value {
+                Value::Module(module) => Some((name.clone(), Rc::clone(module))),
+                _ => None,
+            })
+            .collect();
         let lexical_context = Rc::new(ModuleLexicalContext {
             type_bindings: sub.type_bindings.into_iter().next().unwrap_or_default(),
-            module_aliases: sub.module_aliases.into_iter().next().unwrap_or_default(),
+            module_aliases: module_exports.clone(),
             imported_functions: sub.imported_functions.into_iter().next().unwrap_or_default(),
         });
         Ok(ModuleArtifacts {
@@ -3889,6 +3942,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             enum_defs,
             methods,
             type_exports: sub.type_exports,
+            module_exports,
             lexical_context,
         })
     }

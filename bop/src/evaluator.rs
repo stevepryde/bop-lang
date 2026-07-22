@@ -69,6 +69,9 @@ struct ModuleBindings {
     /// Public type names exposed by this module, retaining each type's
     /// declaration module across facade re-exports.
     type_exports: BTreeMap<String, String>,
+    /// Exported value bindings that are themselves module namespaces. The
+    /// original module object remains authoritative for path and surface.
+    module_exports: BTreeMap<String, Rc<crate::value::BopModule>>,
     /// Module-owned lexical metadata that named functions and methods need
     /// after the loading evaluator has gone away. Installed as a protected
     /// outer call frame so caller-local aliases/types cannot affect the
@@ -852,7 +855,20 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         match &stmt.kind {
             StmtKind::Let { name, value, is_const: _ } => {
                 let val = self.eval_expr(value)?;
+                let module = match &val {
+                    Value::Module(module) => Some(Rc::clone(module)),
+                    _ => None,
+                };
                 self.define(name.clone(), val);
+                let aliases = self.module_aliases.last_mut().expect("module alias scope");
+                if let Some(module) = module {
+                    aliases.insert(name.clone(), module);
+                } else {
+                    aliases.remove(name);
+                }
+                if self.is_module_top_scope() {
+                    self.refresh_root_lexical_context();
+                }
                 Ok(Signal::None)
             }
 
@@ -1296,6 +1312,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let mut fn_entries: Vec<(String, FnDef)> =
             Vec::with_capacity(bindings.fn_decls.len());
         for (name, fn_def) in &bindings.fn_decls {
+            if bindings.bindings.iter().any(|(binding, _)| binding == name) {
+                continue;
+            }
             let value = Value::try_new_module_fn(
                 fn_def.params.clone(),
                 Vec::new(),
@@ -1461,6 +1480,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     .last()
                     .map(|s| s.contains_key(&name))
                     .unwrap_or(false)
+                    || (module_top_scope && self.functions.contains_key(&name))
                 {
                     self.runtime_warnings.push(crate::error::BopWarning::at(
                         format!(
@@ -1471,7 +1491,14 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     ));
                     continue;
                 }
-                self.define(name, value);
+                let module = bindings.module_exports.get(&name).cloned();
+                self.define(name.clone(), value);
+                if let Some(module) = module {
+                    self.module_aliases
+                        .last_mut()
+                        .expect("module alias scope")
+                        .insert(name, module);
+                }
             }
             // Bind the bare type names in the current scope's
             // type_bindings so subsequent `Color::Red` /
@@ -1632,9 +1659,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 methods.push((type_key.clone(), method_name, fn_def));
             }
         }
+        let module_exports: BTreeMap<String, Rc<crate::value::BopModule>> = bindings
+            .iter()
+            .filter_map(|(name, value)| match value {
+                Value::Module(module) => Some((name.clone(), Rc::clone(module))),
+                _ => None,
+            })
+            .collect();
         let lexical_context = Rc::new(ModuleLexicalContext {
             type_bindings: sub.type_bindings.into_iter().next().unwrap_or_default(),
-            module_aliases: sub.module_aliases.into_iter().next().unwrap_or_default(),
+            module_aliases: module_exports.clone(),
             imported_functions: sub.imported_functions.into_iter().next().unwrap_or_default(),
         });
         Ok(ModuleBindings {
@@ -1644,6 +1678,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             enum_defs,
             methods,
             type_exports: sub.type_exports,
+            module_exports,
             lexical_context,
         })
     }
@@ -1887,6 +1922,19 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         format!("Variable `{}` doesn't exist yet", name),
                         format!("Use `let` to create a new variable: let {} = ...", name),
                     ));
+                }
+                if self.is_module_top_scope() {
+                    let module = match self.get_var(name) {
+                        Some(Value::Module(module)) => Some(Rc::clone(module)),
+                        _ => None,
+                    };
+                    let aliases = self.module_aliases.last_mut().expect("module alias scope");
+                    if let Some(module) = module {
+                        aliases.insert(name.clone(), module);
+                    } else {
+                        aliases.remove(name);
+                    }
+                    self.refresh_root_lexical_context();
                 }
                 Ok(())
             }
