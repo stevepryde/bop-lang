@@ -1051,6 +1051,88 @@ let lacks_import = fn() {
 }
 
 #[test]
+fn nested_import_bindings_shadow_outer_frames_but_not_the_current_frame() {
+    let out = compile_with_modules(
+        r#"use first as types
+let selected = 1
+let globbed = 1
+if true {
+    use second as types
+    use values.{selected}
+    use values
+    let point = types.Point { second: selected + globbed }
+}
+if true {
+    let selected = 10
+    use values.{selected}
+    let globbed = 20
+    use values
+}"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+            ("values", "let selected = 2\nlet globbed = 3"),
+        ],
+    )
+    .expect("nested imports may shadow outer frames and keep current-frame bindings");
+
+    assert!(out.contains("\"second\".to_string(), \"Point\".to_string()"));
+}
+
+#[test]
+fn same_scope_type_imports_are_first_win_for_selective_and_glob_forms() {
+    compile_with_modules(
+        r#"if true {
+    use first.{Point}
+    use second.{Point}
+    let selected = Point { first: 1 }
+}
+if true {
+    use first
+    use second
+    let globbed = Point { first: 2 }
+}"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+        ],
+    )
+    .expect("the first type import in each frame must retain the bare name");
+}
+
+#[test]
+fn selective_alias_type_shape_limits_construction_and_pattern_resolution() {
+    let construction_error = compile_with_modules(
+        "use types.{A} as narrowed\nlet bad = narrowed.B { value: 1 }",
+        &[(
+            "types",
+            "struct A { value }\nstruct B { value }",
+        )],
+    )
+    .expect_err("an unselected type must not resolve through a selective alias");
+    assert_eq!(construction_error.message, "Struct `B` is not declared");
+    assert_eq!(construction_error.line, Some(2));
+
+    let out = compile_with_modules(
+        r#"use types as all
+use types.{A} as narrowed
+let value = all.B { value: 1 }
+let result = match value {
+    narrowed.B { value } => "matched",
+    _ => "missed",
+}"#,
+        &[(
+            "types",
+            "struct A { value }\nstruct B { value }",
+        )],
+    )
+    .expect("an unselected pattern type remains a legal non-matching pattern");
+
+    assert!(out.contains("Option::Some(\"narrowed\"), \"A\""));
+    assert!(!out.contains("Option::Some(\"narrowed\"), \"B\""));
+}
+
+#[test]
 fn lazy_import_edges_do_not_create_false_cycles() {
     let out = compile_with_modules(
         "use a as root_a",

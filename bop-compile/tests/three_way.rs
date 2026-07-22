@@ -1623,6 +1623,80 @@ print(build_and_read())"#,
         &[("nested_types", "struct Point { value }")],
     ),
     (
+        "import_nested_alias_shadows_outer_alias",
+        r#"use first_types as types
+if true {
+    use second_types as types
+    let point = types.Point { second: 42 }
+    print(point.second)
+}"#,
+        &[
+            ("first_types", "struct Point { first }"),
+            ("second_types", "struct Point { second }"),
+        ],
+    ),
+    (
+        "import_selective_value_shadowing_is_lexical_and_first_win",
+        r#"let value = 1
+if true {
+    use shadow_values.{value}
+    print(value)
+}
+if true {
+    let value = 10
+    use shadow_values.{value}
+    print(value)
+}"#,
+        &[("shadow_values", "let value = 2")],
+    ),
+    (
+        "import_glob_value_shadowing_is_lexical_and_first_win",
+        r#"let value = 1
+if true {
+    use shadow_values
+    print(value)
+}
+if true {
+    let value = 10
+    use shadow_values
+    print(value)
+}"#,
+        &[("shadow_values", "let value = 2")],
+    ),
+    (
+        "import_bare_type_conflicts_are_first_win_per_scope",
+        r#"if true {
+    use first_types.{Point}
+    use second_types.{Point}
+    let selected = Point { first: 41 }
+    print(selected.first + 1)
+}
+if true {
+    use first_types
+    use second_types
+    let globbed = Point { first: 40 }
+    print(globbed.first + 2)
+}"#,
+        &[
+            ("first_types", "struct Point { first }"),
+            ("second_types", "struct Point { second }"),
+        ],
+    ),
+    (
+        "import_selective_alias_pattern_excludes_unselected_type",
+        r#"use alias_types as all
+use alias_types.{A} as narrowed
+let value = all.B { value: 1 }
+print(match value {
+    narrowed.B { value } => "matched",
+    _ => "missed",
+})"#,
+        &[(
+            "alias_types",
+            "struct A { value }\nstruct B { value }",
+        )],
+    ),
+    (
         "import_lazy_edge_is_not_eager_cycle",
         r#"use lazy_a as a
 print(a.value)

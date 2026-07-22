@@ -933,6 +933,12 @@ struct EmissionScope {
     plain_glob_imports: HashSet<String>,
 }
 
+#[derive(Clone)]
+struct ModuleAliasBinding {
+    module_path: String,
+    exposed_types: BTreeSet<String>,
+}
+
 struct Emitter {
     out: String,
     indent: usize,
@@ -964,14 +970,13 @@ struct Emitter {
     /// stack to produce the correct module path literal in the
     /// emitted Rust.
     type_bindings: Vec<HashMap<String, String>>,
-    /// Per-scope maps of module aliases: `alias → module_path`.
-    /// Populated at emit time by aliased `use` statements;
-    /// consulted when a namespaced reference (`m.Color`) needs
-    /// to be resolved to a module path for construction or
-    /// pattern matching. Kept in lockstep with `type_bindings`
-    /// so aliases introduced in a fn, lambda, or block cannot
-    /// leak into a sibling or enclosing scope during emission.
-    module_aliases: Vec<HashMap<String, String>>,
+    /// Per-scope maps of module aliases. Each binding retains both
+    /// the module path and the type surface selected by the `use`
+    /// statement, so `use shapes.{Circle} as s` cannot resolve
+    /// `s.Square` during construction or pattern matching. Kept in
+    /// lockstep with `type_bindings` so aliases introduced in a fn,
+    /// lambda, or block cannot leak into sibling/enclosing scopes.
+    module_aliases: Vec<HashMap<String, ModuleAliasBinding>>,
     /// Stack of generated Rust scopes. Each frame owns both its
     /// `let`-bound Bop names and the plain-glob imports that emitted
     /// those bindings. Keeping them together prevents an import in
@@ -1066,12 +1071,18 @@ impl Emitter {
     ) -> Option<String> {
         if let Some(ns) = namespace {
             for frame in self.module_aliases.iter().rev() {
-                if let Some(mp) = frame.get(ns) {
+                if let Some(binding) = frame.get(ns) {
                     // Verify the alias actually exports this type.
-                    if self.types.structs.contains_key(&(mp.clone(), type_name.to_string()))
-                        || self.types.enums.contains_key(&(mp.clone(), type_name.to_string()))
+                    if binding.exposed_types.contains(type_name)
+                        && (self.types.structs.contains_key(&(
+                            binding.module_path.clone(),
+                            type_name.to_string(),
+                        )) || self.types.enums.contains_key(&(
+                            binding.module_path.clone(),
+                            type_name.to_string(),
+                        )))
                     {
-                        return Some(mp.clone());
+                        return Some(binding.module_path.clone());
                     }
                     return None;
                 }
@@ -1096,9 +1107,30 @@ impl Emitter {
         }
     }
 
-    fn bind_module_alias(&mut self, alias: &str, module_path: &str) {
+    /// Imported types are first-win within one lexical frame. A
+    /// new inner frame remains free to shadow an outer binding.
+    fn bind_imported_type(&mut self, name: &str, module_path: &str) {
+        if let Some(frame) = self.type_bindings.last_mut() {
+            frame
+                .entry(name.to_string())
+                .or_insert_with(|| module_path.to_string());
+        }
+    }
+
+    fn bind_module_alias(
+        &mut self,
+        alias: &str,
+        module_path: &str,
+        exposed_types: &[String],
+    ) {
         if let Some(frame) = self.module_aliases.last_mut() {
-            frame.insert(alias.to_string(), module_path.to_string());
+            frame.insert(
+                alias.to_string(),
+                ModuleAliasBinding {
+                    module_path: module_path.to_string(),
+                    exposed_types: exposed_types.iter().cloned().collect(),
+                },
+            );
         }
     }
 
@@ -1135,38 +1167,32 @@ impl Emitter {
         // module). Cross-reference the TypeRegistry to enumerate
         // the types each alias's module actually exports.
         let mut alias_arms = String::new();
-        let mut aliases: Vec<(&String, &String)> = Vec::new();
+        let mut aliases: Vec<(&String, &ModuleAliasBinding)> = Vec::new();
         let mut seen_aliases: HashSet<String> = HashSet::new();
         for frame in self.module_aliases.iter().rev() {
-            let mut frame_aliases: Vec<(&String, &String)> = frame.iter().collect();
-            frame_aliases.sort();
-            for (alias, mp) in frame_aliases {
+            let mut frame_aliases: Vec<(&String, &ModuleAliasBinding)> =
+                frame.iter().collect();
+            frame_aliases.sort_by(|a, b| a.0.cmp(b.0));
+            for (alias, binding) in frame_aliases {
                 if seen_aliases.insert(alias.clone()) {
-                    aliases.push((alias, mp));
+                    aliases.push((alias, binding));
                 }
             }
         }
-        aliases.sort();
-        for (alias, mp) in aliases {
-            let mut exported: Vec<String> = Vec::new();
-            for (key, _) in &self.types.structs {
-                if &key.0 == mp {
-                    exported.push(key.1.clone());
+        aliases.sort_by(|a, b| a.0.cmp(b.0));
+        for (alias, binding) in aliases {
+            for tn in &binding.exposed_types {
+                let key = (binding.module_path.clone(), tn.clone());
+                if !self.types.structs.contains_key(&key)
+                    && !self.types.enums.contains_key(&key)
+                {
+                    continue;
                 }
-            }
-            for (key, _) in &self.types.enums {
-                if &key.0 == mp {
-                    exported.push(key.1.clone());
-                }
-            }
-            exported.sort();
-            exported.dedup();
-            for tn in exported {
                 alias_arms.push_str(&format!(
                     "                        (::std::option::Option::Some({alias_lit}), {tn}) => ::std::option::Option::Some({mp}.to_string()),\n",
                     alias_lit = rust_string_literal(alias),
-                    tn = rust_string_literal(&tn),
-                    mp = rust_string_literal(mp),
+                    tn = rust_string_literal(tn),
+                    mp = rust_string_literal(&binding.module_path),
                 ));
             }
         }
@@ -1194,6 +1220,12 @@ impl Emitter {
             .any(|scope| scope.locals.contains(name))
     }
 
+    fn is_local_in_current_scope(&self, name: &str) -> bool {
+        self.scope_stack
+            .last()
+            .is_some_and(|scope| scope.locals.contains(name))
+    }
+
     fn rust_fn_name(&self, name: &str) -> String {
         rust_fn_name_with(&self.module_prefix, name)
     }
@@ -1216,49 +1248,41 @@ impl Emitter {
     fn seed_uses(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             if let StmtKind::Use { path, items, alias } = &stmt.kind {
-                match (items, alias) {
-                    (_, Some(a)) => {
-                        self.bind_module_alias(a, path);
-                    }
-                    (Some(list), None) => {
-                        // Selective imports introduce each listed
-                        // type by bare name.
-                        for name in list {
-                            if self.is_type_in_module(path, name) {
-                                self.bind_type(name, path);
-                            }
-                        }
-                    }
-                    (None, None) => {
-                        // Glob: bring every public type across
-                        // by bare name. Collect into a temp to
-                        // avoid holding an immutable borrow of
-                        // `self.types` across the `bind_type`
-                        // mutation.
-                        let mut glob_types: Vec<String> = Vec::new();
-                        for (mp, tn) in self.types.structs.keys() {
-                            if mp == path && !tn.starts_with('_') {
-                                glob_types.push(tn.clone());
-                            }
-                        }
-                        for (mp, tn) in self.types.enums.keys() {
-                            if mp == path && !tn.starts_with('_') {
-                                glob_types.push(tn.clone());
-                            }
-                        }
-                        for tn in glob_types {
-                            self.bind_type(&tn, path);
-                        }
+                let exposed_types =
+                    self.imported_type_names(path, items.as_deref(), alias.is_some());
+                if let Some(alias_name) = alias {
+                    self.bind_module_alias(alias_name, path, &exposed_types);
+                } else {
+                    for name in exposed_types {
+                        self.bind_imported_type(&name, path);
                     }
                 }
             }
         }
     }
 
-    fn is_type_in_module(&self, module_path: &str, type_name: &str) -> bool {
-        let key = (module_path.to_string(), type_name.to_string());
-        self.types.structs.contains_key(&key)
-            || self.types.enums.contains_key(&key)
+    fn imported_type_names(
+        &self,
+        module_path: &str,
+        items: Option<&[String]>,
+        aliased: bool,
+    ) -> Vec<String> {
+        let Some(entry) = self.modules.modules.get(module_path) else {
+            return Vec::new();
+        };
+        match items {
+            Some(items) => items
+                .iter()
+                .filter(|name| entry.effective_types.iter().any(|ty| ty == *name))
+                .cloned()
+                .collect(),
+            None => entry
+                .effective_types
+                .iter()
+                .filter(|name| aliased || !name.starts_with('_'))
+                .cloned()
+                .collect(),
+        }
     }
 
     /// Pre-seed the current `type_bindings` frame with every
@@ -1559,7 +1583,7 @@ impl Emitter {
                     .map(|t| format!("{}.to_string()", rust_string_literal(t)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if self.is_local(alias_name) {
+                if self.is_local_in_current_scope(alias_name) {
                     return Err(BopError::runtime(
                         format!(
                             "Alias `{}` in `use {} as {}` would shadow an existing binding",
@@ -1582,7 +1606,7 @@ impl Emitter {
                 // time resolution is sufficient here because
                 // the AOT bakes module_path literals directly
                 // into construction + match sites.
-                self.bind_module_alias(alias_name, path);
+                self.bind_module_alias(alias_name, path, &expose_types);
             }
             None => {
                 // Non-aliased: inject each binding as a local.
@@ -1592,25 +1616,12 @@ impl Emitter {
                 // construction + pattern sites can resolve
                 // the bare name to the right module path.
                 for name in &expose_bindings {
-                    if self.is_local(name) {
-                        if items.is_some() {
-                            // Explicit: an explicit conflict is a
-                            // hard error.
-                            return Err(BopError::runtime(
-                                format!(
-                                    "Use of `{}` from `{}` would shadow an existing binding",
-                                    name, path
-                                ),
-                                line,
-                            ));
-                        } else {
-                            // Glob: first-win, skip silently to
-                            // match the walker's warn-and-keep
-                            // behaviour. (We don't surface the
-                            // warning through AOT; the walker is
-                            // the canonical source for that.)
-                            continue;
-                        }
+                    // Every non-aliased import form is first-win in
+                    // the current frame. An outer-frame binding is
+                    // not a clash: this new Rust block should shadow
+                    // it just like the walker and VM value scopes.
+                    if self.is_local_in_current_scope(name) {
+                        continue;
                     }
                     self.line(&format!(
                         "let mut {ident}: ::bop::value::Value = {tmp}.{ident}.clone();",
@@ -1620,8 +1631,7 @@ impl Emitter {
                     self.bind_local(name);
                 }
                 for tn in &expose_types {
-                    let mp = path.to_string();
-                    self.bind_type(tn, &mp);
+                    self.bind_imported_type(tn, path);
                 }
                 if items.is_none() {
                     self.scope_stack
