@@ -94,8 +94,8 @@ primary     = INT | NUMBER | STRING | "true" | "false" | "none"
 
 resultShorthandExpr = ("Ok" | "Err") "(" expr ("," expr)* ")"  // sugar for Result::Ok/Err
 
-arrayLit    = "[" (expr ("," expr)*)? "]"
-dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)*)? "}"
+arrayLit    = "[" (expr ("," expr)* ","?)? "]"
+dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)* ","?)? "}"
 ifExpr      = "if" expr "{" expr "}" "else" "{" expr "}"
 matchExpr   = "match" expr "{" arm ("," arm)* ","? "}"
 arm         = pattern ("if" expr)? "=>" expr
@@ -128,6 +128,37 @@ Bop automatically inserts a semicolon at the end of a line if the last token is 
 - `true`, `false`, `none`
 - `break`, `continue`, `return`
 - `)`, `]`, `}`
+
+Newlines do not insert semicolons while the innermost open delimiter is `(` or `[`. This makes calls, conditions, array literals, and index expressions safe to lay out over multiple lines. A newline immediately before a closing `)`, `]`, or `}` is also ignored, so the final item in a multiline literal does not require a trailing comma.
+
+Braces remain statement-capable even when their block is nested inside parentheses or brackets. Newlines between statements in a function or control-flow block still insert semicolons:
+
+```bop
+let callbacks = [
+  fn() {
+    let x = 1
+    return x
+  },
+]
+```
+
+A line starting with `.` continues a preceding value, including across blank lines or comments:
+
+```bop
+let size = values
+  // Continue the same expression.
+  .len()
+  .to_str()
+```
+
+`return` itself remains a semicolon trigger. A newline immediately after it therefore means a bare `return` whose value is `none`; put the value on the same line, or open a parenthesized expression on that line when it needs multiline layout:
+
+```bop
+return (
+  left +
+  right
+)
+```
 
 This means the opening `{` of a block must be on the same line as its keyword:
 

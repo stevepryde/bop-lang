@@ -365,6 +365,75 @@ fn parse_envelope(stdout: &str) -> Vec<(String, Outcome)> {
 // offers on the happy path.
 
 const CORPUS: &[(&str, &str)] = &[
+    (
+        "asi_multiline_delimiters",
+        r#"fn add(a, b) { return a + b }
+let values = [
+    1,
+    add(
+        2,
+        3
+    ),
+    [
+        6,
+    ][
+        0
+    ],
+]
+let config = {
+    "target": values[
+        1
+    ],
+    "label": "bop"
+}
+if (
+    config[
+        "target"
+    ] == 5 && values.len() == 3
+) {
+    print(
+        values[0] +
+        values[1] +
+        values[2]
+    )
+}
+let length = values
+    // Leading-dot continuation may cross comments and blank lines.
+
+    .len()
+    .to_str()
+print(length)"#,
+    ),
+    (
+        "asi_nested_lambda_braces",
+        r#"let functions = [
+    fn() {
+        let x = 1
+        let y = 2
+        return x + y
+    },
+]
+let wrapped = (fn() {
+    let x = 4
+    let y = 5
+    return x + y
+})
+print(functions[0]() + wrapped())"#,
+    ),
+    (
+        "asi_return_newline",
+        r#"fn bare() {
+    return
+    42
+}
+fn grouped() {
+    return (
+        42
+    )
+}
+print(bare())
+print(grouped())"#,
+    ),
     ("arithmetic", "print(1 + 2 * 3 - 4)"),
     ("divide_float", "print(7 / 2)"),
     ("modulo", "print(10 % 3)"),
