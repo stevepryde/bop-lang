@@ -2962,6 +2962,29 @@ print(outer(1)(point))"#,
 }
 
 #[test]
+fn pattern_namespace_resolves_before_same_named_arm_binding_diff() {
+    set_modules(&[
+        ("types_a", "struct Point { dep }"),
+        ("types_b", "struct Point { dep }"),
+    ]);
+    let outcome = run_both(
+        r#"use types_a as dep
+use types_b as other
+fn make() {
+    let dep = other
+    return fn(value) {
+        return match value { dep.Point { dep } => dep, _ => -1 }
+    }
+}
+let f = make()
+print(f(other.Point { dep: 42 }))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["42"]);
+}
+
+#[test]
 fn aliased_nested_import_does_not_reexport_dependency_bare_names() {
     set_modules(&[
         ("shared", "fn helper(n) { return n + 1 }\nlet public = 10"),

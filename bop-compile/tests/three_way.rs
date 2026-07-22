@@ -1523,6 +1523,23 @@ print(captured(), read(1, point))"#,
         &[("types", "struct Point { value }")],
     ),
     (
+        "pattern_namespace_precedes_same_named_arm_binding",
+        r#"use types_a as dep
+use types_b as other
+fn make() {
+    let dep = other
+    return fn(value) {
+        return match value { dep.Point { dep } => dep, _ => -1 }
+    }
+}
+let f = make()
+print(f(other.Point { dep: 42 }))"#,
+        &[
+            ("types_a", "struct Point { dep }"),
+            ("types_b", "struct Point { dep }"),
+        ],
+    ),
+    (
         "module_functions_resolve_during_module_load",
         r#"use loading
 print(value)"#,

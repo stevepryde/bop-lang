@@ -1374,11 +1374,15 @@ impl Compiler {
 
         for arm in arms {
             let arm_line = arm.line;
+            // Namespace references belong to the environment before this
+            // arm's bindings exist. Record the pattern recipe first so a
+            // pattern such as `dep.Point { dep }` still captures/resolves the
+            // outer `dep`; the field binding only enters scope after matching.
+            let pat_idx = self.add_pattern(arm.pattern.clone());
             let runtime_bindings = arm.pattern.binding_names().into_iter().collect();
             self.runtime_bindings.push(runtime_bindings);
             self.push_runtime_scope(arm_line);
             self.emit(Instr::Dup, arm_line);
-            let pat_idx = self.add_pattern(arm.pattern.clone());
             let match_fail_site = self.emit(
                 Instr::MatchFail {
                     pattern: pat_idx,
