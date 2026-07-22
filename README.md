@@ -103,7 +103,7 @@ fn main() {
 Custom sandboxed host — Bop can only reach the fns you expose:
 
 ```rust
-use bop::{BopError, BopHost, BopLimits, IntoValue, Value};
+use bop::{BopError, BopHost, BopLimits, Value};
 
 struct SandboxedHost;
 
@@ -114,7 +114,7 @@ impl BopHost for SandboxedHost {
         match name {
             // Expose exactly the primitives your program wants to
             // let scripts reach. Everything else is invisible.
-            "now" => Some(42_i64.into_value()),
+            "now" => Some(Ok(Value::from(42_i64))),
             _ => None,
         }
     }

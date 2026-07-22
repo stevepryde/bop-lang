@@ -133,6 +133,21 @@ fn btree_maps_are_deterministic_and_duplicate_bop_keys_are_rejected() {
 }
 
 #[test]
+fn btree_map_forward_failures_add_each_key_to_the_path_once() {
+    let map = BTreeMap::from([("hp", u64::MAX)]);
+    let error = map.into_value().unwrap_err();
+
+    assert_eq!(error.path(), &[ValuePathSegment::Key("hp".into())]);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "value conversion failed at $[\"hp\"]: expected an integer in Bop's i64 range, got integer {}",
+            u64::MAX
+        )
+    );
+}
+
+#[test]
 fn rust_results_round_trip_only_through_the_canonical_builtin_shape() {
     let value = Ok::<Vec<i64>, &str>(vec![1, 2, 3]).into_value().unwrap();
     let Value::EnumVariant(variant) = &value else {

@@ -34,7 +34,7 @@ bop-lang = "0.3"
 ```
 
 ```rust
-use bop::{run, BopError, BopHost, BopLimits, IntoValue, Value};
+use bop::{run, BopError, BopHost, BopLimits, Value};
 
 struct MyHost;
 
@@ -45,7 +45,7 @@ impl BopHost for MyHost {
         // Return Some(Ok(...)) to handle a custom function call,
         // Some(Err(...)) to raise, None to defer to builtins.
         match name {
-            "greet" => Some("hello!".into_value()),
+            "greet" => Some(Ok(Value::from("hello!"))),
             _ => None,
         }
     }

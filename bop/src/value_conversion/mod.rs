@@ -1,4 +1,4 @@
-//! Rust ↔ [`Value`](crate::Value) conversions for embedders.
+//! Rust ↔ [`Value`] conversions for embedders.
 //!
 //! Scalar Rust values that map to Bop without validation implement standard
 //! [`From`]. Recursive values use [`IntoValue`] because constructing a Bop

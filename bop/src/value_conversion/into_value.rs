@@ -215,13 +215,9 @@ where
     V: IntoValue,
 {
     fn into_value(self) -> Result<Value, ValueConversionError> {
-        let entries = self.into_iter().map(|(key, value)| {
-            let key = key.into();
-            let value = value
-                .into_value()
-                .map_err(|error| error.at_key(key.clone()));
-            (key, value)
-        });
+        let entries = self
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into_value()));
         dict_from_results(entries)
     }
 }

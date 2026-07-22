@@ -1,7 +1,7 @@
 /// Construct a tracked, depth-checked Bop value with JSON-like syntax.
 ///
-/// The macro returns `Result<Value, ValueConversionError>` so recursive value
-/// depth and allocation failures remain explicit. Dict keys must be string
+/// The macro returns `Result<Value, ValueConversionError>` so value-depth and
+/// tracked-construction failures remain explicit. Dict keys must be string
 /// literals; dict insertion order follows the source literal.
 ///
 /// ```
