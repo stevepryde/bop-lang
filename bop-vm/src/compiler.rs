@@ -125,6 +125,10 @@ struct Compiler {
     /// and target discovery are monotonic within a chunk, retaining only the
     /// latest target is sufficient to protect every earlier one as well.
     fusion_floor: usize,
+    /// Number of runtime `PushScope`s lexically open at the current emission
+    /// point. Slot-resolved function blocks do not contribute; slow-path
+    /// blocks and match-arm binding scopes do.
+    runtime_scope_depth: usize,
     loops: Vec<LoopCtx>,
     /// Stack of active resolvers. Empty at module top-level. A
     /// fn/lambda compile pushes a fresh resolver; nested fn/lambda
@@ -154,6 +158,10 @@ struct LoopCtx {
     /// Offsets of `Jump` instructions that need to be back-patched to
     /// the loop's exit once it's known.
     break_patches: Vec<CodeOffset>,
+    /// Runtime scope depth at this loop's continue/break target, before the
+    /// per-iteration body scope is entered. Control-flow exits unwind back to
+    /// exactly this depth and leave enclosing-loop scopes intact.
+    runtime_scope_base: usize,
     /// Sidecar owned by this exact loop. This is deliberately not an
     /// inherited "nearest sidecar": breaking an inner `while` must leave
     /// an enclosing `for` iterator untouched.
@@ -165,6 +173,7 @@ impl Compiler {
         Self {
             chunk: Chunk::new(),
             fusion_floor: 0,
+            runtime_scope_depth: 0,
             loops: Vec::new(),
             resolvers: Vec::new(),
             free_vars: None,
@@ -203,6 +212,7 @@ impl Compiler {
     }
 
     fn finish(self) -> Chunk {
+        debug_assert_eq!(self.runtime_scope_depth, 0);
         self.chunk
     }
 
@@ -222,6 +232,33 @@ impl Compiler {
         self.chunk.code.push(instr);
         self.chunk.lines.push(line);
         offset
+    }
+
+    /// Enter one lexically active runtime scope.
+    fn push_runtime_scope(&mut self, line: u32) {
+        self.emit(Instr::PushScope, line);
+        self.runtime_scope_depth += 1;
+    }
+
+    /// Leave one lexically active runtime scope on the normal fallthrough
+    /// path.
+    fn pop_runtime_scope(&mut self, line: u32) {
+        debug_assert!(self.runtime_scope_depth > 0);
+        self.emit(Instr::PopScope, line);
+        self.runtime_scope_depth -= 1;
+    }
+
+    /// Emit cleanup for a break/continue edge without changing lexical
+    /// compiler state: bytecode emission continues with the normal path after
+    /// the jump, where these scopes remain open until their ordinary exits.
+    fn emit_runtime_scope_unwind_to(&mut self, target_depth: usize, line: u32) {
+        let count = self
+            .runtime_scope_depth
+            .checked_sub(target_depth)
+            .expect("loop scope base cannot exceed current runtime scope depth");
+        for _ in 0..count {
+            self.emit(Instr::PopScope, line);
+        }
     }
 
     /// Trailing-sequence peephole. Returns `Some(fused)` if the
@@ -490,13 +527,13 @@ impl Compiler {
         if fast {
             self.current_resolver_mut().unwrap().push_scope();
         } else {
-            self.emit(Instr::PushScope, line);
+            self.push_runtime_scope(line);
         }
         self.compile_block_no_scope(stmts)?;
         if fast {
             self.current_resolver_mut().unwrap().pop_scope();
         } else {
-            self.emit(Instr::PopScope, line);
+            self.pop_runtime_scope(line);
         }
         Ok(())
     }
@@ -541,6 +578,7 @@ impl Compiler {
                 self.loops.push(LoopCtx {
                     continue_target: loop_start,
                     break_patches: Vec::new(),
+                    runtime_scope_base: self.runtime_scope_depth,
                     sidecar: None,
                 });
                 self.compile_scoped_block(body, line)?;
@@ -564,6 +602,7 @@ impl Compiler {
                 self.loops.push(LoopCtx {
                     continue_target: loop_start,
                     break_patches: Vec::new(),
+                    runtime_scope_base: self.runtime_scope_depth,
                     sidecar: Some(LoopStateKind::Repeat),
                 });
                 self.compile_scoped_block(body, line)?;
@@ -595,13 +634,14 @@ impl Compiler {
                 // underlying slot across iterations since control
                 // flow reaches the same `StoreLocal`).
                 let fast = self.current_resolver().is_some();
+                let runtime_scope_base = self.runtime_scope_depth;
                 if fast {
                     let resolver = self.current_resolver_mut().unwrap();
                     resolver.push_scope();
                     let slot = resolver.declare(var);
                     self.emit(Instr::StoreLocal(slot), line);
                 } else {
-                    self.emit(Instr::PushScope, line);
+                    self.push_runtime_scope(line);
                     let var_n = self.add_name(var);
                     self.emit(Instr::DefineLocal(var_n), line);
                 }
@@ -609,13 +649,14 @@ impl Compiler {
                 self.loops.push(LoopCtx {
                     continue_target: loop_start,
                     break_patches: Vec::new(),
+                    runtime_scope_base,
                     sidecar: Some(LoopStateKind::Iterator),
                 });
                 self.compile_block_no_scope(body)?;
                 if fast {
                     self.current_resolver_mut().unwrap().pop_scope();
                 } else {
-                    self.emit(Instr::PopScope, line);
+                    self.pop_runtime_scope(line);
                 }
                 self.emit(Instr::Jump(loop_start), line);
 
@@ -650,11 +691,12 @@ impl Compiler {
             }
 
             StmtKind::Break => {
-                let sidecar = self
+                let (runtime_scope_base, sidecar) = self
                     .loops
                     .last()
-                    .ok_or_else(|| err(line, "break used outside of a loop"))?
-                    .sidecar;
+                    .map(|ctx| (ctx.runtime_scope_base, ctx.sidecar))
+                    .ok_or_else(|| err(line, "break used outside of a loop"))?;
+                self.emit_runtime_scope_unwind_to(runtime_scope_base, line);
                 if let Some(kind) = sidecar {
                     self.emit(Instr::PopLoopState(kind), line);
                 }
@@ -663,10 +705,11 @@ impl Compiler {
             }
 
             StmtKind::Continue => {
-                let target = match self.loops.last() {
-                    Some(ctx) => ctx.continue_target,
+                let (target, runtime_scope_base) = match self.loops.last() {
+                    Some(ctx) => (ctx.continue_target, ctx.runtime_scope_base),
                     None => return Err(err(line, "continue used outside of a loop")),
                 };
+                self.emit_runtime_scope_unwind_to(runtime_scope_base, line);
                 self.emit(Instr::Jump(target), line);
             }
 
@@ -1332,7 +1375,7 @@ impl Compiler {
             let mut runtime_bindings = Vec::new();
             collect_pattern_bindings(&arm.pattern, &mut runtime_bindings);
             self.runtime_bindings.push(runtime_bindings);
-            self.emit(Instr::PushScope, arm_line);
+            self.push_runtime_scope(arm_line);
             self.emit(Instr::Dup, arm_line);
             let pat_idx = self.add_pattern(arm.pattern.clone());
             let match_fail_site = self.emit(
@@ -1358,7 +1401,7 @@ impl Compiler {
             self.emit(Instr::Pop, arm_line);
             self.compile_expr(&arm.body)?;
             self.runtime_bindings.pop();
-            self.emit(Instr::PopScope, arm_line);
+            self.pop_runtime_scope(arm_line);
             let end_jump = self.emit(Instr::Jump(CodeOffset(0)), arm_line);
             end_patches.push(end_jump);
 
@@ -1367,17 +1410,28 @@ impl Compiler {
             // through to the next arm. The scrutinee is still on
             // the stack because `MatchFail` consumed the `Dup`'d
             // copy, not the original.
-            if let Some(gf) = guard_fail_site {
+            let guard_next_patch = if let Some(gf) = guard_fail_site {
                 let here = self.mark_jump_target();
                 self.patch_jump(gf, here);
                 self.emit(Instr::PopScope, arm_line);
-            }
+                Some(self.emit(Instr::Jump(CodeOffset(0)), arm_line))
+            } else {
+                None
+            };
 
             // Pattern-mismatch landing pad: same unwind, then
             // fall through to the next arm.
             let fail_target = self.mark_jump_target();
             self.patch_match_fail(match_fail_site, fail_target);
             self.emit(Instr::PopScope, arm_line);
+
+            // A guard failure already popped this arm's scope, so skip the
+            // pattern-failure cleanup block. Both rejection paths converge at
+            // the next arm with exactly one scope removed.
+            if let Some(patch) = guard_next_patch {
+                let next_arm = self.mark_jump_target();
+                self.patch_jump(patch, next_arm);
+            }
         }
 
         // Every arm rejected: drop the scrutinee and raise.
@@ -1478,6 +1532,8 @@ impl Compiler {
         // free-var list stays isolated.
         let saved_chunk = core::mem::take(&mut self.chunk);
         let saved_fusion_floor = core::mem::replace(&mut self.fusion_floor, 0);
+        let saved_runtime_scope_depth =
+            core::mem::replace(&mut self.runtime_scope_depth, 0);
         let saved_loops = core::mem::take(&mut self.loops);
         let saved_free = self.free_vars.take();
         let saved_runtime_bindings = core::mem::take(&mut self.runtime_bindings);
@@ -1501,11 +1557,16 @@ impl Compiler {
         let free = self.free_vars.take().expect("free-vars set above");
         let mut chunk = core::mem::replace(&mut self.chunk, saved_chunk);
         self.fusion_floor = saved_fusion_floor;
+        let function_runtime_scope_depth = core::mem::replace(
+            &mut self.runtime_scope_depth,
+            saved_runtime_scope_depth,
+        );
         self.loops = saved_loops;
         self.free_vars = saved_free;
         self.runtime_bindings = saved_runtime_bindings;
 
         result?;
+        debug_assert_eq!(function_runtime_scope_depth, 0);
 
         // Resolve each free variable against the enclosing
         // resolver (if any) to decide whether it's a direct slot
