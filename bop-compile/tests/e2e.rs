@@ -988,3 +988,72 @@ print(3.max(7))
 print([1, 2, 3].len())"#,
     );
 }
+
+#[test]
+#[ignore]
+fn e2e_range_boundaries_steps_and_i64_edges() {
+    let output = run_aot(
+        r#"let boundary = range(10000)
+let ascending = range(-7, 29993, 3)
+let descending = range(29993, -7, -3)
+let min = -9223372036854775807 - 1
+let max = 9223372036854775807
+print(boundary.len())
+print(boundary[9999])
+print(ascending.len())
+print(ascending[9999])
+print(descending.len())
+print(descending[9999])
+print(range(5, 0, 1))
+print(range(0, 5, -1))
+print(range(min, max, max))
+print(range(max, min, min))"#,
+        "range_boundaries_steps_and_i64_edges",
+    );
+    assert_eq!(
+        output,
+        concat!(
+            "10000\n",
+            "9999\n",
+            "10000\n",
+            "29990\n",
+            "10000\n",
+            "-4\n",
+            "[]\n",
+            "[]\n",
+            "[-9223372036854775808, -1, 9223372036854775806]\n",
+            "[9223372036854775807, -1]"
+        )
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_range_limit_is_fatal_through_try_call() {
+    let run = run_aot_with_opts(
+        r#"let result = try_call(fn() {
+    return range(10001)
+})
+print("unreachable")"#,
+        "range_limit_is_fatal_through_try_call",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        run.status,
+        Some(1),
+        "expected a clean Bop error exit, not an abort; stderr:\n{}",
+        run.stderr
+    );
+    assert!(run.stdout.is_empty(), "unexpected stdout: {}", run.stdout);
+    assert!(
+        run.stderr.contains(&format!(
+            "[line 2] {}",
+            bop::builtins::RANGE_LIMIT_ERROR_MESSAGE
+        )),
+        "range-limit diagnostic had the wrong message or source line; stderr:\n{}",
+        run.stderr
+    );
+}

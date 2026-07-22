@@ -535,6 +535,17 @@ print(result.join(", "))"#,
     ("builtin_str_int_type", "print(42.to_str())\nprint(3.7.to_int())\nprint([].type())"),
     ("builtin_abs_min_max", "print((-5).abs())\nprint(3.min(7))\nprint(3.max(7))"),
     ("builtin_range", "print(range(5))\nprint(range(2, 5))\nprint(range(0, 10, 3))"),
+    (
+        "range_limit_boundary",
+        "let values = range(10000)\nprint(values.len())\nprint(values[9999])",
+    ),
+    (
+        "range_limit_error",
+        r#"let result = try_call(fn() {
+    return range(10001)
+})
+print("unreachable")"#,
+    ),
     ("builtin_len_inspect", r#"print("hello".len())
 print([1, 2, 3].len())
 print("hi".inspect())"#),
