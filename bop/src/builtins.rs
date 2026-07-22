@@ -12,6 +12,16 @@ use crate::memory::bop_would_exceed;
 use crate::parser::{VariantDecl, VariantKind};
 use crate::value::Value;
 
+/// Maximum number of eagerly materialized values returned by [`builtin_range`].
+pub const RANGE_MAX_ITEMS: usize = 10_000;
+
+/// Stable fatal error text for range cardinalities above [`RANGE_MAX_ITEMS`].
+pub const RANGE_LIMIT_ERROR_MESSAGE: &str = "range() would produce more than 10,000 values";
+
+/// Actionable guidance paired with [`RANGE_LIMIT_ERROR_MESSAGE`].
+pub const RANGE_LIMIT_HINT: &str =
+    "Use a smaller range, a larger step, or process values in smaller chunks.";
+
 // ─── Engine-wide builtin types ────────────────────────────────────
 //
 // `Result` and `RuntimeError` are pre-declared in every engine
@@ -133,27 +143,69 @@ pub fn builtin_range(
         _ => return Err(error(line, "range takes 1, 2, or 3 arguments")),
     };
 
+    let count = range_cardinality(start, end, step);
+    if count > RANGE_MAX_ITEMS as u128 {
+        return Err(range_limit_error(line));
+    }
+    let len = usize::try_from(count).map_err(|_| range_memory_error(line))?;
+    let bytes = len
+        .checked_mul(core::mem::size_of::<Value>())
+        .ok_or_else(|| range_memory_error(line))?;
+    if bop_would_exceed(bytes) {
+        return Err(range_memory_error(line));
+    }
+
+    // Reserve before generating any values so allocation failure is reported as
+    // a fatal resource error rather than aborting midway through the range.
     let mut result = Vec::new();
+    result
+        .try_reserve_exact(len)
+        .map_err(|_| range_memory_error(line))?;
     let mut i = start;
-    let max_items = 10_000usize;
-    if step > 0 {
-        while i < end && result.len() < max_items {
-            result.push(Value::Int(i));
-            i = match i.checked_add(step) {
-                Some(v) => v,
-                None => break,
-            };
-        }
-    } else {
-        while i > end && result.len() < max_items {
-            result.push(Value::Int(i));
-            i = match i.checked_add(step) {
-                Some(v) => v,
-                None => break,
-            };
+    for index in 0..len {
+        result.push(Value::Int(i));
+        if index + 1 < len {
+            i = i
+                .checked_add(step)
+                .ok_or_else(|| error(line, "range arithmetic overflow"))?;
         }
     }
     Value::try_new_array(result, line)
+}
+
+/// Return the exact number of values produced by a non-zero-step range.
+///
+/// The subtraction is performed in `i128` so opposite `i64` extremes remain
+/// representable. A direction-mismatched range is empty, matching the loop
+/// semantics used by the language.
+fn range_cardinality(start: i64, end: i64, step: i64) -> u128 {
+    let (distance, stride) = if step > 0 && start < end {
+        ((end as i128 - start as i128) as u128, step as u128)
+    } else if step < 0 && start > end {
+        ((start as i128 - end as i128) as u128, -(step as i128) as u128)
+    } else {
+        return 0;
+    };
+
+    // ceil(distance / stride), written this way to avoid overflowing when
+    // `distance` spans the entire i64 domain.
+    1 + (distance - 1) / stride
+}
+
+fn range_memory_error(line: u32) -> BopError {
+    error_fatal_with_hint(
+        line,
+        "Memory limit exceeded",
+        "This range would create too many values.",
+    )
+}
+
+fn range_limit_error(line: u32) -> BopError {
+    error_fatal_with_hint(
+        line,
+        RANGE_LIMIT_ERROR_MESSAGE,
+        RANGE_LIMIT_HINT,
+    )
 }
 
 /// Convert a finite `f64` that's already integer-valued into a
@@ -464,5 +516,119 @@ pub fn check_array_concat_memory(a_len: usize, b_len: usize, line: u32) -> Resul
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::bop_memory_init;
+
+    fn run_range(args: &[Value]) -> Result<Value, BopError> {
+        let mut rand_state = 0;
+        builtin_range(args, 7, &mut rand_state)
+    }
+
+    fn array_ints(value: &Value) -> Vec<i64> {
+        let Value::Array(items) = value else {
+            panic!("range did not return an array");
+        };
+        items
+            .iter()
+            .map(|item| match item {
+                Value::Int(value) => *value,
+                _ => panic!("range returned a non-integer item"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn range_cardinality_handles_directions_and_i64_extremes() {
+        assert_eq!(range_cardinality(0, 10, 3), 4);
+        assert_eq!(range_cardinality(10, 0, -3), 4);
+        assert_eq!(range_cardinality(0, 10, -1), 0);
+        assert_eq!(range_cardinality(10, 0, 1), 0);
+        assert_eq!(range_cardinality(5, 5, 1), 0);
+        assert_eq!(
+            range_cardinality(i64::MIN, i64::MAX, 1),
+            u64::MAX as u128
+        );
+        assert_eq!(range_cardinality(i64::MAX, i64::MIN, i64::MIN), 2);
+    }
+
+    #[test]
+    fn range_accepts_exactly_ten_thousand_values() {
+        bop_memory_init(2 * 1024 * 1024);
+        let value = run_range(&[Value::Int(10_000)]).expect("range should fit");
+        let items = array_ints(&value);
+        assert_eq!(items.len(), RANGE_MAX_ITEMS);
+        assert_eq!(items.last(), Some(&9_999));
+    }
+
+    #[test]
+    fn range_emits_extreme_bounds_without_overflow_or_truncation() {
+        bop_memory_init(1024);
+        let value = run_range(&[
+            Value::Int(i64::MIN),
+            Value::Int(i64::MAX),
+            Value::Int(i64::MAX),
+        ])
+        .expect("small extreme range should fit");
+        assert_eq!(array_ints(&value), [i64::MIN, -1, i64::MAX - 1]);
+
+        let value = run_range(&[
+            Value::Int(i64::MAX),
+            Value::Int(i64::MIN),
+            Value::Int(i64::MIN),
+        ])
+        .expect("small reverse extreme range should fit");
+        assert_eq!(array_ints(&value), [i64::MAX, -1]);
+    }
+
+    #[test]
+    fn oversized_range_is_a_dedicated_fatal_limit_error() {
+        bop_memory_init(usize::MAX);
+        let err = run_range(&[Value::Int(10_001)]).expect_err("range should exceed limit");
+        assert!(err.is_fatal);
+        assert_eq!(err.line, Some(7));
+        assert_eq!(err.message, RANGE_LIMIT_ERROR_MESSAGE);
+        assert_eq!(err.friendly_hint.as_deref(), Some(RANGE_LIMIT_HINT));
+    }
+
+    #[test]
+    fn range_limit_uses_exact_cardinality_for_steps_and_direction() {
+        bop_memory_init(2 * 1024 * 1024);
+        let forward = run_range(&[Value::Int(0), Value::Int(20_000), Value::Int(2)])
+            .expect("10,000 stepped values should fit");
+        assert_eq!(array_ints(&forward).len(), RANGE_MAX_ITEMS);
+
+        let reverse = run_range(&[
+            Value::Int(20_000),
+            Value::Int(0),
+            Value::Int(-2),
+        ])
+        .expect("10,000 reverse values should fit");
+        assert_eq!(array_ints(&reverse).len(), RANGE_MAX_ITEMS);
+
+        for args in [
+            [Value::Int(0), Value::Int(20_001), Value::Int(2)],
+            [Value::Int(20_002), Value::Int(0), Value::Int(-2)],
+        ] {
+            let err = run_range(&args).expect_err("10,001 values should exceed the limit");
+            assert!(err.is_fatal);
+            assert_eq!(err.message, RANGE_LIMIT_ERROR_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn configured_memory_limit_still_applies_below_range_cap() {
+        bop_memory_init(64);
+        let err = run_range(&[Value::Int(10)]).expect_err("range should exceed memory limit");
+        assert!(err.is_fatal);
+        assert_eq!(err.message, "Memory limit exceeded");
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("This range would create too many values.")
+        );
     }
 }

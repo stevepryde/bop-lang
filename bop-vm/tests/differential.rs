@@ -2129,6 +2129,123 @@ fn builtin_range_reverse() {
 }
 
 #[test]
+fn builtin_range_boundary_is_not_truncated_diff() {
+    let outcome = run_both(
+        r#"let at_old_cap = range(10000)
+print(at_old_cap.len())
+print(at_old_cap[9999])"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["10000", "9999"]);
+}
+
+#[test]
+fn builtin_range_large_signed_steps_are_exact_diff() {
+    let outcome = run_both(
+        r#"let ascending = range(-7, 29993, 3)
+let descending = range(29993, -7, -3)
+print(ascending.len())
+print(ascending[9999])
+print(descending.len())
+print(descending[9999])"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["10000", "29990", "10000", "-4"]);
+}
+
+#[test]
+fn builtin_range_direction_mismatch_is_empty_diff() {
+    let outcome = run_both("print(range(5, 0, 1))\nprint(range(0, 5, -1))", &standard());
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["[]", "[]"]);
+}
+
+#[test]
+fn builtin_range_full_i64_span_avoids_cardinality_overflow_diff() {
+    let outcome = run_both(
+        r#"let min = -9223372036854775807 - 1
+let max = 9223372036854775807
+print(range(min, max, max))
+print(range(max, min, min))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        [
+            "[-9223372036854775808, -1, 9223372036854775806]",
+            "[9223372036854775807, -1]"
+        ]
+    );
+}
+
+#[test]
+fn builtin_range_zero_step_remains_non_fatal_diff() {
+    for engine in ["tree-walker", "bytecode vm"] {
+        let mut host = RecordHost::new();
+        let result = if engine == "tree-walker" {
+            bop::run("let values = range(0, 10, 0)", &mut host, &standard())
+        } else {
+            bop_vm::run("let values = range(0, 10, 0)", &mut host, &standard())
+        };
+        assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+        let err = result.unwrap_err();
+        assert_eq!(err.message, "range step can't be 0", "{} message", engine);
+        assert_eq!(err.line, Some(1), "{} line", engine);
+        assert!(!err.is_fatal, "{} returned a fatal error", engine);
+    }
+
+    let code = r#"let result = try_call(fn() { return range(0, 10, 0) })
+print(result.is_err())"#;
+    assert_eq!(say(code), "true");
+}
+
+#[test]
+fn builtin_range_one_past_limit_is_fatal_diff() {
+    let code = r#"let result = try_call(fn() {
+    return range(10001)
+})
+print("unreachable")"#;
+    for engine in ["tree-walker", "bytecode vm"] {
+        let mut host = RecordHost::new();
+        let result = if engine == "tree-walker" {
+            bop::run(code, &mut host, &standard())
+        } else {
+            bop_vm::run(code, &mut host, &standard())
+        };
+        assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.message,
+            bop::builtins::RANGE_LIMIT_ERROR_MESSAGE,
+            "{} message",
+            engine
+        );
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some(bop::builtins::RANGE_LIMIT_HINT),
+            "{} hint",
+            engine
+        );
+        assert_eq!(err.line, Some(2), "{} line", engine);
+        assert!(err.is_fatal, "{} returned a catchable error", engine);
+    }
+}
+
+#[test]
+fn builtin_range_limit_uses_stepped_cardinality_diff() {
+    for code in [
+        "let values = range(0, 20002, 2)",
+        "let values = range(20000, -2, -2)",
+    ] {
+        let err = run_err(code);
+        assert_eq!(err, bop::builtins::RANGE_LIMIT_ERROR_MESSAGE);
+    }
+}
+
+#[test]
 fn builtin_str() {
     assert_eq!(say(r#"print(42.to_str())"#), "42");
     assert_eq!(say(r#"print(true.to_str())"#), "true");
@@ -2681,13 +2798,21 @@ fn safety_nested_loop_step_bound() {
 }
 
 #[test]
-fn safety_range_hard_cap() {
-    let (tw, vm) = run_err_loose(
-        r#"let a = range(100000)
-let x = 1"#,
-        tight(),
-    );
-    assert_both_resource_limit(&tw, &vm);
+fn safety_range_memory_preflight() {
+    let code = "let values = range(10000)";
+    for engine in ["tree-walker", "bytecode vm"] {
+        let mut host = RecordHost::new();
+        let result = if engine == "tree-walker" {
+            bop::run(code, &mut host, &tight())
+        } else {
+            bop_vm::run(code, &mut host, &tight())
+        };
+        assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+        let err = result.unwrap_err();
+        assert_eq!(err.message, "Memory limit exceeded", "{} message", engine);
+        assert_eq!(err.line, Some(1), "{} line", engine);
+        assert!(err.is_fatal, "{} returned a catchable error", engine);
+    }
 }
 
 // ─── BopHost extension ────────────────────────────────────────────

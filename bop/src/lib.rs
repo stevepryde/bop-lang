@@ -1561,7 +1561,7 @@ let x = 1"#,
             tight_limits(),
         );
         assert!(
-            msg.contains("Memory limit") || msg.contains("too many steps"),
+            msg.contains(builtins::RANGE_LIMIT_ERROR_MESSAGE),
             "got: {}", msg
         );
     }

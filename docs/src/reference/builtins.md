@@ -32,7 +32,8 @@ range(10, 0, -3)   // [10, 7, 4, 1]
 - With 2 args: `range(start, end)` auto-detects direction.
 - With 3 args: explicit `step` (error if `step == 0`).
 - All arguments must be `int` — floats are rejected.
-- Maximum 10,000 elements. Bigger ranges raise a runtime error so loops can't build gigabyte arrays by accident.
+- Maximum 10,000 elements. Bigger ranges raise a fatal resource error before
+  allocating, so they cannot be silently truncated or hidden with `try_call`.
 
 ## `rand(n)`
 
