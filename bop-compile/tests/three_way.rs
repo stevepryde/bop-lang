@@ -1595,6 +1595,17 @@ print(helper())"#,
         ],
     ),
     (
+        "import_local_callable_shadows_named_function",
+        r#"fn helper() { return 1 }
+fn local() {
+    use inner.{helper}
+    return helper()
+}
+print(local())
+print(helper())"#,
+        &[("inner", "fn helper() { return 2 }")],
+    ),
+    (
         "import_function_local_callable_does_not_leak",
         r#"fn seed() {
     use inner.{helper}

@@ -999,6 +999,10 @@ struct Emitter {
     /// arm should propagate via `return Ok(...)` (fn body) or
     /// raise a real error (top-level program).
     in_top_level: bool,
+    /// True while emitting a named function, method, or lambda body. Combined
+    /// with `scope_stack` depth to distinguish a module's direct use-site from
+    /// a nested lexical import when applying named-function first-win rules.
+    in_callable_body: bool,
 }
 
 impl Emitter {
@@ -1040,6 +1044,7 @@ impl Emitter {
             module_aliases: vec![HashMap::new()],
             scope_stack: Vec::new(),
             in_top_level: false,
+            in_callable_body: false,
         }
     }
 
@@ -1224,6 +1229,10 @@ impl Emitter {
         self.scope_stack
             .last()
             .is_some_and(|scope| scope.locals.contains(name))
+    }
+
+    fn is_module_top_scope(&self) -> bool {
+        !self.in_callable_body && self.scope_stack.len() == 1
     }
 
     fn rust_fn_name(&self, name: &str) -> String {
@@ -1623,7 +1632,8 @@ impl Emitter {
                     // not a clash: this new Rust block should shadow
                     // it just like the walker and VM value scopes.
                     if self.is_local_in_current_scope(name)
-                        || self.fn_info.all_fns.contains_key(name)
+                        || (self.is_module_top_scope()
+                            && self.fn_info.all_fns.contains_key(name))
                     {
                         continue;
                     }
@@ -2451,6 +2461,8 @@ impl Emitter {
         // real error.
         let saved_top_level = self.in_top_level;
         self.in_top_level = false;
+        let saved_callable_body = self.in_callable_body;
+        self.in_callable_body = true;
         // Function-entry checkpoint — matches the plan's "step-count
         // checks at loop backedges / function entry". No-op outside
         // sandbox mode.
@@ -2476,6 +2488,7 @@ impl Emitter {
         self.line("Ok(::bop::value::Value::None)");
         self.tmp_counter = saved_tmp;
         self.in_top_level = saved_top_level;
+        self.in_callable_body = saved_callable_body;
         self.close_block();
         Ok(())
     }
@@ -3619,9 +3632,11 @@ impl Emitter {
         let saved_indent = self.indent;
         let saved_tmp = self.tmp_counter;
         let saved_top_level = self.in_top_level;
+        let saved_callable_body = self.in_callable_body;
         self.indent = 0;
         self.tmp_counter = 0;
         self.in_top_level = false;
+        self.in_callable_body = true;
         for s in body {
             self.emit_stmt(s)?;
         }
@@ -3629,6 +3644,7 @@ impl Emitter {
         self.indent = saved_indent;
         self.tmp_counter = saved_tmp;
         self.in_top_level = saved_top_level;
+        self.in_callable_body = saved_callable_body;
 
         self.pop_scope();
         self.scope_stack = saved_scope_stack;
