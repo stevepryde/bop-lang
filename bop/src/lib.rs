@@ -1252,6 +1252,8 @@ print(d.len())"#),
             ("let if = 1", "if", 1, 5),
             ("\nfn const() { none }", "const", 2, 4),
             ("for while in [] {}", "while", 1, 5),
+            ("print(match 1 { if => 1, _ => 2 })", "if", 1, 17),
+            ("print(match [1] { [..if] => 1, _ => 2 })", "if", 1, 22),
         ] {
             let error = parse_err_full(source);
             assert_eq!(error.line, Some(line), "source: {source}");

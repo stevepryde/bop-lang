@@ -2075,10 +2075,16 @@ impl Parser {
                     Ok(Pattern::Binding(name))
                 }
             }
-            other => Err(self.error(
-                line,
-                format!("Expected a pattern, got `{}`", fmt_token(&other)),
-            )),
+            other => {
+                if let Some(keyword) = other.keyword_name() {
+                    Err(BopError::reserved_word(keyword, line, self.peek_column()))
+                } else {
+                    Err(self.error(
+                        line,
+                        format!("Expected a pattern, got `{}`", fmt_token(&other)),
+                    ))
+                }
+            }
         }
     }
 
@@ -2096,7 +2102,17 @@ impl Parser {
                             self.advance();
                             ArrayRest::Named(n)
                         }
-                        _ => ArrayRest::Ignored,
+                        other => {
+                            if let Some(keyword) = other.keyword_name() {
+                                let (line, _column) = self.peek_pos();
+                                return Err(BopError::reserved_word(
+                                    keyword,
+                                    line,
+                                    self.peek_column(),
+                                ));
+                            }
+                            ArrayRest::Ignored
+                        }
                     };
                     rest = Some(captured);
                     // `..` must be the last element in the array
