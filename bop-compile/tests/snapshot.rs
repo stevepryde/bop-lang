@@ -1000,6 +1000,57 @@ let own = 7"#,
 }
 
 #[test]
+fn function_local_module_alias_does_not_leak_into_a_sibling_function() {
+    let error = compile_with_modules(
+        r#"fn seed_alias() {
+    use types as t
+    return none
+}
+fn lacks_import() {
+    return t.Point { value: 42 }
+}"#,
+        &[("types", "struct Point { value }")],
+    )
+    .expect_err("a function-local module alias must not reach a sibling function");
+
+    assert_eq!(error.message, "Struct `Point` is not declared");
+    assert_eq!(error.line, Some(6));
+}
+
+#[test]
+fn block_local_module_alias_does_not_leak_into_the_enclosing_scope() {
+    let error = compile_with_modules(
+        r#"if true {
+    use types as t
+}
+let leaked = t.Point { value: 42 }"#,
+        &[("types", "struct Point { value }")],
+    )
+    .expect_err("a block-local module alias must not reach its enclosing scope");
+
+    assert_eq!(error.message, "Struct `Point` is not declared");
+    assert_eq!(error.line, Some(4));
+}
+
+#[test]
+fn lambda_local_module_alias_does_not_leak_into_a_sibling_lambda() {
+    let error = compile_with_modules(
+        r#"let seed_alias = fn() {
+    use types as t
+    return none
+}
+let lacks_import = fn() {
+    return t.Point { value: 42 }
+}"#,
+        &[("types", "struct Point { value }")],
+    )
+    .expect_err("a lambda-local module alias must not reach a sibling lambda");
+
+    assert_eq!(error.message, "Struct `Point` is not declared");
+    assert_eq!(error.line, Some(6));
+}
+
+#[test]
 fn lazy_import_edges_do_not_create_false_cycles() {
     let out = compile_with_modules(
         "use a as root_a",

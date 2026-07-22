@@ -964,11 +964,14 @@ struct Emitter {
     /// stack to produce the correct module path literal in the
     /// emitted Rust.
     type_bindings: Vec<HashMap<String, String>>,
-    /// Module-alias map: `alias → module_path`. Populated at
-    /// emit time by aliased `use` statements; consulted when
-    /// a namespaced reference (`m.Color`) needs to be resolved
-    /// to a module path for construction or pattern matching.
-    module_aliases: HashMap<String, String>,
+    /// Per-scope maps of module aliases: `alias → module_path`.
+    /// Populated at emit time by aliased `use` statements;
+    /// consulted when a namespaced reference (`m.Color`) needs
+    /// to be resolved to a module path for construction or
+    /// pattern matching. Kept in lockstep with `type_bindings`
+    /// so aliases introduced in a fn, lambda, or block cannot
+    /// leak into a sibling or enclosing scope during emission.
+    module_aliases: Vec<HashMap<String, String>>,
     /// Stack of generated Rust scopes. Each frame owns both its
     /// `let`-bound Bop names and the plain-glob imports that emitted
     /// those bindings. Keeping them together prevents an import in
@@ -1029,7 +1032,7 @@ impl Emitter {
             module_prefix: String::new(),
             current_module: String::from(bop::value::ROOT_MODULE_PATH),
             type_bindings: vec![builtin_frame],
-            module_aliases: HashMap::new(),
+            module_aliases: vec![HashMap::new()],
             scope_stack: Vec::new(),
             in_top_level: false,
         }
@@ -1038,12 +1041,16 @@ impl Emitter {
     fn push_scope(&mut self) {
         self.scope_stack.push(EmissionScope::default());
         self.type_bindings.push(HashMap::new());
+        self.module_aliases.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scope_stack.pop();
         if self.type_bindings.len() > 1 {
             self.type_bindings.pop();
+        }
+        if self.module_aliases.len() > 1 {
+            self.module_aliases.pop();
         }
     }
 
@@ -1058,14 +1065,16 @@ impl Emitter {
         type_name: &str,
     ) -> Option<String> {
         if let Some(ns) = namespace {
-            if let Some(mp) = self.module_aliases.get(ns) {
-                // Verify the alias actually exports this type.
-                if self.types.structs.contains_key(&(mp.clone(), type_name.to_string()))
-                    || self.types.enums.contains_key(&(mp.clone(), type_name.to_string()))
-                {
-                    return Some(mp.clone());
+            for frame in self.module_aliases.iter().rev() {
+                if let Some(mp) = frame.get(ns) {
+                    // Verify the alias actually exports this type.
+                    if self.types.structs.contains_key(&(mp.clone(), type_name.to_string()))
+                        || self.types.enums.contains_key(&(mp.clone(), type_name.to_string()))
+                    {
+                        return Some(mp.clone());
+                    }
+                    return None;
                 }
-                return None;
             }
             return None;
         }
@@ -1084,6 +1093,12 @@ impl Emitter {
     fn bind_type(&mut self, name: &str, module_path: &str) {
         if let Some(frame) = self.type_bindings.last_mut() {
             frame.insert(name.to_string(), module_path.to_string());
+        }
+    }
+
+    fn bind_module_alias(&mut self, alias: &str, module_path: &str) {
+        if let Some(frame) = self.module_aliases.last_mut() {
+            frame.insert(alias.to_string(), module_path.to_string());
         }
     }
 
@@ -1120,7 +1135,17 @@ impl Emitter {
         // module). Cross-reference the TypeRegistry to enumerate
         // the types each alias's module actually exports.
         let mut alias_arms = String::new();
-        let mut aliases: Vec<(&String, &String)> = self.module_aliases.iter().collect();
+        let mut aliases: Vec<(&String, &String)> = Vec::new();
+        let mut seen_aliases: HashSet<String> = HashSet::new();
+        for frame in self.module_aliases.iter().rev() {
+            let mut frame_aliases: Vec<(&String, &String)> = frame.iter().collect();
+            frame_aliases.sort();
+            for (alias, mp) in frame_aliases {
+                if seen_aliases.insert(alias.clone()) {
+                    aliases.push((alias, mp));
+                }
+            }
+        }
         aliases.sort();
         for (alias, mp) in aliases {
             let mut exported: Vec<String> = Vec::new();
@@ -1193,7 +1218,7 @@ impl Emitter {
             if let StmtKind::Use { path, items, alias } = &stmt.kind {
                 match (items, alias) {
                     (_, Some(a)) => {
-                        self.module_aliases.insert(a.clone(), path.clone());
+                        self.bind_module_alias(a, path);
                     }
                     (Some(list), None) => {
                         // Selective imports introduce each listed
@@ -1358,8 +1383,10 @@ impl Emitter {
         );
         let saved_bindings =
             std::mem::replace(&mut self.type_bindings, vec![module_frame]);
-        let saved_aliases =
-            std::mem::take(&mut self.module_aliases);
+        let saved_aliases = std::mem::replace(
+            &mut self.module_aliases,
+            vec![HashMap::new()],
+        );
         // Seed this module's types too — see
         // `seed_types_for_module` for why this matters. Methods
         // inside the module need to resolve bare type names
@@ -1555,8 +1582,7 @@ impl Emitter {
                 // time resolution is sufficient here because
                 // the AOT bakes module_path literals directly
                 // into construction + match sites.
-                self.module_aliases
-                    .insert(alias_name.to_string(), path.to_string());
+                self.bind_module_alias(alias_name, path);
             }
             None => {
                 // Non-aliased: inject each binding as a local.

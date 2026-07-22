@@ -1610,6 +1610,19 @@ print(wrapper_module.run())"#,
         ],
     ),
     (
+        "import_nested_alias_type_construction",
+        r#"fn build_and_read() {
+    use nested_types as types
+    let point = types.Point { value: 41 }
+    return match point {
+        types.Point { value } => value + 1,
+        _ => 0,
+    }
+}
+print(build_and_read())"#,
+        &[("nested_types", "struct Point { value }")],
+    ),
+    (
         "import_lazy_edge_is_not_eager_cycle",
         r#"use lazy_a as a
 print(a.value)
