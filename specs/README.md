@@ -13,6 +13,15 @@ historical delivery detail.
   execution data flow, and system invariants.
 - [Stack](stack.md) owns committed implementation and tooling constraints.
 
+## Proposals
+
+Proposals are design inputs, not current language contracts. They move into the
+canonical specifications and teaching documentation only when implemented with
+parity across all three engines.
+
+- [Second-class `ref` parameters](proposals/ref-parameters.md) — **planned; not
+  implemented**
+
 ## Source map
 
 - **Confirmed:** `README.md`, `plans/general-purpose-roadmap.md`,
