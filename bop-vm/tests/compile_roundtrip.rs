@@ -10,6 +10,7 @@
 use bop::parse;
 use bop_vm::chunk::SlotIdx;
 use bop_vm::{Instr, LoopStateKind, compile, disassemble};
+use std::rc::Rc;
 
 fn disasm(source: &str) -> String {
     let ast = parse(source).expect("parse");
@@ -932,4 +933,35 @@ fn instruction_and_line_tables_have_equal_length() {
             );
         }
     }
+}
+
+#[test]
+fn cloned_chunks_share_immutable_function_pattern_and_interpolation_pools() {
+    let ast = parse(
+        r#"let add = fn(x) { return x + 1 }
+let text = "value={add}"
+let label = match 1 { 1 => "one", _ => "other" }"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let cloned = chunk.clone();
+
+    assert!(Rc::ptr_eq(
+        &chunk.functions[0].chunk,
+        &cloned.functions[0].chunk,
+    ));
+    assert!(Rc::ptr_eq(&chunk.patterns[0], &cloned.patterns[0]));
+    assert!(Rc::ptr_eq(
+        &chunk.interps[0].parts,
+        &cloned.interps[0].parts,
+    ));
+
+    let function_body = Rc::downgrade(&chunk.functions[0].chunk);
+    let pattern = Rc::downgrade(&chunk.patterns[0]);
+    let interpolation = Rc::downgrade(&chunk.interps[0].parts);
+    drop(cloned);
+    drop(chunk);
+    assert!(function_body.upgrade().is_none());
+    assert!(pattern.upgrade().is_none());
+    assert!(interpolation.upgrade().is_none());
 }
