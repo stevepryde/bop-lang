@@ -4435,7 +4435,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
         };
         drop(callable);
-        self.call_closure(&func, Vec::new(), line)?;
+        if let Err(err) = self.call_closure(&func, Vec::new(), line) {
+            if err.is_fatal {
+                return Err(err);
+            }
+            self.push_value(builtins::make_try_call_err(&err));
+            return Ok(Next::Continue);
+        }
         // The frame we just pushed is the one that should
         // participate in the try_call wrap/catch dance.
         if let Some(frame) = self.frames.last_mut() {

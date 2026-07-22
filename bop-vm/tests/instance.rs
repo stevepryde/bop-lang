@@ -79,6 +79,33 @@ fn callbacks_have_instance_affinity_and_preflight_is_line_zero() {
 }
 
 #[test]
+fn try_call_wraps_foreign_affinity_and_callback_arity_preflight_errors() {
+    let mut host = Host;
+    let mut first = BopInstance::load(
+        "pub fn make() { return fn() { return 7 } }",
+        &mut host,
+        &BopLimits::standard(),
+    )
+    .unwrap();
+    let foreign = first.call("make", &[], &mut host).unwrap();
+
+    let mut second = BopInstance::load(
+        "pub fn probe(f) { return try_call(f) }\npub fn make_arity() { return fn(x) { return x } }",
+        &mut host,
+        &BopLimits::standard(),
+    )
+    .unwrap();
+    let affinity = second.call("probe", &[foreign], &mut host).unwrap();
+    assert!(affinity.inspect().contains("Result::Err"));
+    assert!(affinity.inspect().contains("different Bop engine instance"));
+
+    let wrong_arity = second.call("make_arity", &[], &mut host).unwrap();
+    let arity = second.call("probe", &[wrong_arity], &mut host).unwrap();
+    assert!(arity.inspect().contains("Result::Err"));
+    assert!(arity.inspect().contains("expects 1 argument"));
+}
+
+#[test]
 fn uncaught_errors_unwind_transient_state_but_keep_prior_mutations() {
     let mut host = Host;
     let mut instance = BopInstance::load(
