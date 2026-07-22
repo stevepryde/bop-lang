@@ -359,6 +359,11 @@ mod tests {
             label,
             sequence
         ));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("stale test resolver root should be removable: {error}"),
+        }
         std::fs::create_dir_all(&root).expect("test resolver root should be created");
         root
     }

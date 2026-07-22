@@ -27,13 +27,17 @@ pub fn resolve_module_from_root(
     root: &Path,
     name: &str,
 ) -> Option<Result<String, BopError>> {
-    if !is_valid_module_name(name) {
-        return Some(Err(crate::error::io_error(
-            &format!("Invalid module name `{}`", name),
-            None,
-        )));
+    if let Err(error) = validate_module_name(name) {
+        return Some(Err(error));
     }
 
+    resolve_validated_module_from_root(root, name)
+}
+
+fn resolve_validated_module_from_root(
+    root: &Path,
+    name: &str,
+) -> Option<Result<String, BopError>> {
     let mut path = root.to_path_buf();
     for segment in name.split('.') {
         path.push(segment);
@@ -107,6 +111,9 @@ impl BopHost for StandardHost {
                 return Some(Ok(src.to_string()));
             }
         }
+        if let Err(error) = validate_module_name(name) {
+            return Some(Err(error));
+        }
         let root = match self.module_root.clone() {
             Some(r) => r,
             None => match std::env::current_dir() {
@@ -119,7 +126,7 @@ impl BopHost for StandardHost {
                 }
             },
         };
-        resolve_module_from_root(&root, name)
+        resolve_validated_module_from_root(&root, name)
     }
 }
 
@@ -134,6 +141,17 @@ fn is_valid_module_name(name: &str) -> bool {
     name.split('.').all(|seg| {
         !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     })
+}
+
+fn validate_module_name(name: &str) -> Result<(), BopError> {
+    if is_valid_module_name(name) {
+        Ok(())
+    } else {
+        Err(crate::error::io_error(
+            &format!("Invalid module name `{}`", name),
+            None,
+        ))
+    }
 }
 
 fn enabled_function_hint() -> &'static str {
