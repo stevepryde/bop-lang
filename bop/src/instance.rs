@@ -373,9 +373,10 @@ mod tests {
             "let count = 0\nfn bump() { count += 1; return count }".to_string(),
         );
         modules.insert("bad".to_string(), "use leaf\nmissing()".to_string());
+        modules.insert("bad_signal".to_string(), "use leaf\nbreak".to_string());
         let mut host = ModuleHost { modules };
         let mut instance = BopInstance::load(
-            "pub fn fail() { use bad }\npub fn recover() { use leaf as leaf; return leaf.bump() }",
+            "pub fn fail() { use bad }\npub fn fail_signal() { use bad_signal }\npub fn recover() { use leaf as leaf; return leaf.bump() }",
             &mut host,
             &BopLimits::standard(),
         )
@@ -385,6 +386,7 @@ mod tests {
             instance.call("recover", &[], &mut host).unwrap().inspect(),
             "1"
         );
+        assert!(instance.call("fail_signal", &[], &mut host).is_err());
         assert_eq!(
             instance.call("recover", &[], &mut host).unwrap().inspect(),
             "2"

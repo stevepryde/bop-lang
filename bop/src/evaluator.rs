@@ -140,6 +140,21 @@ fn put_live_environment(
     environments.insert(module_path.to_string(), environment);
 }
 
+fn restore_failed_module_environment(
+    environments: &LiveValueEnvironments,
+    live_origins: &LiveBindingOrigins,
+    module_path: &str,
+    scopes: &mut [BTreeMap<String, Value>],
+    binding_origins: &BTreeMap<String, BindingOrigin>,
+) {
+    let failed_environment = scopes.first_mut().map(core::mem::take).unwrap_or_default();
+    put_live_environment(environments, module_path, failed_environment, binding_origins);
+    // Forwarded values have been returned to their authoritative origins. The
+    // failed module's own partial state must not become cacheable.
+    environments.borrow_mut().remove(module_path);
+    live_origins.borrow_mut().remove(module_path);
+}
+
 const MAX_CALL_DEPTH: usize = 64;
 
 // `try` unwinds via `BopError::try_return_signal` — a proper
@@ -1782,13 +1797,15 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         let _ = line;
         let stmts = crate::parse(source)?;
         let imports = Rc::clone(&self.imports);
+        let live_value_environments = Rc::clone(&self.live_value_environments);
+        let live_binding_origins = Rc::clone(&self.live_binding_origins);
         let limits = self.limits.clone();
         let mut sub = Evaluator::new_for_module(
             self.host,
             limits,
             imports,
-            Rc::clone(&self.live_value_environments),
-            Rc::clone(&self.live_binding_origins),
+            Rc::clone(&live_value_environments),
+            Rc::clone(&live_binding_origins),
             self.function_origin.clone(),
             module_path.to_string(),
         );
@@ -1801,27 +1818,36 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         let module_signal = match module_result {
             Ok(signal) => signal,
             Err(module_error) => {
-                let failed_environment = sub.scopes.into_iter().next().unwrap_or_default();
-                put_live_environment(
-                    &self.live_value_environments,
+                restore_failed_module_environment(
+                    &live_value_environments,
+                    &live_binding_origins,
                     module_path,
-                    failed_environment,
+                    &mut sub.scopes,
                     &sub.binding_origins,
                 );
-                // Forwarded values have been returned to their authoritative
-                // origins. The failed module's own partial state must not
-                // become a cacheable environment.
-                self.live_value_environments.borrow_mut().remove(module_path);
-                self.live_binding_origins.borrow_mut().remove(module_path);
                 return Err(module_error);
             }
         };
         match module_signal {
             Signal::Return(_) | Signal::None => {}
             Signal::Break => {
+                restore_failed_module_environment(
+                    &live_value_environments,
+                    &live_binding_origins,
+                    module_path,
+                    &mut sub.scopes,
+                    &sub.binding_origins,
+                );
                 return Err(error(0, "break used outside of a loop"));
             }
             Signal::Continue => {
+                restore_failed_module_environment(
+                    &live_value_environments,
+                    &live_binding_origins,
+                    module_path,
+                    &mut sub.scopes,
+                    &sub.binding_origins,
+                );
                 return Err(error(0, "continue used outside of a loop"));
             }
         }
