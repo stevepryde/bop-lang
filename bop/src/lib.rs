@@ -3006,6 +3006,57 @@ print(total)"#),
     }
 
     #[test]
+    fn struct_literals_parse_inside_condition_delimiters() {
+        let mut host = TestHost::new();
+        run(
+            r#"struct Point { x, y }
+fn get_x(point) { return point.x }
+let choices = [false, true]
+
+if get_x(Point { x: 1, y: 2 }) == 1 { print("call") }
+if (Point { x: 2, y: 3 }).x == 2 { print("paren") }
+if choices[Point { x: 1, y: 0 }.x] { print("index") }
+if [Point { x: 3, y: 0 }][0].x == 3 { print("array") }
+if {"point": Point { x: 4, y: 0 }}["point"].x == 4 { print("dict") }
+if Ok(Point { x: 5, y: 0 }).is_ok() { print("result") }
+if match 1 {
+    value if Point { x: value, y: 0 }.x == 1 => Point { x: 6, y: 0 }.x,
+    _ => 0,
+} == 6 { print("match") }
+if (if true { Point { x: 7, y: 0 }.x } else { 0 }) == 7 { print("if-expr") }
+if fn() { return Point { x: 8, y: 0 }.x }() == 8 { print("lambda") }"#,
+            &mut host,
+            &test_limits(),
+        )
+        .expect("delimiter-scoped struct literals should run");
+        assert_eq!(
+            host.prints.borrow().clone(),
+            [
+                "call", "paren", "index", "array", "dict", "result", "match", "if-expr",
+                "lambda",
+            ]
+        );
+    }
+
+    #[test]
+    fn control_flow_head_braces_remain_disambiguated() {
+        assert_eq!(
+            say(
+                r#"const CONDITION = false
+const ITEMS = [1, 2]
+const COUNT = 0
+const VALUE = 1
+if CONDITION { print("bad-if") }
+while CONDITION { print("bad-while") }
+for item in ITEMS { print(item) }
+repeat COUNT { print("bad-repeat") }
+print(match VALUE { _ => "ok" })"#,
+            ),
+            "ok"
+        );
+    }
+
+    #[test]
     fn struct_literal_ok_in_let_rhs() {
         // In a let rhs, struct literals are allowed. This
         // confirms the context flag is re-enabled outside
