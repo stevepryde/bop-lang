@@ -3105,6 +3105,10 @@ impl Emitter {
         // back-assign branch when it's actually needed.
         let method_lit = rust_string_literal(method);
         let mutating = is_mutating_method(method);
+        let nested_place = matches!(
+            &object.kind,
+            ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
+        );
         let ident_target = if mutating {
             match &object.kind {
                 ExprKind::Ident(n) => Some(rust_ident(n)),
@@ -3137,15 +3141,31 @@ impl Emitter {
                 .unwrap();
             }
             None => {
+                let nested_guard = if nested_place {
+                    format!(
+                        "::bop::methods::reject_nested_array_mutation(&{}, {}, {})?; ",
+                        obj_tmp, method_lit, line
+                    )
+                } else {
+                    String::new()
+                };
                 write!(
                     body,
                     "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
                         Some(v) => v, \
                         None => {{ \
-                            let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
+                            {}let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
                         }}, \
                     }}; __ret }}",
-                    obj_tmp, method_lit, args_arr, line, obj_tmp, method_lit, args_arr, line
+                    obj_tmp,
+                    method_lit,
+                    args_arr,
+                    line,
+                    nested_guard,
+                    obj_tmp,
+                    method_lit,
+                    args_arr,
+                    line
                 )
                 .unwrap();
             }

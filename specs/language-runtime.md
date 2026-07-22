@@ -37,6 +37,11 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
 - **RUN-009 — Correctness over silent truncation.** Resource guards and engine
   limitations must surface an error rather than silently changing a program's
   result.
+- **RUN-010 — No silent mutation loss.** A mutating method must not report
+  success when an unsupported receiver place would silently discard the
+  mutation. Index and field receivers that cannot yet be written back must
+  raise an actionable runtime error; genuine by-value temporaries may still be
+  mutated and discarded intentionally.
 
 ## Acceptance criteria
 

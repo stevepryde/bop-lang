@@ -1,7 +1,7 @@
 #[cfg(feature = "no_std")]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
-use crate::builtins::error;
+use crate::builtins::{error, error_with_hint};
 use crate::error::BopError;
 use crate::ops::{
     normalize_element_index, normalize_insert_index, normalize_slice_bound, numeric_index,
@@ -711,6 +711,30 @@ pub fn is_mutating_method(method: &str) -> bool {
         method,
         "push" | "pop" | "insert" | "remove" | "reverse" | "sort"
     )
+}
+
+/// Reject a built-in array mutation whose receiver was evaluated
+/// from an index or field access. Those syntactic forms are not yet
+/// write-back places, so accepting the call would mutate a detached
+/// value and silently discard the result.
+///
+/// Call this only after user-defined method dispatch. A struct or
+/// enum method named `push`, `pop`, etc. remains a regular dynamic
+/// method call; the restriction is specifically the combination of
+/// a nested-place syntax form and the built-in array receiver type.
+pub fn reject_nested_array_mutation(
+    receiver: &Value,
+    method: &str,
+    line: u32,
+) -> Result<(), BopError> {
+    if matches!(receiver, Value::Array(_)) && is_mutating_method(method) {
+        return Err(error_with_hint(
+            line,
+            crate::error_messages::NESTED_MUTATION_ERROR_MESSAGE,
+            crate::error_messages::NESTED_MUTATION_HINT,
+        ));
+    }
+    Ok(())
 }
 
 // ─── Result methods ────────────────────────────────────────────

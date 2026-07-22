@@ -114,8 +114,12 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
             method,
             argc,
             assign_back_to,
+            nested_place,
         } => {
             let name = chunk.name(*method);
+            if *nested_place {
+                return format!("CallMethod .{}/{} (nested place)", name, argc);
+            }
             match assign_back_to {
                 Some(crate::chunk::AssignBack::Name(var)) => format!(
                     "CallMethod .{}/{} (back to {})",

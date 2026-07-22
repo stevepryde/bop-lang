@@ -34,6 +34,21 @@ print(items)    // [99, 20, 30]
 
 ## Methods
 
+Mutating methods such as `push`, `pop`, `insert`, `remove`, `reverse`, and
+`sort` write their updated array back to a variable receiver. Nested index and
+field receivers are not write-back places yet: `dict["items"].push(value)` and
+`holder.items.sort()` raise a runtime error with the workaround rather than
+silently doing nothing. Use an explicit variable and assignment:
+
+```bop
+let items = dict["items"]
+items.push(value)
+dict["items"] = items
+```
+
+True temporary receivers remain valid. `[1, 2].push(3)` mutates the temporary,
+discards it, and returns `none`.
+
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `arr.len()` | int | Number of elements |

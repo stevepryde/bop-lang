@@ -169,10 +169,14 @@ pub enum Instr {
     /// `Slot(idx)` for compile-time-resolved locals, `Name(idx)`
     /// for the scope-map fallback, or `None` when the receiver is
     /// a transient (e.g. `[1,2].push(3)` — nothing to update).
+    /// `nested_place` distinguishes an index/field receiver from a
+    /// genuine temporary so built-in array mutation can fail rather
+    /// than silently discarding the detached mutation.
     CallMethod {
         method: NameIdx,
         argc: u32,
         assign_back_to: Option<AssignBack>,
+        nested_place: bool,
     },
 
     // ─── Functions ────────────────────────────────────────────────

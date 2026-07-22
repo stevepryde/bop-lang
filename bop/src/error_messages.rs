@@ -95,6 +95,17 @@ pub fn no_such_method(kind: &str, method: &str) -> String {
     format!("{} doesn't have a .{}() method", kind, method)
 }
 
+/// Exact diagnostic contract for a mutating built-in array method
+/// whose receiver is an index or field place that cannot yet be
+/// written back.
+pub const NESTED_MUTATION_ERROR_MESSAGE: &str =
+    "can't mutate through an index or field receiver yet";
+
+/// Actionable recovery paired with
+/// [`NESTED_MUTATION_ERROR_MESSAGE`].
+pub const NESTED_MUTATION_HINT: &str =
+    "Assign the value to a variable, mutate that variable, then assign it back.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +143,18 @@ mod tests {
         assert_eq!(
             cant_read_field("x", "array"),
             "Can't read field `x` on array"
+        );
+    }
+
+    #[test]
+    fn nested_array_mutation_explains_the_workaround() {
+        assert_eq!(
+            NESTED_MUTATION_ERROR_MESSAGE,
+            "can't mutate through an index or field receiver yet"
+        );
+        assert_eq!(
+            NESTED_MUTATION_HINT,
+            "Assign the value to a variable, mutate that variable, then assign it back."
         );
     }
 }
