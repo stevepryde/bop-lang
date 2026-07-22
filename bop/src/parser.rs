@@ -7,7 +7,10 @@ use alloc::collections::BTreeSet;
 use std::collections::BTreeSet;
 
 use crate::error::BopError;
-use crate::lexer::{SpannedToken, StringPart, Token};
+use crate::lexer::{
+    I64_MIN_MAGNITUDE_TEXT, SpannedToken, StringPart, Token,
+    integer_literal_out_of_range,
+};
 use crate::naming;
 
 // ─── Naming helpers ─────────────────────────────────────────────────────
@@ -1393,15 +1396,24 @@ impl Parser {
             }
             Token::Minus => {
                 self.advance();
-                let expr = self.parse_unary()?;
-                Ok(Expr {
-                    kind: ExprKind::UnaryOp {
-                        op: UnaryOp::Neg,
-                        expr: Box::new(expr),
-                    },
-                    line,
-                    column,
-                })
+                if matches!(self.peek(), Token::IntMinMagnitude) {
+                    self.advance();
+                    Ok(Expr {
+                        kind: ExprKind::Int(i64::MIN),
+                        line,
+                        column,
+                    })
+                } else {
+                    let expr = self.parse_unary()?;
+                    Ok(Expr {
+                        kind: ExprKind::UnaryOp {
+                            op: UnaryOp::Neg,
+                            expr: Box::new(expr),
+                        },
+                        line,
+                        column,
+                    })
+                }
             }
             Token::Try => {
                 // `try <expr>` binds tighter than binary ops but
@@ -1552,6 +1564,10 @@ impl Parser {
                     column,
                 })
             }
+            Token::IntMinMagnitude => Err(self.error(
+                line,
+                integer_literal_out_of_range(I64_MIN_MAGNITUDE_TEXT),
+            )),
             Token::Number(n) => {
                 self.advance();
                 Ok(Expr {
@@ -1958,6 +1974,10 @@ impl Parser {
                 self.advance();
                 Ok(Pattern::Literal(LiteralPattern::Int(n)))
             }
+            Token::IntMinMagnitude => Err(self.error(
+                line,
+                integer_literal_out_of_range(I64_MIN_MAGNITUDE_TEXT),
+            )),
             Token::Number(n) => {
                 self.advance();
                 Ok(Pattern::Literal(LiteralPattern::Number(n)))
@@ -1982,6 +2002,10 @@ impl Parser {
                 // Negative number literal: `-1`, `-3.14`.
                 self.advance();
                 match self.peek().clone() {
+                    Token::IntMinMagnitude => {
+                        self.advance();
+                        Ok(Pattern::Literal(LiteralPattern::Int(i64::MIN)))
+                    }
                     Token::Int(n) => {
                         self.advance();
                         // `i64::MIN` has no positive counterpart
@@ -2431,6 +2455,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
 
     match token {
         Token::Int(_) => "an integer",
+        Token::IntMinMagnitude => "an integer",
         Token::Number(_) => "a number",
         Token::Str(_) | Token::StringInterp(_) => "a string",
         Token::Ident(_) => "a name",
@@ -2553,6 +2578,98 @@ mod depth_tests {
                 .expect_err("the namespaced pattern should be malformed");
             assert_eq!(parser.depth, 0, "source: {source}");
         }
+    }
+}
+
+#[cfg(test)]
+mod integer_boundary_tests {
+    use super::*;
+
+    fn expression(source: &str) -> Result<Expr, BopError> {
+        let mut parser = Parser::new(crate::lexer::lex(source)?);
+        let expression = parser.parse_expr()?;
+        assert!(matches!(parser.peek(), Token::Eof), "source: {source}");
+        Ok(expression)
+    }
+
+    fn pattern(source: &str) -> Result<Pattern, BopError> {
+        let mut parser = Parser::new(crate::lexer::lex(source)?);
+        let pattern = parser.parse_pattern()?;
+        assert!(matches!(parser.peek(), Token::Eof), "source: {source}");
+        Ok(pattern)
+    }
+
+    #[test]
+    fn immediate_unary_minus_folds_the_minimum_integer() {
+        for source in [
+            "-9223372036854775808",
+            "- 9223372036854775808",
+            "- // continue the operand\n  9223372036854775808",
+            "(-9223372036854775808)",
+        ] {
+            let expression = expression(source).expect("minimum integer should parse");
+            assert!(
+                matches!(expression.kind, ExprKind::Int(i64::MIN)),
+                "source: {source}; expression: {expression:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_integer_fold_preserves_outer_unary_precedence() {
+        let expression = expression("--9223372036854775808").expect("double negation parses");
+        assert!(matches!(
+            expression.kind,
+            ExprKind::UnaryOp {
+                op: UnaryOp::Neg,
+                expr,
+            } if matches!(expr.kind, ExprKind::Int(i64::MIN))
+        ));
+    }
+
+    #[test]
+    fn unnegated_or_non_immediate_minimum_magnitude_is_rejected() {
+        let cases = [
+            ("  9223372036854775808", 3),
+            ("0 - 9223372036854775808", 5),
+            ("-(9223372036854775808)", 3),
+        ];
+        for (source, column) in cases {
+            let error = expression(source).expect_err("positive magnitude must be rejected");
+            assert_eq!(error.line, Some(1), "source: {source}");
+            assert_eq!(error.column, Some(column), "source: {source}");
+            assert_eq!(
+                error.message,
+                "Integer literal out of range for i64: 9223372036854775808",
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_integer_pattern_is_exact_and_positive_pattern_is_rejected() {
+        for source in [
+            "-9223372036854775808",
+            "- 9223372036854775808",
+            "- // continue the pattern\n  9223372036854775808",
+        ] {
+            assert!(
+                matches!(
+                    pattern(source).expect("negative boundary pattern should parse"),
+                    Pattern::Literal(LiteralPattern::Int(i64::MIN))
+                ),
+                "source: {source}"
+            );
+        }
+
+        let error = pattern("9223372036854775808")
+            .expect_err("positive boundary pattern must be rejected");
+        assert_eq!(error.line, Some(1));
+        assert_eq!(error.column, Some(1));
+        assert_eq!(
+            error.message,
+            "Integer literal out of range for i64: 9223372036854775808"
+        );
     }
 }
 

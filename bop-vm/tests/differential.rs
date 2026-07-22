@@ -1923,6 +1923,52 @@ fn int_overflow_errors_diff() {
 }
 
 #[test]
+fn i64_min_literal_expression_and_pattern_diff() {
+    assert_eq!(
+        say("print(-9223372036854775808)"),
+        "-9223372036854775808"
+    );
+    assert_eq!(say("print((-9223372036854775808).type())"), "int");
+    assert_eq!(
+        say("print(-9223372036854775808 + 1)"),
+        "-9223372036854775807"
+    );
+    assert_eq!(
+        say("print(-9223372036854775808 < -9223372036854775807)"),
+        "true"
+    );
+    assert_eq!(
+        say(
+            r#"print(match -9223372036854775808 {
+    -9223372036854775808 => "minimum",
+    _ => "other",
+})"#,
+        ),
+        "minimum"
+    );
+}
+
+#[test]
+fn i64_min_literal_overflow_and_range_errors_diff() {
+    for source in [
+        "print(--9223372036854775808)",
+        "print(-9223372036854775808 - 1)",
+    ] {
+        assert_eq!(run_err(source), "Integer overflow in `-`", "{source}");
+    }
+
+    for source in [
+        "print(9223372036854775808)",
+        "print(9223372036854775809)",
+        "print(-9223372036854775809)",
+        "print(0 - 9223372036854775808)",
+    ] {
+        let message = run_err(source);
+        assert!(message.contains("out of range for i64"), "{source}: {message}");
+    }
+}
+
+#[test]
 fn len_returns_int_diff() {
     assert_eq!(say(r#"print("hi".len().type())"#), "int");
 }

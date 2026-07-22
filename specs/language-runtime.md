@@ -53,6 +53,11 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   forms. Reads through a constant and writes through lowercase mutable
   bindings remain valid. A new `const` declaration is a declaration, not an
   assignment target.
+- **RUN-013 — Exact signed integer literals.** Decimal integer source must map
+  to exact signed 64-bit values without floating-point fallback. The minimum
+  value `-9223372036854775808` is valid in expression and literal-pattern
+  contexts; positive or larger magnitudes are rejected with source context,
+  and arithmetic at either boundary remains checked.
 
 ## Acceptance criteria
 
@@ -81,6 +86,10 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   strings and comments remains ordinary source content. The compatibility
   `precheck::check` API retains its narrow `let` / named-`fn` contract without
   maintaining a second keyword list.
+- **AC-RUN-009:** Lexer/parser, walker/VM differential, and native AOT tests
+  cover `i64::MIN` expressions and patterns, exact integer type/value
+  preservation, unary-minus and subtraction precedence, checked overflow, and
+  rejection of one-beyond magnitudes on both signs with line and column.
 
 ## Design notes
 

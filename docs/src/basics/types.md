@@ -38,6 +38,8 @@ print(1 + 1.0)       // 2       (int + number → number, prints as whole)
 print(1 == 1.0)      // true    (cross-type numeric equality)
 ```
 
+Ints cover the full signed 64-bit range, from `-9223372036854775808` through `9223372036854775807`. The minimum value is written with unary `-` directly before its magnitude (spaces or comments may separate the tokens); the positive magnitude `9223372036854775808` is out of range. Integer literals never silently become `number` values when they are too large.
+
 Use `.to_int()` to truncate a number to an integer (toward zero), and `.to_float()` to widen an int to a number:
 
 ```bop
