@@ -2004,6 +2004,181 @@ print(removed)"#),
 }
 
 #[test]
+fn array_negative_remove_insert_and_slice_diff() {
+    let outcome = run_both(
+        r#"let values = [10, 20, 30, 40]
+let removed = values.remove(-1)
+let inserted = values.insert(-1, 25)
+print(removed)
+print(inserted)
+print(values)
+print(values.slice(-3, -1))
+print(values.slice(-99, 99))
+print(values.slice(99, -99))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        [
+            "40",
+            "none",
+            "[10, 20, 25, 30]",
+            "[20, 25]",
+            "[10, 20, 25, 30]",
+            "[]"
+        ]
+    );
+}
+
+#[test]
+fn array_signed_index_boundaries_and_empty_values_diff() {
+    let outcome = run_both(
+        r#"let values = [20, 30]
+print(values.insert(-2, 10))
+print(values.insert(3, 40))
+print(values.remove(-4))
+print(values[-3])
+print(values)
+let empty = []
+print(empty.insert(0, 1))
+print(empty)
+print([].slice(-5, 5))
+print(try_call(fn() { return [].remove(-1) }).is_err())
+print(try_call(fn() { return [].insert(-1, 1) }).is_err())
+print(try_call(fn() { return values.remove(3) }).is_err())
+print(try_call(fn() { return values[-4] }).is_err())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        [
+            "none",
+            "none",
+            "10",
+            "20",
+            "[20, 30, 40]",
+            "none",
+            "[1]",
+            "[]",
+            "true",
+            "true",
+            "true",
+            "true"
+        ]
+    );
+}
+
+#[test]
+fn signed_index_failures_are_nonfatal_and_catchable_diff() {
+    let outcome = run_both(
+        r#"let values = [10, 20, 30]
+let remove_result = try_call(fn() { return values.remove(-4) })
+let insert_result = try_call(fn() { return values.insert(-4, 0) })
+let set_result = try_call(fn() { values[-4] = 0 })
+print(remove_result.is_err())
+print(insert_result.is_err())
+print(set_result.is_err())
+print(values)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    // Lambdas snapshot captures by value, so the final print documents that
+    // existing value-semantics contract; mutation atomicity itself follows
+    // from the shared helpers returning Err before any replacement value.
+    assert_eq!(outcome.prints, ["true", "true", "true", "[10, 20, 30]"]);
+}
+
+#[test]
+fn numeric_indices_truncate_toward_zero_diff() {
+    let outcome = run_both(
+        r#"let values = [10, 20, 30]
+print(values[1.9])
+values[-1.9] = 99
+print(values.remove(-1.9))
+print(values.insert(1.9, 15))
+print(values)
+print(values.slice(0.9, 2.9))
+print("a🙂é"[1.9])
+print("a🙂é".slice(0.9, 2.9))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        ["20", "99", "none", "[10, 15, 20]", "[10, 15]", "🙂", "a🙂"]
+    );
+}
+
+#[test]
+fn signed_index_operations_reject_non_numeric_values_diff() {
+    for (code, expected) in [
+        (r#"print([1]["0"])"#, "Can't index array with string"),
+        (r#"[1].remove("0")"#, "expects a number"),
+        (r#"[1].insert("0", 2)"#, "expects a number"),
+        ("[1].slice(false, 1)", "expects a number"),
+        (r#"print("a"["0"])"#, "Can't index string with string"),
+        (r#"print("abc".slice("0", 1))"#, "expects a number"),
+    ] {
+        let message = run_err(code);
+        assert!(
+            message.contains(expected),
+            "expected {expected:?} for {code:?}, got {message:?}"
+        );
+    }
+}
+
+#[test]
+fn signed_index_errors_report_the_original_index_diff() {
+    for (code, expected) in [
+        ("[1, 2].remove(-3)", "Remove index -3 is out of bounds"),
+        ("[1, 2].insert(-3, 0)", "Insert index -3 is out of bounds"),
+        (
+            "print([1, 2][-3])",
+            "Index -3 is out of bounds (array has 2 items)",
+        ),
+    ] {
+        assert_eq!(run_err(code), expected, "source: {code}");
+    }
+}
+
+#[test]
+fn signed_indices_handle_i64_extremes_without_overflow_diff() {
+    let outcome = run_both(
+        r#"let min = -9223372036854775807 - 1
+let max = 9223372036854775807
+let values = [1, 2]
+print(values.slice(min, max))
+print(values.slice(max, min))
+print(try_call(fn() { return values[min] }).is_err())
+print(try_call(fn() { return values.remove(min) }).is_err())
+print(try_call(fn() { return values.insert(max, 3) }).is_err())
+print(values)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["[1, 2]", "[]", "true", "true", "true", "[1, 2]"]);
+}
+
+#[test]
+fn signed_index_failures_keep_the_call_site_line_diff() {
+    let code = "let values = [1, 2]\nvalues.remove(-3)";
+    for engine in ["tree-walker", "bytecode vm"] {
+        let mut host = RecordHost::new();
+        let result = if engine == "tree-walker" {
+            bop::run(code, &mut host, &standard())
+        } else {
+            bop_vm::run(code, &mut host, &standard())
+        };
+        let err = result.unwrap_err();
+        assert_eq!(err.line, Some(2), "{} line", engine);
+        assert!(!err.is_fatal, "{} returned a fatal error", engine);
+        assert_eq!(err.message, "Remove index -3 is out of bounds");
+    }
+}
+
+#[test]
 fn array_concat() {
     assert_eq!(say("print([1, 2] + [3, 4])"), "[1, 2, 3, 4]");
 }
@@ -2066,6 +2241,28 @@ fn string_index_of() {
 #[test]
 fn string_index_char() {
     assert_eq!(say(r#"print("abc"[1])"#), "b");
+}
+
+#[test]
+fn string_negative_indices_and_slices_use_unicode_chars_diff() {
+    let outcome = run_both(
+        r#"let text = "a🙂é界"
+print(text[-1])
+print(text[-4])
+print(text.slice(-3, -1))
+print(text.slice(-4, 4))
+print(text.slice(-99, 99))
+print(text.slice(99, -99))
+print("".slice(-1, 1))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["界", "a", "🙂é", "a🙂é界", "a🙂é界", "", ""]);
+
+    for code in [r#"print("a🙂é界"[-5])"#, r#"print(""[-1])"#] {
+        let message = run_err(code);
+        assert!(message.contains("out of bounds"), "got: {message}");
+    }
 }
 
 // ─── Dicts ────────────────────────────────────────────────────────

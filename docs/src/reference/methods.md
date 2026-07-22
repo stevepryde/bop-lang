@@ -90,7 +90,7 @@ See [Strings](../data/strings.md) for worked examples.
 | `s.replace(old, new)` | string | Replace every occurrence. |
 | `s.upper()`, `s.lower()` | string | Case conversion. |
 | `s.trim()` | string | Strip leading / trailing whitespace. |
-| `s.slice(start, end)` | string | Substring by code-point index. |
+| `s.slice(start, end)` | string | Half-open substring by code-point index. Negative bounds count from the end; out-of-range bounds clamp. |
 | `s.to_int()` | int | Parse. `"3.7".to_int()` parses as float then truncates → `3`. Raises on junk. |
 | `s.to_float()` | number | Parse. Raises on junk. |
 | `s.iter()` | iter | Lazy iterator over Unicode code points. See [Iter methods](#iter-methods--iter). |
@@ -106,9 +106,9 @@ See [Arrays](../data/arrays.md) for worked examples.
 | `arr.pop()` | value | Remove and return the last element. |
 | `arr.has(v)` | bool | Structural equality check. |
 | `arr.index_of(v)` | int | Index of first match, or `-1`. |
-| `arr.insert(i, v)` | none | Insert at index, shifting right. |
-| `arr.remove(i)` | value | Remove at index, returning the removed value. |
-| `arr.slice(start, end)` | array | Sub-array. |
+| `arr.insert(i, v)` | none | Insert at a signed index, shifting right. Negative indices count from the end; `len` appends. |
+| `arr.remove(i)` | value | Remove at a signed index, returning the removed value. Negative indices count from the end. |
+| `arr.slice(start, end)` | array | Half-open sub-array. Negative bounds count from the end; out-of-range bounds clamp. |
 | `arr.reverse()` | none | In-place. |
 | `arr.sort()` | none | In-place, numeric or lexicographic depending on element types. |
 | `arr.join(sep)` | string | Join after stringifying each element. |

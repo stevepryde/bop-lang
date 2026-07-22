@@ -41,9 +41,9 @@ print(items)    // [99, 20, 30]
 | `arr.pop()` | value | Remove and return last element |
 | `arr.has(val)` | bool | Whether the array contains the value |
 | `arr.index_of(val)` | int | Index of first occurrence, or `-1` |
-| `arr.insert(i, val)` | none | Insert at index, shifting elements right |
-| `arr.remove(i)` | value | Remove at index, shifting elements left |
-| `arr.slice(start, end)` | array | New sub-array |
+| `arr.insert(i, val)` | none | Insert at a signed index, shifting right. Negative indices count from the end; `len` appends |
+| `arr.remove(i)` | value | Remove at a signed index. Negative indices count from the end |
+| `arr.slice(start, end)` | array | Half-open sub-array. Negative bounds count from the end; out-of-range bounds clamp |
 | `arr.reverse()` | none | Reverse in place |
 | `arr.sort()` | none | Sort in place |
 | `arr.join(sep)` | string | Join elements into a string |
