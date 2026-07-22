@@ -386,6 +386,14 @@ pub(crate) struct ModuleEntry {
     pub direct_imports: Vec<String>,
 }
 
+#[derive(Clone)]
+struct ModuleImport {
+    path: String,
+    items: Option<Vec<String>>,
+    alias: Option<String>,
+    line: u32,
+}
+
 fn build_module_graph(
     root: &[Stmt],
     opts: &Options,
@@ -402,7 +410,7 @@ fn build_module_graph(
         None => {
             return Err(BopError::runtime(
                 "bop-compile: `use` requires `Options::module_resolver` to be set so the transpiler can inline the imported modules",
-                root_imports.first().map(|(_, line)| *line).unwrap_or(0),
+                root_imports.first().map(|import| import.line).unwrap_or(0),
             ));
         }
     };
@@ -413,10 +421,10 @@ fn build_module_graph(
     };
     let mut visiting: BTreeSet<String> = BTreeSet::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();
-    for (name, line) in &root_imports {
+    for import in &root_imports {
         visit_module(
-            name,
-            *line,
+            &import.path,
+            import.line,
             &resolver,
             &mut graph,
             &mut visiting,
@@ -463,11 +471,11 @@ fn visit_module(
 
     // Collect this module's direct imports and visit them first so
     // `effective_exports` is ready when we pack ours.
-    let direct_imports: Vec<(String, u32)> = collect_imports_in_stmts(&ast);
-    for (child_name, child_line) in &direct_imports {
+    let direct_imports = collect_imports_in_stmts(&ast);
+    for import in &direct_imports {
         visit_module(
-            child_name,
-            *child_line,
+            &import.path,
+            import.line,
             resolver,
             graph,
             visiting,
@@ -479,49 +487,78 @@ fn visit_module(
     let own_fns = collect_top_level_fn_params(&ast);
     let own_types = collect_top_level_types(&ast);
 
-    // effective_exports = own_lets + own_fn_names + (transitively,
-    // every import's effective_exports). De-dup while preserving
-    // declaration order.
+    // Effective exports mirror the bindings that each `use` shape
+    // actually introduces into this module's scope. A plain glob
+    // propagates public dependency names, a selective import only
+    // propagates the listed names, and an aliased import contributes
+    // only its alias value (never the dependency's bare exports).
+    // De-dup while preserving import/declaration order.
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut exports: Vec<String> = Vec::new();
-    for (imp_name, _) in &direct_imports {
-        if let Some(m) = graph.modules.get(imp_name) {
-            for name in &m.effective_exports {
-                if seen.insert(name.clone()) {
-                    exports.push(name.clone());
+    for import in &direct_imports {
+        if let Some(alias) = &import.alias {
+            push_unique(&mut exports, &mut seen, alias);
+            continue;
+        }
+        let Some(module) = graph.modules.get(&import.path) else {
+            continue;
+        };
+        match &import.items {
+            Some(items) => {
+                for item in items {
+                    if module.effective_exports.iter().any(|name| name == item) {
+                        push_unique(&mut exports, &mut seen, item);
+                    }
+                }
+            }
+            None => {
+                for name in &module.effective_exports {
+                    if !name.starts_with('_') {
+                        push_unique(&mut exports, &mut seen, name);
+                    }
                 }
             }
         }
     }
     for name in &own_lets {
-        if seen.insert(name.clone()) {
-            exports.push(name.clone());
-        }
+        push_unique(&mut exports, &mut seen, name);
     }
     for name in own_fns.keys() {
-        if seen.insert(name.clone()) {
-            exports.push(name.clone());
-        }
+        push_unique(&mut exports, &mut seen, name);
     }
 
-    // effective_types = own_types + transitively from imports.
+    // Types follow the same flat glob/selective projection. Aliases
+    // are value bindings and therefore never add bare type names.
     // Types live in the global registry for AOT, so this list only
     // drives `Value::Module.types` and selective-import validation.
     let mut seen_types: BTreeSet<String> = BTreeSet::new();
     let mut type_exports: Vec<String> = Vec::new();
-    for (imp_name, _) in &direct_imports {
-        if let Some(m) = graph.modules.get(imp_name) {
-            for ty in &m.effective_types {
-                if seen_types.insert(ty.clone()) {
-                    type_exports.push(ty.clone());
+    for import in &direct_imports {
+        if import.alias.is_some() {
+            continue;
+        }
+        let Some(module) = graph.modules.get(&import.path) else {
+            continue;
+        };
+        match &import.items {
+            Some(items) => {
+                for item in items {
+                    if module.effective_types.iter().any(|name| name == item) {
+                        push_unique(&mut type_exports, &mut seen_types, item);
+                    }
+                }
+            }
+            None => {
+                for ty in &module.effective_types {
+                    if !ty.starts_with('_') {
+                        push_unique(&mut type_exports, &mut seen_types, ty);
+                    }
                 }
             }
         }
     }
     for ty in &own_types {
-        if seen_types.insert(ty.clone()) {
-            type_exports.push(ty.clone());
-        }
+        push_unique(&mut type_exports, &mut seen_types, ty);
     }
 
     graph.modules.insert(
@@ -530,7 +567,7 @@ fn visit_module(
             ast,
             own_fns,
             own_lets,
-            direct_imports: direct_imports.into_iter().map(|(n, _)| n).collect(),
+            direct_imports: direct_imports.into_iter().map(|import| import.path).collect(),
             effective_exports: exports,
             effective_types: type_exports,
         },
@@ -541,11 +578,22 @@ fn visit_module(
     Ok(())
 }
 
-fn collect_imports_in_stmts(stmts: &[Stmt]) -> Vec<(String, u32)> {
+fn push_unique(names: &mut Vec<String>, seen: &mut BTreeSet<String>, name: &str) {
+    if seen.insert(name.to_string()) {
+        names.push(name.to_string());
+    }
+}
+
+fn collect_imports_in_stmts(stmts: &[Stmt]) -> Vec<ModuleImport> {
     let mut out = Vec::new();
     for stmt in stmts {
-        if let StmtKind::Use { path, items: _, alias: _ } = &stmt.kind {
-            out.push((path.clone(), stmt.line));
+        if let StmtKind::Use { path, items, alias } = &stmt.kind {
+            out.push(ModuleImport {
+                path: path.clone(),
+                items: items.clone(),
+                alias: alias.clone(),
+                line: stmt.line,
+            });
         }
     }
     out
@@ -593,6 +641,7 @@ fn collect_top_level_fn_params(stmts: &[Stmt]) -> HashMap<String, Vec<String>> {
 /// reachable from outside its defining block and therefore
 /// eligible to be turned into a first-class `Value::Fn` via an
 /// emitted wrapper.
+#[derive(Clone)]
 struct FnInfo {
     all_fns: HashMap<String, Vec<String>>,
     top_level_fns: HashSet<String>,
@@ -1215,7 +1264,7 @@ impl Emitter {
             None => entry
                 .effective_exports
                 .iter()
-                .filter(|n| !n.starts_with('_'))
+                .filter(|n| alias.is_some() || !n.starts_with('_'))
                 .cloned()
                 .collect(),
         };
@@ -1228,7 +1277,7 @@ impl Emitter {
             None => entry
                 .effective_types
                 .iter()
-                .filter(|n| !n.starts_with('_'))
+                .filter(|n| alias.is_some() || !n.starts_with('_'))
                 .cloned()
                 .collect(),
         };
@@ -1545,21 +1594,39 @@ impl Emitter {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for ((_module_path, type_name, method_name), entry) in &entries {
+        for ((module_path, type_name, method_name), entry) in &entries {
+            let method_fn_name = rust_fn_name_with(
+                &method_fn_prefix(&entry.module_prefix, type_name),
+                method_name,
+            );
             let saved_prefix = std::mem::replace(
                 &mut self.module_prefix,
-                method_fn_prefix(&entry.module_prefix, type_name),
+                entry.module_prefix.clone(),
             );
+            let mut method_fn_info = collect_fn_info(&entry.body);
+            // The method's Rust symbol stays type-qualified, while calls in
+            // its body resolve against the declaring module's functions.
+            let module_fn_info = if module_path == bop::value::ROOT_MODULE_PATH {
+                self.fn_info.clone()
+            } else {
+                let module = self
+                    .modules
+                    .modules
+                    .get(module_path)
+                    .expect("method's declaring module must be in the module graph");
+                collect_fn_info(&module.ast)
+            };
+            for (name, params) in module_fn_info.all_fns {
+                method_fn_info.all_fns.entry(name).or_insert(params);
+            }
+            method_fn_info
+                .top_level_fns
+                .extend(module_fn_info.top_level_fns);
             let saved_fn_info = std::mem::replace(
                 &mut self.fn_info,
-                collect_fn_info(&entry.body),
+                method_fn_info,
             );
-            self.emit_fn_decl(
-                method_name,
-                &entry.params,
-                &entry.body,
-                0,
-            )?;
+            self.emit_fn_decl_as(&method_fn_name, &entry.params, &entry.body, 0)?;
             self.fn_info = saved_fn_info;
             self.module_prefix = saved_prefix;
         }
@@ -2081,6 +2148,16 @@ impl Emitter {
         line: u32,
     ) -> Result<(), BopError> {
         let fn_name = self.rust_fn_name(name);
+        self.emit_fn_decl_as(&fn_name, params, body, line)
+    }
+
+    fn emit_fn_decl_as(
+        &mut self,
+        fn_name: &str,
+        params: &[String],
+        body: &[Stmt],
+        line: u32,
+    ) -> Result<(), BopError> {
         let param_list = params
             .iter()
             .map(|p| format!("mut {}: ::bop::value::Value", rust_user_ident(p)))

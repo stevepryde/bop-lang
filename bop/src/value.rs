@@ -411,6 +411,10 @@ pub struct BopFn {
     /// Lambdas created from an `fn(...) { ... }` expression leave
     /// this `None`.
     pub self_name: Option<String>,
+    /// Module scope that owns this function body. Module-exported functions
+    /// retain this so sibling bare calls resolve inside their defining module
+    /// without publishing those siblings into an alias importer's scope.
+    pub module_path: Option<String>,
     /// Maximum recursive ownership depth, including captures and any
     /// engine-owned values hidden inside an opaque compiled body.
     depth: u16,
@@ -439,6 +443,7 @@ impl core::fmt::Debug for BopFn {
             .field("captures", &self.captures.len())
             .field("body", &self.body)
             .field("self_name", &self.self_name)
+            .field("module_path", &self.module_path)
             .finish()
     }
 }
@@ -462,12 +467,24 @@ impl BopFn {
         self_name: Option<String>,
         line: u32,
     ) -> Result<Rc<Self>, BopError> {
+        Self::try_new_ast_in_module(params, captures, body, self_name, None, line)
+    }
+
+    pub fn try_new_ast_in_module(
+        params: Vec<String>,
+        captures: Vec<(String, Value)>,
+        body: Vec<Stmt>,
+        self_name: Option<String>,
+        module_path: Option<String>,
+        line: u32,
+    ) -> Result<Rc<Self>, BopError> {
         let depth = checked_owner_depth(captures.iter().map(|(_, value)| value), 1, line)?;
         Ok(Rc::new(Self {
             params,
             captures,
             body: FnBody::Ast(body),
             self_name,
+            module_path,
             depth,
         }))
     }
@@ -477,6 +494,26 @@ impl BopFn {
         captures: Vec<(String, Value)>,
         body: Rc<dyn core::any::Any + 'static>,
         self_name: Option<String>,
+        opaque_body_depth: u16,
+        line: u32,
+    ) -> Result<Rc<Self>, BopError> {
+        Self::try_new_compiled_in_module(
+            params,
+            captures,
+            body,
+            self_name,
+            None,
+            opaque_body_depth,
+            line,
+        )
+    }
+
+    pub fn try_new_compiled_in_module(
+        params: Vec<String>,
+        captures: Vec<(String, Value)>,
+        body: Rc<dyn core::any::Any + 'static>,
+        self_name: Option<String>,
+        module_path: Option<String>,
         opaque_body_depth: u16,
         line: u32,
     ) -> Result<Rc<Self>, BopError> {
@@ -494,6 +531,7 @@ impl BopFn {
             captures,
             body: FnBody::Compiled(body),
             self_name,
+            module_path,
             depth,
         }))
     }
@@ -899,6 +937,25 @@ impl Value {
         BopFn::try_new_ast(params, captures, body, self_name, line).map(Value::Fn)
     }
 
+    pub fn try_new_module_fn(
+        params: Vec<String>,
+        captures: Vec<(String, Value)>,
+        body: Vec<Stmt>,
+        self_name: Option<String>,
+        module_path: String,
+        line: u32,
+    ) -> Result<Self, BopError> {
+        BopFn::try_new_ast_in_module(
+            params,
+            captures,
+            body,
+            self_name,
+            Some(module_path),
+            line,
+        )
+        .map(Value::Fn)
+    }
+
     /// Build a closure value with an engine-opaque compiled body.
     /// Used by the bytecode VM (and any future engine) to carry
     /// its pre-compiled form inside a `Value::Fn` without
@@ -927,6 +984,27 @@ impl Value {
     ) -> Result<Self, BopError> {
         BopFn::try_new_compiled(params, captures, body, self_name, opaque_body_depth, line)
             .map(Value::Fn)
+    }
+
+    pub fn try_new_compiled_module_fn(
+        params: Vec<String>,
+        captures: Vec<(String, Value)>,
+        body: Rc<dyn core::any::Any + 'static>,
+        self_name: Option<String>,
+        module_path: String,
+        opaque_body_depth: u16,
+        line: u32,
+    ) -> Result<Self, BopError> {
+        BopFn::try_new_compiled_in_module(
+            params,
+            captures,
+            body,
+            self_name,
+            Some(module_path),
+            opaque_body_depth,
+            line,
+        )
+        .map(Value::Fn)
     }
 
     /// Build a namespace value while accounting for recursively owned
@@ -1688,6 +1766,39 @@ mod depth_tests {
             ),
             23,
         );
+    }
+
+    #[test]
+    fn function_module_metadata_preserves_identity_without_rc_cycles() {
+        let value = Value::try_new_module_fn(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some("helper".into()),
+            "shared".into(),
+            1,
+        )
+        .expect("module function");
+        let Value::Fn(function) = &value else {
+            unreachable!()
+        };
+        assert_eq!(function.module_path.as_deref(), Some("shared"));
+        assert!(format!("{function:?}").contains("shared"));
+        let weak = Rc::downgrade(function);
+
+        let cloned = value.clone();
+        assert!(values_equal(&value, &cloned));
+        drop(value);
+        assert!(weak.upgrade().is_some());
+        drop(cloned);
+        assert!(weak.upgrade().is_none());
+
+        let plain = Value::try_new_fn(Vec::new(), Vec::new(), Vec::new(), None, 1)
+            .expect("plain function");
+        let Value::Fn(plain) = &plain else {
+            unreachable!()
+        };
+        assert_eq!(plain.module_path, None);
     }
 
     #[test]

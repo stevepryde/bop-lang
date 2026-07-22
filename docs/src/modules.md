@@ -138,7 +138,7 @@ This is Bop's answer to the "same-named type, different shape, in different modu
 
 ## Re-exports are transitive
 
-A module's effective exports include everything it `use`s from other modules (minus privacy filtering). If `a` does `use b` and `b` declares `fn foo()`, then `use a` in the top-level program makes `foo` visible too. The same applies to types — importing `a` brings `b`'s public types in scope.
+A module re-exports the bindings that its own `use` statements introduce. If `a` does `use b` and `b` declares `fn foo()`, then `use a` in the top-level program makes `foo` visible too. Selective imports re-export only their selected names, including a private name selected explicitly. Aliased imports re-export only the alias: if `a` does `use b as dep`, an importer of `a` can reach `dep`, but does not receive `b`'s exports as bare names. The same shape rules apply to types, and glob privacy filtering is applied at every module boundary.
 
 ## Builtin types
 

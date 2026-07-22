@@ -142,6 +142,9 @@ struct Frame {
     type_scope_base: usize,
     stack_base: usize,
     is_function: bool,
+    /// Defining module for named-function and module-exported closure bodies.
+    /// Used to resolve private sibling function bindings from the module cache.
+    function_module: Option<String>,
     /// How this frame's return value should be transformed
     /// before being pushed for the caller. See [`FrameWrap`].
     wrap: FrameWrap,
@@ -160,6 +163,7 @@ impl Frame {
             type_scope_base: 1,
             stack_base: 0,
             is_function: false,
+            function_module: None,
             wrap: FrameWrap::None,
         }
     }
@@ -170,6 +174,7 @@ impl Frame {
         scopes: Vec<BTreeMap<String, Value>>,
         type_scope_base: usize,
         stack_base: usize,
+        function_module: Option<String>,
         wrap: FrameWrap,
     ) -> Self {
         Self {
@@ -181,6 +186,7 @@ impl Frame {
             type_scope_base,
             stack_base,
             is_function: true,
+            function_module,
             wrap,
         }
     }
@@ -257,6 +263,7 @@ fn unwrap_iter_step(v: &Value) -> IterStep {
 struct FnEntry {
     params: Vec<String>,
     chunk: Rc<Chunk>,
+    module_path: String,
 }
 
 /// Structural equality check for two enum-variant lists.
@@ -703,6 +710,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         slots: Vec<Value>,
         scopes: Vec<BTreeMap<String, Value>>,
         stack_base: usize,
+        function_module: Option<String>,
         wrap: FrameWrap,
     ) {
         let type_scope_base = self.type_bindings.len() + 1;
@@ -712,6 +720,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scopes,
             type_scope_base,
             stack_base,
+            function_module,
             wrap,
         ));
         self.type_bindings.push(BTreeMap::new());
@@ -823,6 +832,36 @@ impl<'h, H: BopHost> Vm<'h, H> {
         bop::suggest::did_you_mean(target, candidates)
     }
 
+    fn active_module_path(&self) -> &str {
+        self.frames
+            .last()
+            .and_then(|frame| frame.function_module.as_deref())
+            .unwrap_or(&self.current_module)
+    }
+
+    /// Resolve module-owned sibling functions from cached module artifacts
+    /// before falling back to caller-visible functions. This preserves module
+    /// function environments without making alias imports publish bare names.
+    fn lookup_function_entry(&self, name: &str) -> Option<Rc<FnEntry>> {
+        if let Some(module_path) = self
+            .frames
+            .last()
+            .and_then(|frame| frame.function_module.as_deref())
+        {
+            if module_path != bop::value::ROOT_MODULE_PATH {
+                let cache = self.imports.borrow();
+                if let Some(ImportSlot::Loaded(artifacts)) = cache.get(module_path) {
+                    if let Some((_, entry)) =
+                        artifacts.fn_decls.iter().find(|(candidate, _)| candidate == name)
+                    {
+                        return Some(entry.clone());
+                    }
+                }
+            }
+        }
+        self.functions.get(name).cloned()
+    }
+
     // ─── Dispatch ────────────────────────────────────────────────
 
     #[inline]
@@ -858,17 +897,17 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     // need the name as a `&str` / `String`.
                     let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
                     let name = chunk.name(n);
-                    let fn_parts = self
-                        .functions
-                        .get(name)
-                        .map(|entry| (entry.params.clone(), entry.chunk.clone()));
-                    if let Some((params, chunk_rc)) = fn_parts {
+                    let fn_entry = self.lookup_function_entry(name);
+                    if let Some(entry) = fn_entry {
+                        let params = entry.params.clone();
+                        let chunk_rc = entry.chunk.clone();
                         let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-                        let v = Value::try_new_compiled_fn(
+                        let v = Value::try_new_compiled_module_fn(
                             params,
                             Vec::new(),
                             body,
                             Some(name.to_string()),
+                            entry.module_path.clone(),
                             0,
                             line,
                         )?;
@@ -1640,8 +1679,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // Same here: DefineFn populates `self.functions` only
         // for user-declared names, so builtins like `range`,
         // `print` don't collide.)
-        if let Some(entry_rc) = self.functions.get(name) {
-            let entry = Rc::clone(entry_rc);
+        if let Some(entry) = self.lookup_function_entry(name) {
             // Argc check before we touch the stack so error
             // messages match the walker's `name` wording.
             if argc != entry.params.len() {
@@ -1797,6 +1835,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // inside a fn body, but the fallback is safe).
             Vec::new(),
             self.stack.len(),
+            Some(entry.module_path.clone()),
             FrameWrap::None,
         );
         // A fresh type_bindings frame scopes any type decl
@@ -2007,6 +2046,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     slots,
                     Vec::new(),
                     self.stack.len(),
+                    Some(entry.module_path.clone()),
                     FrameWrap::None,
                 );
                 // User methods don't do mutation back-assign
@@ -2164,6 +2204,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let entry = Rc::new(FnEntry {
             params: fn_def.params,
             chunk: Rc::new(fn_def.chunk),
+            module_path: self.current_module.clone(),
         });
         // Methods attach to the *full* receiver-type identity.
         // A method declared inside `paint` for `Color` only
@@ -2627,6 +2668,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let entry = Rc::new(FnEntry {
             params: fn_def.params,
             chunk: Rc::new(fn_def.chunk),
+            module_path: self.active_module_path().to_string(),
         });
         self.functions.insert(fn_def.name, entry);
     }
@@ -2640,7 +2682,15 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let fn_def = self.current_chunk().function(idx).clone();
         let captures = self.snapshot_captures_for(&fn_def);
         let body: Rc<dyn core::any::Any + 'static> = Rc::new(fn_def.chunk);
-        let value = Value::try_new_compiled_fn(fn_def.params, captures, body, None, 0, line)?;
+        let value = Value::try_new_compiled_module_fn(
+            fn_def.params,
+            captures,
+            body,
+            None,
+            self.active_module_path().to_string(),
+            0,
+            line,
+        )?;
         self.push_value(value);
         Ok(())
     }
@@ -2769,6 +2819,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             slots,
             vec![scope],
             self.stack.len(),
+            func.module_path.clone(),
             FrameWrap::None,
         );
         Ok(Next::Continue)
@@ -2845,11 +2896,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
         for (name, entry) in &artifacts.fn_decls {
             let chunk_rc: Rc<Chunk> = entry.chunk.clone();
             let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-            let value = Value::try_new_compiled_fn(
+            let value = Value::try_new_compiled_module_fn(
                 entry.params.clone(),
                 Vec::new(),
                 body,
                 Some(name.clone()),
+                entry.module_path.clone(),
                 0,
                 line,
             )?;
@@ -2916,9 +2968,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
         if let Some(alias_name) = alias {
             // Aliased form: pack the exports into a Value::Module
             // and bind it under the alias. The alias lives in the
-            // current frame's top scope; `self.functions` still
-            // gets the module's fn entries so sibling bare calls
-            // inside module-owned code resolve.
+            // current frame's top scope. Function values retain
+            // their defining module, so sibling calls resolve
+            // through cached module artifacts without publishing
+            // bare names in this caller.
             let frame_has = self
                 .frames
                 .last()
@@ -2933,11 +2986,6 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         alias_name
                     ),
                 ));
-            }
-            for (name, entry) in fn_entries {
-                if !self.functions.contains_key(&name) {
-                    self.functions.insert(name, entry);
-                }
             }
             let module_rc = bop::value::BopModule::try_new(
                 path.to_string(),
@@ -3483,6 +3531,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             slots,
             Vec::new(),
             self.stack.len(),
+            Some(entry.module_path.clone()),
             wrap,
         );
         Ok(())
@@ -3793,6 +3842,7 @@ for outer in [1, 2] {
             Vec::new(),
             Vec::new(),
             0,
+            None,
             FrameWrap::None,
         );
         vm.pop_scope();
@@ -3817,6 +3867,7 @@ for outer in [1, 2] {
             Vec::new(),
             vec![captures],
             vm.stack.len(),
+            None,
             FrameWrap::None,
         );
         vm.push_scope();
@@ -3838,6 +3889,7 @@ for outer in [1, 2] {
             Vec::new(),
             Vec::new(),
             vm.stack.len(),
+            None,
             FrameWrap::TryCall { line: 1 },
         );
         vm.push_scope();
@@ -3846,6 +3898,7 @@ for outer in [1, 2] {
             Vec::new(),
             Vec::new(),
             vm.stack.len(),
+            None,
             FrameWrap::None,
         );
         vm.push_scope();

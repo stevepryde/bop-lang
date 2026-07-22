@@ -2311,6 +2311,105 @@ print(x)"#),
     );
 }
 
+#[test]
+fn aliased_module_functions_keep_private_sibling_scope_without_bare_leaks() {
+    set_modules(&[(
+        "internal",
+        r#"fn helper(n) { return n + 1 }
+fn twice(n) { return helper(n) + helper(n) }
+fn recurse(n) {
+    if n == 0 { return 0 }
+    return 1 + recurse(n - 1)
+}
+fn factory() {
+    fn nested(n) { return helper(n) }
+    return nested
+}
+let closure = fn(n) { return helper(n) }
+struct Thing { value }
+fn Thing.bump(self) { return helper(self.value) }
+let public = 10
+let _private = 99"#,
+    )]);
+
+    let positive = run_both(
+        r#"use internal as module
+print(module.twice(3))
+print(module.recurse(4))
+let returned = module.twice
+print(returned(5))
+let nested = module.factory()
+print(nested(7))
+print(module.closure(6))
+print(module.Thing { value: 7 }.value)
+print(module.Thing { value: 8 }.bump())
+print(module._private)"#,
+        &standard(),
+    );
+    assert!(positive.is_ok(), "unexpected error: {:?}", positive.error);
+    assert_eq!(
+        positive.prints,
+        ["8", "4", "12", "8", "7", "7", "9", "99"]
+    );
+
+    let function_error = run_err(
+        r#"use internal as module
+print(helper(1))"#,
+    );
+    assert!(function_error.contains("Function `helper` not found"));
+
+    let value_error = run_err(
+        r#"use internal as module
+print(public)"#,
+    );
+    assert!(value_error.contains("Variable `public` not found"));
+
+    let type_error = run_err(
+        r#"use internal as module
+print(Thing { value: 1 })"#,
+    );
+    assert!(type_error.contains("Struct `Thing` is not declared"));
+}
+
+#[test]
+fn aliased_nested_import_does_not_reexport_dependency_bare_names() {
+    set_modules(&[
+        ("shared", "fn helper(n) { return n + 1 }\nlet public = 10"),
+        (
+            "wrapper",
+            "use shared as dep\nlet via_alias = dep.helper(3)\nlet via_bare = helper(4)",
+        ),
+    ]);
+    let error = run_err(
+        r#"use wrapper
+print(via_alias)"#,
+    );
+    assert!(error.contains("Function `helper` not found"));
+}
+
+#[test]
+fn selective_imports_remain_exact_at_root_and_in_nested_modules() {
+    set_modules(&[
+        ("shared", "fn helper(n) { return n + 1 }\nlet public = 10"),
+        (
+            "wrapper",
+            "use shared.{public}\nlet via_public = public\nlet via_bare = helper(4)",
+        ),
+    ]);
+
+    let root_error = run_err(
+        r#"use shared.{public}
+print(helper(1))"#,
+    );
+    assert!(root_error.contains("Function `helper` not found"));
+
+    let nested_error = run_err(
+        r#"use wrapper
+print(via_public)"#,
+    );
+    assert!(nested_error.contains("Function `helper` not found"));
+}
+
 // ─── Module-qualified type identity (phase 2b) ──────────────────
 
 #[test]
