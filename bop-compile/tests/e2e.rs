@@ -1385,23 +1385,57 @@ print("unreachable")"#,
 #[test]
 #[ignore]
 fn e2e_top_level_try_renders_the_shared_friendly_hint() {
-    let run = run_aot_with_opts(
-        r#"enum Result { Ok(value), Err(error) }
-let value = try Result::Err("boom")"#,
-        "top_level_try_friendly_hint",
-        &Options::default(),
-    );
-    assert_eq!(run.status, Some(1), "stderr:\n{}", run.stderr);
-    assert!(run.stdout.is_empty(), "unexpected stdout: {}", run.stdout);
-    assert!(
-        run.stderr
-            .contains(bop::error_messages::TOP_LEVEL_TRY_ERROR_MESSAGE),
-        "missing canonical message:\n{}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains(bop::error_messages::TOP_LEVEL_TRY_HINT),
-        "missing friendly hint:\n{}",
-        run.stderr
-    );
+    let source = r#"enum Result { Ok(value), Err(error) }
+let value = try Result::Err("boom")"#;
+    let cases = [
+        ("standard", Options::default()),
+        (
+            "sandbox",
+            Options {
+                sandbox: true,
+                ..Options::default()
+            },
+        ),
+    ];
+
+    for (mode, options) in cases {
+        let run = run_aot_with_opts(
+            source,
+            &format!("top_level_try_friendly_hint_{mode}"),
+            &options,
+        );
+        assert_eq!(run.status, Some(1), "{mode} stderr:\n{}", run.stderr);
+        assert!(
+            run.stdout.is_empty(),
+            "{mode} unexpected stdout: {}",
+            run.stdout
+        );
+        assert!(
+            run.stderr.contains(&format!(
+                "[line 2] {}",
+                bop::error_messages::TOP_LEVEL_TRY_ERROR_MESSAGE
+            )),
+            "{mode} missing canonical message or source line:\n{}",
+            run.stderr
+        );
+        assert_eq!(
+            run.stderr
+                .matches(bop::error_messages::TOP_LEVEL_TRY_ERROR_MESSAGE)
+                .count(),
+            1,
+            "{mode} printed the message more than once:\n{}",
+            run.stderr
+        );
+        assert_eq!(
+            run.stderr
+                .matches(&format!(
+                    "hint: {}",
+                    bop::error_messages::TOP_LEVEL_TRY_HINT
+                ))
+                .count(),
+            1,
+            "{mode} did not print exactly one canonical hint:\n{}",
+            run.stderr
+        );
+    }
 }

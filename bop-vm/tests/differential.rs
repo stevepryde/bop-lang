@@ -1818,19 +1818,24 @@ doit()"#,
 
 #[test]
 fn try_at_top_level_on_err_errors_diff() {
-    let msg = run_err(
-        r#"enum Result { Ok(v), Err(e) }
-let r = try Result::Err("boom")"#,
-    );
+    let source = r#"enum Result { Ok(v), Err(e) }
+let r = try Result::Err("boom")"#;
+    let msg = run_err(source);
     assert!(msg.contains("top-level"), "got: {}", msg);
+
+    let mut host = RecordHost::new();
+    let vm_error = bop_vm::run(source, &mut host, &standard())
+        .expect_err("top-level try on Err must fail in the VM");
     assert_eq!(
-        vm_hint(
-            r#"enum Result { Ok(v), Err(e) }
-let r = try Result::Err("boom")"#,
-        )
-        .as_deref(),
+        vm_error.message,
+        bop::error_messages::TOP_LEVEL_TRY_ERROR_MESSAGE
+    );
+    assert_eq!(
+        vm_error.friendly_hint.as_deref(),
         Some(bop::error_messages::TOP_LEVEL_TRY_HINT)
     );
+    assert_eq!(vm_error.line, Some(2));
+    assert_eq!(vm_error.column, None);
 }
 
 #[test]

@@ -114,6 +114,7 @@ pub const TOP_LEVEL_TRY_ERROR_MESSAGE: &str = "try encountered Err at top-level"
 pub const TOP_LEVEL_TRY_HINT: &str =
     "Wrap the calling code in a fn, or use `match` to handle both arms explicitly.";
 
+/// Construct the canonical top-level `try` runtime error at `line`.
 pub fn top_level_try_error(line: u32) -> crate::error::BopError {
     let mut error = crate::error::BopError::runtime(TOP_LEVEL_TRY_ERROR_MESSAGE, line);
     error.friendly_hint = Some(String::from(TOP_LEVEL_TRY_HINT));

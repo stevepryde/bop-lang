@@ -2264,6 +2264,8 @@ let r = try Result::Err("boom")"#,
             error.friendly_hint.as_deref(),
             Some(crate::error_messages::TOP_LEVEL_TRY_HINT)
         );
+        assert_eq!(error.line, Some(2));
+        assert_eq!(error.column, None);
     }
 
     #[test]
