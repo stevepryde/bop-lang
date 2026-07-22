@@ -549,6 +549,39 @@ print("unreachable")"#,
     ("builtin_len_inspect", r#"print("hello".len())
 print([1, 2, 3].len())
 print("hi".inspect())"#),
+    (
+        "signed_index_methods",
+        r#"let values = [10, 20, 30, 40]
+print(values.remove(-1))
+print(values.insert(-1, 25))
+print(values)
+print(values.slice(-3, -1))
+print("a🙂é界"[-1])
+print("a🙂é界".slice(-3, -1))
+print(values[1.9])"#,
+    ),
+    (
+        "signed_index_failures_are_nonfatal",
+        r#"let values = [10, 20, 30]
+print(try_call(fn() { return values.remove(-4) }).is_err())
+print(try_call(fn() { return values.insert(-4, 0) }).is_err())
+print(try_call(fn() { values[-4] = 0 }).is_err())
+print(values)"#,
+    ),
+    (
+        "signed_index_i64_extremes",
+        r#"let min = -9223372036854775807 - 1
+let max = 9223372036854775807
+let values = [1, 2]
+print(values.slice(min, max))
+print(values.slice(max, min))
+print(try_call(fn() { return values[min] }).is_err())
+print(try_call(fn() { return values.remove(min) }).is_err())
+print(try_call(fn() { return values.insert(max, 3) }).is_err())
+print(values)"#,
+    ),
+    ("signed_index_bounds_error", "[1, 2].remove(-3)"),
+    ("signed_index_type_error", r#"[1].remove("0")"#),
     ("nested_array_access", "let m = [[1, 2], [3, 4]]\nprint(m[1][0])"),
     ("method_chain", r#"print("  HELLO  ".trim().lower())"#),
     (

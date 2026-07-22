@@ -1,9 +1,21 @@
 #[cfg(feature = "no_std")]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
-use crate::builtins::{error, expect_number};
+use crate::builtins::error;
 use crate::error::BopError;
+use crate::ops::{
+    normalize_element_index, normalize_insert_index, normalize_slice_bound, numeric_index,
+};
 use crate::value::{Value, values_equal};
+
+fn expect_method_index(name: &str, value: &Value, line: u32) -> Result<i64, BopError> {
+    numeric_index(value).ok_or_else(|| {
+        error(
+            line,
+            format!("`{}` expects a number, but got {}", name, value.type_name()),
+        )
+    })
+}
 
 /// Returns (return_value, optional_mutated_object)
 pub fn array_method(
@@ -45,33 +57,32 @@ pub fn array_method(
             if args.len() != 2 {
                 return Err(error(line, ".insert() needs 2 arguments: index and value"));
             }
-            let i = expect_number("insert", &args[0], line)? as usize;
+            let i = expect_method_index("insert", &args[0], line)?;
+            let actual = normalize_insert_index(i, arr.len())
+                .ok_or_else(|| error(line, format!("Insert index {} is out of bounds", i)))?;
             let mut new_arr = arr.to_vec();
-            if i > new_arr.len() {
-                return Err(error(line, format!("Insert index {} is out of bounds", i)));
-            }
-            new_arr.insert(i, args[1].clone());
+            new_arr.insert(actual, args[1].clone());
             Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
         }
         "remove" => {
             if args.len() != 1 {
                 return Err(error(line, ".remove() needs exactly 1 argument (index)"));
             }
-            let i = expect_number("remove", &args[0], line)? as usize;
+            let i = expect_method_index("remove", &args[0], line)?;
+            let actual = normalize_element_index(i, arr.len())
+                .ok_or_else(|| error(line, format!("Remove index {} is out of bounds", i)))?;
             let mut new_arr = arr.to_vec();
-            if i >= new_arr.len() {
-                return Err(error(line, format!("Remove index {} is out of bounds", i)));
-            }
-            let removed = new_arr.remove(i);
+            let removed = new_arr.remove(actual);
             Ok((removed, Some(Value::try_new_array(new_arr, line)?)))
         }
         "slice" => {
             if args.len() != 2 {
                 return Err(error(line, ".slice() needs 2 arguments: start and end"));
             }
-            let start = expect_number("slice", &args[0], line)? as usize;
-            let end = (expect_number("slice", &args[1], line)? as usize).min(arr.len());
-            let start = start.min(end);
+            let start = expect_method_index("slice", &args[0], line)?;
+            let end = expect_method_index("slice", &args[1], line)?;
+            let end = normalize_slice_bound(end, arr.len());
+            let start = normalize_slice_bound(start, arr.len()).min(end);
             let slice = arr[start..end].to_vec();
             Ok((Value::try_new_array(slice, line)?, None))
         }
@@ -222,10 +233,11 @@ pub fn string_method(
             if args.len() != 2 {
                 return Err(error(line, ".slice() needs 2 arguments: start and end"));
             }
-            let start = expect_number("slice", &args[0], line)? as usize;
+            let start = expect_method_index("slice", &args[0], line)?;
             let chars: Vec<char> = s.chars().collect();
-            let end = (expect_number("slice", &args[1], line)? as usize).min(chars.len());
-            let start = start.min(end);
+            let end = expect_method_index("slice", &args[1], line)?;
+            let end = normalize_slice_bound(end, chars.len());
+            let start = normalize_slice_bound(start, chars.len()).min(end);
             let result: String = chars[start..end].iter().collect();
             Ok((Value::new_str(result), None))
         }
@@ -260,6 +272,136 @@ pub fn string_method(
             Ok((Value::new_string_iter(chars), None))
         }
         _ => Err(error(line, format!("String doesn't have a .{}() method", method))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ints(value: &Value) -> Vec<i64> {
+        let Value::Array(items) = value else {
+            panic!("expected an array");
+        };
+        items
+            .iter()
+            .map(|item| match item {
+                Value::Int(value) => *value,
+                _ => panic!("expected an integer item"),
+            })
+            .collect()
+    }
+
+    fn updated_array(result: (Value, Option<Value>)) -> Value {
+        result.1.expect("method did not return an array update")
+    }
+
+    #[test]
+    fn remove_uses_negative_element_indices() {
+        let source = [
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(30),
+            Value::Int(40),
+        ];
+        let (removed, update) = array_method(&source, "remove", &[Value::Int(-1)], 9)
+            .expect("negative remove should succeed");
+        let Value::Int(removed) = removed else {
+            panic!("remove did not return an integer");
+        };
+        assert_eq!(removed, 40);
+        assert_eq!(ints(&update.expect("remove did not update the array")), [10, 20, 30]);
+    }
+
+    #[test]
+    fn insert_supports_signed_positions_and_the_positive_endpoint() {
+        let source = [Value::Int(10), Value::Int(20), Value::Int(30)];
+        for (index, expected) in [
+            (-1, &[10, 20, 99, 30][..]),
+            (-3, &[99, 10, 20, 30][..]),
+            (3, &[10, 20, 30, 99][..]),
+        ] {
+            let result = array_method(
+                &source,
+                "insert",
+                &[Value::Int(index), Value::Int(99)],
+                9,
+            )
+            .expect("valid insertion index should succeed");
+            assert_eq!(ints(&updated_array(result)), expected);
+        }
+
+        for index in [-4, 4] {
+            let err = array_method(
+                &source,
+                "insert",
+                &[Value::Int(index), Value::Int(99)],
+                9,
+            )
+            .expect_err("out-of-range insertion should fail");
+            assert_eq!(err.message, format!("Insert index {} is out of bounds", index));
+        }
+    }
+
+    #[test]
+    fn slice_translates_negative_bounds_then_clamps() {
+        let source = [
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(30),
+            Value::Int(40),
+        ];
+        for (start, end, expected) in [
+            (-2, 4, &[30, 40][..]),
+            (0, -1, &[10, 20, 30][..]),
+            (-100, 100, &[10, 20, 30, 40][..]),
+            (3, 1, &[][..]),
+        ] {
+            let (slice, update) = array_method(
+                &source,
+                "slice",
+                &[Value::Int(start), Value::Int(end)],
+                9,
+            )
+            .expect("slice should normalize its bounds");
+            assert!(update.is_none());
+            assert_eq!(ints(&slice), expected);
+        }
+    }
+
+    #[test]
+    fn string_slice_counts_unicode_characters_from_the_end() {
+        let (slice, update) = string_method(
+            "a🦀éz",
+            "slice",
+            &[Value::Int(-3), Value::Int(-1)],
+            9,
+        )
+        .expect("unicode slice should succeed");
+        assert!(update.is_none());
+        let Value::Str(ref slice) = slice else {
+            panic!("slice did not return a string");
+        };
+        assert_eq!(slice.as_str(), "🦀é");
+    }
+
+    #[test]
+    fn method_indices_preserve_subscript_numeric_coercion() {
+        let source = [Value::Int(10), Value::Int(20), Value::Int(30)];
+        let (removed, update) = array_method(&source, "remove", &[Value::Number(-1.9)], 9)
+            .expect("fractional numeric index should truncate like a subscript");
+        let Value::Int(removed) = removed else {
+            panic!("remove did not return an integer");
+        };
+        assert_eq!(removed, 30);
+        assert_eq!(ints(&update.expect("remove did not update the array")), [10, 20]);
+
+        let err = array_method(&source, "remove", &[Value::Int(i64::MIN)], 9)
+            .expect_err("extreme negative index should fail");
+        assert_eq!(
+            err.message,
+            format!("Remove index {} is out of bounds", i64::MIN)
+        );
     }
 }
 

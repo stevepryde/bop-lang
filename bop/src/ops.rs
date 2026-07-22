@@ -252,15 +252,55 @@ pub fn not(val: &Value) -> Value {
     Value::Bool(!val.is_truthy())
 }
 
-/// Coerce any numeric index (Int or Number) to an `i64`. Returns
-/// `None` for non-numeric values. Used by the `index_get` /
-/// `index_set` paths so both `arr[0]` (Int) and `arr[0.0]`
-/// (Number) still work after phase 6's Int/Number split.
-fn numeric_index(idx: &Value) -> Option<i64> {
+/// Coerce any numeric index (`Int` or `Number`) to an `i64`.
+///
+/// `Int` remains exact, while `Number` preserves the language's historical
+/// float-to-index conversion (truncation toward zero, including Rust's
+/// saturating casts for non-finite values). Method and subscript indexing both
+/// use this helper so their accepted input types cannot drift apart.
+pub(crate) fn numeric_index(idx: &Value) -> Option<i64> {
     match idx {
         Value::Int(n) => Some(*n),
         Value::Number(n) => Some(*n as i64),
         _ => None,
+    }
+}
+
+/// Normalize an element index into `[0, len)`, counting negative indices from
+/// the end. Returns `None` when the signed position lies outside the sequence.
+pub(crate) fn normalize_element_index(index: i64, len: usize) -> Option<usize> {
+    normalize_signed_index(index, len, false)
+}
+
+/// Normalize an insertion index into `[0, len]`. The positive `len` endpoint
+/// appends; negative indices still count from the existing sequence end, so
+/// `-1` inserts immediately before the final element.
+pub(crate) fn normalize_insert_index(index: i64, len: usize) -> Option<usize> {
+    normalize_signed_index(index, len, true)
+}
+
+/// Normalize one slice bound by counting negatives from the end and clamping
+/// out-of-range positions to `[0, len]`.
+pub(crate) fn normalize_slice_bound(index: i64, len: usize) -> usize {
+    let position = signed_position(index, len);
+    position.clamp(0, len as i128) as usize
+}
+
+fn normalize_signed_index(index: i64, len: usize, allow_end: bool) -> Option<usize> {
+    let position = signed_position(index, len);
+    let upper = len as i128;
+    if position < 0 || position > upper || (!allow_end && position == upper) {
+        None
+    } else {
+        Some(position as usize)
+    }
+}
+
+fn signed_position(index: i64, len: usize) -> i128 {
+    if index < 0 {
+        len as i128 + index as i128
+    } else {
+        index as i128
     }
 }
 
@@ -277,12 +317,8 @@ pub fn index_get(obj: &Value, idx: &Value, line: u32) -> Result<Value, BopError>
                     ),
                 )
             })?;
-            let actual = if i < 0 {
-                (arr.len() as i64 + i) as usize
-            } else {
-                i as usize
-            };
-            arr.get(actual).cloned().ok_or_else(|| {
+            let actual = normalize_element_index(i, arr.len());
+            actual.and_then(|index| arr.get(index)).cloned().ok_or_else(|| {
                 error(
                     line,
                     format!(
@@ -305,13 +341,8 @@ pub fn index_get(obj: &Value, idx: &Value, line: u32) -> Result<Value, BopError>
                 )
             })?;
             let chars: Vec<char> = s.chars().collect();
-            let actual = if i < 0 {
-                (chars.len() as i64 + i) as usize
-            } else {
-                i as usize
-            };
-            chars
-                .get(actual)
+            normalize_element_index(i, chars.len())
+                .and_then(|index| chars.get(index))
                 .map(|c| Value::new_str(c.to_string()))
                 .ok_or_else(|| {
                     error(
@@ -364,17 +395,12 @@ pub fn index_set(
                 error(line, "Can't set index with these types")
             })?;
             let len = arr.len();
-            let actual = if i < 0 {
-                (len as i64 + i) as usize
-            } else {
-                i as usize
-            };
-            if actual >= len {
-                return Err(error(
+            let actual = normalize_element_index(i, len).ok_or_else(|| {
+                error(
                     line,
                     format!("Index {} is out of bounds (array has {} items)", i, len),
-                ));
-            }
+                )
+            })?;
             arr.try_set(actual, val, line)
         }
         Value::Dict(entries) => match idx {

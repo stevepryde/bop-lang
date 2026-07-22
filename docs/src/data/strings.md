@@ -81,7 +81,7 @@ let msg = "Score: " + (42).to_str()
 | `s.upper()` | string | Uppercase copy |
 | `s.lower()` | string | Lowercase copy |
 | `s.trim()` | string | Copy with leading/trailing whitespace removed |
-| `s.slice(start, end)` | string | Substring |
+| `s.slice(start, end)` | string | Half-open substring by code-point index. Negative bounds count from the end; out-of-range bounds clamp |
 | `s.to_int()` | int | Parse. `"3.7".to_int()` → `3` (float-then-truncate). Raises on junk. |
 | `s.to_float()` | number | Parse. Raises on junk. |
 

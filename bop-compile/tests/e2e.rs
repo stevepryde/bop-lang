@@ -308,6 +308,60 @@ print(sorted)"#,
 
 #[test]
 #[ignore]
+fn e2e_signed_indices_across_methods_and_subscripts() {
+    let output = run_aot(
+        r#"let values = [10, 20, 30, 40]
+print(values.remove(-1))
+print(values.insert(-1, 25))
+print(values)
+print(values.slice(-3, -1))
+print(values.slice(-99, 99))
+print(values.slice(99, -99))
+let fractional = [10, 20, 30]
+print(fractional[1.9])
+fractional[-1.9] = 99
+print(fractional.remove(-1.9))
+print(fractional.insert(1.9, 15))
+print(fractional)
+let text = "a🙂é界"
+print(text[-1])
+print(text.slice(-3, -1))
+print(text.slice(-99, 99))
+let unchanged = [1, 2, 3]
+print(try_call(fn() { return unchanged.remove(-4) }).is_err())
+print(try_call(fn() { return unchanged.insert(-4, 0) }).is_err())
+print(try_call(fn() { unchanged[-4] = 0 }).is_err())
+print(try_call(fn() { return unchanged.remove("0") }).is_err())
+print(unchanged)"#,
+        "signed_indices_across_methods_and_subscripts",
+    );
+    assert_eq!(
+        output,
+        concat!(
+            "40\n",
+            "none\n",
+            "[10, 20, 25, 30]\n",
+            "[20, 25]\n",
+            "[10, 20, 25, 30]\n",
+            "[]\n",
+            "20\n",
+            "99\n",
+            "none\n",
+            "[10, 15, 20]\n",
+            "界\n",
+            "🙂é\n",
+            "a🙂é界\n",
+            "true\n",
+            "true\n",
+            "true\n",
+            "true\n",
+            "[1, 2, 3]"
+        )
+    );
+}
+
+#[test]
+#[ignore]
 fn e2e_string_interpolation() {
     assert_aot_matches(
         "interpolation",
