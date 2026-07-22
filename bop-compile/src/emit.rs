@@ -651,6 +651,12 @@ fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<String>
 
 // ─── Emitter ───────────────────────────────────────────────────────
 
+#[derive(Default)]
+struct EmissionScope {
+    locals: HashSet<String>,
+    plain_glob_imports: HashSet<String>,
+}
+
 struct Emitter {
     out: String,
     indent: usize,
@@ -687,12 +693,11 @@ struct Emitter {
     /// a namespaced reference (`m.Color`) needs to be resolved
     /// to a module path for construction or pattern matching.
     module_aliases: HashMap<String, String>,
-    /// Paths already imported at the current scope. Re-importing
-    /// the same path in the same scope is a no-op — matches the
-    /// walker's `imported_here` guard.
-    imported_in_scope: HashSet<String>,
-    /// Stack of `let`-bound Bop names visible at the current
-    /// emission position. Used for:
+    /// Stack of generated Rust scopes. Each frame owns both its
+    /// `let`-bound Bop names and the plain-glob imports that emitted
+    /// those bindings. Keeping them together prevents an import in
+    /// one module, function, lambda, or block from suppressing the
+    /// declarations needed by another. Used for:
     ///
     /// - Ident resolution (local vs top-level fn vs error).
     /// - Free-variable analysis for lambda capture.
@@ -700,7 +705,7 @@ struct Emitter {
     /// Each block (if / while / repeat / for / fn / lambda) pushes
     /// a fresh set on entry and pops on exit. User-fn and
     /// lambda parameters are inserted into the freshly-pushed set.
-    scope_stack: Vec<HashSet<String>>,
+    scope_stack: Vec<EmissionScope>,
     /// True while emitting the body of `run_program` (the Rust fn
     /// that returns `Result<(), BopError>`). User fns and lambdas
     /// toggle this off for the duration of their body — inside
@@ -749,14 +754,13 @@ impl Emitter {
             current_module: String::from(bop::value::ROOT_MODULE_PATH),
             type_bindings: vec![builtin_frame],
             module_aliases: HashMap::new(),
-            imported_in_scope: HashSet::new(),
             scope_stack: Vec::new(),
             in_top_level: false,
         }
     }
 
     fn push_scope(&mut self) {
-        self.scope_stack.push(HashSet::new());
+        self.scope_stack.push(EmissionScope::default());
         self.type_bindings.push(HashMap::new());
     }
 
@@ -878,12 +882,15 @@ impl Emitter {
 
     fn bind_local(&mut self, name: &str) {
         if let Some(top) = self.scope_stack.last_mut() {
-            top.insert(name.to_string());
+            top.locals.insert(name.to_string());
         }
     }
 
     fn is_local(&self, name: &str) -> bool {
-        self.scope_stack.iter().rev().any(|s| s.contains(name))
+        self.scope_stack
+            .iter()
+            .rev()
+            .any(|scope| scope.locals.contains(name))
     }
 
     fn rust_fn_name(&self, name: &str) -> String {
@@ -1154,7 +1161,11 @@ impl Emitter {
         // visible effects (different item subset, different alias
         // binding) when re-run in the same scope, so we always
         // re-emit them.
-        if items.is_none() && alias.is_none() && self.imported_in_scope.contains(path) {
+        let already_imported_here = self
+            .scope_stack
+            .last()
+            .is_some_and(|scope| scope.plain_glob_imports.contains(path));
+        if items.is_none() && alias.is_none() && already_imported_here {
             return Ok(());
         }
         let entry = self
@@ -1311,7 +1322,11 @@ impl Emitter {
                     self.bind_type(tn, &mp);
                 }
                 if items.is_none() {
-                    self.imported_in_scope.insert(path.to_string());
+                    self.scope_stack
+                        .last_mut()
+                        .expect("use statements are emitted inside a scope")
+                        .plain_glob_imports
+                        .insert(path.to_string());
                 }
             }
         }
@@ -3355,7 +3370,7 @@ fn scan_free_vars_stmts(
     stmts: &[Stmt],
     known: &mut HashSet<String>,
     free: &mut std::collections::BTreeSet<String>,
-    outer_scopes: &[HashSet<String>],
+    outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
     for stmt in stmts {
@@ -3367,7 +3382,7 @@ fn scan_free_vars_stmt(
     stmt: &Stmt,
     known: &mut HashSet<String>,
     free: &mut std::collections::BTreeSet<String>,
-    outer_scopes: &[HashSet<String>],
+    outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
     match &stmt.kind {
@@ -3680,7 +3695,7 @@ fn scan_free_vars_expr(
     expr: &Expr,
     known: &mut HashSet<String>,
     free: &mut std::collections::BTreeSet<String>,
-    outer_scopes: &[HashSet<String>],
+    outer_scopes: &[EmissionScope],
     fn_info: &FnInfo,
 ) {
     match &expr.kind {
@@ -3835,8 +3850,10 @@ fn scan_free_vars_expr(
     }
 }
 
-fn is_outer_local(name: &str, outer_scopes: &[HashSet<String>]) -> bool {
-    outer_scopes.iter().any(|s| s.contains(name))
+fn is_outer_local(name: &str, outer_scopes: &[EmissionScope]) -> bool {
+    outer_scopes
+        .iter()
+        .any(|scope| scope.locals.contains(name))
 }
 
 // ─── Free helpers ──────────────────────────────────────────────────
