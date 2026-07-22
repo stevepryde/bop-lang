@@ -131,6 +131,9 @@ Assignment targets can be:
 - Struct fields: `point.x = ...`
 
 Reassigning an all-caps identifier is a parse error ("can't reassign a constant").
+The rule follows the base binding through index and field targets, so
+`VALUES[0] = ...` and `CONFIG.retries += ...` are also rejected when `VALUES`
+or `CONFIG` is a constant.
 
 ## Field access / method call
 

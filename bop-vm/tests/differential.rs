@@ -428,6 +428,44 @@ print(old_counter.label)"#,
 }
 
 #[test]
+fn const_container_assignment_is_rejected_by_both_engines_diff() {
+    let cases = [
+        "const VALUES = [1, 2]\nVALUES[0] = 9",
+        "const VALUES = [1, 2]\nVALUES[0] += 9",
+        "const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] = 9",
+        "const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] += 9",
+        "struct Counter { n }\nconst COUNTER = Counter { n: 1 }\nCOUNTER.n = 9",
+        "struct Counter { n }\nconst COUNTER = Counter { n: 1 }\nCOUNTER.n += 9",
+        "const VALUES = [1, 2]\n((VALUES))[0] = 9",
+        "const GRID = [[1]]\nGRID[0][0] += 9",
+    ];
+
+    for source in cases {
+        let message = run_err(source);
+        assert!(
+            message.contains("can't reassign") && message.contains("constant"),
+            "source: {source}\nerror: {message}"
+        );
+    }
+}
+
+#[test]
+fn const_declaration_shadowing_remains_engine_consistent_diff() {
+    assert_eq!(
+        say("const VALUE = [1]\nconst VALUE = [2]\nprint(VALUE[0])"),
+        "2"
+    );
+}
+
+#[test]
+fn const_index_reads_in_mutable_targets_remain_engine_consistent_diff() {
+    assert_eq!(
+        say("const INDEX = 0\nlet values = [1]\nvalues[INDEX] += 2\nprint(values)"),
+        "[3]"
+    );
+}
+
+#[test]
 fn named_index_assignment_observes_rhs_then_index_then_live_current_diff() {
     assert_eq!(
         say(r#"let values = [1, 2]

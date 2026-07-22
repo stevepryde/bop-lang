@@ -2192,28 +2192,19 @@ pub fn count_instructions(stmts: &[Stmt]) -> u32 {
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError> {
-    match expr.kind {
-        ExprKind::Ident(name) => {
-            // All-caps LHS → reassigning a constant. Refused at
-            // parse time without needing scope tracking: the
-            // parser already forbids `let` / `fn` bindings with
-            // an all-caps shape, so any all-caps identifier in
-            // the source must have come from a `const` declaration
-            // (or is undeclared, in which case we give the user
-            // the right kind of diagnostic anyway).
-            if naming::is_constant_name(&name) {
-                let mut err = BopError::runtime(
-                    format!("can't reassign `{}` — it's a constant", name),
-                    line,
-                );
-                err.friendly_hint = Some(
-                    "constants are immutable. Use `let` if you want a mutable binding."
-                        .to_string(),
-                );
-                return Err(err);
-            }
-            Ok(AssignTarget::Variable(name))
+    // Assignment mutates the binding at the root of a place, not
+    // merely the final index or field. Parentheses do not need a
+    // separate case because the parser deliberately erases them.
+    // Check the complete place before lowering it so every engine
+    // receives an AST in which const mutation is unrepresentable.
+    if let Some(name) = assignable_root_name(&expr) {
+        if naming::is_constant_name(name) {
+            return Err(const_assignment_error(name, line));
         }
+    }
+
+    match expr.kind {
+        ExprKind::Ident(name) => Ok(AssignTarget::Variable(name)),
         ExprKind::Index { object, index } => Ok(AssignTarget::Index {
             object: *object,
             index: *index,
@@ -2233,6 +2224,38 @@ fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError
             is_try_return: false,
         }),
     }
+}
+
+/// Return the binding at the root of an assignable place.
+///
+/// Only the receiver/object side participates: an all-caps name
+/// used as an index is a read (`items[INDEX] = value`), not the
+/// binding being mutated. Calls and other expressions have no
+/// assignable root and retain their existing invalid-target error.
+fn assignable_root_name(expr: &Expr) -> Option<&str> {
+    match &expr.kind {
+        ExprKind::Ident(name) => Some(name),
+        ExprKind::Index { object, .. } | ExprKind::FieldAccess { object, .. } => {
+            assignable_root_name(object)
+        }
+        _ => None,
+    }
+}
+
+fn const_assignment_error(name: &str, line: u32) -> BopError {
+    // All-caps LHS → reassigning a constant. Refused at parse
+    // time without scope tracking: value bindings cannot use an
+    // all-caps shape, so an assignable all-caps root denotes a
+    // constant (or an undeclared name for which this remains the
+    // most actionable diagnostic).
+    let mut err = BopError::runtime(
+        format!("can't reassign `{}` — it's a constant", name),
+        line,
+    );
+    err.friendly_hint = Some(
+        "constants are immutable. Use `let` if you want a mutable binding.".to_string(),
+    );
+    err
 }
 
 pub fn fmt_token(token: &Token) -> &'static str {

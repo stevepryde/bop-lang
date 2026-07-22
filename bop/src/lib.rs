@@ -3413,6 +3413,85 @@ print(leak())"#,
     }
 
     #[test]
+    fn const_container_assignment_is_refused_at_parse_time() {
+        let cases = [
+            ("const VALUES = [1, 2]\nVALUES[0] = 9", "VALUES", 2),
+            ("const VALUES = [1, 2]\nVALUES[0] += 9", "VALUES", 2),
+            (
+                "const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] = 9",
+                "LOOKUP",
+                2,
+            ),
+            (
+                "const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] += 9",
+                "LOOKUP",
+                2,
+            ),
+            (
+                "struct Counter { n }\nconst COUNTER = Counter { n: 1 }\nCOUNTER.n = 9",
+                "COUNTER",
+                3,
+            ),
+            (
+                "struct Counter { n }\nconst COUNTER = Counter { n: 1 }\nCOUNTER.n += 9",
+                "COUNTER",
+                3,
+            ),
+        ];
+
+        for (source, name, line) in cases {
+            let err = parse(source).unwrap_err();
+            assert_eq!(
+                err.message,
+                format!("can't reassign `{name}` — it's a constant"),
+                "source: {source}"
+            );
+            assert_eq!(err.line, Some(line), "source: {source}");
+            assert_eq!(
+                err.friendly_hint.as_deref(),
+                Some("constants are immutable. Use `let` if you want a mutable binding."),
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn const_assignment_finds_grouped_and_nested_place_roots() {
+        let cases = [
+            "const VALUES = [1, 2]\n(VALUES)[0] = 9",
+            "const VALUES = [1, 2]\n((VALUES))[0] += 9",
+            "const GRID = [[1]]\nGRID[0][0] = 9",
+            "struct Counter { n }\nconst COUNTER = Counter { n: 1 }\n(COUNTER).n = 9",
+        ];
+
+        for source in cases {
+            let err = parse(source).unwrap_err();
+            assert!(
+                err.message.contains("can't reassign") && err.message.contains("constant"),
+                "source: {source}\nerror: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn const_declarations_remain_declarations_not_assignments() {
+        // Issue #7 distinguishes a declaration that shadows/replaces an
+        // existing same-shaped binding from an assignment to that binding.
+        assert_eq!(
+            say("const VALUE = [1]\nconst VALUE = [2]\nprint(VALUE[0])"),
+            "2"
+        );
+    }
+
+    #[test]
+    fn const_names_remain_readable_inside_mutable_assignment_targets() {
+        assert_eq!(
+            say("const INDEX = 0\nlet values = [1]\nvalues[INDEX] += 2\nprint(values)"),
+            "[3]"
+        );
+    }
+
+    #[test]
     fn let_name_must_start_lowercase() {
         let err = run_err("let Foo = 1");
         assert!(err.to_lowercase().contains("value"), "got: {err}");
