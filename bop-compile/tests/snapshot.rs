@@ -32,6 +32,18 @@ fn inconsistent_or_pattern_is_rejected_before_aot_emission() {
     assert!(error.friendly_hint.is_some());
 }
 
+#[test]
+fn multiline_if_expression_still_rejects_multiple_branch_values_before_aot_emission() {
+    let error = transpile(
+        "let value = if true {\n    1\n    2\n} else {\n    3\n}",
+        &Options::default(),
+    )
+    .expect_err("a second branch expression must fail before Rust emission");
+    assert_eq!(error.message, "Expected `}` but found `an integer`");
+    assert_eq!(error.line, Some(3));
+    assert_eq!(error.column, Some(5));
+}
+
 fn contains_all(haystack: &str, needles: &[&str]) {
     for n in needles {
         assert!(
