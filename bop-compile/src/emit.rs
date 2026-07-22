@@ -2160,7 +2160,8 @@ impl Emitter {
     ) -> Result<(), BopError> {
         let param_list = params
             .iter()
-            .map(|p| format!("mut {}: ::bop::value::Value", rust_user_ident(p)))
+            .enumerate()
+            .map(|(index, _)| format!("__bop_param_{index}: ::bop::value::Value"))
             .collect::<Vec<_>>()
             .join(", ");
         let sig = if params.is_empty() {
@@ -2191,8 +2192,12 @@ impl Emitter {
         // isolates outer locals anyway, but scope tracking is the
         // source of truth for lambda-capture analysis.
         self.push_scope();
-        for p in params {
+        for (index, p) in params.iter().enumerate() {
             self.bind_local(p);
+            self.line(&format!(
+                "let mut {}: ::bop::value::Value = __bop_param_{};",
+                rust_user_ident(p), index
+            ));
         }
         for s in body {
             self.emit_stmt(s)?;

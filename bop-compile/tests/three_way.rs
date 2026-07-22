@@ -913,6 +913,19 @@ print(double(5))
 print(double(21))"#,
     ),
     (
+        "lambda_parameter_binding_semantics",
+        r#"fn named(value, value) { return value }
+struct Holder { n }
+fn Holder.pick(self, value, value) { return self.n + value }
+fn make(value) { return fn(value) { return value } }
+let outer = 40
+let closure = fn(_ignored, value, value) { return outer + value }
+print(closure(1, 2, 3))
+print(named(4, 5))
+print(Holder { n: 6 }.pick(7, 8))
+print(make(9)(10))"#,
+    ),
+    (
         "closure_captures_value",
         r#"let n = 5
 let add_n = fn(x) { return x + n }
