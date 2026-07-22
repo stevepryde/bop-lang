@@ -515,6 +515,46 @@ fn if_expression() {
     assert_eq!(say("let x = if true { 1 } else { 2 }\nprint(x)"), "1");
 }
 
+#[test]
+fn if_expression_jump_targets_survive_all_peephole_fusions_diff() {
+    let outcome = run_both(
+        r#"
+fn add_const(c, a, b) { return (if c { a } else { b }) + 1 }
+fn add_local(c, a, b, d) { return (if c { a } else { b }) + d }
+fn sub_const(c, a, b) { return (if c { a } else { b }) - 1 }
+fn lt_const(c, a, b) { return (if c { a } else { b }) < 15 }
+fn lt_local(c, a, b, d) { return (if c { a } else { b }) < d }
+fn nested(c1, c2, a, b, d) {
+    return (if c1 { if c2 { a } else { b } } else { d }) + 1
+}
+
+print(add_const(true, 10, 20))
+print(add_const(false, 10, 20))
+print(add_local(true, 10, 20, 100))
+print(add_local(false, 10, 20, 100))
+print(sub_const(true, 10, 20))
+print(sub_const(false, 10, 20))
+print(lt_const(true, 10, 20))
+print(lt_const(false, 10, 20))
+print(lt_local(true, 10, 20, 15))
+print(lt_local(false, 10, 20, 15))
+print(nested(true, true, 10, 20, 30))
+print(nested(true, false, 10, 20, 30))
+print(nested(false, true, 10, 20, 30))
+"#,
+        &standard(),
+    );
+
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        vec![
+            "11", "21", "110", "120", "9", "19", "true", "false", "true", "false", "11", "21",
+            "31",
+        ]
+    );
+}
+
 // ─── While ────────────────────────────────────────────────────────
 
 #[test]
