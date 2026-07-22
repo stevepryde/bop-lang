@@ -804,19 +804,25 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
 
     fn module_binding(&self, module: &crate::value::BopModule, name: &str) -> Option<Value> {
         if module.path == self.active_value_module {
-            return self
+            if let Some(value) = self
                 .scopes
                 .first()
                 .and_then(|scope| scope.get(name))
-                .cloned();
+                .cloned()
+            {
+                return Some(value);
+            }
         }
         let (origin_module, origin_binding) = module.__binding_origin(name);
         if origin_module == self.active_value_module {
-            return self
+            if let Some(value) = self
                 .scopes
                 .first()
                 .and_then(|scope| scope.get(&origin_binding))
-                .cloned();
+                .cloned()
+            {
+                return Some(value);
+            }
         }
         if let Some(active_binding) = self.binding_origins.iter().find_map(
             |(active_binding, active_origin)| {
@@ -1792,7 +1798,25 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         let module_result = sub.exec_block(&stmts);
         self.steps = sub.steps;
         self.rand_state = sub.rand_state;
-        match module_result? {
+        let module_signal = match module_result {
+            Ok(signal) => signal,
+            Err(module_error) => {
+                let failed_environment = sub.scopes.into_iter().next().unwrap_or_default();
+                put_live_environment(
+                    &self.live_value_environments,
+                    module_path,
+                    failed_environment,
+                    &sub.binding_origins,
+                );
+                // Forwarded values have been returned to their authoritative
+                // origins. The failed module's own partial state must not
+                // become a cacheable environment.
+                self.live_value_environments.borrow_mut().remove(module_path);
+                self.live_binding_origins.borrow_mut().remove(module_path);
+                return Err(module_error);
+            }
+        };
+        match module_signal {
             Signal::Return(_) | Signal::None => {}
             Signal::Break => {
                 return Err(error(0, "break used outside of a loop"));

@@ -97,6 +97,7 @@ impl BopInstance {
         args: &[Value],
         host: &mut dyn BopHost,
     ) -> Result<Value, BopError> {
+        let _operation = OperationGuard::begin(&self.in_operation)?;
         let entry = self.entries.iter().find(|entry| entry.name == name).ok_or_else(|| {
             error(0, format!("Public entry point `{}` was not found", name))
         })?;
@@ -112,7 +113,6 @@ impl BopInstance {
                 ),
             ));
         }
-        let _operation = OperationGuard::begin(&self.in_operation)?;
         if self.memory.__exceeded() {
             return Err(memory_limit_error());
         }
@@ -132,8 +132,8 @@ impl BopInstance {
         args: &[Value],
         host: &mut dyn BopHost,
     ) -> Result<Value, BopError> {
-        self.session.validate_instance_callable(callable, args.len())?;
         let _operation = OperationGuard::begin(&self.in_operation)?;
+        self.session.validate_instance_callable(callable, args.len())?;
         if self.memory.__exceeded() {
             return Err(memory_limit_error());
         }
@@ -176,6 +176,7 @@ impl Drop for OperationGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
 
     struct Host;
@@ -348,6 +349,49 @@ mod tests {
     }
 
     #[test]
+    fn active_module_handles_fall_back_to_callable_export_metadata() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "state".to_string(),
+            "fn helper() { return 7 }\nfn via(handle) { return handle.helper() }".to_string(),
+        );
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "use state as state\npub fn call() { return state.via(state) }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(instance.call("call", &[], &mut host).unwrap().inspect(), "7");
+    }
+
+    #[test]
+    fn failed_facade_initialization_restores_dependency_values() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "leaf".to_string(),
+            "let count = 0\nfn bump() { count += 1; return count }".to_string(),
+        );
+        modules.insert("bad".to_string(), "use leaf\nmissing()".to_string());
+        let mut host = ModuleHost { modules };
+        let mut instance = BopInstance::load(
+            "pub fn fail() { use bad }\npub fn recover() { use leaf as leaf; return leaf.bump() }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert!(instance.call("fail", &[], &mut host).is_err());
+        assert_eq!(
+            instance.call("recover", &[], &mut host).unwrap().inspect(),
+            "1"
+        );
+        assert_eq!(
+            instance.call("recover", &[], &mut host).unwrap().inspect(),
+            "2"
+        );
+    }
+
+    #[test]
     fn facade_handles_read_forwarded_bindings_from_the_active_facade() {
         let mut modules = BTreeMap::new();
         modules.insert(
@@ -427,5 +471,182 @@ mod tests {
         let error = instance.call("too_large", &[], &mut host).unwrap_err();
         assert!(error.is_fatal);
         assert!(error.message.contains("Memory limit"));
+    }
+
+    struct ExternalValueHost {
+        value: Option<Value>,
+    }
+
+    impl BopHost for ExternalValueHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            (name == "take_external").then(|| Ok(self.value.take().unwrap_or(Value::None)))
+        }
+    }
+
+    #[test]
+    fn external_host_values_are_free_until_the_instance_first_mutates_them() {
+        let external = {
+            let _suspended = ActiveMemoryGuard::__suspend();
+            Value::new_array((0..256).map(Value::Int).collect())
+        };
+        let limits = BopLimits { max_steps: 100, max_memory: 64 };
+        let mut host = ExternalValueHost { value: Some(external) };
+        let mut instance = BopInstance::load(
+            "let stored = none\npub fn keep() { stored = take_external() }\npub fn mutate() { stored.push(256) }\npub fn harmless() { return 1 }",
+            &mut host,
+            &limits,
+        )
+        .unwrap();
+
+        instance.call("keep", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.used(), 0);
+
+        let mutation_error = instance.call("mutate", &[], &mut host).unwrap_err();
+        assert!(mutation_error.is_fatal);
+        assert!(mutation_error.message.contains("Memory limit"));
+        assert!(instance.memory.used() > limits.max_memory);
+
+        let poisoned_error = instance.call("harmless", &[], &mut host).unwrap_err();
+        assert!(poisoned_error.is_fatal);
+        assert!(poisoned_error.message.contains("Memory limit"));
+    }
+
+    #[test]
+    fn returned_values_keep_their_instance_receipt_until_the_last_owner_drops() {
+        let mut host = Host;
+        let mut instance = BopInstance::load(
+            "pub fn make() { return [1, 2, 3, 4] }\npub fn harmless() { return none }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(instance.memory.used(), 0);
+
+        let retained = instance.call("make", &[], &mut host).unwrap();
+        let retained_bytes = instance.memory.used();
+        assert!(retained_bytes > 0);
+        instance.call("harmless", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.used(), retained_bytes);
+
+        let second_owner = retained.clone();
+        drop(retained);
+        assert_eq!(instance.memory.used(), retained_bytes);
+        drop(second_owner);
+        assert_eq!(instance.memory.used(), 0);
+    }
+
+    #[test]
+    fn interleaved_instances_keep_independent_memory_accounts() {
+        let mut host = Host;
+        let source = "pub fn make(x) { return [x, x] }";
+        let limits = BopLimits::standard();
+        let mut first = BopInstance::load(source, &mut host, &limits).unwrap();
+        let mut second = BopInstance::load(source, &mut host, &limits).unwrap();
+
+        let first_value = first.call("make", &[Value::Int(1)], &mut host).unwrap();
+        let first_bytes = first.memory.used();
+        assert!(first_bytes > 0);
+        assert_eq!(second.memory.used(), 0);
+
+        let second_value = second.call("make", &[Value::Int(2)], &mut host).unwrap();
+        let second_bytes = second.memory.used();
+        assert!(second_bytes > 0);
+        assert_eq!(first.memory.used(), first_bytes);
+
+        drop(first_value);
+        assert_eq!(first.memory.used(), 0);
+        assert_eq!(second.memory.used(), second_bytes);
+        drop(second_value);
+        assert_eq!(second.memory.used(), 0);
+    }
+
+    struct HookAllocatingHost {
+        retained: RefCell<Vec<Value>>,
+    }
+
+    impl HookAllocatingHost {
+        fn retain_large(&self) {
+            self.retained
+                .borrow_mut()
+                .push(Value::new_str("x".repeat(16 * 1024)));
+        }
+    }
+
+    impl BopHost for HookAllocatingHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            self.retain_large();
+            (name == "host_value").then_some(Ok(Value::None))
+        }
+
+        fn on_print(&mut self, _message: &str) {
+            self.retain_large();
+        }
+
+        fn function_hint(&self) -> &str {
+            self.retain_large();
+            "host hint"
+        }
+
+        fn on_tick(&mut self) -> Result<(), BopError> {
+            self.retain_large();
+            Ok(())
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.retain_large();
+            (name == "hook").then(|| Ok(String::new()))
+        }
+    }
+
+    #[test]
+    fn every_host_hook_runs_with_instance_accounting_suspended() {
+        let limits = BopLimits { max_steps: 100, max_memory: 64 };
+        let mut host = HookAllocatingHost { retained: RefCell::new(Vec::new()) };
+        let mut instance = BopInstance::load(
+            "use hook\npub fn print_it() { print(\"ok\") }\npub fn host_it() { host_value() }\npub fn hint_it() { missing() }",
+            &mut host,
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(instance.memory.used(), 0);
+
+        instance.call("print_it", &[], &mut host).unwrap();
+        instance.call("host_it", &[], &mut host).unwrap();
+        let error = instance.call("hint_it", &[], &mut host).unwrap_err();
+        assert!(!error.is_fatal);
+        assert!(error
+            .friendly_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("host hint")));
+        assert_eq!(instance.memory.used(), 0);
+        assert!(host.retained.borrow().len() >= 8);
+    }
+
+    #[test]
+    fn reentry_rejection_precedes_target_and_arity_preflight() {
+        let mut host = Host;
+        let mut instance = BopInstance::load(
+            "pub fn entry() {}",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        instance.in_operation.set(true);
+        let error = instance
+            .call("missing", &[Value::None], &mut host)
+            .unwrap_err();
+        instance.in_operation.set(false);
+        assert_eq!(error.line, Some(0));
+        assert!(error.message.contains("cannot be re-entered"));
     }
 }
