@@ -284,36 +284,79 @@ fn insert_semicolons(raw: Vec<SpannedToken>) -> Vec<SpannedToken> {
     result
 }
 
-struct Lexer {
-    chars: Vec<char>,
-    pos: usize,
+/// A zero-copy cursor over UTF-8 source text.
+///
+/// `byte_pos` is always kept on a character boundary by [`advance`], while
+/// callers continue to count source columns in characters rather than bytes.
+struct SourceCursor<'source> {
+    source: &'source str,
+    chars: core::str::CharIndices<'source>,
+    current: Option<(usize, char)>,
+    next: Option<(usize, char)>,
+    byte_pos: usize,
+}
+
+impl<'source> SourceCursor<'source> {
+    fn new(source: &'source str) -> Self {
+        let mut chars = source.char_indices();
+        let current = chars.next();
+        let next = chars.next();
+        Self {
+            source,
+            chars,
+            current,
+            next,
+            byte_pos: 0,
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.current.map(|(_, ch)| ch)
+    }
+
+    fn peek_next(&self) -> Option<char> {
+        self.next.map(|(_, ch)| ch)
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let (_, ch) = self.current?;
+        self.current = self.next;
+        self.next = self.chars.next();
+        self.byte_pos = self
+            .current
+            .map(|(byte_pos, _)| byte_pos)
+            .unwrap_or(self.source.len());
+        Some(ch)
+    }
+}
+
+struct Lexer<'source> {
+    cursor: SourceCursor<'source>,
     line: u32,
     /// 1-indexed column of the *next* character to consume.
     /// Reset to 1 after each newline; incremented by `advance`.
     column: u32,
 }
 
-impl Lexer {
-    fn new(source: &str) -> Self {
+impl<'source> Lexer<'source> {
+    fn new(source: &'source str) -> Self {
         Self {
-            chars: source.chars().collect(),
-            pos: 0,
+            cursor: SourceCursor::new(source),
             line: 1,
             column: 1,
         }
     }
 
     fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+        self.cursor.peek()
     }
 
     fn peek_next(&self) -> Option<char> {
-        self.chars.get(self.pos + 1).copied()
+        self.cursor.peek_next()
     }
 
     fn advance(&mut self) -> Option<char> {
-        let ch = self.chars.get(self.pos).copied()?;
-        self.pos += 1;
+        let ch = self.cursor.advance()?;
         if ch == '\n' {
             // The newline itself belongs to the line it
             // terminates; the next character starts at column 1
@@ -937,6 +980,33 @@ mod tests {
 
     fn lex_err(code: &str) -> String {
         lex(code).unwrap_err().message
+    }
+
+    #[test]
+    fn source_cursor_borrows_utf8_and_advances_on_character_boundaries() {
+        let source = "é🙂x";
+        let mut lexer = Lexer::new(source);
+
+        assert_eq!(lexer.cursor.source.as_ptr(), source.as_ptr());
+        assert_eq!(lexer.cursor.byte_pos, 0);
+
+        assert_eq!(lexer.advance(), Some('é'));
+        assert_eq!(lexer.cursor.byte_pos, 'é'.len_utf8());
+        assert_eq!(lexer.column, 2);
+
+        assert_eq!(lexer.advance(), Some('🙂'));
+        assert_eq!(lexer.cursor.byte_pos, 'é'.len_utf8() + '🙂'.len_utf8());
+        assert_eq!(lexer.column, 3);
+        assert_eq!(lexer.peek(), Some('x'));
+    }
+
+    #[test]
+    fn utf8_string_contents_preserve_character_based_token_columns() {
+        let tokens = lex("\"é🙂\" next").expect("source should lex");
+        assert!(matches!(&tokens[0].token, Token::Str(value) if value == "é🙂"));
+        assert_eq!((tokens[0].line, tokens[0].column), (1, 1));
+        assert!(matches!(&tokens[1].token, Token::Ident(name) if name == "next"));
+        assert_eq!((tokens[1].line, tokens[1].column), (1, 6));
     }
 
     // ─── Numbers ───────────────────────────────────────────────────

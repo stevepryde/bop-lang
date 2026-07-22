@@ -727,6 +727,22 @@ impl Parser {
         tok
     }
 
+    /// Consume and return the current token without cloning heap payloads.
+    ///
+    /// Callers first inspect [`Self::peek`] to decide whether the token is
+    /// valid in context. That keeps error paths positioned on the offending
+    /// token while successful paths can transfer owned strings and vectors
+    /// directly into the AST.
+    fn take(&mut self) -> Token {
+        if self.pos >= self.tokens.len() {
+            return Token::Eof;
+        }
+
+        let token = core::mem::replace(&mut self.tokens[self.pos].token, Token::Eof);
+        self.pos += 1;
+        token
+    }
+
     fn is_at_end(&self) -> bool {
         matches!(self.peek(), Token::Eof)
     }
@@ -750,8 +766,10 @@ impl Parser {
 
     fn expect_ident(&mut self) -> Result<(String, u32), BopError> {
         let (line, _column) = self.peek_pos();
-        if let Token::Ident(name) = self.peek().clone() {
-            self.advance();
+        if matches!(self.peek(), Token::Ident(_)) {
+            let Token::Ident(name) = self.take() else {
+                unreachable!("identifier variant checked before taking token")
+            };
             Ok((name, line))
         } else if let Some(keyword) = self.peek().keyword_name() {
             Err(BopError::reserved_word(keyword, line, self.peek_column()))
@@ -1586,8 +1604,9 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr, BopError> {
         let (line, column) = self.peek_pos();
 
-        match self.peek().clone() {
+        match self.peek() {
             Token::Int(n) => {
+                let n = *n;
                 self.advance();
                 Ok(Expr {
                     kind: ExprKind::Int(n),
@@ -1600,6 +1619,7 @@ impl Parser {
                 integer_literal_out_of_range(I64_MIN_MAGNITUDE_TEXT),
             )),
             Token::Number(n) => {
+                let n = *n;
                 self.advance();
                 Ok(Expr {
                     kind: ExprKind::Number(n),
@@ -1607,16 +1627,20 @@ impl Parser {
                     column,
                 })
             }
-            Token::Str(s) => {
-                self.advance();
+            Token::Str(_) => {
+                let Token::Str(s) = self.take() else {
+                    unreachable!("string variant checked before taking token")
+                };
                 Ok(Expr {
                     kind: ExprKind::Str(s),
                     line,
                     column,
                 })
             }
-            Token::StringInterp(parts) => {
-                self.advance();
+            Token::StringInterp(_) => {
+                let Token::StringInterp(parts) = self.take() else {
+                    unreachable!("interpolation variant checked before taking token")
+                };
                 Ok(Expr {
                     kind: ExprKind::StringInterp(parts),
                     line,
@@ -1647,8 +1671,10 @@ impl Parser {
                     column,
                 })
             }
-            Token::Ident(name) => {
-                self.advance();
+            Token::Ident(_) => {
+                let Token::Ident(name) = self.take() else {
+                    unreachable!("identifier variant checked before taking token")
+                };
                 // Sugar: bare `Ok(args)` / `Err(args)` desugars
                 // to the built-in `Result::Ok(args)` /
                 // `Result::Err(args)`. Bop's case rules already
@@ -1900,9 +1926,11 @@ impl Parser {
 
     fn expect_string_key(&mut self) -> Result<String, BopError> {
         let (line, _column) = self.peek_pos();
-        match self.peek().clone() {
-            Token::Str(s) => {
-                self.advance();
+        match self.peek() {
+            Token::Str(_) => {
+                let Token::Str(s) = self.take() else {
+                    unreachable!("string variant checked before taking token")
+                };
                 Ok(s)
             }
             _ => Err(self.error(line, "Dict keys must be strings (in quotes)")),
@@ -2022,8 +2050,9 @@ impl Parser {
     /// and early `return` below is balanced by [`Self::leave`].
     fn parse_pattern_single_inner(&mut self) -> Result<Pattern, BopError> {
         let (line, _column) = self.peek_pos();
-        match self.peek().clone() {
+        match self.peek() {
             Token::Int(n) => {
+                let n = *n;
                 self.advance();
                 Ok(Pattern::Literal(LiteralPattern::Int(n)))
             }
@@ -2032,11 +2061,14 @@ impl Parser {
                 integer_literal_out_of_range(I64_MIN_MAGNITUDE_TEXT),
             )),
             Token::Number(n) => {
+                let n = *n;
                 self.advance();
                 Ok(Pattern::Literal(LiteralPattern::Number(n)))
             }
-            Token::Str(s) => {
-                self.advance();
+            Token::Str(_) => {
+                let Token::Str(s) = self.take() else {
+                    unreachable!("string variant checked before taking token")
+                };
                 Ok(Pattern::Literal(LiteralPattern::Str(s)))
             }
             Token::True => {
@@ -2054,12 +2086,13 @@ impl Parser {
             Token::Minus => {
                 // Negative number literal: `-1`, `-3.14`.
                 self.advance();
-                match self.peek().clone() {
+                match self.peek() {
                     Token::IntMinMagnitude => {
                         self.advance();
                         Ok(Pattern::Literal(LiteralPattern::Int(i64::MIN)))
                     }
                     Token::Int(n) => {
+                        let n = *n;
                         self.advance();
                         // `i64::MIN` has no positive counterpart
                         // — negating it overflows. Raise a clear
@@ -2077,6 +2110,7 @@ impl Parser {
                         }
                     }
                     Token::Number(n) => {
+                        let n = *n;
                         self.advance();
                         Ok(Pattern::Literal(LiteralPattern::Number(-n)))
                     }
@@ -2084,7 +2118,7 @@ impl Parser {
                         line,
                         format!(
                             "Expected a number after `-` in pattern, got `{}`",
-                            fmt_token(&other)
+                            fmt_token(other)
                         ),
                     )),
                 }
@@ -2094,8 +2128,10 @@ impl Parser {
                 self.advance();
                 Ok(Pattern::Wildcard)
             }
-            Token::Ident(name) => {
-                self.advance();
+            Token::Ident(_) => {
+                let Token::Ident(name) = self.take() else {
+                    unreachable!("identifier variant checked before taking token")
+                };
                 // Sugar: `Ok(p)` / `Err(p)` as patterns — mirror
                 // the expression-side shortcut. Reduces the
                 // `match r { Result::Ok(v) => ..., Result::Err(e)
@@ -2158,7 +2194,7 @@ impl Parser {
                 } else {
                     Err(self.error(
                         line,
-                        format!("Expected a pattern, got `{}`", fmt_token(&other)),
+                        format!("Expected a pattern, got `{}`", fmt_token(other)),
                     ))
                 }
             }
@@ -2174,9 +2210,11 @@ impl Parser {
                 if matches!(self.peek(), Token::DotDot) {
                     self.advance();
                     // Optional name binding after `..`.
-                    let captured = match self.peek().clone() {
+                    let captured = match self.peek() {
                         Token::Ident(n) if n != "_" => {
-                            self.advance();
+                            let Token::Ident(n) = self.take() else {
+                                unreachable!("identifier variant checked before taking token")
+                            };
                             ArrayRest::Named(n)
                         }
                         other => {
@@ -2711,6 +2749,137 @@ mod integer_boundary_tests {
             error.message,
             "Integer literal out of range for i64: 9223372036854775808"
         );
+    }
+}
+
+#[cfg(test)]
+mod token_ownership_tests {
+    use super::*;
+
+    fn ident_ptr(tokens: &[SpannedToken], expected: &str, occurrence: usize) -> *const u8 {
+        tokens
+            .iter()
+            .filter_map(|spanned| match &spanned.token {
+                Token::Ident(name) if name == expected => Some(name.as_ptr()),
+                _ => None,
+            })
+            .nth(occurrence)
+            .expect("expected identifier token")
+    }
+
+    fn string_ptr(tokens: &[SpannedToken], expected: &str) -> *const u8 {
+        tokens
+            .iter()
+            .find_map(|spanned| match &spanned.token {
+                Token::Str(value) if value == expected => Some(value.as_ptr()),
+                _ => None,
+            })
+            .expect("expected string token")
+    }
+
+    #[test]
+    fn declaration_and_primary_payloads_move_from_tokens_into_the_ast() {
+        let tokens = crate::lexer::lex(r#"let owned_name = "owned_literal""#)
+            .expect("source should lex");
+        let name_ptr = ident_ptr(&tokens, "owned_name", 0);
+        let literal_ptr = string_ptr(&tokens, "owned_literal");
+
+        let statements = parse(tokens).expect("source should parse");
+        let StmtKind::Let { name, value, .. } = &statements[0].kind else {
+            panic!("expected let statement")
+        };
+        let ExprKind::Str(literal) = &value.kind else {
+            panic!("expected string value")
+        };
+
+        assert_eq!(name.as_ptr(), name_ptr);
+        assert_eq!(literal.as_ptr(), literal_ptr);
+    }
+
+    #[test]
+    fn interpolation_and_dict_key_buffers_move_into_the_ast() {
+        let interpolation_tokens = crate::lexer::lex(r#""left {owned_var} right""#)
+            .expect("interpolation should lex");
+        let (parts_ptr, variable_ptr) = interpolation_tokens
+            .iter()
+            .find_map(|spanned| match &spanned.token {
+                Token::StringInterp(parts) => Some((
+                    parts.as_ptr(),
+                    parts.iter().find_map(|part| match part {
+                        StringPart::Variable(name) => Some(name.as_ptr()),
+                        StringPart::Literal(_) => None,
+                    })?,
+                )),
+                _ => None,
+            })
+            .expect("expected interpolation token");
+
+        let statements = parse(interpolation_tokens).expect("interpolation should parse");
+        let StmtKind::ExprStmt(Expr {
+            kind: ExprKind::StringInterp(parts),
+            ..
+        }) = &statements[0].kind
+        else {
+            panic!("expected interpolation expression")
+        };
+        let ast_variable_ptr = parts
+            .iter()
+            .find_map(|part| match part {
+                StringPart::Variable(name) => Some(name.as_ptr()),
+                StringPart::Literal(_) => None,
+            })
+            .expect("expected interpolation variable");
+        assert_eq!(parts.as_ptr(), parts_ptr);
+        assert_eq!(ast_variable_ptr, variable_ptr);
+
+        let dict_tokens = crate::lexer::lex(r#"{"owned_key": 1}"#)
+            .expect("dictionary should lex");
+        let key_ptr = string_ptr(&dict_tokens, "owned_key");
+        let statements = parse(dict_tokens).expect("dictionary should parse");
+        let StmtKind::ExprStmt(Expr {
+            kind: ExprKind::Dict(entries),
+            ..
+        }) = &statements[0].kind
+        else {
+            panic!("expected dictionary expression")
+        };
+        assert_eq!(entries[0].0.as_ptr(), key_ptr);
+    }
+
+    #[test]
+    fn pattern_payloads_move_from_tokens_into_the_ast() {
+        let tokens = crate::lexer::lex(
+            r#"match subject { ["owned_pattern", owned_binding, ..owned_rest] => owned_binding }"#,
+        )
+        .expect("pattern should lex");
+        let literal_ptr = string_ptr(&tokens, "owned_pattern");
+        let binding_ptr = ident_ptr(&tokens, "owned_binding", 0);
+        let rest_ptr = ident_ptr(&tokens, "owned_rest", 0);
+
+        let statements = parse(tokens).expect("pattern should parse");
+        let StmtKind::ExprStmt(Expr {
+            kind: ExprKind::Match { arms, .. },
+            ..
+        }) = &statements[0].kind
+        else {
+            panic!("expected match expression")
+        };
+        let Pattern::Array { elements, rest } = &arms[0].pattern else {
+            panic!("expected array pattern")
+        };
+        let Pattern::Literal(LiteralPattern::Str(literal)) = &elements[0] else {
+            panic!("expected string pattern")
+        };
+        let Pattern::Binding(binding) = &elements[1] else {
+            panic!("expected binding pattern")
+        };
+        let Some(ArrayRest::Named(rest)) = rest else {
+            panic!("expected named rest pattern")
+        };
+
+        assert_eq!(literal.as_ptr(), literal_ptr);
+        assert_eq!(binding.as_ptr(), binding_ptr);
+        assert_eq!(rest.as_ptr(), rest_ptr);
     }
 }
 
