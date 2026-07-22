@@ -13,7 +13,7 @@ use crate::chunk::{
     EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, Instr, InterpIdx, InterpPart,
     InterpRecipe, LoopStateKind, NameIdx, PatternIdx, SlotIdx, StructDef, StructIdx,
 };
-use bop::parser::{ArrayRest, MatchArm, Pattern, VariantKind, VariantPatternPayload};
+use bop::parser::{MatchArm, Pattern, VariantKind};
 
 // ─── Local slot resolver ───────────────────────────────────────────
 //
@@ -1372,8 +1372,7 @@ impl Compiler {
 
         for arm in arms {
             let arm_line = arm.line;
-            let mut runtime_bindings = Vec::new();
-            collect_pattern_bindings(&arm.pattern, &mut runtime_bindings);
+            let runtime_bindings = arm.pattern.binding_names().into_iter().collect();
             self.runtime_bindings.push(runtime_bindings);
             self.push_runtime_scope(arm_line);
             self.emit(Instr::Dup, arm_line);
@@ -1619,50 +1618,6 @@ impl Compiler {
             capture_names,
             capture_sources,
         })
-    }
-}
-
-fn collect_pattern_bindings(pattern: &Pattern, names: &mut Vec<String>) {
-    match pattern {
-        Pattern::Binding(name) => {
-            if !names.iter().any(|existing| existing == name) {
-                names.push(name.clone());
-            }
-        }
-        Pattern::EnumVariant { payload, .. } => match payload {
-            VariantPatternPayload::Unit => {}
-            VariantPatternPayload::Tuple(patterns) => {
-                for pattern in patterns {
-                    collect_pattern_bindings(pattern, names);
-                }
-            }
-            VariantPatternPayload::Struct { fields, .. } => {
-                for (_, pattern) in fields {
-                    collect_pattern_bindings(pattern, names);
-                }
-            }
-        },
-        Pattern::Struct { fields, .. } => {
-            for (_, pattern) in fields {
-                collect_pattern_bindings(pattern, names);
-            }
-        }
-        Pattern::Array { elements, rest } => {
-            for pattern in elements {
-                collect_pattern_bindings(pattern, names);
-            }
-            if let Some(ArrayRest::Named(name)) = rest {
-                if !names.iter().any(|existing| existing == name) {
-                    names.push(name.clone());
-                }
-            }
-        }
-        Pattern::Or(alternatives) => {
-            for pattern in alternatives {
-                collect_pattern_bindings(pattern, names);
-            }
-        }
-        Pattern::Literal(_) | Pattern::Wildcard => {}
     }
 }
 

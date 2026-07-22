@@ -2399,10 +2399,7 @@ impl Emitter {
             // locals on the emitter's scope stack so `expr_src`
             // treats them as locals (not free captures) inside the
             // guard and body.
-            let mut names_set: HashSet<String> = HashSet::new();
-            collect_pattern_bindings(&arm.pattern, &mut names_set);
-            let mut names: Vec<String> = names_set.into_iter().collect();
-            names.sort();
+            let names: Vec<String> = arm.pattern.binding_names().into_iter().collect();
 
             src.push_str("        {\n");
             src.push_str(&format!(
@@ -3493,54 +3490,6 @@ fn scan_free_vars_stmt(
     }
 }
 
-/// Walks a `Pattern` and records every name it binds into `known`
-/// so the arm's free-var scan treats those bindings as locals
-/// rather than captures. Kept free-standing so the AOT emitter
-/// can call it from the exhaustive `ExprKind` match without
-/// pulling the entire pattern-matching path through `impl` state.
-fn collect_pattern_bindings(pattern: &bop::parser::Pattern, known: &mut HashSet<String>) {
-    use bop::parser::{ArrayRest, Pattern, VariantPatternPayload};
-    match pattern {
-        Pattern::Literal(_) | Pattern::Wildcard => {}
-        Pattern::Binding(name) => {
-            known.insert(name.clone());
-        }
-        Pattern::EnumVariant { payload, .. } => match payload {
-            VariantPatternPayload::Unit => {}
-            VariantPatternPayload::Tuple(items) => {
-                for item in items {
-                    collect_pattern_bindings(item, known);
-                }
-            }
-            VariantPatternPayload::Struct { fields, .. } => {
-                for (_, p) in fields {
-                    collect_pattern_bindings(p, known);
-                }
-            }
-        },
-        Pattern::Struct { fields, .. } => {
-            for (_, p) in fields {
-                collect_pattern_bindings(p, known);
-            }
-        }
-        Pattern::Array { elements, rest } => {
-            for e in elements {
-                collect_pattern_bindings(e, known);
-            }
-            if let Some(ArrayRest::Named(name)) = rest {
-                known.insert(name.clone());
-            }
-        }
-        Pattern::Or(alts) => {
-            // Every alternative is required to bind the same set
-            // of names, so scanning the first one is sufficient.
-            if let Some(first) = alts.first() {
-                collect_pattern_bindings(first, known);
-            }
-        }
-    }
-}
-
 /// Emit Rust source that constructs a `bop::parser::Pattern`
 /// value equivalent to `pat`. The emitted expression is used at
 /// runtime by `bop::pattern_matches`, so walker / VM / AOT all
@@ -3837,7 +3786,7 @@ fn scan_free_vars_expr(
             scan_free_vars_expr(scrutinee, known, free, outer_scopes, fn_info);
             for arm in arms {
                 let mut arm_known = known.clone();
-                collect_pattern_bindings(&arm.pattern, &mut arm_known);
+                arm_known.extend(arm.pattern.binding_names());
                 if let Some(guard) = &arm.guard {
                     scan_free_vars_expr(guard, &mut arm_known, free, outer_scopes, fn_info);
                 }
