@@ -16,7 +16,7 @@ use crate::chunk::{
     InterpRecipe, LoopStateKind, NameIdx, NamespaceRef, PatternIdx, PatternRecipe, SlotIdx,
     StructDef, StructIdx,
 };
-use bop::parser::{MatchArm, Pattern, VariantKind, VariantPatternPayload};
+use bop::parser::{MatchArm, Pattern, VariantKind};
 
 // ─── Local slot resolver ───────────────────────────────────────────
 //
@@ -477,11 +477,8 @@ impl Compiler {
 
     fn add_pattern(&mut self, pat: Pattern) -> PatternIdx {
         let idx = PatternIdx(self.chunk.patterns.len() as u32);
-        let mut namespace_names = Vec::new();
-        collect_pattern_namespaces(&pat, &mut namespace_names);
-        namespace_names.sort();
-        namespace_names.dedup();
-        let namespaces = namespace_names
+        let namespaces = pat
+            .namespace_names()
             .into_iter()
             .map(|name| {
                 let namespace = self.namespace_ref(&name);
@@ -497,6 +494,9 @@ impl Compiler {
 
     fn namespace_ref(&mut self, name: &str) -> NamespaceRef {
         let slot = self.current_resolver().and_then(|resolver| resolver.resolve(name));
+        if slot.is_none() {
+            self.note_free_var(name);
+        }
         let name = self.add_name(name);
         match slot {
             Some(slot) => NamespaceRef::Slot { name, slot },
@@ -1620,49 +1620,6 @@ impl Compiler {
             capture_names,
             capture_sources,
         })
-    }
-}
-
-fn collect_pattern_namespaces(pattern: &Pattern, names: &mut Vec<String>) {
-    match pattern {
-        Pattern::EnumVariant {
-            namespace,
-            payload,
-            ..
-        } => {
-            if let Some(namespace) = namespace {
-                names.push(namespace.clone());
-            }
-            match payload {
-                VariantPatternPayload::Unit => {}
-                VariantPatternPayload::Tuple(patterns) => {
-                    for pattern in patterns {
-                        collect_pattern_namespaces(pattern, names);
-                    }
-                }
-                VariantPatternPayload::Struct { fields, .. } => {
-                    for (_, pattern) in fields {
-                        collect_pattern_namespaces(pattern, names);
-                    }
-                }
-            }
-        }
-        Pattern::Struct {
-            namespace, fields, ..
-        } => {
-            if let Some(namespace) = namespace {
-                names.push(namespace.clone());
-            }
-            for (_, pattern) in fields {
-                collect_pattern_namespaces(pattern, names);
-            }
-        }
-        Pattern::Array { elements, .. } | Pattern::Or(elements) => {
-            for pattern in elements {
-                collect_pattern_namespaces(pattern, names);
-            }
-        }
-        Pattern::Literal(_) | Pattern::Wildcard | Pattern::Binding(_) => {}
     }
 }
 

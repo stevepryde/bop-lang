@@ -1429,6 +1429,40 @@ print(build(1))"#,
         &[("types", "struct Point { value }")],
     ),
     (
+        "declaration_alias_is_source_ordered_at_call_time",
+        r#"fn build() { return t.Point { value: 42 } }
+let before = try_call(build)
+use types as t
+print(before.is_err(), build().value)"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "namespace_only_lambda_capture_and_pattern_shadow",
+        r#"use types as dep
+let point = dep.Point { value: 42 }
+fn outer(dep) {
+    return fn() {
+        let made = dep.Point { value: 41 }
+        return match made { dep.Point { value: found } => found + 1, _ => 0 }
+    }
+}
+let captured = outer(dep)
+fn read(dep, value) {
+    return match value { dep.Point { value: found } => found, _ => 0 }
+}
+print(captured(), read(1, point))"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "module_functions_resolve_during_module_load",
+        r#"use loading
+print(value)"#,
+        &[((
+            "loading",
+            "fn helper(n) { return n + 1 }\nfn recurse(n) { if n == 0 { return 0 } return recurse(n - 1) + 1 }\nfn build() { return helper(40) + recurse(1) }\nlet value = build()",
+        ))],
+    ),
+    (
         "imported_fn_method_declaration_alias_context",
         r#"use first_holder as first
 use second_holder as second

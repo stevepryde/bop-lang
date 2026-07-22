@@ -1054,6 +1054,31 @@ fn build(t) { return t.Point { value: 42 } }"#,
 }
 
 #[test]
+fn module_loader_clears_declaration_alias_context_after_failure() {
+    let output = compile_with_modules(
+        "use holder",
+        &[(
+            "holder",
+            "use types as dep\nlet broken = 1 / 0",
+        ), ("types", "let value = 42")],
+    )
+    .expect("transpile failing module body");
+    let loader = output
+        .split_once(&module_load_marker("holder"))
+        .expect("holder loader")
+        .1;
+    let loader = loader
+        .split_once("fn ")
+        .map_or(loader, |(loader, _)| loader);
+    assert!(loader.contains("let __load_result = (||"));
+    assert!(loader.contains("if __load_result.is_err()"));
+    assert!(loader.contains("ctx.module_cache.remove(\"holder\")"));
+    assert!(loader.contains(
+        "ctx.module_aliases.retain(|(module, _), _| module != \"holder\")"
+    ));
+}
+
+#[test]
 fn block_local_module_alias_does_not_leak_into_the_enclosing_scope() {
     let error = compile_with_modules(
         r#"if true {

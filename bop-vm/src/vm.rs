@@ -3363,29 +3363,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// pattern matching, and namespace validation: keeps
     /// resolution rules centralised.
     fn resolve_type_ref(&self, namespace: Option<&str>, type_name: &str) -> Option<String> {
-        if let Some(ns) = namespace {
-            let frame = self.frames.last()?;
-            for scope in frame.scopes.iter().rev() {
-                if let Some(Value::Module(m)) = scope.get(ns) {
-                    if m.types.iter().any(|t| t == type_name) {
-                        return Some(m.path.clone());
-                    }
-                    return None;
-                }
-            }
-            if let Some(m) = self.module_alias(ns) {
-                if m.types.iter().any(|t| t == type_name) {
-                    return Some(m.path.clone());
-                }
-            }
-            return None;
-        }
-        for scope in self.type_bindings.iter().rev() {
-            if let Some(mp) = scope.get(type_name) {
-                return Some(mp.clone());
-            }
-        }
-        None
+        let frame = self.frames.last()?;
+        let floor = frame.is_function.then_some(frame.alias_scope_base);
+        bop::resolve_type_in_scoped(
+            &frame.scopes,
+            &self.type_bindings,
+            &self.module_aliases,
+            floor,
+            namespace,
+            type_name,
+        )
     }
 
     fn load_module(

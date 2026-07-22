@@ -276,12 +276,23 @@ impl FreeVariableCollector {
                 }
             }
             ExprKind::FieldAccess { object, .. } => self.visit_expr(object),
-            ExprKind::StructConstruct { fields, .. } => {
+            ExprKind::StructConstruct {
+                namespace, fields, ..
+            } => {
+                if let Some(namespace) = namespace {
+                    self.reference(namespace);
+                }
                 for (_, value) in fields {
                     self.visit_expr(value);
                 }
             }
-            ExprKind::EnumConstruct { payload, .. } => match payload {
+            ExprKind::EnumConstruct {
+                namespace, payload, ..
+            } => {
+                if let Some(namespace) = namespace {
+                    self.reference(namespace);
+                }
+                match payload {
                 VariantPayload::Unit => {}
                 VariantPayload::Tuple(values) => {
                     for value in values {
@@ -293,7 +304,8 @@ impl FreeVariableCollector {
                         self.visit_expr(value);
                     }
                 }
-            },
+                }
+            }
             ExprKind::Index { object, index } => {
                 self.visit_expr(object);
                 self.visit_expr(index);
@@ -326,6 +338,9 @@ impl FreeVariableCollector {
             ExprKind::Match { scrutinee, arms } => {
                 self.visit_expr(scrutinee);
                 for arm in arms {
+                    for namespace in arm.pattern.namespace_names() {
+                        self.reference(&namespace);
+                    }
                     let bindings = arm.pattern.binding_names();
                     self.scopes.push(bindings);
                     if let Some(guard) = &arm.guard {

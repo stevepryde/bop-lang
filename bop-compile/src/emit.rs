@@ -622,6 +622,7 @@ fn analyze_module(
         push_unique(&mut type_exports, &mut seen_types, ty);
     }
 
+
     graph.modules.insert(
         name.to_string(),
         ModuleEntry {
@@ -1176,9 +1177,9 @@ impl Emitter {
                 ));
             }
         }
-        // Module aliases: emit one arm per (alias, type_name in
-        // module). Cross-reference the TypeRegistry to enumerate
-        // the types each alias's module actually exports.
+        // Module aliases resolve from runtime Values. A local/parameter binding
+        // hard-shadows declaration context; otherwise a lifted callable checks
+        // the defining module's source-ordered alias map.
         let mut alias_arms = String::new();
         let mut aliases: Vec<(&String, &ModuleAliasBinding)> = Vec::new();
         let mut seen_aliases: HashSet<String> = HashSet::new();
@@ -1193,21 +1194,27 @@ impl Emitter {
             }
         }
         aliases.sort_by(|a, b| a.0.cmp(b.0));
-        for (alias, binding) in aliases {
-            for tn in &binding.exposed_types {
-                let key = (binding.module_path.clone(), tn.clone());
-                if !self.types.structs.contains_key(&key)
-                    && !self.types.enums.contains_key(&key)
-                {
-                    continue;
-                }
-                alias_arms.push_str(&format!(
-                    "                        (::std::option::Option::Some({alias_lit}), {tn}) => ::std::option::Option::Some({mp}.to_string()),\n",
-                    alias_lit = rust_string_literal(alias),
-                    tn = rust_string_literal(tn),
-                    mp = rust_string_literal(&binding.module_path),
-                ));
-            }
+        for (alias, _) in aliases {
+            let value = if self.is_local(alias) {
+                format!("::std::option::Option::Some(&{})", rust_user_ident(alias))
+            } else if self
+                .declaration_aliases
+                .iter()
+                .any(|import| import.alias.as_deref() == Some(alias.as_str()))
+            {
+                format!(
+                    "ctx.module_aliases.get(&({module}.to_string(), {alias}.to_string()))",
+                    module = rust_string_literal(&self.current_module),
+                    alias = rust_string_literal(alias),
+                )
+            } else {
+                "::std::option::Option::None".to_string()
+            };
+            alias_arms.push_str(&format!(
+                "                        (::std::option::Option::Some({alias}), __tn) => match {value} {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) if __module.types.iter().any(|__type| __type == __tn) => ::std::option::Option::Some(__module.path.clone()), _ => ::std::option::Option::None }},\n",
+                alias = rust_string_literal(alias),
+                value = value,
+            ));
         }
         format!(
             "            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
@@ -1774,6 +1781,15 @@ impl Emitter {
             r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__ModuleLoading));"#,
             key = name
         ));
+        self.line(&format!(
+            "ctx.module_aliases.retain(|(module, _), _| module != {});",
+            rust_string_literal(name)
+        ));
+        self.line(&format!(
+            "let __load_result = (|| -> Result<{exports}, ::bop::error::BopError> {{",
+            exports = exports
+        ));
+        self.indent += 1;
 
         // Sandbox gets a tick at module entry too — same checkpoint
         // as any fn entry.
@@ -1834,6 +1850,21 @@ impl Emitter {
         self.pad();
         self.out.push_str("Ok(__exports)\n");
         self.pop_scope();
+        self.indent -= 1;
+        self.line("})();");
+        self.line("if __load_result.is_err() {");
+        self.indent += 1;
+        self.line(&format!(
+            "ctx.module_cache.remove({});",
+            rust_string_literal(name)
+        ));
+        self.line(&format!(
+            "ctx.module_aliases.retain(|(module, _), _| module != {});",
+            rust_string_literal(name)
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line("__load_result");
         self.indent = 0;
         self.out.push_str("}\n\n");
         Ok(())
@@ -4282,6 +4313,13 @@ fn scan_free_vars_expr(
             // bubble up as captures.
             scan_free_vars_expr(scrutinee, known, free, outer_scopes, fn_info);
             for arm in arms {
+                for namespace in arm.pattern.namespace_names() {
+                    if !known.contains(&namespace)
+                        && is_outer_local(&namespace, outer_scopes)
+                    {
+                        free.insert(namespace);
+                    }
+                }
                 let mut arm_known = known.clone();
                 arm_known.extend(arm.pattern.binding_names());
                 if let Some(guard) = &arm.guard {

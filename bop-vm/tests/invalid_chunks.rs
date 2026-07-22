@@ -3,7 +3,7 @@ use std::rc::Rc;
 use bop::{BopHost, BopLimits, Value};
 use bop_vm::chunk::{
     Chunk, CodeOffset, ConstIdx, EnumIdx, FnDef, FnIdx, Instr, InterpIdx, InterpPart, InterpRecipe,
-    NameIdx, PatternIdx, SlotIdx, StructIdx, UseIdx,
+    NameIdx, NamespaceRef, PatternIdx, PatternRecipe, SlotIdx, StructIdx, UseIdx,
 };
 use bop_vm::{Vm, execute};
 
@@ -105,6 +105,32 @@ fn execute_rejects_top_level_local_slots_and_out_of_stream_jumps() {
 
     let jump_error = execution_error(chunk_with(Instr::Jump(CodeOffset(2))));
     assert!(jump_error.message.contains("jump target 2"));
+}
+
+#[test]
+fn execute_rejects_invalid_namespace_references() {
+    let mut construct = chunk_with(Instr::ConstructStruct {
+        namespace: Some(NamespaceRef::Slot {
+            name: NameIdx(0),
+            slot: SlotIdx(0),
+        }),
+        type_name: NameIdx(1),
+        count: 0,
+    });
+    construct.names = vec!["module".into(), "Point".into()];
+    let slot_error = execution_error(construct);
+    assert!(slot_error.message.contains("local slot 0"));
+
+    let mut pattern = chunk_with(Instr::MatchFail {
+        pattern: PatternIdx(0),
+        on_fail: CodeOffset(1),
+    });
+    pattern.patterns.push(PatternRecipe {
+        pattern: Rc::new(bop::parser::Pattern::Wildcard),
+        namespaces: vec![("module".into(), NamespaceRef::Name(NameIdx(0)))],
+    });
+    let name_error = execution_error(pattern);
+    assert!(name_error.message.contains("pattern 0 references name 0"));
 }
 
 #[test]

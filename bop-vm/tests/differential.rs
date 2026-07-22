@@ -2876,6 +2876,92 @@ print(module.build(42))"#),
 }
 
 #[test]
+fn imported_functions_do_not_see_root_declaration_context_diff() {
+    set_modules(&[
+        ("types", "struct Point { value }"),
+        (
+            "alias_holder",
+            "fn build() { return t.Point { value: 42 } }",
+        ),
+        ("type_holder", "fn build() { return Point { value: 42 } }"),
+        ("fn_holder", "fn build() { return helper() }"),
+    ]);
+
+    let alias_error = run_err(
+        r#"use types as t
+use alias_holder as holder
+print(holder.build())"#,
+    );
+    assert!(alias_error.contains("isn't a module alias"), "got: {alias_error}");
+
+    let type_error = run_err(
+        r#"use types.{Point}
+use type_holder as holder
+print(holder.build())"#,
+    );
+    assert!(type_error.contains("Struct `Point` is not declared"));
+
+    let function_error = run_err(
+        r#"fn helper() { return 42 }
+use fn_holder as holder
+print(holder.build())"#,
+    );
+    assert!(function_error.contains("Function `helper` not found"));
+}
+
+#[test]
+fn module_functions_resolve_siblings_while_the_module_is_loading_diff() {
+    set_modules(&[(
+        "loading",
+        r#"fn helper(n) { return n + 1 }
+fn recurse(n) { if n == 0 { return 0 } return recurse(n - 1) + 1 }
+fn build() { return helper(40) + recurse(1) }
+let value = build()"#,
+    )]);
+    let outcome = run_both("use loading\nprint(value)", &standard());
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["42"]);
+}
+
+#[test]
+fn namespace_only_lambda_captures_and_shadows_match_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let positive = run_both(
+        r#"use types as dep
+fn outer(dep) {
+    return fn() {
+        let point = dep.Point { value: 42 }
+        return match point { dep.Point { value: found } => found, _ => 0 }
+    }
+}
+print(outer(dep)())"#,
+        &standard(),
+    );
+    assert!(positive.is_ok(), "unexpected error: {:?}", positive.error);
+    assert_eq!(positive.prints, ["42"]);
+
+    let construct_error = run_err(
+        r#"use types as dep
+fn outer(dep) { return fn() { return dep.Point { value: 42 } } }
+print(outer(1)())"#,
+    );
+    assert!(
+        construct_error.contains("`dep` is a int, not a module alias"),
+        "got: {construct_error}"
+    );
+
+    let pattern = run_both(
+        r#"use types as dep
+let point = dep.Point { value: 42 }
+fn outer(dep) { return fn(value) { return match value { dep.Point { value: found } => found, _ => 0 } } }
+print(outer(1)(point))"#,
+        &standard(),
+    );
+    assert!(pattern.is_ok(), "unexpected error: {:?}", pattern.error);
+    assert_eq!(pattern.prints, ["0"]);
+}
+
+#[test]
 fn aliased_nested_import_does_not_reexport_dependency_bare_names() {
     set_modules(&[
         ("shared", "fn helper(n) { return n + 1 }\nlet public = 10"),

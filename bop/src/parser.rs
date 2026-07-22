@@ -340,6 +340,57 @@ impl Pattern {
         names
     }
 
+    /// Return every namespace identifier used by a namespaced type pattern,
+    /// including references nested inside tuple/struct/array/or patterns.
+    pub fn namespace_names(&self) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        self.collect_namespace_names(&mut names);
+        names
+    }
+
+    fn collect_namespace_names(&self, names: &mut BTreeSet<String>) {
+        match self {
+            Self::EnumVariant {
+                namespace,
+                payload,
+                ..
+            } => {
+                if let Some(namespace) = namespace {
+                    names.insert(namespace.clone());
+                }
+                match payload {
+                    VariantPatternPayload::Unit => {}
+                    VariantPatternPayload::Tuple(patterns) => {
+                        for pattern in patterns {
+                            pattern.collect_namespace_names(names);
+                        }
+                    }
+                    VariantPatternPayload::Struct { fields, .. } => {
+                        for (_, pattern) in fields {
+                            pattern.collect_namespace_names(names);
+                        }
+                    }
+                }
+            }
+            Self::Struct {
+                namespace, fields, ..
+            } => {
+                if let Some(namespace) = namespace {
+                    names.insert(namespace.clone());
+                }
+                for (_, pattern) in fields {
+                    pattern.collect_namespace_names(names);
+                }
+            }
+            Self::Array { elements, .. } | Self::Or(elements) => {
+                for pattern in elements {
+                    pattern.collect_namespace_names(names);
+                }
+            }
+            Self::Literal(_) | Self::Wildcard | Self::Binding(_) => {}
+        }
+    }
+
     fn collect_binding_names(&self, names: &mut BTreeSet<String>) {
         match self {
             Self::Binding(name) => {
