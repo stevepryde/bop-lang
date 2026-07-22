@@ -455,6 +455,10 @@ pub struct Vm<'h, H: BopHost> {
 }
 
 impl<'h, H: BopHost> Vm<'h, H> {
+    /// Construct a VM from trusted bytecode.
+    ///
+    /// Embedders executing a hand-built or deserialized [`Chunk`] should use
+    /// [`execute`], which validates structural bytecode invariants first.
     pub fn new(chunk: Chunk, host: &'h mut H, limits: BopLimits) -> Self {
         bop::memory::bop_memory_init(limits.max_memory);
         Self::new_internal(
@@ -988,8 +992,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 // operands. `fib`'s recursive body and every
                 // `total = total + i` loop go through here.
                 let frame = self.frames.last().expect("frame present");
-                let av = &frame.slots[a.0 as usize];
-                let bv = &frame.slots[b.0 as usize];
+                let av = frame
+                    .slots
+                    .get(a.0 as usize)
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
+                let bv = frame
+                    .slots
+                    .get(b.0 as usize)
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let result = match (av, bv) {
                     (Value::Int(x), Value::Int(y)) => x
                         .checked_add(*y)
@@ -1004,8 +1014,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
             Instr::LtLocals(a, b) => {
                 let frame = self.frames.last().expect("frame present");
-                let av = &frame.slots[a.0 as usize];
-                let bv = &frame.slots[b.0 as usize];
+                let av = frame
+                    .slots
+                    .get(a.0 as usize)
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
+                let bv = frame
+                    .slots
+                    .get(b.0 as usize)
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let result = match (av, bv) {
                     (Value::Int(x), Value::Int(y)) => Value::Bool(x < y),
                     _ => ops::lt(av, bv, line)?,
@@ -1020,7 +1036,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 // still works when `x` is a Number.
                 let frame = self.frames.last_mut().expect("frame present");
                 let i = slot.0 as usize;
-                let current = &frame.slots[i];
+                let current = frame
+                    .slots
+                    .get(i)
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let new = match current {
                     Value::Int(x) => x
                         .checked_add(k as i64)
@@ -1037,7 +1056,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 // Push `slots[slot] + k`. Covers `array[i + 1]` after the
                 // compiler folds a small-int literal into the op.
                 let frame = self.frames.last().expect("frame present");
-                let v = &frame.slots[slot.0 as usize];
+                let v = frame
+                    .slots
+                    .get(slot.0 as usize)
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let result = match v {
                     Value::Int(x) => x
                         .checked_add(k as i64)
@@ -1052,7 +1074,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 // test in `fib` and every bounded `while i < K`
                 // loop.
                 let frame = self.frames.last().expect("frame present");
-                let v = &frame.slots[slot.0 as usize];
+                let v = frame
+                    .slots
+                    .get(slot.0 as usize)
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let result = match v {
                     Value::Int(x) => Value::Bool(*x < k as i64),
                     _ => ops::lt(v, &Value::Int(k as i64), line)?,
@@ -3723,11 +3748,16 @@ where
 // ─── Public entry points ──────────────────────────────────────────
 
 /// Execute a pre-compiled [`Chunk`] against the supplied host.
+///
+/// The chunk is structurally validated before the VM starts, so malformed
+/// hand-built or deserialized bytecode is reported as a [`BopError`] rather
+/// than panicking or silently jumping beyond the instruction stream.
 pub fn execute<H: BopHost>(
     chunk: Chunk,
     host: &mut H,
     limits: &BopLimits,
 ) -> Result<(), BopError> {
+    crate::validate_chunk(&chunk)?;
     let vm = Vm::new(chunk, host, limits.clone());
     vm.run()
 }

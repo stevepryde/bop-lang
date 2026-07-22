@@ -92,6 +92,7 @@ extern crate alloc;
 pub mod chunk;
 pub mod compiler;
 pub mod disasm;
+pub mod validate;
 pub mod vm;
 
 pub use chunk::{
@@ -101,4 +102,5 @@ pub use chunk::{
 };
 pub use compiler::compile;
 pub use disasm::disassemble;
+pub use validate::validate_chunk;
 pub use vm::{Vm, execute, run};
