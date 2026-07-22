@@ -399,6 +399,45 @@ fn index_assign_on_non_ident_is_rejected() {
     );
 }
 
+#[test]
+fn const_container_assignment_is_rejected_before_aot_emission() {
+    let cases = [
+        "const VALUES = [1, 2]\nVALUES[0] = 9",
+        "const VALUES = [1, 2]\nVALUES[0] += 9",
+        "const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] = 9",
+        "const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] += 9",
+        "struct Counter { n }\nconst COUNTER = Counter { n: 1 }\nCOUNTER.n = 9",
+        "struct Counter { n }\nconst COUNTER = Counter { n: 1 }\n(COUNTER).n += 9",
+        "const GRID = [[1]]\nGRID[0][0] = 9",
+    ];
+
+    for source in cases {
+        let err = transpile(source, &Options::default()).unwrap_err();
+        assert!(
+            err.message.contains("can't reassign") && err.message.contains("constant"),
+            "source: {source}\nerror: {err}"
+        );
+        assert_eq!(
+            err.friendly_hint.as_deref(),
+            Some("constants are immutable. Use `let` if you want a mutable binding."),
+            "source: {source}"
+        );
+    }
+}
+
+#[test]
+fn const_index_reads_in_mutable_targets_still_emit_aot() {
+    let out = compile("const INDEX = 0\nlet values = [1]\nvalues[INDEX] += 2");
+    contains_all(
+        &out,
+        &[
+            "INDEX.clone()",
+            "::bop::ops::index_get(&values,",
+            "::bop::ops::index_set(&mut values,",
+        ],
+    );
+}
+
 // ─── Sandbox mode ─────────────────────────────────────────────────
 
 fn compile_sandbox(code: &str) -> String {

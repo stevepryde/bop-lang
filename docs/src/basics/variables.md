@@ -37,6 +37,17 @@ const MAX_SIZE = 100
 MAX_SIZE = 200      // Error: can't reassign a constant
 ```
 
+Index and field assignments respect the same rule. An assignment cannot reach
+through a constant array, dict, or struct binding to change part of its value:
+
+```bop
+const ORIGIN = [0, 0]
+ORIGIN[0] = 10      // Error: can't reassign `ORIGIN` — it's a constant
+
+const OPTIONS = {"retries": 3}
+OPTIONS["retries"] += 1   // Same error
+```
+
 Constants must be **all-caps** (with digits / underscores allowed). `const Pi = 3.14` is rejected: the parser will suggest `const PI = 3.14` instead.
 
 ## Reassignment

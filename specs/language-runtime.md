@@ -47,6 +47,12 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   structs, and enum payloads. Implementations may share backing storage until
   mutation, but changing one value must not change another. Iterators are the
   deliberate exception: cloned iterator handles share their cursor.
+- **RUN-012 — Constant bindings are immutable assignment roots.** No assignment
+  target whose base binding is a constant may mutate that value, including
+  direct, index, field, compound, grouped, and syntactically nested place
+  forms. Reads through a constant and writes through lowercase mutable
+  bindings remain valid. A new `const` declaration is a declaration, not an
+  assignment target.
 
 ## Acceptance criteria
 
@@ -66,6 +72,10 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   allocation; unique mutation does not copy its backing storage; the first
   mutation of shared storage detaches exactly once; and tracked storage is
   released when its last owner drops.
+- **AC-RUN-007:** Parser and cross-engine tests reject direct and compound
+  Array, Dict, and Struct writes rooted at constants with the canonical
+  constant diagnostic and hint, including grouped/nested targets, while the
+  corresponding mutable-binding programs still execute identically.
 
 ## Design notes
 
