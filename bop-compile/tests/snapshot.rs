@@ -846,12 +846,20 @@ fn compile_with_modules(
     )
 }
 
-fn module_export_fields(generated: &str, module: &str) -> Vec<String> {
-    let slug: String = module
+fn module_slug(module: &str) -> String {
+    module
         .as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect();
+        .collect()
+}
+
+fn module_load_marker(module: &str) -> String {
+    format!("fn __mod_{}_load(", module_slug(module))
+}
+
+fn module_export_fields(generated: &str, module: &str) -> Vec<String> {
+    let slug = module_slug(module);
     let marker = format!("struct BopModule{slug}Exports {{");
     let body = generated
         .split_once(&marker)
@@ -868,6 +876,164 @@ fn module_export_fields(generated: &str, module: &str) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+#[test]
+fn nested_import_discovery_reaches_every_statement_body_and_lambda_expression() {
+    let source = r#"fn exercise() {
+    use fn_dep as fn_module
+    if true {
+        use if_dep as if_module
+    } else if false {
+        use else_if_dep as else_if_module
+    } else {
+        use else_dep as else_module
+    }
+    while false {
+        use while_dep as while_module
+    }
+    repeat 0 {
+        use repeat_dep as repeat_module
+    }
+    for item in [] {
+        use for_dep as for_module
+    }
+}
+struct Holder { value }
+fn Holder.exercise(self) {
+    use method_dep as method_module
+}
+let direct = fn() {
+    use lambda_dep as lambda_module
+    return none
+}
+let from_match = match 1 {
+    1 => fn() {
+        use match_lambda_dep as match_module
+        return none
+    },
+    _ => fn() { return none },
+}"#;
+    let modules = [
+        "fn_dep",
+        "if_dep",
+        "else_if_dep",
+        "else_dep",
+        "while_dep",
+        "repeat_dep",
+        "for_dep",
+        "method_dep",
+        "lambda_dep",
+        "match_lambda_dep",
+    ]
+    .map(|name| (name, "let value = 1"));
+
+    let out = compile_with_modules(source, &modules).expect("discover every nested import");
+    for (module, _) in modules {
+        let marker = module_load_marker(module);
+        assert!(
+            out.contains(&marker),
+            "missing nested module `{module}` ({marker}) in generated output"
+        );
+    }
+}
+
+#[test]
+fn repeated_nested_imports_resolve_once_but_emit_per_runtime_scope() {
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(0_u32));
+    let resolver_calls = std::rc::Rc::clone(&calls);
+    let resolver: bop_compile::ModuleResolver = std::rc::Rc::new(std::cell::RefCell::new(
+        move |name: &str| {
+            if name == "shared" {
+                *resolver_calls.borrow_mut() += 1;
+                Some(Ok("fn helper(n) { return n + 10 }".to_string()))
+            } else {
+                None
+            }
+        },
+    ));
+    let source = r#"fn one() { use shared; return helper(1) }
+fn two() { use shared; return helper(2) }"#;
+    let out = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            module_resolver: Some(resolver),
+            ..Options::default()
+        },
+    )
+    .expect("transpile two function-local imports");
+
+    assert_eq!(*calls.borrow(), 1, "resolver must run once per module path");
+    let load_site = format!("= __mod_{}_load(ctx)?;", module_slug("shared"));
+    assert_eq!(
+        out.matches(&load_site).count(),
+        2,
+        "each function still needs its own runtime binding site:\n{out}"
+    );
+}
+
+#[test]
+fn nested_imports_do_not_become_module_re_exports() {
+    let out = compile_with_modules(
+        "use wrapper as wrapper_module",
+        &[
+            ("dep", "let value = 41\nlet hidden = 99"),
+            (
+                "wrapper",
+                r#"fn load() {
+    use dep.{value} as chosen
+    return chosen.value + 1
+}
+let own = 7"#,
+            ),
+        ],
+    )
+    .expect("transpile a module with a function-local selective alias");
+
+    assert!(out.contains(&module_load_marker("dep")));
+    assert_eq!(
+        module_export_fields(&out, "wrapper"),
+        ["__bop_user_value_6f776e", "__bop_user_value_6c6f6164"]
+    );
+}
+
+#[test]
+fn lazy_import_edges_do_not_create_false_cycles() {
+    let out = compile_with_modules(
+        "use a as root_a",
+        &[
+            (
+                "a",
+                "let value = 10\nfn load() { use b as nested_b; return nested_b.value }",
+            ),
+            ("b", "use a as parent\nlet value = 32"),
+        ],
+    )
+    .expect("a lazy a -> b edge must not form an eager b -> a cycle");
+
+    assert!(out.contains(&module_load_marker("a")));
+    assert!(out.contains(&module_load_marker("b")));
+}
+
+#[test]
+fn nested_import_missing_and_eager_cycle_diagnostics_keep_source_lines() {
+    let missing = compile_with_modules(
+        "fn run() {\n    let before = 1\n    use absent\n}",
+        &[],
+    )
+    .expect_err("nested missing module must fail during graph discovery");
+    assert_eq!(missing.message, "Module `absent` not found");
+    assert_eq!(missing.line, Some(3));
+
+    let cycle = compile_with_modules(
+        "fn run() {\n    use a\n}",
+        &[("a", "use b"), ("b", "use a")],
+    )
+    .expect_err("top-level module imports still form an eager cycle");
+    assert_eq!(cycle.message, "Circular import: module `a`");
+    assert_eq!(cycle.line, Some(1));
 }
 
 #[test]

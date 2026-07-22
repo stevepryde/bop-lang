@@ -354,9 +354,11 @@ fn collect_types_from_stmts(
 // ─── Module graph ──────────────────────────────────────────────────
 
 /// Transitively-resolved modules, keyed by dot-joined path and
-/// ordered so each module comes after the ones it imports
-/// (topological / leaves-first). Produced once per transpile and
-/// handed to the emitter.
+/// ordered so each module comes after its eager top-level imports
+/// (topological / leaves-first). Lazy imports in nested runtime
+/// bodies are included in the graph without imposing an eager
+/// ordering edge. Produced once per transpile and handed to the
+/// emitter.
 pub(crate) struct ModuleGraph {
     pub order: Vec<String>,
     pub modules: HashMap<String, ModuleEntry>,
@@ -415,17 +417,35 @@ fn build_module_graph(
         }
     };
 
+    // Discovery and eager-dependency analysis are deliberately
+    // separate. A `use` inside a fn/block/lambda must make its
+    // module available to codegen, but it neither runs while the
+    // containing module loads nor contributes re-exports. Treating
+    // that lazy edge like a top-level edge would also report false
+    // cycles for harmless patterns such as `fn f() { use self }`.
+    let mut resolved: HashMap<String, Vec<Stmt>> = HashMap::new();
+    let mut discovery_order: Vec<(String, u32)> = Vec::new();
+    for import in &root_imports {
+        resolve_module_tree(
+            &import.path,
+            import.line,
+            &resolver,
+            &mut resolved,
+            &mut discovery_order,
+        )?;
+    }
+
     let mut graph = ModuleGraph {
         order: Vec::new(),
         modules: HashMap::new(),
     };
     let mut visiting: BTreeSet<String> = BTreeSet::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();
-    for import in &root_imports {
-        visit_module(
-            &import.path,
-            import.line,
-            &resolver,
+    for (name, line) in discovery_order {
+        analyze_module(
+            &name,
+            line,
+            &resolved,
             &mut graph,
             &mut visiting,
             &mut visited,
@@ -434,10 +454,62 @@ fn build_module_graph(
     Ok(graph)
 }
 
-fn visit_module(
+/// Resolve and parse every module reachable through any runtime
+/// statement body. The AST is cached before following imports so a
+/// lazy self/mutual reference is discovery-idempotent rather than a
+/// compile-time cycle. Real load-time cycles are checked later from
+/// top-level edges only.
+fn resolve_module_tree(
     name: &str,
     line: u32,
     resolver: &crate::ModuleResolver,
+    resolved: &mut HashMap<String, Vec<Stmt>>,
+    discovery_order: &mut Vec<(String, u32)>,
+) -> Result<(), BopError> {
+    if resolved.contains_key(name) {
+        return Ok(());
+    }
+
+    let source = {
+        let mut r = resolver.borrow_mut();
+        match r(name) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(BopError::runtime(
+                    format!("Module `{}` not found", name),
+                    line,
+                ));
+            }
+        }
+    };
+    let ast = bop::parse(&source)?;
+    let imports = collect_imports_in_stmts(&ast);
+
+    // Insert before recursion: this is both the resolver-work cache
+    // and the guard against false cycles through lazy import sites.
+    resolved.insert(name.to_string(), ast);
+    discovery_order.push((name.to_string(), line));
+    for import in &imports {
+        resolve_module_tree(
+            &import.path,
+            import.line,
+            resolver,
+            resolved,
+            discovery_order,
+        )?;
+    }
+    Ok(())
+}
+
+/// Compute load order and effective exports from eager (module
+/// top-level) imports. Nested imports were resolved in the discovery
+/// phase, but are intentionally absent here because their bindings
+/// are local to the runtime body that executes them.
+fn analyze_module(
+    name: &str,
+    line: u32,
+    resolved: &HashMap<String, Vec<Stmt>>,
     graph: &mut ModuleGraph,
     visiting: &mut BTreeSet<String>,
     visited: &mut BTreeSet<String>,
@@ -453,30 +525,19 @@ fn visit_module(
     }
     visiting.insert(name.to_string());
 
-    // Resolve + parse.
-    let source = {
-        let mut r = resolver.borrow_mut();
-        match r(name) {
-            Some(Ok(s)) => s,
-            Some(Err(e)) => return Err(e),
-            None => {
-                return Err(BopError::runtime(
-                    format!("Module `{}` not found", name),
-                    line,
-                ));
-            }
-        }
-    };
-    let ast = bop::parse(&source)?;
+    let ast = resolved
+        .get(name)
+        .cloned()
+        .expect("discovered module has a parsed AST");
 
-    // Collect this module's direct imports and visit them first so
-    // `effective_exports` is ready when we pack ours.
-    let direct_imports = collect_imports_in_stmts(&ast);
+    // Only top-level imports execute as part of module loading and
+    // can contribute bindings/types to this module's exports.
+    let direct_imports = collect_top_level_imports(&ast);
     for import in &direct_imports {
-        visit_module(
+        analyze_module(
             &import.path,
             import.line,
-            resolver,
+            resolved,
             graph,
             visiting,
             visited,
@@ -587,16 +648,182 @@ fn push_unique(names: &mut Vec<String>, seen: &mut BTreeSet<String>, name: &str)
 fn collect_imports_in_stmts(stmts: &[Stmt]) -> Vec<ModuleImport> {
     let mut out = Vec::new();
     for stmt in stmts {
-        if let StmtKind::Use { path, items, alias } = &stmt.kind {
-            out.push(ModuleImport {
-                path: path.clone(),
-                items: items.clone(),
-                alias: alias.clone(),
-                line: stmt.line,
-            });
-        }
+        collect_imports_in_stmt(stmt, &mut out);
     }
     out
+}
+
+fn collect_top_level_imports(stmts: &[Stmt]) -> Vec<ModuleImport> {
+    stmts
+        .iter()
+        .filter_map(module_import_from_stmt)
+        .collect()
+}
+
+fn module_import_from_stmt(stmt: &Stmt) -> Option<ModuleImport> {
+    let StmtKind::Use { path, items, alias } = &stmt.kind else {
+        return None;
+    };
+    Some(ModuleImport {
+        path: path.clone(),
+        items: items.clone(),
+        alias: alias.clone(),
+        line: stmt.line,
+    })
+}
+
+fn collect_imports_in_stmt(stmt: &Stmt, out: &mut Vec<ModuleImport>) {
+    match &stmt.kind {
+        StmtKind::Use { .. } => {
+            out.push(module_import_from_stmt(stmt).expect("matched use statement"));
+        }
+        StmtKind::Let { value, .. } => collect_imports_in_expr(value, out),
+        StmtKind::Assign { target, value, .. } => {
+            collect_imports_in_assign_target(target, out);
+            collect_imports_in_expr(value, out);
+        }
+        StmtKind::If {
+            condition,
+            body,
+            else_ifs,
+            else_body,
+        } => {
+            collect_imports_in_expr(condition, out);
+            collect_imports_in_stmts_into(body, out);
+            for (condition, body) in else_ifs {
+                collect_imports_in_expr(condition, out);
+                collect_imports_in_stmts_into(body, out);
+            }
+            if let Some(body) = else_body {
+                collect_imports_in_stmts_into(body, out);
+            }
+        }
+        StmtKind::While { condition, body } => {
+            collect_imports_in_expr(condition, out);
+            collect_imports_in_stmts_into(body, out);
+        }
+        StmtKind::Repeat { count, body } => {
+            collect_imports_in_expr(count, out);
+            collect_imports_in_stmts_into(body, out);
+        }
+        StmtKind::ForIn { iterable, body, .. } => {
+            collect_imports_in_expr(iterable, out);
+            collect_imports_in_stmts_into(body, out);
+        }
+        StmtKind::FnDecl { body, .. } | StmtKind::MethodDecl { body, .. } => {
+            collect_imports_in_stmts_into(body, out);
+        }
+        StmtKind::Return { value } => {
+            if let Some(value) = value {
+                collect_imports_in_expr(value, out);
+            }
+        }
+        StmtKind::ExprStmt(expr) => collect_imports_in_expr(expr, out),
+        StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::StructDecl { .. }
+        | StmtKind::EnumDecl { .. } => {}
+    }
+}
+
+fn collect_imports_in_stmts_into(stmts: &[Stmt], out: &mut Vec<ModuleImport>) {
+    for stmt in stmts {
+        collect_imports_in_stmt(stmt, out);
+    }
+}
+
+fn collect_imports_in_assign_target(target: &AssignTarget, out: &mut Vec<ModuleImport>) {
+    match target {
+        AssignTarget::Variable(_) => {}
+        AssignTarget::Index { object, index } => {
+            collect_imports_in_expr(object, out);
+            collect_imports_in_expr(index, out);
+        }
+        AssignTarget::Field { object, .. } => collect_imports_in_expr(object, out),
+    }
+}
+
+fn collect_imports_in_expr(expr: &Expr, out: &mut Vec<ModuleImport>) {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::StringInterp(_)
+        | ExprKind::Bool(_)
+        | ExprKind::None
+        | ExprKind::Ident(_) => {}
+        ExprKind::BinaryOp { left, right, .. } => {
+            collect_imports_in_expr(left, out);
+            collect_imports_in_expr(right, out);
+        }
+        ExprKind::UnaryOp { expr, .. } | ExprKind::Try(expr) => {
+            collect_imports_in_expr(expr, out);
+        }
+        ExprKind::Call { callee, args } => {
+            collect_imports_in_expr(callee, out);
+            for arg in args {
+                collect_imports_in_expr(arg, out);
+            }
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            collect_imports_in_expr(object, out);
+            for arg in args {
+                collect_imports_in_expr(arg, out);
+            }
+        }
+        ExprKind::FieldAccess { object, .. } => collect_imports_in_expr(object, out),
+        ExprKind::StructConstruct { fields, .. } => {
+            for (_, value) in fields {
+                collect_imports_in_expr(value, out);
+            }
+        }
+        ExprKind::EnumConstruct { payload, .. } => match payload {
+            VariantPayload::Unit => {}
+            VariantPayload::Tuple(values) => {
+                for value in values {
+                    collect_imports_in_expr(value, out);
+                }
+            }
+            VariantPayload::Struct(fields) => {
+                for (_, value) in fields {
+                    collect_imports_in_expr(value, out);
+                }
+            }
+        },
+        ExprKind::Index { object, index } => {
+            collect_imports_in_expr(object, out);
+            collect_imports_in_expr(index, out);
+        }
+        ExprKind::Array(values) => {
+            for value in values {
+                collect_imports_in_expr(value, out);
+            }
+        }
+        ExprKind::Dict(entries) => {
+            for (_, value) in entries {
+                collect_imports_in_expr(value, out);
+            }
+        }
+        ExprKind::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_imports_in_expr(condition, out);
+            collect_imports_in_expr(then_expr, out);
+            collect_imports_in_expr(else_expr, out);
+        }
+        ExprKind::Lambda { body, .. } => collect_imports_in_stmts_into(body, out),
+        ExprKind::Match { scrutinee, arms } => {
+            collect_imports_in_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_imports_in_expr(guard, out);
+                }
+                collect_imports_in_expr(&arm.body, out);
+            }
+        }
+    }
 }
 
 fn collect_top_level_lets(stmts: &[Stmt]) -> Vec<String> {
@@ -1048,9 +1275,9 @@ impl Emitter {
         // are visible to the fn bodies we're about to emit.
         self.seed_types_for_module(bop::value::ROOT_MODULE_PATH);
         self.seed_uses(stmts);
-        // Imported modules emit first (topo-ordered — leaves
-        // first) so their fns, exports, and load fns exist by
-        // the time the root program's code references them.
+        // Imported modules emit first. Eager top-level edges are
+        // topo-ordered leaves-first; lazy nested edges need no Rust
+        // item ordering but are present in the same resolved graph.
         self.emit_imported_modules()?;
         // Top-level fn declarations move out of `run_program`'s
         // body to module scope. That way the `__bop_user_fn_value_*`
@@ -3549,9 +3776,8 @@ fn scan_free_vars_stmt(
         }
         StmtKind::Break | StmtKind::Continue => {}
         StmtKind::Use { .. } => {
-            // Imports inside lambda bodies are already rejected at
-            // emit time for the AOT — leave the scan a no-op
-            // rather than inventing phantom captures.
+            // Import bindings are created when the lambda executes,
+            // so the use site itself does not capture an outer value.
         }
         StmtKind::StructDecl { .. } => {
             // Struct declarations don't reference any identifiers

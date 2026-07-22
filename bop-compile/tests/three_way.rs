@@ -1539,6 +1539,89 @@ use m
 print(x)"#,
         &[("m", "let x = 42")],
     ),
+    (
+        "import_nested_every_runtime_body",
+        r#"fn function_use() {
+    use nested_shared as unused_alias
+    use nested_shared.{inc}
+    return inc(1)
+}
+fn branch_use(which) {
+    if which == 1 {
+        use nested_shared
+        return inc(2)
+    } else if which == 2 {
+        use nested_shared.{inc}
+        return inc(3)
+    } else {
+        use nested_shared
+        return inc(4)
+    }
+}
+fn loop_uses() {
+    let total = 0
+    while total == 0 {
+        use nested_shared
+        total = inc(4)
+    }
+    repeat 1 {
+        use nested_shared.{inc}
+        total += inc(5)
+    }
+    for item in [6] {
+        use nested_shared
+        total += inc(item)
+    }
+    return total
+}
+struct Holder { value }
+fn Holder.load(self) {
+    use nested_shared
+    return inc(self.value)
+}
+let lambda_use = fn() {
+    use nested_shared.{inc}
+    return inc(7)
+}
+let match_lambda_use = match 1 {
+    1 => fn() {
+        use nested_shared
+        return inc(8)
+    },
+    _ => fn() { return 0 },
+}
+print(function_use())
+print(branch_use(1), branch_use(2), branch_use(3))
+print(loop_uses())
+print(Holder { value: 6 }.load())
+print(lambda_use(), match_lambda_use())"#,
+        &[("nested_shared", "fn inc(n) { return n + 1 }")],
+    ),
+    (
+        "import_nested_inside_imported_module",
+        r#"use wrapper as wrapper_module
+print(wrapper_module.run())"#,
+        &[
+            (
+                "wrapper",
+                "fn run() { use leaf.{value}; return value }",
+            ),
+            ("leaf", "let value = 42"),
+        ],
+    ),
+    (
+        "import_lazy_edge_is_not_eager_cycle",
+        r#"use lazy_a as a
+print(a.value)
+print(a.load())"#,
+        &[
+            (
+                "lazy_a",
+                "let value = 10\nfn load() { use lazy_b; return answer() }",
+            ),
+            ("lazy_b", "use lazy_a as parent\nfn answer() { return 32 }"),
+        ],
+    ),
     // ─── Result methods (engine-level, no `use` required) ────
     (
         "result_method_helpers",
