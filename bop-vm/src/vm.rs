@@ -1177,10 +1177,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
             // ─── String interpolation ────────────────────────────
             Instr::StringInterp(idx) => {
-                let recipe_parts = {
-                    let recipe = self.current_chunk().interp(idx);
-                    recipe.parts.clone()
-                };
+                let recipe_parts = Rc::clone(&self.current_chunk().interp(idx).parts);
                 self.push_value(self.build_interp(&recipe_parts, line)?);
             }
 
@@ -1887,7 +1884,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
         nested_place: bool,
         line: u32,
     ) -> Result<Next, BopError> {
-        let method = self.current_chunk().name(method_idx).to_string();
+        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+        let method = chunk.name(method_idx);
 
         let args = self.pop_n_values(argc, line)?;
         let obj = self.pop_value(line)?;
@@ -1902,7 +1900,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
         argc: usize,
         line: u32,
     ) -> Result<Next, BopError> {
-        let method = self.current_chunk().name(method_idx).to_string();
+        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+        let method = chunk.name(method_idx);
         let args = self.pop_n_values(argc, line)?;
 
         // The compiler only emits this instruction for a bare identifier and
@@ -1920,26 +1919,26 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     .get_mut(slot.0 as usize)
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 if let Value::Array(array) = value {
-                    let result = methods::array_method_mut(array, &method, args, line)?;
+                    let result = methods::array_method_mut(array, method, args, line)?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
                 value.clone()
             }
             crate::chunk::AssignBack::Name(name_idx) => {
-                let name = self.current_chunk().name(name_idx).to_string();
+                let name = chunk.name(name_idx);
                 let Some(value) = self.lookup_var_mut_by_idx(name_idx) else {
-                    let hint = self.value_candidates_hint(&name).unwrap_or_else(|| {
+                    let hint = self.value_candidates_hint(name).unwrap_or_else(|| {
                         "Did you forget to create it with `let`?".to_string()
                     });
                     return Err(error_with_hint(
                         line,
-                        bop::error_messages::variable_not_found(&name),
+                        bop::error_messages::variable_not_found(name),
                         hint,
                     ));
                 };
                 if let Value::Array(array) = value {
-                    let result = methods::array_method_mut(array, &method, args, line)?;
+                    let result = methods::array_method_mut(array, method, args, line)?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
@@ -1953,13 +1952,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
     fn dispatch_method(
         &mut self,
         obj: Value,
-        method: String,
+        method: &str,
         args: Vec<Value>,
         assign_back_to: Option<crate::chunk::AssignBack>,
         nested_place: bool,
         line: u32,
     ) -> Result<Next, BopError> {
-
         // `m.foo(args)` on a module alias: there's no struct /
         // enum receiver — `m` is a `Value::Module` whose `foo`
         // export is a callable. Look it up and dispatch through
@@ -1972,11 +1970,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // gated by whether the module happens to export that
         // name.
         if let Value::Module(ref m) = obj {
-            if let Some(result) = methods::common_method(&obj, &method, &args, line)? {
+            if let Some(result) = methods::common_method(&obj, method, &args, line)? {
                 self.push_value(result.0);
                 return Ok(Next::Continue);
             }
-            if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == &method) {
+            if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == method) {
                 let callee = v.clone();
                 drop(obj);
                 return self.invoke_value(callee, args, line);
@@ -2008,7 +2006,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             let entry = self
                 .user_methods
                 .get(&type_key)
-                .and_then(|m| m.get(&method))
+                .and_then(|m| m.get(method))
                 .cloned();
             if let Some(entry) = entry {
                 if entry.params.len() != args.len() + 1 {
@@ -2059,13 +2057,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
 
         if nested_place {
-            methods::reject_nested_array_mutation(&obj, &method, line)?;
+            methods::reject_nested_array_mutation(&obj, method, line)?;
         }
 
         // `type` / `to_str` / `inspect` work on every value —
         // dispatch them ahead of the type-specific tables so
         // walker / VM / AOT agree on the common method surface.
-        if let Some((ret, _)) = methods::common_method(&obj, &method, &args, line)? {
+        if let Some((ret, _)) = methods::common_method(&obj, method, &args, line)? {
             self.push_value(ret);
             return Ok(Next::Continue);
         }
@@ -2076,43 +2074,43 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // closure frame with a `FrameWrap` that wraps the return
         // in `Ok`/`Err` or passes it through.
         if methods::is_builtin_result(&obj) {
-            if let Some(v) = methods::result_method(&obj, &method, &args, line)? {
+            if let Some(v) = methods::result_method(&obj, method, &args, line)? {
                 self.push_value(v);
                 return Ok(Next::Continue);
             }
-            if let Some(kind) = methods::is_result_callable_method(&method) {
-                return self.call_result_callable_method(obj, kind, &method, args, line);
+            if let Some(kind) = methods::is_result_callable_method(method) {
+                return self.call_result_callable_method(obj, kind, method, args, line);
             }
         }
 
         let (ret, mutated) = match &obj {
             Value::Array(arr) => {
-                methods::array_method(arr, &method, &args, line)?
+                methods::array_method(arr, method, &args, line)?
             }
             Value::Str(s) => {
-                methods::string_method(s.as_str(), &method, &args, line)?
+                methods::string_method(s.as_str(), method, &args, line)?
             }
             Value::Dict(entries) => {
-                methods::dict_method(entries, &method, &args, line)?
+                methods::dict_method(entries, method, &args, line)?
             }
             Value::Int(_) | Value::Number(_) => {
-                methods::numeric_method(&obj, &method, &args, line)?
+                methods::numeric_method(&obj, method, &args, line)?
             }
             Value::Bool(_) => {
-                methods::bool_method(&obj, &method, &args, line)?
+                methods::bool_method(&obj, method, &args, line)?
             }
             Value::Iter(_) => {
-                methods::iter_method(&obj, &method, &args, line)?
+                methods::iter_method(&obj, method, &args, line)?
             }
             _ => {
                 return Err(error(
                     line,
-                    bop::error_messages::no_such_method(obj.type_name(), &method),
+                    bop::error_messages::no_such_method(obj.type_name(), method),
                 ));
             }
         };
 
-        if methods::is_mutating_method(&method) {
+        if methods::is_mutating_method(method) {
             if let (Some(target), Some(new_obj)) = (assign_back_to, mutated) {
                 match target {
                     crate::chunk::AssignBack::Slot(slot) => {
@@ -2198,12 +2196,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
         method_name: NameIdx,
         fn_idx: FnIdx,
     ) {
-        let type_name_s = self.current_chunk().name(type_name).to_string();
-        let method_name_s = self.current_chunk().name(method_name).to_string();
-        let fn_def = self.current_chunk().function(fn_idx).clone();
+        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+        let type_name_s = chunk.name(type_name).to_string();
+        let method_name_s = chunk.name(method_name).to_string();
+        let fn_def = chunk.function(fn_idx);
         let entry = Rc::new(FnEntry {
-            params: fn_def.params,
-            chunk: Rc::new(fn_def.chunk),
+            params: fn_def.params.clone(),
+            chunk: Rc::clone(&fn_def.chunk),
             module_path: self.current_module.clone(),
         });
         // Methods attach to the *full* receiver-type identity.
@@ -2568,10 +2567,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
     ) -> Result<(), BopError> {
         let value = self.pop_value(line)?;
         // `pattern` refers to a slot in the *currently executing*
-        // chunk's pattern pool; we clone it out rather than hold
-        // a borrow so we can mutate `self` afterwards to install
-        // bindings.
-        let pat = self.current_chunk().pattern(pattern).clone();
+        // chunk's pattern pool; clone the shared handle rather than hold a
+        // frame borrow while mutating `self` to install bindings.
+        let pat = Rc::clone(self.current_chunk().pattern(pattern));
         let mut bindings: Vec<(String, Value)> = Vec::new();
         // Build a resolver snapshot from the current frame's
         // value scopes plus the VM-level type_bindings and
@@ -2660,13 +2658,15 @@ impl<'h, H: BopHost> Vm<'h, H> {
     }
 
     fn define_fn(&mut self, idx: FnIdx) {
-        let fn_def = self.current_chunk().function(idx).clone();
+        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+        let fn_def = chunk.function(idx);
+        let name = fn_def.name.clone();
         let entry = Rc::new(FnEntry {
-            params: fn_def.params,
-            chunk: Rc::new(fn_def.chunk),
+            params: fn_def.params.clone(),
+            chunk: Rc::clone(&fn_def.chunk),
             module_path: self.active_module_path().to_string(),
         });
-        self.functions.insert(fn_def.name, entry);
+        self.functions.insert(name, entry);
     }
 
     /// Materialise a lambda expression as a `Value::Fn`. Each
@@ -2675,11 +2675,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// — no "flatten every binding in sight" pass, and no
     /// over-capture of out-of-scope slots.
     fn make_lambda(&mut self, idx: FnIdx, line: u32) -> Result<(), BopError> {
-        let fn_def = self.current_chunk().function(idx).clone();
-        let captures = self.snapshot_captures_for(&fn_def);
-        let body: Rc<dyn core::any::Any + 'static> = Rc::new(fn_def.chunk);
+        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+        let fn_def = chunk.function(idx);
+        let captures = self.snapshot_captures_for(fn_def);
+        let compiled_chunk = Rc::clone(&fn_def.chunk);
+        let body: Rc<dyn core::any::Any + 'static> = compiled_chunk;
         let value = Value::try_new_compiled_module_fn(
-            fn_def.params,
+            fn_def.params.clone(),
             captures,
             body,
             None,

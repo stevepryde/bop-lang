@@ -2677,6 +2677,34 @@ print(add_n(3))"#),
 }
 
 #[test]
+fn repeated_compiled_pool_dispatch_keeps_semantics_diff() {
+    let outcome = run_both(
+        r#"struct Counter { n }
+fn Counter.bump(self, amount) { return self.n + amount }
+fn exercise(limit) {
+    let total = 0
+    for i in range(limit) {
+        let add_i = fn(x) { return x + i }
+        let label = match i % 3 {
+            0 => "zero",
+            1 => "one",
+            _ => "two",
+        }
+        total += add_i(label.len())
+        total += Counter { n: i }.bump(1)
+        let rendered = "{i}:{label}:{total}"
+        if rendered.len() > 0 { total += 1 }
+    }
+    return total
+}
+print(exercise(180))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["33180"]);
+}
+
+#[test]
 fn unresolved_direct_lambda_capture_reports_variable_not_found_diff() {
     assert_eq!(
         run_err(r#"let read = fn() { return missing }

@@ -2,7 +2,9 @@
 //! set overview.
 
 #[cfg(feature = "no_std")]
-use alloc::{string::{String, ToString}, vec, vec::Vec};
+use alloc::{rc::Rc, string::{String, ToString}, vec, vec::Vec};
+#[cfg(not(feature = "no_std"))]
+use std::rc::Rc;
 
 use bop::error::BopError;
 use bop::methods;
@@ -474,7 +476,7 @@ impl Compiler {
 
     fn add_pattern(&mut self, pat: Pattern) -> PatternIdx {
         let idx = PatternIdx(self.chunk.patterns.len() as u32);
-        self.chunk.patterns.push(pat);
+        self.chunk.patterns.push(Rc::new(pat));
         idx
     }
 
@@ -980,7 +982,9 @@ impl Compiler {
                         }
                     }
                 }
-                let recipe = InterpRecipe { parts: resolved };
+                let recipe = InterpRecipe {
+                    parts: Rc::from(resolved),
+                };
                 let idx = self.add_interp(recipe);
                 self.emit(Instr::StringInterp(idx), line);
             }
@@ -1587,7 +1591,7 @@ impl Compiler {
         Ok(FnDef {
             name: name.to_string(),
             params: params.to_vec(),
-            chunk,
+            chunk: Rc::new(chunk),
             slot_count: resolver.max_slot,
             capture_names,
             capture_sources,

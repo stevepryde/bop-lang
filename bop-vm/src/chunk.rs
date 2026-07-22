@@ -3,7 +3,9 @@
 //! instruction set.
 
 #[cfg(feature = "no_std")]
-use alloc::{string::String, vec::Vec};
+use alloc::{rc::Rc, string::String, vec::Vec};
+#[cfg(not(feature = "no_std"))]
+use std::rc::Rc;
 
 /// One bytecode operation.
 ///
@@ -462,10 +464,11 @@ pub enum InterpPart {
 }
 
 /// A compiled string-interpolation recipe. Parts are formatted in
-/// source order using their compile-time-resolved bindings.
+/// source order using their compile-time-resolved bindings. The immutable
+/// slice is shared so repeated interpolation only bumps a refcount.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterpRecipe {
-    pub parts: Vec<InterpPart>,
+    pub parts: Rc<[InterpPart]>,
 }
 
 /// Compiled descriptor for a `use` statement. Parallel to the
@@ -494,8 +497,9 @@ pub struct Chunk {
     pub functions: Vec<FnDef>,
     pub struct_defs: Vec<StructDef>,
     pub enum_defs: Vec<EnumDef>,
-    /// Match patterns referenced by `MatchFail` instructions.
-    pub patterns: Vec<bop::parser::Pattern>,
+    /// Match patterns referenced by `MatchFail` instructions. Pool entries
+    /// are shared because matching may execute the same arm in a hot loop.
+    pub patterns: Vec<Rc<bop::parser::Pattern>>,
     /// Side-table of `use` descriptors referenced by
     /// `Instr::Use`. Holds variable-length fields (path, items,
     /// alias) so the instruction payload stays `Copy`.
@@ -572,7 +576,7 @@ impl Chunk {
         &self.enum_defs[idx.0 as usize]
     }
 
-    pub fn pattern(&self, idx: PatternIdx) -> &bop::parser::Pattern {
+    pub fn pattern(&self, idx: PatternIdx) -> &Rc<bop::parser::Pattern> {
         &self.patterns[idx.0 as usize]
     }
 
@@ -586,7 +590,9 @@ impl Chunk {
 pub struct FnDef {
     pub name: String,
     pub params: Vec<String>,
-    pub chunk: Chunk,
+    /// Immutable compiled body shared by the defining chunk, function
+    /// registry, and every closure materialised from this definition.
+    pub chunk: Rc<Chunk>,
     /// Total slot count for this function's frame (params + every
     /// `let` / `for-in` variable assigned a slot by the compiler).
     /// The VM resizes the frame's `slots` vec to this length
