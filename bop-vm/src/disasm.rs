@@ -235,7 +235,12 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
             count,
         } => {
             let ns_prefix = match namespace {
-                Some(ns) => format!("{}.", chunk.name(*ns)),
+                Some(crate::chunk::NamespaceRef::Name(ns)) => {
+                    format!("{}.", chunk.name(*ns))
+                }
+                Some(crate::chunk::NamespaceRef::Slot { name, slot }) => {
+                    format!("{}.(@{})", chunk.name(*name), slot.0)
+                }
                 None => String::new(),
             };
             format!(
@@ -258,7 +263,12 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 S::Struct(n) => format!("Struct({})", n),
             };
             let ns_prefix = match namespace {
-                Some(ns) => format!("{}.", chunk.name(*ns)),
+                Some(crate::chunk::NamespaceRef::Name(ns)) => {
+                    format!("{}.", chunk.name(*ns))
+                }
+                Some(crate::chunk::NamespaceRef::Slot { name, slot }) => {
+                    format!("{}.(@{})", chunk.name(*name), slot.0)
+                }
                 None => String::new(),
             };
             format!(

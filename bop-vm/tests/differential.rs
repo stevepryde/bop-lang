@@ -2772,6 +2772,110 @@ print(Thing { value: 1 })"#,
 }
 
 #[test]
+fn root_named_functions_keep_module_alias_context_diff() {
+    set_modules(&[(
+        "types",
+        r#"struct Point { value }
+fn make(value) { return Point { value: value } }"#,
+    )]);
+    let outcome = run_both(
+        r#"use types as t
+fn build(value) {
+    let direct = t.Point { value: value }
+    let called = t.make(direct.value + 1)
+    return match called {
+        t.Point { value: found } => found,
+        _ => 0,
+    }
+}
+print(build(41))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["42"]);
+}
+
+#[test]
+fn declaration_alias_is_shadowed_by_function_parameter_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let error = run_err(
+        r#"use types as t
+fn build(t) { return t.Point { value: 42 } }
+print(build(1))"#,
+    );
+    assert!(
+        error.contains("`t` is a int, not a module alias"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn imported_functions_and_methods_keep_defining_module_context_diff() {
+    set_modules(&[
+        (
+            "first_types",
+            r#"struct Point { value }
+fn make(value) { return Point { value: value } }"#,
+        ),
+        (
+            "second_types",
+            r#"struct Point { value }
+fn make(value) { return Point { value: value + 100 } }"#,
+        ),
+        (
+            "first_holder",
+            r#"use first_types as dep
+struct Holder { value }
+fn build(value) {
+    let point = dep.make(value)
+    return match point { dep.Point { value: found } => found, _ => 0 }
+}
+fn Holder.build(self) { return dep.make(self.value).value }"#,
+        ),
+        (
+            "second_holder",
+            r#"use second_types as dep
+struct Holder { value }
+fn build(value) {
+    let point = dep.Point { value: value }
+    return match point { dep.Point { value: found } => found, _ => 0 }
+}
+fn Holder.build(self) { return dep.make(self.value).value }"#,
+        ),
+    ]);
+    let outcome = run_both(
+        r#"use first_holder as first
+use second_holder as second
+use second_types as dep
+print(first.build(1), first.Holder { value: 2 }.build())
+print(second.build(3), second.Holder { value: 4 }.build())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1 2", "3 104"]);
+}
+
+#[test]
+fn imported_function_keeps_bare_type_binding_from_defining_module_diff() {
+    set_modules(&[
+        ("types", "struct Point { value }"),
+        (
+            "holder",
+            r#"use types.{Point}
+fn build(value) {
+    let point = Point { value: value }
+    return match point { Point { value: found } => found, _ => 0 }
+}"#,
+        ),
+    ]);
+    assert_eq!(
+        say(r#"use holder as module
+print(module.build(42))"#),
+        "42"
+    );
+}
+
+#[test]
 fn aliased_nested_import_does_not_reexport_dependency_bare_names() {
     set_modules(&[
         ("shared", "fn helper(n) { return n + 1 }\nlet public = 10"),

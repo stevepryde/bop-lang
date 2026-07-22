@@ -1408,6 +1408,65 @@ print(square(7))"#,
         &[("math", "fn square(n) { return n * n }")],
     ),
     (
+        "root_named_fn_declaration_alias_context",
+        r#"use types as t
+fn build(value) {
+    let direct = t.Point { value: value }
+    let called = t.make(direct.value + 1)
+    return match called { t.Point { value: found } => found, _ => 0 }
+}
+print(build(41))"#,
+        &[((
+            "types",
+            "struct Point { value }\nfn make(value) { return Point { value: value } }",
+        ))],
+    ),
+    (
+        "declaration_alias_is_shadowed_by_parameter",
+        r#"use types as t
+fn build(t) { return t.Point { value: 42 } }
+print(build(1))"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "imported_fn_method_declaration_alias_context",
+        r#"use first_holder as first
+use second_holder as second
+use second_types as dep
+print(first.build(1), first.Holder { value: 2 }.build())
+print(second.build(3), second.Holder { value: 4 }.build())"#,
+        &[
+            (
+                "first_types",
+                "struct Point { value }\nfn make(value) { return Point { value: value } }",
+            ),
+            (
+                "second_types",
+                "struct Point { value }\nfn make(value) { return Point { value: value + 100 } }",
+            ),
+            (
+                "first_holder",
+                "use first_types as dep\nstruct Holder { value }\nfn build(value) { let point = dep.make(value) return match point { dep.Point { value: found } => found, _ => 0 } }\nfn Holder.build(self) { return dep.make(self.value).value }",
+            ),
+            (
+                "second_holder",
+                "use second_types as dep\nstruct Holder { value }\nfn build(value) { let point = dep.Point { value: value } return match point { dep.Point { value: found } => found, _ => 0 } }\nfn Holder.build(self) { return dep.make(self.value).value }",
+            ),
+        ],
+    ),
+    (
+        "imported_fn_bare_type_declaration_context",
+        r#"use holder as module
+print(module.build(42))"#,
+        &[
+            ("types", "struct Point { value }"),
+            (
+                "holder",
+                "use types.{Point}\nfn build(value) { let point = Point { value: value } return match point { Point { value: found } => found, _ => 0 } }",
+            ),
+        ],
+    ),
+    (
         "import_dotted_path",
         r#"use std.math
 print(e)"#,

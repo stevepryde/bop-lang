@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 
 use bop::error::BopError;
 
-use crate::chunk::{AssignBack, CaptureSource, Chunk, CodeOffset, Instr, InterpPart, SlotIdx};
+use crate::chunk::{
+    AssignBack, CaptureSource, Chunk, CodeOffset, Instr, InterpPart, NamespaceRef, SlotIdx,
+};
 
 /// Validate a bytecode chunk before executing it.
 ///
@@ -157,6 +159,12 @@ impl<'a> Validator<'a> {
             ));
         }
 
+        for (index, recipe) in self.chunk.patterns.iter().enumerate() {
+            for (_, namespace) in &recipe.namespaces {
+                self.namespace_ref(*namespace, 0, &format!("pattern {index}"))?;
+            }
+        }
+
         for (offset, instr) in self.chunk.code.iter().copied().enumerate() {
             self.instruction(instr, offset)?;
         }
@@ -254,7 +262,7 @@ impl<'a> Validator<'a> {
             } => {
                 self.pair_count(count, line, &at)?;
                 if let Some(namespace) = namespace {
-                    self.pool(namespace.0, self.chunk.names.len(), line, "name", &at)?;
+                    self.namespace_ref(namespace, line, &at)?;
                 }
                 self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
             }
@@ -268,7 +276,7 @@ impl<'a> Validator<'a> {
                     self.pair_count(count, line, &at)?;
                 }
                 if let Some(namespace) = namespace {
-                    self.pool(namespace.0, self.chunk.names.len(), line, "name", &at)?;
+                    self.namespace_ref(namespace, line, &at)?;
                 }
                 self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
                 self.pool(variant.0, self.chunk.names.len(), line, "name", &at)?;
@@ -334,6 +342,23 @@ impl<'a> Validator<'a> {
                 line,
                 format!("{detail} has a field-pair count that overflows this target"),
             ))
+        }
+    }
+
+    fn namespace_ref(
+        &self,
+        namespace: NamespaceRef,
+        line: u32,
+        detail: &str,
+    ) -> Result<(), BopError> {
+        match namespace {
+            NamespaceRef::Name(name) => {
+                self.pool(name.0, self.chunk.names.len(), line, "name", detail)
+            }
+            NamespaceRef::Slot { name, slot } => {
+                self.pool(name.0, self.chunk.names.len(), line, "name", detail)?;
+                self.slot(slot, line, detail)
+            }
         }
     }
 

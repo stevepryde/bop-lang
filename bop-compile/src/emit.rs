@@ -1003,6 +1003,12 @@ struct Emitter {
     /// with `scope_stack` depth to distinguish a module's direct use-site from
     /// a nested lexical import when applying named-function first-win rules.
     in_callable_body: bool,
+    /// Aliased top-level imports owned by the module whose lifted callables are
+    /// currently being emitted. Their runtime values must be recreated inside
+    /// each Rust function because loader locals are not capturable Rust state.
+    declaration_aliases: Vec<ModuleImport>,
+    /// Root copy restored after temporarily emitting imported modules/methods.
+    root_declaration_aliases: Vec<ModuleImport>,
 }
 
 impl Emitter {
@@ -1045,6 +1051,8 @@ impl Emitter {
             scope_stack: Vec::new(),
             in_top_level: false,
             in_callable_body: false,
+            declaration_aliases: Vec::new(),
+            root_declaration_aliases: Vec::new(),
         }
     }
 
@@ -1270,6 +1278,46 @@ impl Emitter {
         }
     }
 
+    fn emit_declaration_alias_bindings(
+        &mut self,
+        params: &[String],
+        body: &[Stmt],
+    ) -> Result<(), BopError> {
+        let mut outer = EmissionScope::default();
+        for import in &self.declaration_aliases {
+            if let Some(alias) = &import.alias {
+                outer.locals.insert(alias.clone());
+            }
+        }
+        let mut known: HashSet<String> = params.iter().cloned().collect();
+        let mut referenced = std::collections::BTreeSet::new();
+        scan_free_vars_stmts(
+            body,
+            &mut known,
+            &mut referenced,
+            core::slice::from_ref(&outer),
+            &self.fn_info,
+        );
+        let imports = self.declaration_aliases.clone();
+        for import in imports {
+            let Some(alias) = import.alias else {
+                continue;
+            };
+            if !referenced.contains(&alias) {
+                continue;
+            }
+            self.line(&format!(
+                "let mut {alias_ident}: ::bop::value::Value = ctx.module_aliases.get(&({module}.to_string(), {alias}.to_string())).cloned().ok_or_else(|| ::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({alias}), {line}))?;",
+                alias_ident = rust_user_ident(&alias),
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(&alias),
+                line = import.line,
+            ));
+            self.bind_local(&alias);
+        }
+        Ok(())
+    }
+
     fn imported_type_names(
         &self,
         module_path: &str,
@@ -1325,6 +1373,11 @@ impl Emitter {
         }
         self.emit_header();
         self.emit_runtime_preamble();
+        self.root_declaration_aliases = collect_top_level_imports(stmts)
+            .into_iter()
+            .filter(|import| import.alias.is_some())
+            .collect();
+        self.declaration_aliases = self.root_declaration_aliases.clone();
         // Seed the outermost type_bindings frame with the
         // root program's declared types so methods + top-level
         // fns (emitted ahead of the main AST walk) can resolve
@@ -1420,6 +1473,13 @@ impl Emitter {
             &mut self.module_aliases,
             vec![HashMap::new()],
         );
+        let saved_declaration_aliases = std::mem::replace(
+            &mut self.declaration_aliases,
+            collect_top_level_imports(&entry.ast)
+                .into_iter()
+                .filter(|import| import.alias.is_some())
+                .collect(),
+        );
         // Seed this module's types too — see
         // `seed_types_for_module` for why this matters. Methods
         // inside the module need to resolve bare type names
@@ -1438,6 +1498,7 @@ impl Emitter {
         self.current_module = saved_module;
         self.type_bindings = saved_bindings;
         self.module_aliases = saved_aliases;
+        self.declaration_aliases = saved_declaration_aliases;
         Ok(())
     }
 
@@ -1492,6 +1553,7 @@ impl Emitter {
         alias: &Option<String>,
         line: u32,
     ) -> Result<(), BopError> {
+        let module_top_scope = self.is_module_top_scope();
         // Idempotency: only plain-glob re-imports are cached. The
         // other three forms can legitimately produce different
         // visible effects (different item subset, different alias
@@ -1611,6 +1673,14 @@ impl Emitter {
                     types = types_src,
                     line = line,
                 ));
+                if module_top_scope {
+                    self.line(&format!(
+                        "ctx.module_aliases.insert(({module}.to_string(), {alias_name}.to_string()), {alias}.clone());",
+                        module = rust_string_literal(&self.current_module),
+                        alias_name = rust_string_literal(alias_name),
+                        alias = rust_user_ident(alias_name),
+                    ));
+                }
                 self.bind_local(alias_name);
                 // Track the alias for compile-time resolution
                 // of namespaced references (`m.Color`). Emit-
@@ -1880,6 +1950,51 @@ impl Emitter {
                 &mut self.module_prefix,
                 entry.module_prefix.clone(),
             );
+            let saved_module_context = if module_path == bop::value::ROOT_MODULE_PATH {
+                None
+            } else {
+                let module_ast = self
+                    .modules
+                    .modules
+                    .get(module_path)
+                    .expect("method's declaring module must be in the module graph")
+                    .ast
+                    .clone();
+                let saved_module = std::mem::replace(
+                    &mut self.current_module,
+                    module_path.clone(),
+                );
+                let mut builtin_types = HashMap::new();
+                for name in ["Result", "RuntimeError", "Iter"] {
+                    builtin_types.insert(
+                        name.to_string(),
+                        bop::value::BUILTIN_MODULE_PATH.to_string(),
+                    );
+                }
+                let saved_type_bindings = std::mem::replace(
+                    &mut self.type_bindings,
+                    vec![builtin_types],
+                );
+                let saved_module_aliases = std::mem::replace(
+                    &mut self.module_aliases,
+                    vec![HashMap::new()],
+                );
+                let saved_declaration_aliases = std::mem::replace(
+                    &mut self.declaration_aliases,
+                    collect_top_level_imports(&module_ast)
+                        .into_iter()
+                        .filter(|import| import.alias.is_some())
+                        .collect(),
+                );
+                self.seed_types_for_module(module_path);
+                self.seed_uses(&module_ast);
+                Some((
+                    saved_module,
+                    saved_type_bindings,
+                    saved_module_aliases,
+                    saved_declaration_aliases,
+                ))
+            };
             let mut method_fn_info = collect_fn_info(&entry.body);
             // The method's Rust symbol stays type-qualified, while calls in
             // its body resolve against the declaring module's functions.
@@ -1906,6 +2021,14 @@ impl Emitter {
             self.emit_fn_decl_as(&method_fn_name, &entry.params, &entry.body, 0)?;
             self.fn_info = saved_fn_info;
             self.module_prefix = saved_prefix;
+            if let Some((module, type_bindings, module_aliases, declaration_aliases)) =
+                saved_module_context
+            {
+                self.current_module = module;
+                self.type_bindings = type_bindings;
+                self.module_aliases = module_aliases;
+                self.declaration_aliases = declaration_aliases;
+            }
         }
         Ok(())
     }
@@ -2467,6 +2590,12 @@ impl Emitter {
         // checks at loop backedges / function entry". No-op outside
         // sandbox mode.
         self.emit_tick(line);
+        // Rust item functions cannot capture locals from `run_program` or a
+        // module loader. Recreate the defining module's alias values in a
+        // protected outer scope, then put params/locals in a fresh inner scope
+        // so they retain normal lexical shadowing.
+        self.push_scope();
+        self.emit_declaration_alias_bindings(params, body)?;
         // Fresh scope with the params bound; Rust-level fn scope
         // isolates outer locals anyway, but scope tracking is the
         // source of truth for lambda-capture analysis.
@@ -2481,6 +2610,7 @@ impl Emitter {
         for s in body {
             self.emit_stmt(s)?;
         }
+        self.pop_scope();
         self.pop_scope();
         // Implicit `return none` if control falls off the end. The
         // `allow(unreachable_code)` at the top of the file silences
@@ -3831,9 +3961,12 @@ fn scan_free_vars_stmt(
             }
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::Use { .. } => {
+        StmtKind::Use { alias, .. } => {
             // Import bindings are created when the lambda executes,
             // so the use site itself does not capture an outer value.
+            if let Some(alias) = alias {
+                known.insert(alias.clone());
+            }
         }
         StmtKind::StructDecl { .. } => {
             // Struct declarations don't reference any identifiers
@@ -4378,6 +4511,10 @@ const CTX_BASE: &str = r#"pub struct Ctx<'h> {
     /// sentinel.
     pub module_cache:
         ::std::collections::HashMap<::std::string::String, ::std::boxed::Box<dyn ::core::any::Any + 'static>>,
+    pub module_aliases: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        ::bop::value::Value,
+    >,
 }
 
 "#;
@@ -4398,6 +4535,10 @@ const CTX_SANDBOX: &str = r#"pub struct Ctx<'h> {
     /// sentinel.
     pub module_cache:
         ::std::collections::HashMap<::std::string::String, ::std::boxed::Box<dyn ::core::any::Any + 'static>>,
+    pub module_aliases: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        ::bop::value::Value,
+    >,
 }
 
 "#;
@@ -4741,19 +4882,17 @@ fn __bop_validate_namespace_type(
                 Ok(())
             } else {
                 Err(::bop::error::BopError::runtime(
-                    format!(
-                        "Module `{}` (bound as `{}`) has no type `{}`",
-                        m.path, alias, type_name
-                    ),
+                    format!("`{}` isn't a type exported from `{}`", type_name, m.path),
                     line,
                 ))
             }
         }
         other => Err(::bop::error::BopError::runtime(
             format!(
-                "`{}` is not a module (got {})",
+                "`{}` is a {}, not a module alias — can't reach `{}` through it",
                 alias,
-                other.type_name()
+                other.type_name(),
+                type_name
             ),
             line,
         )),
@@ -5016,6 +5155,7 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         host: host as &mut dyn ::bop::BopHost,
         rand_state: 0,
         module_cache: ::std::collections::HashMap::new(),
+        module_aliases: ::std::collections::HashMap::new(),
     };
     run_program(&mut ctx)
 }
@@ -5061,6 +5201,7 @@ pub fn run<H: ::bop::BopHost>(
         steps: 0,
         max_steps: limits.max_steps,
         module_cache: ::std::collections::HashMap::new(),
+        module_aliases: ::std::collections::HashMap::new(),
     };
     run_program(&mut ctx)
 }

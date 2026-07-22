@@ -66,6 +66,18 @@ struct ModuleBindings {
     /// type_name), method_name, fn_def)` — the importer merges
     /// these directly into its own `methods` table.
     methods: Vec<((String, String), String, FnDef)>,
+    /// Module-owned lexical metadata that named functions and methods need
+    /// after the loading evaluator has gone away. Installed as a protected
+    /// outer call frame so caller-local aliases/types cannot affect the
+    /// callee, while the callee's own locals remain free to shadow it.
+    lexical_context: ModuleLexicalContext,
+}
+
+#[derive(Clone, Default)]
+struct ModuleLexicalContext {
+    type_bindings: BTreeMap<String, String>,
+    module_aliases: BTreeMap<String, Rc<crate::value::BopModule>>,
+    imported_functions: BTreeMap<String, FnDef>,
 }
 
 type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
@@ -562,7 +574,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .filter(|(index, _)| floor.is_none_or(|floor| *index >= floor))
             .find_map(|(_, frame)| frame.get(name))
     }
 
@@ -572,8 +584,23 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .filter(|(index, _)| floor.is_none_or(|floor| *index >= floor))
             .find_map(|(_, frame)| frame.get(name))
+    }
+
+    fn module_lexical_context(&self, module_path: &str) -> ModuleLexicalContext {
+        if module_path == self.current_module {
+            return ModuleLexicalContext {
+                type_bindings: self.type_bindings.first().cloned().unwrap_or_default(),
+                module_aliases: self.module_aliases.first().cloned().unwrap_or_default(),
+                imported_functions: self.imported_functions.first().cloned().unwrap_or_default(),
+            };
+        }
+        let cache = self.imports.borrow();
+        match cache.get(module_path) {
+            Some(ImportSlot::Loaded(bindings)) => bindings.lexical_context.clone(),
+            _ => ModuleLexicalContext::default(),
+        }
     }
 
     fn is_module_top_scope(&self) -> bool {
@@ -700,9 +727,14 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 }
             }
         }
-        self.imported_function(name)
-            .cloned()
-            .or_else(|| self.functions.get(name).cloned())
+        self.imported_function(name).cloned().or_else(|| {
+            let defining_module = self.function_modules.last().map(String::as_str);
+            if defining_module.is_none_or(|path| path == self.current_module) {
+                self.functions.get(name).cloned()
+            } else {
+                None
+            }
+        })
     }
 
     // ─── Statements ────────────────────────────────────────────────
@@ -1504,12 +1536,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 methods.push((type_key.clone(), method_name, fn_def));
             }
         }
+        let lexical_context = ModuleLexicalContext {
+            type_bindings: sub.type_bindings.into_iter().next().unwrap_or_default(),
+            module_aliases: sub.module_aliases.into_iter().next().unwrap_or_default(),
+            imported_functions: sub.imported_functions.into_iter().next().unwrap_or_default(),
+        };
         Ok(ModuleBindings {
             bindings,
             fn_decls,
             struct_defs,
             enum_defs,
             methods,
+            lexical_context,
         })
     }
 
@@ -2631,17 +2669,33 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // type decl inside the fn body still ends up scoped to
         // that fn and vanishes on return.
         self.call_depth += 1;
-        self.function_modules.push(
-            func.module_path
-                .clone()
-                .unwrap_or_else(|| crate::value::ROOT_MODULE_PATH.to_string()),
+        let function_module = func
+            .module_path
+            .clone()
+            .unwrap_or_else(|| crate::value::ROOT_MODULE_PATH.to_string());
+        let lexical_context = self.module_lexical_context(&function_module);
+        self.function_modules.push(function_module);
+        let alias_values = lexical_context
+            .module_aliases
+            .iter()
+            .map(|(name, module)| (name.clone(), Value::Module(Rc::clone(module))))
+            .collect();
+        let saved_scopes = core::mem::replace(
+            &mut self.scopes,
+            vec![alias_values, BTreeMap::new()],
         );
-        let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
+        let type_scope_floor = self.type_bindings.len();
+        self.type_bindings.push(lexical_context.type_bindings);
         self.type_bindings.push(BTreeMap::new());
         let alias_scope_floor = self.module_aliases.len();
+        self.module_aliases.push(lexical_context.module_aliases);
         self.module_aliases.push(BTreeMap::new());
+        self.imported_functions
+            .push(lexical_context.imported_functions);
         self.imported_functions.push(BTreeMap::new());
         self.alias_scope_floors.push(alias_scope_floor);
+        self.imported_here
+            .push(alloc_import::collections::BTreeSet::new());
         self.imported_here
             .push(alloc_import::collections::BTreeSet::new());
 
@@ -2662,7 +2716,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
 
         let result = self.exec_block(body);
         self.scopes = saved_scopes;
-        self.type_bindings.pop();
+        self.type_bindings.truncate(type_scope_floor);
         self.module_aliases.truncate(alias_scope_floor);
         self.imported_functions.truncate(alias_scope_floor);
         self.alias_scope_floors.pop();
@@ -3153,8 +3207,8 @@ pub fn resolve_type_in(
 }
 
 /// Scoped variant used by evaluators that retain one module-alias frame per
-/// lexical value scope. Frame zero remains visible across function calls;
-/// `alias_scope_floor` hides active caller-local frames below the callee.
+/// lexical value scope. At call time the defining module's context is copied
+/// at `alias_scope_floor`, so every caller frame below that floor is hidden.
 #[doc(hidden)]
 pub fn resolve_type_in_scoped(
     value_scopes: &[BTreeMap<String, Value>],
@@ -3181,7 +3235,7 @@ pub fn resolve_type_in_scoped(
             }
         }
         for (index, frame) in module_aliases.iter().enumerate().rev() {
-            if alias_scope_floor.is_some_and(|floor| index != 0 && index < floor) {
+            if alias_scope_floor.is_some_and(|floor| index < floor) {
                 continue;
             }
             if let Some(module) = frame.get(ns) {
@@ -3193,7 +3247,10 @@ pub fn resolve_type_in_scoped(
         }
         return None;
     }
-    for scope in type_scopes.iter().rev() {
+    for (index, scope) in type_scopes.iter().enumerate().rev() {
+        if alias_scope_floor.is_some_and(|floor| index < floor) {
+            continue;
+        }
         if let Some(mp) = scope.get(type_name) {
             return Some(mp.clone());
         }

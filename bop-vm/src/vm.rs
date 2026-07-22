@@ -203,7 +203,7 @@ impl Frame {
 
     fn caller_type_scope_depth(&self) -> usize {
         if self.is_function {
-            self.type_scope_base.saturating_sub(1)
+            self.type_scope_base.saturating_sub(2)
         } else {
             self.type_scope_base
         }
@@ -397,6 +397,16 @@ struct ModuleArtifacts {
     /// `((module_path, type_name), method_name, FnEntry)` for
     /// every method the module declared on its own types.
     methods: Vec<ModuleMethodDef>,
+    /// Private module-owned context restored for calls declared in this
+    /// module. This is intentionally separate from the exported surface.
+    lexical_context: ModuleLexicalContext,
+}
+
+#[derive(Clone, Default)]
+struct ModuleLexicalContext {
+    type_bindings: BTreeMap<String, String>,
+    module_aliases: BTreeMap<String, Rc<bop::value::BopModule>>,
+    imported_functions: BTreeMap<String, Rc<FnEntry>>,
 }
 
 /// Import cache shared across nested VMs so recursive imports
@@ -737,10 +747,32 @@ impl<'h, H: BopHost> Vm<'h, H> {
         function_module: Option<String>,
         wrap: FrameWrap,
     ) {
-        let type_scope_base = self.type_bindings.len() + 1;
+        let lexical_context = function_module
+            .as_deref()
+            .map(|module| self.module_lexical_context(module))
+            .unwrap_or_default();
+        let mut scopes = scopes;
+        if !lexical_context.module_aliases.is_empty() {
+            let alias_values = lexical_context
+                .module_aliases
+                .iter()
+                .map(|(name, module)| {
+                    (name.clone(), Value::Module(Rc::clone(module)))
+                })
+                .collect();
+            scopes.insert(0, alias_values);
+            if scopes.len() == 1 {
+                scopes.push(BTreeMap::new());
+            }
+        }
+        let type_scope_base = self.type_bindings.len() + 2;
         let alias_scope_base = self.module_aliases.len();
+        self.module_aliases.push(lexical_context.module_aliases);
         self.module_aliases.push(BTreeMap::new());
+        self.imported_functions
+            .push(lexical_context.imported_functions);
         self.imported_functions.push(BTreeMap::new());
+        self.imported_here.push(BTreeSet::new());
         self.imported_here.push(BTreeSet::new());
         self.frames.push(Frame::function(
             chunk,
@@ -754,6 +786,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             function_module,
             wrap,
         ));
+        self.type_bindings.push(lexical_context.type_bindings);
         self.type_bindings.push(BTreeMap::new());
     }
 
@@ -763,7 +796,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .filter(|(index, _)| floor.is_none_or(|floor| *index >= floor))
             .find_map(|(_, frame)| frame.get(name))
     }
 
@@ -773,7 +806,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(index, _)| floor.is_none_or(|floor| *index == 0 || *index >= floor))
+            .filter(|(index, _)| floor.is_none_or(|floor| *index >= floor))
             .find_map(|(_, frame)| frame.get(name))
     }
 
@@ -782,6 +815,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
     }
 
     fn define_local(&mut self, name: String, value: Value) {
+        if self.current_scopes().is_empty() {
+            self.current_scopes_mut().push(BTreeMap::new());
+        }
         if let Some(scope) = self.current_scopes_mut().last_mut() {
             scope.insert(name, value);
         }
@@ -894,6 +930,21 @@ impl<'h, H: BopHost> Vm<'h, H> {
             .unwrap_or(&self.current_module)
     }
 
+    fn module_lexical_context(&self, module_path: &str) -> ModuleLexicalContext {
+        if module_path == self.current_module {
+            return ModuleLexicalContext {
+                type_bindings: self.type_bindings.first().cloned().unwrap_or_default(),
+                module_aliases: self.module_aliases.first().cloned().unwrap_or_default(),
+                imported_functions: self.imported_functions.first().cloned().unwrap_or_default(),
+            };
+        }
+        let cache = self.imports.borrow();
+        match cache.get(module_path) {
+            Some(ImportSlot::Loaded(artifacts)) => artifacts.lexical_context.clone(),
+            _ => ModuleLexicalContext::default(),
+        }
+    }
+
     /// Resolve module-owned sibling functions from cached module artifacts
     /// before falling back to caller-visible functions. This preserves module
     /// function environments without making alias imports publish bare names.
@@ -914,9 +965,17 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
             }
         }
-        self.imported_function(name)
-            .cloned()
-            .or_else(|| self.functions.get(name).cloned())
+        self.imported_function(name).cloned().or_else(|| {
+            let defining_module = self
+                .frames
+                .last()
+                .and_then(|frame| frame.function_module.as_deref());
+            if defining_module.is_none_or(|path| path == self.current_module) {
+                self.functions.get(name).cloned()
+            } else {
+                None
+            }
+        })
     }
 
     // ─── Dispatch ────────────────────────────────────────────────
@@ -2296,7 +2355,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
     fn construct_struct(
         &mut self,
-        namespace: Option<NameIdx>,
+        namespace: Option<crate::chunk::NamespaceRef>,
         type_name: NameIdx,
         count: usize,
         line: u32,
@@ -2307,12 +2366,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // means `ns.Type { ... }`; bare means the scope walker
         // looks up `Type` in `type_bindings`.
         let module_path = match namespace {
-            Some(ns_idx) => {
-                let ns_name = self.current_chunk().name(ns_idx).to_string();
-                self.validate_namespaced_type(&ns_name, &type_name_s, line)?;
-                self.resolve_type_ref(Some(&ns_name), &type_name_s)
-                    .unwrap_or_else(|| self.current_module.clone())
-            }
+            Some(namespace) => self.resolve_namespaced_type(namespace, &type_name_s, line)?,
             None => self
                 .resolve_type_ref(None, &type_name_s)
                 .ok_or_else(|| {
@@ -2396,7 +2450,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
 
     fn construct_enum(
         &mut self,
-        namespace: Option<NameIdx>,
+        namespace: Option<crate::chunk::NamespaceRef>,
         type_name: NameIdx,
         variant: NameIdx,
         shape: EnumConstructShape,
@@ -2405,12 +2459,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let type_name_s = self.current_chunk().name(type_name).to_string();
         let variant_s = self.current_chunk().name(variant).to_string();
         let module_path = match namespace {
-            Some(ns_idx) => {
-                let ns_name = self.current_chunk().name(ns_idx).to_string();
-                self.validate_namespaced_type(&ns_name, &type_name_s, line)?;
-                self.resolve_type_ref(Some(&ns_name), &type_name_s)
-                    .unwrap_or_else(|| self.current_module.clone())
-            }
+            Some(namespace) => self.resolve_namespaced_type(namespace, &type_name_s, line)?,
             None => self
                 .resolve_type_ref(None, &type_name_s)
                 .ok_or_else(|| {
@@ -2647,7 +2696,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // `pattern` refers to a slot in the *currently executing*
         // chunk's pattern pool; clone the shared handle rather than hold a
         // frame borrow while mutating `self` to install bindings.
-        let pat = Rc::clone(self.current_chunk().pattern(pattern));
+        let recipe = self.current_chunk().pattern(pattern).clone();
         let mut bindings: Vec<(String, Value)> = Vec::new();
         // Build a resolver snapshot from the current frame's
         // value scopes plus the VM-level type_bindings and
@@ -2660,6 +2709,24 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let module_aliases = &self.module_aliases;
         let alias_scope_floor = frame.is_function.then_some(frame.alias_scope_base);
         let resolver = |ns: Option<&str>, tn: &str| -> Option<String> {
+            if let Some(ns) = ns {
+                if let Some((_, namespace)) = recipe
+                    .namespaces
+                    .iter()
+                    .find(|(name, _)| name == ns)
+                {
+                    if let crate::chunk::NamespaceRef::Slot { slot, .. } = namespace {
+                        return match frame.slots.get(slot.0 as usize) {
+                            Some(Value::Module(module))
+                                if module.types.iter().any(|name| name == tn) =>
+                            {
+                                Some(module.path.clone())
+                            }
+                            _ => None,
+                        };
+                    }
+                }
+            }
             bop::resolve_type_in_scoped(
                 frame_scopes,
                 type_bindings,
@@ -2669,7 +2736,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 tn,
             )
         };
-        let matched = bop::pattern_matches(&pat, &value, &mut bindings, &resolver);
+        let matched = bop::pattern_matches(&recipe.pattern, &value, &mut bindings, &resolver);
         if matched {
             for (name, v) in bindings {
                 self.define_local(name, v);
@@ -3183,6 +3250,54 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// Validate `ns.Type` — confirm `ns` binds a `Value::Module`
     /// whose type exports include `type_name`. Used by
     /// namespaced struct-literal / variant-ctor dispatch.
+    fn resolve_namespaced_type(
+        &self,
+        namespace: crate::chunk::NamespaceRef,
+        type_name: &str,
+        line: u32,
+    ) -> Result<String, BopError> {
+        use crate::chunk::NamespaceRef;
+
+        let (name, value) = match namespace {
+            NamespaceRef::Name(name) => {
+                let name = self.current_chunk().name(name);
+                self.validate_namespaced_type(name, type_name, line)?;
+                return self.resolve_type_ref(Some(name), type_name).ok_or_else(|| {
+                    error(line, format!("`{type_name}` isn't a type exported from `{name}`"))
+                });
+            }
+            NamespaceRef::Slot { name, slot } => {
+                let name = self.current_chunk().name(name);
+                let value = self
+                    .frames
+                    .last()
+                    .and_then(|frame| frame.slots.get(slot.0 as usize))
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
+                (name, value)
+            }
+        };
+        let module = match value {
+            Value::Module(module) => module,
+            other => {
+                return Err(error(
+                    line,
+                    format!(
+                        "`{name}` is a {}, not a module alias — can't reach `{type_name}` through it",
+                        other.type_name()
+                    ),
+                ));
+            }
+        };
+        if module.types.iter().any(|candidate| candidate == type_name) {
+            Ok(module.path.clone())
+        } else {
+            Err(error(
+                line,
+                format!("`{type_name}` isn't a type exported from `{}`", module.path),
+            ))
+        }
+    }
+
     fn validate_namespaced_type(
         &self,
         ns: &str,
@@ -3384,12 +3499,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 methods.push((type_key.clone(), method_name, entry));
             }
         }
+        let lexical_context = ModuleLexicalContext {
+            type_bindings: sub.type_bindings.into_iter().next().unwrap_or_default(),
+            module_aliases: sub.module_aliases.into_iter().next().unwrap_or_default(),
+            imported_functions: sub.imported_functions.into_iter().next().unwrap_or_default(),
+        };
         Ok(ModuleArtifacts {
             bindings,
             fn_decls,
             struct_defs,
             enum_defs,
             methods,
+            lexical_context,
         })
     }
 

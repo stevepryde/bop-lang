@@ -13,9 +13,10 @@ use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind,
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx,
     EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, Instr, InterpIdx, InterpPart,
-    InterpRecipe, LoopStateKind, NameIdx, PatternIdx, SlotIdx, StructDef, StructIdx,
+    InterpRecipe, LoopStateKind, NameIdx, NamespaceRef, PatternIdx, PatternRecipe, SlotIdx,
+    StructDef, StructIdx,
 };
-use bop::parser::{MatchArm, Pattern, VariantKind};
+use bop::parser::{MatchArm, Pattern, VariantKind, VariantPatternPayload};
 
 // ─── Local slot resolver ───────────────────────────────────────────
 //
@@ -476,8 +477,31 @@ impl Compiler {
 
     fn add_pattern(&mut self, pat: Pattern) -> PatternIdx {
         let idx = PatternIdx(self.chunk.patterns.len() as u32);
-        self.chunk.patterns.push(Rc::new(pat));
+        let mut namespace_names = Vec::new();
+        collect_pattern_namespaces(&pat, &mut namespace_names);
+        namespace_names.sort();
+        namespace_names.dedup();
+        let namespaces = namespace_names
+            .into_iter()
+            .map(|name| {
+                let namespace = self.namespace_ref(&name);
+                (name, namespace)
+            })
+            .collect();
+        self.chunk.patterns.push(PatternRecipe {
+            pattern: Rc::new(pat),
+            namespaces,
+        });
         idx
+    }
+
+    fn namespace_ref(&mut self, name: &str) -> NamespaceRef {
+        let slot = self.current_resolver().and_then(|resolver| resolver.resolve(name));
+        let name = self.add_name(name);
+        match slot {
+            Some(slot) => NamespaceRef::Slot { name, slot },
+            None => NamespaceRef::Name(name),
+        }
     }
 
     // ─── Statements ───────────────────────────────────────────────
@@ -1228,10 +1252,10 @@ impl Compiler {
                     self.compile_expr(fexpr)?;
                 }
                 let type_idx = self.add_name(type_name);
-                let ns_idx = namespace.as_ref().map(|ns| self.add_name(ns));
+                let namespace = namespace.as_ref().map(|ns| self.namespace_ref(ns));
                 self.emit(
                     Instr::ConstructStruct {
-                        namespace: ns_idx,
+                        namespace,
                         type_name: type_idx,
                         count: fields.len() as u32,
                     },
@@ -1265,10 +1289,10 @@ impl Compiler {
                 };
                 let type_idx = self.add_name(type_name);
                 let var_idx = self.add_name(variant);
-                let ns_idx = namespace.as_ref().map(|ns| self.add_name(ns));
+                let namespace = namespace.as_ref().map(|ns| self.namespace_ref(ns));
                 self.emit(
                     Instr::ConstructEnum {
-                        namespace: ns_idx,
+                        namespace,
                         type_name: type_idx,
                         variant: var_idx,
                         shape,
@@ -1596,6 +1620,49 @@ impl Compiler {
             capture_names,
             capture_sources,
         })
+    }
+}
+
+fn collect_pattern_namespaces(pattern: &Pattern, names: &mut Vec<String>) {
+    match pattern {
+        Pattern::EnumVariant {
+            namespace,
+            payload,
+            ..
+        } => {
+            if let Some(namespace) = namespace {
+                names.push(namespace.clone());
+            }
+            match payload {
+                VariantPatternPayload::Unit => {}
+                VariantPatternPayload::Tuple(patterns) => {
+                    for pattern in patterns {
+                        collect_pattern_namespaces(pattern, names);
+                    }
+                }
+                VariantPatternPayload::Struct { fields, .. } => {
+                    for (_, pattern) in fields {
+                        collect_pattern_namespaces(pattern, names);
+                    }
+                }
+            }
+        }
+        Pattern::Struct {
+            namespace, fields, ..
+        } => {
+            if let Some(namespace) = namespace {
+                names.push(namespace.clone());
+            }
+            for (_, pattern) in fields {
+                collect_pattern_namespaces(pattern, names);
+            }
+        }
+        Pattern::Array { elements, .. } | Pattern::Or(elements) => {
+            for pattern in elements {
+                collect_pattern_namespaces(pattern, names);
+            }
+        }
+        Pattern::Literal(_) | Pattern::Wildcard | Pattern::Binding(_) => {}
     }
 }
 

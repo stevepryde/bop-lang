@@ -269,7 +269,7 @@ pub enum Instr {
     /// name resolves to a `Value::Module` whose exports include
     /// this type before falling through to the normal registry.
     ConstructStruct {
-        namespace: Option<NameIdx>,
+        namespace: Option<NamespaceRef>,
         type_name: NameIdx,
         count: u32,
     },
@@ -283,7 +283,7 @@ pub enum Instr {
     /// `namespace` mirrors the `ConstructStruct` field — set for
     /// `m.Result::Ok(v)` forms.
     ConstructEnum {
-        namespace: Option<NameIdx>,
+        namespace: Option<NamespaceRef>,
         type_name: NameIdx,
         variant: NameIdx,
         shape: EnumConstructShape,
@@ -393,6 +393,16 @@ pub struct EnumIdx(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PatternIdx(pub u32);
 
+/// Lexically resolved namespace used by a namespaced type reference.
+/// Function locals live in slots, while captures and module bindings retain
+/// name-based lookup. Keeping that distinction in bytecode ensures a local
+/// non-module binding hard-shadows a declaration-context module alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceRef {
+    Name(NameIdx),
+    Slot { name: NameIdx, slot: SlotIdx },
+}
+
 /// Index into a chunk's `use_specs` pool. Each `use` statement
 /// emits one [`UseSpec`] describing the shape of the import
 /// (path + optional `items` + optional `alias`); `Instr::Use`
@@ -501,7 +511,7 @@ pub struct Chunk {
     pub enum_defs: Vec<EnumDef>,
     /// Match patterns referenced by `MatchFail` instructions. Pool entries
     /// are shared because matching may execute the same arm in a hot loop.
-    pub patterns: Vec<Rc<bop::parser::Pattern>>,
+    pub patterns: Vec<PatternRecipe>,
     /// Side-table of `use` descriptors referenced by
     /// `Instr::Use`. Holds variable-length fields (path, items,
     /// alias) so the instruction payload stays `Copy`.
@@ -578,13 +588,22 @@ impl Chunk {
         &self.enum_defs[idx.0 as usize]
     }
 
-    pub fn pattern(&self, idx: PatternIdx) -> &Rc<bop::parser::Pattern> {
+    pub fn pattern(&self, idx: PatternIdx) -> &PatternRecipe {
         &self.patterns[idx.0 as usize]
     }
 
     pub fn use_spec(&self, idx: UseIdx) -> &UseSpec {
         &self.use_specs[idx.0 as usize]
     }
+}
+
+/// A pattern plus the lexical resolution selected for every namespace it
+/// contains. Namespace names remain alongside their bytecode reference because
+/// one recursive pattern can mention several distinct aliases.
+#[derive(Debug, Clone)]
+pub struct PatternRecipe {
+    pub pattern: Rc<bop::parser::Pattern>,
+    pub namespaces: Vec<(String, NamespaceRef)>,
 }
 
 /// A compiled user-defined function.
