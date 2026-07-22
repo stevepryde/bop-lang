@@ -1226,13 +1226,11 @@ fn fn_multiple_params() {
 
 #[test]
 fn fn_scope_isolation() {
-    assert!(
-        run_err(
-            r#"let secret = 42
+    assert_eq!(
+        say(r#"let secret = 42
 fn peek() { return secret }
-peek()"#
-        )
-        .contains("not found")
+print(peek())"#),
+        "42"
     );
 }
 
@@ -3621,15 +3619,15 @@ print(valid_index(), valid_field())"#,
 #[test]
 fn declaration_alias_mutable_place_errors_are_canonical_diff() {
     set_modules(&[("types", "struct Point { value }")]);
-    for source in [
-        r#"use types as dep
+    for (source, expected) in [
+        (r#"use types as dep
 fn invalid() { dep["value"] = 1 }
-invalid()"#,
-        r#"use types as dep
+invalid()"#, "Can't set index with these types"),
+        (r#"use types as dep
 fn invalid() { dep.value = 1 }
-invalid()"#,
+invalid()"#, "Can't assign to field `value` on module"),
     ] {
-        assert_eq!(run_err(source), "Variable `dep` not found");
+        assert_eq!(run_err(source), expected);
     }
 }
 
@@ -3997,13 +3995,13 @@ print(read())"#),
 #[test]
 fn named_fn_lambda_does_not_capture_module_let_diff() {
     assert_eq!(
-        run_err(r#"let g = 5
+        say(r#"let g = 5
 fn read_global() {
     let read = fn() { return g }
     return read()
 }
 print(read_global())"#),
-        "Variable `g` not found"
+        "5"
     );
 }
 
