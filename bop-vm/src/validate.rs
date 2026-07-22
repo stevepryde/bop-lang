@@ -190,6 +190,7 @@ impl<'a> Validator<'a> {
                 self.slot(a, line, &at)?;
                 self.slot(b, line, &at)?;
             }
+            Instr::CompoundAssign { target, .. } => self.assign_back(target, line, &at)?,
             Instr::SetIndexInPlace { target, .. } => self.assign_back(target, line, &at)?,
             Instr::StringInterp(index) => self.pool(
                 index.0,
@@ -254,6 +255,43 @@ impl<'a> Validator<'a> {
                 self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
                 self.pool(method_name.0, self.chunk.names.len(), line, "name", &at)?;
                 self.pool(fn_idx.0, self.chunk.functions.len(), line, "function", &at)?;
+            }
+            Instr::ValidateStructConstruct {
+                namespace,
+                type_name,
+                fields,
+            } => {
+                if let Some(namespace) = namespace {
+                    self.namespace_ref(namespace, line, &at)?;
+                }
+                self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(
+                    fields.0,
+                    self.chunk.construct_fields.len(),
+                    line,
+                    "construction field recipe",
+                    &at,
+                )?;
+            }
+            Instr::ValidateEnumConstruct {
+                namespace,
+                type_name,
+                variant,
+                fields,
+                ..
+            } => {
+                if let Some(namespace) = namespace {
+                    self.namespace_ref(namespace, line, &at)?;
+                }
+                self.pool(type_name.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(variant.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(
+                    fields.0,
+                    self.chunk.construct_fields.len(),
+                    line,
+                    "construction field recipe",
+                    &at,
+                )?;
             }
             Instr::ConstructStruct {
                 namespace,

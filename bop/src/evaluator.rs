@@ -719,6 +719,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         None
     }
 
+    fn has_active_declaration_alias(&self, name: &str) -> bool {
+        self.active_lexical_contexts
+            .last()
+            .is_some_and(|context| context.module_aliases.contains_key(name))
+    }
+
     fn set_var(&mut self, name: &str, value: Value) -> bool {
         for scope in self.scopes.iter_mut().rev() {
             if scope.contains_key(name) {
@@ -1773,8 +1779,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
             (VariantKind::Struct(decl_fields), VariantPayload::Struct(provided)) => {
                 let mut seen = alloc_import::collections::BTreeSet::new();
-                let mut provided_map: BTreeMap<String, Value> = BTreeMap::new();
-                for (fname, fexpr) in provided {
+                for (fname, _) in provided {
                     if !seen.insert(fname.clone()) {
                         return Err(error(
                             line,
@@ -1792,23 +1797,31 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                             ),
                         ));
                     }
+                }
+                for decl_field in decl_fields {
+                    if !seen.contains(decl_field) {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Missing field `{}` in `{}::{}` construction",
+                                decl_field, type_name, variant
+                            ),
+                        ));
+                    }
+                }
+                let mut provided_map: BTreeMap<String, Value> = BTreeMap::new();
+                for (fname, fexpr) in provided {
                     provided_map.insert(fname.clone(), self.eval_expr(fexpr)?);
                 }
                 let mut values: Vec<(String, Value)> =
                     Vec::with_capacity(decl_fields.len());
                 for decl_field in decl_fields {
-                    match provided_map.remove(decl_field) {
-                        Some(v) => values.push((decl_field.clone(), v)),
-                        None => {
-                            return Err(error(
-                                line,
-                                format!(
-                                    "Missing field `{}` in `{}::{}` construction",
-                                    decl_field, type_name, variant
-                                ),
-                            ));
-                        }
-                    }
+                    values.push((
+                        decl_field.clone(),
+                        provided_map
+                            .remove(decl_field)
+                            .expect("variant shape validated before payload evaluation"),
+                    ));
                 }
                 Value::try_new_enum_struct(
                     module_path,
@@ -1857,7 +1870,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         let current = self
                             .get_var_value(name)
                             .ok_or_else(|| {
-                                error(line, format!("Variable `{}` doesn't exist yet", name))
+                                error(line, crate::error_messages::variable_not_found(name))
                             })?;
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
@@ -1887,6 +1900,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         };
                         let current = if let Some(obj) = self.get_var(name) {
                             ops::index_get(obj, &idx, line)?
+                        } else if self.has_active_declaration_alias(name) {
+                            return Err(error(
+                                line,
+                                crate::error_messages::variable_not_found(name),
+                            ));
                         } else {
                             // Preserve the identifier evaluator's existing
                             // not-found hint / named-function fallback on the
@@ -1898,8 +1916,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 };
                 if let ExprKind::Ident(name) = &object.kind {
+                    let declaration_alias = self.has_active_declaration_alias(name);
                     let obj = self.get_var_mut(name).ok_or_else(|| {
-                        error(line, format!("Variable `{}` doesn't exist", name))
+                        if declaration_alias {
+                            error(line, crate::error_messages::variable_not_found(name))
+                        } else {
+                            error(line, format!("Variable `{}` doesn't exist", name))
+                        }
                     })?;
                     // Mutate through the live binding. Cloning the receiver
                     // first would temporarily raise its CoW refcount and force
@@ -1928,11 +1951,16 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                 };
+                let declaration_alias = self.has_active_declaration_alias(&name);
                 let val_to_set = match op {
                     AssignOp::Eq => new_val,
                     _ => {
                         let obj = self.get_var(&name).ok_or_else(|| {
-                            error(line, format!("Variable `{}` doesn't exist", name))
+                            if declaration_alias {
+                                error(line, crate::error_messages::variable_not_found(&name))
+                            } else {
+                                error(line, format!("Variable `{}` doesn't exist", name))
+                            }
                         })?;
                         let current = match obj {
                             Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
@@ -1958,7 +1986,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     }
                 };
                 let obj = self.get_var_mut(&name).ok_or_else(|| {
-                    error(line, format!("Variable `{}` doesn't exist", name))
+                    if declaration_alias {
+                        error(line, crate::error_messages::variable_not_found(&name))
+                    } else {
+                        error(line, format!("Variable `{}` doesn't exist", name))
+                    }
                 })?;
                 match obj {
                     Value::Struct(s) => {
@@ -2438,13 +2470,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 // fields. The per-field loops below produce the
                 // specific messages the tests assert on.
                 let mut seen = alloc_import::collections::BTreeSet::new();
-                let mut values: Vec<(String, Value)> =
-                    Vec::with_capacity(decl_fields.len());
-                // Evaluate provided fields by name, then emit them
-                // in *declaration* order so the `Value::Struct`'s
-                // field list is stable across construction sites.
-                let mut provided: BTreeMap<String, Value> = BTreeMap::new();
-                for (fname, fexpr) in fields {
+                for (fname, _) in fields {
                     if !seen.insert(fname.clone()) {
                         return Err(error(
                             expr.line,
@@ -2465,21 +2491,31 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         };
                         return Err(err);
                     }
-                    provided.insert(fname.clone(), self.eval_expr(fexpr)?);
                 }
                 for decl in &decl_fields {
-                    match provided.remove(decl) {
-                        Some(v) => values.push((decl.clone(), v)),
-                        None => {
-                            return Err(error(
-                                expr.line,
-                                format!(
-                                    "Missing field `{}` in `{}` construction",
-                                    decl, type_name
-                                ),
-                            ));
-                        }
+                    if !seen.contains(decl) {
+                        return Err(error(
+                            expr.line,
+                            format!(
+                                "Missing field `{}` in `{}` construction",
+                                decl, type_name
+                            ),
+                        ));
                     }
+                }
+                let mut provided: BTreeMap<String, Value> = BTreeMap::new();
+                for (fname, fexpr) in fields {
+                    provided.insert(fname.clone(), self.eval_expr(fexpr)?);
+                }
+                let mut values: Vec<(String, Value)> =
+                    Vec::with_capacity(decl_fields.len());
+                for decl in &decl_fields {
+                    values.push((
+                        decl.clone(),
+                        provided
+                            .remove(decl)
+                            .expect("struct shape validated before payload evaluation"),
+                    ));
                 }
                 Value::try_new_struct(module_path, type_name.clone(), values, expr.line)
             }

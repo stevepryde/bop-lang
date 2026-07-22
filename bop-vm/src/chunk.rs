@@ -56,6 +56,13 @@ pub enum Instr {
     /// assignment; the VM treats them identically once slots are
     /// pre-sized at call time.
     StoreLocal(SlotIdx),
+    /// Pop an already-evaluated RHS, then read and compound-assign the live
+    /// target binding. Keeping target resolution after RHS evaluation matches
+    /// the walker/AOT error and side-effect order.
+    CompoundAssign {
+        target: AssignBack,
+        op: InPlaceAssignOp,
+    },
 
     // ─── Superinstructions ──────────────────────────────────────
     //
@@ -164,12 +171,13 @@ pub enum Instr {
     /// Resolution order: locally-bound closure → builtin → host →
     /// named user fn → error.
     Call { name: NameIdx, argc: u32 },
-    /// Call whatever sits under the `argc` args on the stack. The
+    /// Call whatever sits on top of the `argc` args on the stack. The
     /// callee must be a `Value::Fn`; anything else is a runtime
     /// error. Emitted when the call's callee expression isn't a
-    /// bare ident (e.g. `funcs[0](x)` or `make_adder(5)(3)`).
+    /// bare ident (e.g. `funcs[0](x)` or `make_adder(5)(3)`). Arguments
+    /// are evaluated before the callee, matching the tree walker.
     CallValue { argc: u32 },
-    /// Method call: `[.., obj, args...]` → `[.., ret]`, and if the
+    /// Method call: `[.., args..., obj]` → `[.., ret]`, and if the
     /// method is mutating and `obj` came from a variable, the VM
     /// writes the mutated value back to the original binding. The
     /// back-write target is the binding that produced `obj` —
@@ -260,6 +268,22 @@ pub enum Instr {
         type_name: NameIdx,
         method_name: NameIdx,
         fn_idx: FnIdx,
+    },
+    /// Validate a complete struct-construction recipe before any field payload
+    /// expression is evaluated. The field-name list lives in a side pool so
+    /// this instruction remains `Copy`.
+    ValidateStructConstruct {
+        namespace: Option<NamespaceRef>,
+        type_name: NameIdx,
+        fields: ConstructFieldsIdx,
+    },
+    /// Validate enum type/variant/payload shape before evaluating payloads.
+    ValidateEnumConstruct {
+        namespace: Option<NamespaceRef>,
+        type_name: NameIdx,
+        variant: NameIdx,
+        shape: EnumConstructShape,
+        fields: ConstructFieldsIdx,
     },
     /// Struct literal: pop `2 * count` stack entries (field-name
     /// string + value, alternating — same layout as `MakeDict`),
@@ -411,6 +435,10 @@ pub enum NamespaceRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UseIdx(pub u32);
 
+/// Index into a chunk's construction field-name recipe pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstructFieldsIdx(pub u32);
+
 /// Shape of an enum variant's payload at the construction site —
 /// tells the VM how many stack entries to pop.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -509,6 +537,9 @@ pub struct Chunk {
     pub functions: Vec<FnDef>,
     pub struct_defs: Vec<StructDef>,
     pub enum_defs: Vec<EnumDef>,
+    /// Source-order field names for struct and struct-variant construction
+    /// preflight instructions.
+    pub construct_fields: Vec<Vec<String>>,
     /// Match patterns referenced by `MatchFail` instructions. Pool entries
     /// are shared because matching may execute the same arm in a hot loop.
     pub patterns: Vec<PatternRecipe>,
@@ -586,6 +617,10 @@ impl Chunk {
 
     pub fn enum_def(&self, idx: EnumIdx) -> &EnumDef {
         &self.enum_defs[idx.0 as usize]
+    }
+
+    pub fn construct_fields(&self, idx: ConstructFieldsIdx) -> &[String] {
+        &self.construct_fields[idx.0 as usize]
     }
 
     pub fn pattern(&self, idx: PatternIdx) -> &PatternRecipe {

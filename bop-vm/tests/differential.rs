@@ -2610,6 +2610,68 @@ print(t.Point { value: 42 })"#,
 }
 
 #[test]
+fn assigned_block_local_module_alias_does_not_leak_diff() {
+    set_modules(&[
+        ("first", "struct Point { first }"),
+        ("second", "struct Point { second }"),
+    ]);
+    for body in ["", "        dep = other\n"] {
+        let source = format!(
+            r#"use second as other
+fn make() {{
+    if true {{
+        use first as dep
+{body}    }}
+    return dep.Point {{ second: 7 }}
+}}
+make()"#
+        );
+        assert_eq!(run_err(&source), "`dep` isn't a module alias in scope");
+    }
+}
+
+#[test]
+fn block_local_type_and_callable_import_metadata_do_not_leak_diff() {
+    set_modules(&[("funcmod", "fn answer() { return 42 }")]);
+    let type_error = run_err(
+        r#"fn make() {
+    if true { struct Point { value } }
+    return Point { value: 7 }
+}
+make()"#,
+    );
+    assert_eq!(type_error, "Struct `Point` is not declared");
+
+    let function_error = run_err(
+        r#"fn make() {
+    if true { use funcmod.{answer} }
+    return answer()
+}
+make()"#,
+    );
+    assert_eq!(function_error, "Function `answer` not found");
+}
+
+#[test]
+fn block_local_import_scope_unwinds_on_return_and_error_diff() {
+    set_modules(&[("first", "struct Point { value }")]);
+    for source in [
+        r#"fn seed() {
+    if true { use first as dep; return 1 }
+}
+seed()
+dep.Point { value: 7 }"#,
+        r#"fn seed() {
+    if true { use first as dep; panic("stop") }
+}
+try_call(seed)
+dep.Point { value: 7 }"#,
+    ] {
+        assert_eq!(run_err(source), "`dep` isn't a module alias in scope");
+    }
+}
+
+#[test]
 fn named_function_does_not_dynamically_inherit_caller_alias_diff() {
     set_modules(&[("types", "struct Point { value }")]);
     let error = run_err(
@@ -2620,6 +2682,86 @@ if true {
 }"#,
     );
     assert!(error.contains("isn't a module alias in scope"), "got: {error}");
+}
+
+#[test]
+fn namespaced_construction_validates_alias_before_payload_diff() {
+    set_modules(&[(
+        "types",
+        "struct Stack { items }\nenum Maybe { Some(value), Named { value } }",
+    )]);
+    for source in [
+        r#"fn invalid() { return dep.Stack { items: panic("payload") } }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { return dep.Maybe::Some(panic("payload")) }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { return dep.Maybe::Named { value: panic("payload") } }
+invalid()
+use types as dep"#,
+    ] {
+        assert_eq!(
+            run_err(source),
+            "`dep` isn't a module alias in scope",
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn constructor_shape_validation_precedes_every_payload_diff() {
+    set_modules(&[(
+        "types",
+        "struct Stack { items }\nenum Maybe { Some(value), Named { value } }",
+    )]);
+    let cases = [
+        (
+            r#"use types as dep
+dep.Stack { wrong: panic("payload") }"#,
+            "Struct `Stack` has no field `wrong`",
+        ),
+        (
+            r#"use types as dep
+dep.Stack { items: panic("payload"), wrong: 2 }"#,
+            "Struct `Stack` has no field `wrong`",
+        ),
+        (
+            r#"use types as dep
+dep.Maybe::Some(panic("payload"), 2)"#,
+            "`Maybe::Some` expects 1 argument, but got 2",
+        ),
+        (
+            r#"use types as dep
+dep.Maybe::Missing(panic("payload"))"#,
+            "Enum `Maybe` has no variant `Missing`",
+        ),
+        (
+            r#"use types as dep
+dep.Maybe::Named { value: panic("payload"), wrong: 2 }"#,
+            "Variant `Maybe::Named` has no field `wrong`",
+        ),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(run_err(source), expected, "{source}");
+    }
+}
+
+#[test]
+fn call_arguments_precede_receiver_and_callee_dispatch_diff() {
+    set_modules(&[("types", "fn exported(value) { return value }")]);
+    for source in [
+        r#"fn invalid() { return dep.nope(panic("payload")) }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { return "receiver".nope(panic("payload")) }
+invalid()"#,
+        r#"fn invalid() { return dep["exported"](panic("payload")) }
+invalid()
+use types as dep"#,
+    ] {
+        assert_eq!(run_err(source), "payload", "{source}");
+    }
 }
 
 #[test]
@@ -2984,6 +3126,57 @@ print(valid_index(), valid_field())"#,
     );
     assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
     assert_eq!(outcome.prints, ["true true", "2 3"]);
+}
+
+#[test]
+fn declaration_alias_mutable_place_errors_are_canonical_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    for source in [
+        r#"use types as dep
+fn invalid() { dep["value"] = 1 }
+invalid()"#,
+        r#"use types as dep
+fn invalid() { dep.value = 1 }
+invalid()"#,
+    ] {
+        assert_eq!(run_err(source), "Variable `dep` not found");
+    }
+}
+
+#[test]
+fn future_declaration_alias_assignment_errors_are_operation_specific_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    let simple = run_err(
+        r#"fn invalid() { dep = 1 }
+invalid()
+use types as dep"#,
+    );
+    assert_eq!(simple, "Variable `dep` doesn't exist yet");
+
+    let compound = run_err(
+        r#"fn invalid() { dep += 1 }
+invalid()
+use types as dep"#,
+    );
+    assert_eq!(compound, "Variable `dep` not found");
+}
+
+#[test]
+fn compound_assignment_rhs_precedes_target_and_place_resolution_diff() {
+    set_modules(&[("types", "struct Point { value }")]);
+    for source in [
+        r#"fn invalid() { dep += panic("payload") }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { dep[panic("index")] += panic("payload") }
+invalid()
+use types as dep"#,
+        r#"fn invalid() { dep.value += panic("payload") }
+invalid()
+use types as dep"#,
+    ] {
+        assert_eq!(run_err(source), "payload", "{source}");
+    }
 }
 
 #[test]

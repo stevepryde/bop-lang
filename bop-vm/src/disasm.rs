@@ -54,6 +54,18 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
 
         Instr::LoadLocal(s) => format!("LoadLocal @{}", s.0),
         Instr::StoreLocal(s) => format!("StoreLocal @{}", s.0),
+        Instr::CompoundAssign { target, op } => match target {
+            crate::chunk::AssignBack::Name(name) => format!(
+                "CompoundAssign{} (target {})",
+                assign_op_suffix(*op),
+                chunk.name(*name)
+            ),
+            crate::chunk::AssignBack::Slot(slot) => format!(
+                "CompoundAssign{} (target @{})",
+                assign_op_suffix(*op),
+                slot.0
+            ),
+        },
 
         Instr::AddLocals(a, b) => format!("AddLocals @{}, @{}", a.0, b.0),
         Instr::LtLocals(a, b) => format!("LtLocals @{}, @{}", a.0, b.0),
@@ -227,6 +239,52 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 chunk.name(*type_name),
                 chunk.name(*method_name),
                 fn_idx.0,
+            )
+        }
+        Instr::ValidateStructConstruct {
+            namespace,
+            type_name,
+            fields,
+        } => {
+            let namespace = match namespace {
+                Some(crate::chunk::NamespaceRef::Name(name)) => {
+                    format!("{}.", chunk.name(*name))
+                }
+                Some(crate::chunk::NamespaceRef::Slot { name, slot }) => {
+                    format!("{}.(@{}).", chunk.name(*name), slot.0)
+                }
+                None => String::new(),
+            };
+            format!(
+                "ValidateStructConstruct {}{} [{}]",
+                namespace,
+                chunk.name(*type_name),
+                chunk.construct_fields(*fields).join(", ")
+            )
+        }
+        Instr::ValidateEnumConstruct {
+            namespace,
+            type_name,
+            variant,
+            shape,
+            fields,
+        } => {
+            let namespace = match namespace {
+                Some(crate::chunk::NamespaceRef::Name(name)) => {
+                    format!("{}.", chunk.name(*name))
+                }
+                Some(crate::chunk::NamespaceRef::Slot { name, slot }) => {
+                    format!("{}.(@{}).", chunk.name(*name), slot.0)
+                }
+                None => String::new(),
+            };
+            format!(
+                "ValidateEnumConstruct {}{}::{} {:?} [{}]",
+                namespace,
+                chunk.name(*type_name),
+                chunk.name(*variant),
+                shape,
+                chunk.construct_fields(*fields).join(", ")
             )
         }
         Instr::ConstructStruct {

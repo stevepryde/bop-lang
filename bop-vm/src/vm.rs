@@ -1116,6 +1116,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 // Fast path: look the target up by index so we
                 // neither `Rc::clone` nor allocate the name.
                 let v = self.pop_value(line)?;
+                let runtime_alias_without_value_binding = {
+                    let chunk = Rc::clone(
+                        &self.frames.last().expect("frame present").chunk,
+                    );
+                    let name = chunk.name(n);
+                    self.lookup_var_by_idx(n).is_none() && self.module_alias(name).is_some()
+                };
+                if runtime_alias_without_value_binding {
+                    let name = self.current_chunk().name(n).to_string();
+                    self.define_local(name, v);
+                    return Ok(Next::Continue);
+                }
                 if !self.set_existing_by_idx(n, v) {
                     // Cold path: synthesise the error with the
                     // name — allocation is fine here.
@@ -1126,6 +1138,74 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         format!("Variable `{}` doesn't exist yet", name),
                         format!("Use `let` to create a new variable: let {} = ...", name),
                     ));
+                }
+            }
+            Instr::CompoundAssign { target, op } => {
+                let rhs = self.pop_value(line)?;
+                let runtime_alias_without_value_binding = match target {
+                    crate::chunk::AssignBack::Name(name_idx) => {
+                        let chunk = Rc::clone(
+                            &self.frames.last().expect("frame present").chunk,
+                        );
+                        self.lookup_var_by_idx(name_idx).is_none()
+                            && self.module_alias(chunk.name(name_idx)).is_some()
+                    }
+                    crate::chunk::AssignBack::Slot(_) => false,
+                };
+                let current = match target {
+                    crate::chunk::AssignBack::Slot(slot) => self
+                        .frames
+                        .last()
+                        .and_then(|frame| frame.slots.get(slot.0 as usize))
+                        .cloned()
+                        .ok_or_else(|| error(line, "VM: local slot out of range"))?,
+                    crate::chunk::AssignBack::Name(name_idx) => {
+                        if let Some(value) = self.lookup_var_by_idx(name_idx).cloned() {
+                            value
+                        } else {
+                            let chunk = Rc::clone(
+                                &self.frames.last().expect("frame present").chunk,
+                            );
+                            let name = chunk.name(name_idx);
+                            if let Some(module) = self.module_alias(name).cloned() {
+                                Value::Module(module)
+                            } else {
+                                return Err(error(
+                                    line,
+                                    bop::error_messages::variable_not_found(name),
+                                ));
+                            }
+                        }
+                    }
+                };
+                let value = apply_in_place_assign(op, rhs, line, || Ok(current))?;
+                match target {
+                    crate::chunk::AssignBack::Slot(slot) => {
+                        let target = self
+                            .frames
+                            .last_mut()
+                            .expect("frame present")
+                            .slots
+                            .get_mut(slot.0 as usize)
+                            .ok_or_else(|| error(line, "VM: local slot out of range"))?;
+                        *target = value;
+                    }
+                    crate::chunk::AssignBack::Name(name) => {
+                        if runtime_alias_without_value_binding {
+                            let name = self.current_chunk().name(name).to_string();
+                            self.define_local(name, value);
+                            return Ok(Next::Continue);
+                        }
+                        if !self.set_existing_by_idx(name, value) {
+                            let chunk = Rc::clone(
+                                &self.frames.last().expect("frame present").chunk,
+                            );
+                            return Err(error(
+                                line,
+                                bop::error_messages::variable_not_found(chunk.name(name)),
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -1650,6 +1730,36 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 method_name,
                 fn_idx,
             } => self.define_method(type_name, method_name, fn_idx),
+            Instr::ValidateStructConstruct {
+                namespace,
+                type_name,
+                fields,
+            } => {
+                let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+                self.validate_struct_construct(
+                    namespace,
+                    chunk.name(type_name),
+                    chunk.construct_fields(fields),
+                    line,
+                )?;
+            }
+            Instr::ValidateEnumConstruct {
+                namespace,
+                type_name,
+                variant,
+                shape,
+                fields,
+            } => {
+                let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+                self.validate_enum_construct(
+                    namespace,
+                    chunk.name(type_name),
+                    chunk.name(variant),
+                    shape,
+                    chunk.construct_fields(fields),
+                    line,
+                )?;
+            }
             Instr::ConstructStruct {
                 namespace,
                 type_name,
@@ -2067,13 +2177,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
         Ok(Next::Continue)
     }
 
-    /// Dispatch a value-based call: `argc` args sit on top, the
-    /// callee sits directly under them. Pops all `argc + 1` slots,
+    /// Dispatch a value-based call: the callee sits on top of the
+    /// `argc` args. Pops all `argc + 1` slots,
     /// expects the callee to be a `Value::Fn`, and delegates to
     /// `call_closure`.
     fn call_value(&mut self, argc: usize, line: u32) -> Result<Next, BopError> {
-        let args = self.pop_n_values(argc, line)?;
         let callee = self.pop_value(line)?;
+        let args = self.pop_n_values(argc, line)?;
         self.invoke_value(callee, args, line)
     }
 
@@ -2112,8 +2222,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
         let method = chunk.name(method_idx);
 
-        let args = self.pop_n_values(argc, line)?;
         let obj = self.pop_value(line)?;
+        let args = self.pop_n_values(argc, line)?;
 
         self.dispatch_method(obj, method, args, assign_back_to, nested_place, line)
     }
@@ -2550,6 +2660,166 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
         self.push_value(Value::try_new_struct(module_path, type_name_s, fields, line)?);
         Ok(())
+    }
+
+    fn validate_struct_construct(
+        &self,
+        namespace: Option<crate::chunk::NamespaceRef>,
+        type_name: &str,
+        provided: &[String],
+        line: u32,
+    ) -> Result<(), BopError> {
+        let module_path = match namespace {
+            Some(namespace) => self.resolve_namespaced_type(namespace, type_name, line)?,
+            None => self.resolve_type_ref(None, type_name).ok_or_else(|| {
+                error(line, bop::error_messages::struct_not_declared(type_name))
+            })?,
+        };
+        let declared = self
+            .struct_defs
+            .get(&(module_path, type_name.to_string()))
+            .ok_or_else(|| {
+                error(line, bop::error_messages::struct_not_declared(type_name))
+            })?;
+        for (index, field) in provided.iter().enumerate() {
+            if provided[..index].contains(field) {
+                return Err(error(
+                    line,
+                    format!(
+                        "Field `{}` specified twice in `{}` construction",
+                        field, type_name
+                    ),
+                ));
+            }
+            if !declared.contains(field) {
+                let message = bop::error_messages::struct_has_no_field(type_name, field);
+                return match bop::suggest::did_you_mean(
+                    field,
+                    declared.iter().map(|name| name.as_str()),
+                ) {
+                    Some(hint) => Err(error_with_hint(line, message, hint)),
+                    None => Err(error(line, message)),
+                };
+            }
+        }
+        for field in declared {
+            if !provided.contains(field) {
+                return Err(error(
+                    line,
+                    format!(
+                        "Missing field `{}` in `{}` construction",
+                        field, type_name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_enum_construct(
+        &self,
+        namespace: Option<crate::chunk::NamespaceRef>,
+        type_name: &str,
+        variant: &str,
+        shape: EnumConstructShape,
+        provided: &[String],
+        line: u32,
+    ) -> Result<(), BopError> {
+        let module_path = match namespace {
+            Some(namespace) => self.resolve_namespaced_type(namespace, type_name, line)?,
+            None => self.resolve_type_ref(None, type_name).ok_or_else(|| {
+                error(line, bop::error_messages::enum_not_declared(type_name))
+            })?,
+        };
+        let variants = self
+            .enum_defs
+            .get(&(module_path, type_name.to_string()))
+            .ok_or_else(|| error(line, bop::error_messages::enum_not_declared(type_name)))?;
+        let declared = variants
+            .iter()
+            .find(|(name, _)| name == variant)
+            .map(|(_, shape)| shape)
+            .ok_or_else(|| {
+                let message = bop::error_messages::enum_has_no_variant(type_name, variant);
+                match bop::suggest::did_you_mean(
+                    variant,
+                    variants.iter().map(|(name, _)| name.as_str()),
+                ) {
+                    Some(hint) => error_with_hint(line, message, hint),
+                    None => error(line, message),
+                }
+            })?;
+        match (declared, shape) {
+            (EnumVariantShape::Unit, EnumConstructShape::Unit) => Ok(()),
+            (EnumVariantShape::Tuple(fields), EnumConstructShape::Tuple(argc)) => {
+                if fields.len() == argc as usize {
+                    Ok(())
+                } else {
+                    Err(error(
+                        line,
+                        format!(
+                            "`{}::{}` expects {} argument{}, but got {}",
+                            type_name,
+                            variant,
+                            fields.len(),
+                            if fields.len() == 1 { "" } else { "s" },
+                            argc
+                        ),
+                    ))
+                }
+            }
+            (EnumVariantShape::Struct(fields), EnumConstructShape::Struct(_)) => {
+                for (index, field) in provided.iter().enumerate() {
+                    if provided[..index].contains(field) {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Field `{}` specified twice in `{}::{}`",
+                                field, type_name, variant
+                            ),
+                        ));
+                    }
+                    if !fields.contains(field) {
+                        return Err(error(
+                            line,
+                            bop::error_messages::variant_has_no_field(
+                                type_name, variant, field,
+                            ),
+                        ));
+                    }
+                }
+                for field in fields {
+                    if !provided.contains(field) {
+                        return Err(error(
+                            line,
+                            format!(
+                                "Missing field `{}` in `{}::{}` construction",
+                                field, type_name, variant
+                            ),
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            (EnumVariantShape::Unit, _) => Err(error(
+                line,
+                format!("Variant `{}::{}` takes no payload", type_name, variant),
+            )),
+            (EnumVariantShape::Tuple(_), _) => Err(error(
+                line,
+                format!(
+                    "Variant `{}::{}` expects positional arguments `(…)`",
+                    type_name, variant
+                ),
+            )),
+            (EnumVariantShape::Struct(_), _) => Err(error(
+                line,
+                format!(
+                    "Variant `{}::{}` expects named fields `{{ … }}`",
+                    type_name, variant
+                ),
+            )),
+        }
     }
 
     fn construct_enum(

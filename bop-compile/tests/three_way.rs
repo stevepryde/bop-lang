@@ -1429,6 +1429,193 @@ print(build(1))"#,
         &[("types", "struct Point { value }")],
     ),
     (
+        "future_alias_struct_namespace_precedes_payload",
+        r#"fn invalid() { return dep.Stack { items: panic("payload") } }
+invalid()
+use types as dep"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "future_alias_enum_tuple_namespace_precedes_payload",
+        r#"fn invalid() { return dep.Maybe::Some(panic("payload")) }
+invalid()
+use types as dep"#,
+        &[("types", "enum Maybe { Some(value) }")],
+    ),
+    (
+        "future_alias_enum_struct_namespace_precedes_payload",
+        r#"fn invalid() { return dep.Maybe::Named { value: panic("payload") } }
+invalid()
+use types as dep"#,
+        &[("types", "enum Maybe { Named { value } }")],
+    ),
+    (
+        "future_alias_method_arguments_precede_receiver",
+        r#"fn invalid() { return dep.nope(panic("payload")) }
+invalid()
+use types as dep"#,
+        &[("types", "fn exported(value) { return value }")],
+    ),
+    (
+        "ordinary_method_arguments_precede_receiver",
+        r#"fn invalid() { return "receiver".nope(panic("payload")) }
+invalid()"#,
+        &[],
+    ),
+    (
+        "non_ident_call_arguments_precede_callee",
+        r#"fn invalid() { return dep["exported"](panic("payload")) }
+invalid()
+use types as dep"#,
+        &[("types", "fn exported(value) { return value }")],
+    ),
+    (
+        "dynamic_struct_namespace_without_declaration_seed",
+        r#"use second as other
+fn make(module) { return module.Point { second: 2 } }
+fn is_second(value) {
+    return match value { other.Point { second: found } => found == 2, _ => false }
+}
+print(is_second(make(other)))"#,
+        &[("second", "struct Point { second }")],
+    ),
+    (
+        "dynamic_struct_namespace_shadow_uses_runtime_identity_and_shape",
+        r#"use first as dep
+use second as other
+fn make(dep) { return dep.Point { second: 2 } }
+fn is_second(value) {
+    return match value { other.Point { second: found } => found == 2, _ => false }
+}
+print(is_second(make(other)))"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+        ],
+    ),
+    (
+        "dynamic_enum_namespace_unit_tuple_and_struct",
+        r#"use second as other
+fn unit(module) { return module.State::Ready }
+fn tuple(module) { return module.TupleState::Item(2) }
+fn named(module) { return module.NamedState::Item { second: 3 } }
+print(match unit(other) { other.State::Ready => true, _ => false })
+print(match tuple(other) { other.TupleState::Item(value) => value, _ => 0 })
+print(match named(other) { other.NamedState::Item { second: value } => value, _ => 0 })"#,
+        &[(
+            "second",
+            "enum State { Ready }\nenum TupleState { Item(value) }\nenum NamedState { Item { second } }",
+        )],
+    ),
+    (
+        "dynamic_enum_namespace_shadow_uses_runtime_shape",
+        r#"use first as dep
+use second as other
+fn tuple(dep) { return dep.TupleState::Item(2) }
+fn named(dep) { return dep.NamedState::Item { second: 3 } }
+print(match tuple(other) { other.TupleState::Item(value) => value, _ => 0 })
+print(match named(other) { other.NamedState::Item { second: value } => value, _ => 0 })"#,
+        &[
+            (
+                "first",
+                "enum TupleState { Item(left, right) }\nenum NamedState { Item { first } }",
+            ),
+            (
+                "second",
+                "enum TupleState { Item(value) }\nenum NamedState { Item { second } }",
+            ),
+        ],
+    ),
+    (
+        "dynamic_constructor_shape_precedes_payload",
+        r#"use types as module
+fn invalid_struct(ns) { return ns.Stack { wrong: panic("payload") } }
+invalid_struct(module)"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "dynamic_enum_variant_and_arity_precede_payload",
+        r#"use types as module
+fn invalid_enum(ns) { return ns.Maybe::Some(panic("payload"), 2) }
+invalid_enum(module)"#,
+        &[("types", "enum Maybe { Some(value) }")],
+    ),
+    (
+        "reassigned_declaration_alias_constructs_runtime_struct_identity",
+        r#"use first as dep
+use second as other
+fn make() {
+    dep = other
+    return dep.Point { second: 2 }
+}
+print(match make() { other.Point { second: value } => value, _ => 0 })"#,
+        &[
+            ("first", "struct Point { first }"),
+            ("second", "struct Point { second }"),
+        ],
+    ),
+    (
+        "reassigned_local_alias_constructs_runtime_enum_identity",
+        r#"use second as other
+fn make() {
+    use first as dep
+    dep = other
+    return dep.State::Item { second: 3 }
+}
+print(match make() { other.State::Item { second: value } => value, _ => 0 })"#,
+        &[
+            ("first", "enum State { Item { first } }"),
+            ("second", "enum State { Item { second } }"),
+        ],
+    ),
+    (
+        "loop_carried_alias_mutation_uses_runtime_struct_and_enum_shapes",
+        r#"use first as dep
+use second as other
+let i = 0
+while i < 2 {
+    if i == 1 {
+        let point = dep.Point { second: 2 }
+        let state = dep.State::Item { second: 3 }
+        print(match point { other.Point { second: value } => value, _ => 0 })
+        print(match state { other.State::Item { second: value } => value, _ => 0 })
+    }
+    dep = other
+    i += 1
+}"#,
+        &[
+            (
+                "first",
+                "struct Point { first }\nenum State { Item { first } }",
+            ),
+            (
+                "second",
+                "struct Point { second }\nenum State { Item { second } }",
+            ),
+        ],
+    ),
+    (
+        "compound_assignment_rhs_precedes_future_alias_target",
+        r#"fn invalid() { dep += panic("payload") }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "index_compound_assignment_rhs_precedes_future_alias_target",
+        r#"fn invalid() { dep[panic("index")] += panic("payload") }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "field_compound_assignment_rhs_precedes_future_alias_target",
+        r#"fn invalid() { dep.value += panic("payload") }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
         "declaration_alias_assignment_creates_call_local_overlay",
         r#"use types as dep
 fn replace() {
@@ -1541,6 +1728,34 @@ fn valid_field() {
 }
 print(try_call(invalid_index).is_err(), try_call(invalid_field).is_err())
 print(valid_index(), valid_field())"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "declaration_alias_unoverlaid_index_error_is_canonical",
+        r#"use types as dep
+fn invalid() { dep["value"] = 1 }
+invalid()"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "declaration_alias_unoverlaid_field_error_is_canonical",
+        r#"use types as dep
+fn invalid() { dep.value = 1 }
+invalid()"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "future_declaration_alias_simple_assignment_error",
+        r#"fn invalid() { dep = 1 }
+invalid()
+use types as dep"#,
+        &[("types", "struct Point { value }")],
+    ),
+    (
+        "future_declaration_alias_compound_assignment_error",
+        r#"fn invalid() { dep += 1 }
+invalid()
+use types as dep"#,
         &[("types", "struct Point { value }")],
     ),
     (

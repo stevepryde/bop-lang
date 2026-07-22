@@ -52,7 +52,7 @@
 //! - `Call { name, argc }` — call a named function (builtin, host, or
 //!   user) with `argc` args popped in reverse order.
 //! - `CallMethod { method, argc, assign_back_to, nested_place }` — method call on
-//!   an object under the args. If the method is mutating and
+//!   an object above the already-evaluated args. If the method is mutating and
 //!   `assign_back_to` is set, the mutated object is written back to
 //!   that variable (matching the tree-walker's semantics for
 //!   `arr.push(x)` etc.).

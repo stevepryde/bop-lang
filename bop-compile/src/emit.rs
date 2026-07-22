@@ -926,11 +926,51 @@ fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<String>
     }
 }
 
+fn callable_assignment_names(stmts: &[Stmt]) -> HashSet<String> {
+    fn visit(stmts: &[Stmt], names: &mut HashSet<String>) {
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::Assign {
+                    target: AssignTarget::Variable(name),
+                    ..
+                } => {
+                    names.insert(name.clone());
+                }
+                StmtKind::If {
+                    body,
+                    else_ifs,
+                    else_body,
+                    ..
+                } => {
+                    visit(body, names);
+                    for (_, body) in else_ifs {
+                        visit(body, names);
+                    }
+                    if let Some(body) = else_body {
+                        visit(body, names);
+                    }
+                }
+                StmtKind::While { body, .. }
+                | StmtKind::Repeat { body, .. }
+                | StmtKind::ForIn { body, .. } => visit(body, names),
+                // Nested named functions and lambdas are separate callable
+                // mutation domains and are analysed when emitted.
+                _ => {}
+            }
+        }
+    }
+    let mut names = HashSet::new();
+    visit(stmts, &mut names);
+    names
+}
+
 // ─── Emitter ───────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct EmissionScope {
     locals: HashSet<String>,
+    module_alias_locals: HashSet<String>,
+    mutated_locals: HashSet<String>,
     plain_glob_imports: HashSet<String>,
 }
 
@@ -1014,6 +1054,11 @@ struct Emitter {
     /// assigned overlay first, then the cache and live declaration context;
     /// assignment populates only the overlay for the rest of the invocation.
     declaration_alias_overlays: Vec<HashSet<String>>,
+    /// Whole-callable assignment pre-analysis. Namespace aliases assigned on
+    /// any control-flow path use runtime type identity even at construction
+    /// sites that appear textually before the assignment (for example, on a
+    /// later loop iteration).
+    callable_mutations: Vec<HashSet<String>>,
     /// Root copy restored after temporarily emitting imported modules/methods.
     root_declaration_aliases: Vec<ModuleImport>,
 }
@@ -1060,6 +1105,7 @@ impl Emitter {
             in_callable_body: false,
             declaration_aliases: Vec::new(),
             declaration_alias_overlays: Vec::new(),
+            callable_mutations: Vec::new(),
             root_declaration_aliases: Vec::new(),
         }
     }
@@ -1278,6 +1324,29 @@ impl Emitter {
             .is_some_and(|scope| scope.locals.contains(name))
     }
 
+    fn is_dynamic_namespace_local(&self, name: &str) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            if scope.locals.contains(name) {
+                return !scope.module_alias_locals.contains(name)
+                    || scope.mutated_locals.contains(name)
+                    || self
+                        .callable_mutations
+                        .last()
+                        .is_some_and(|names| names.contains(name));
+            }
+        }
+        self.declaration_alias_overlay(name).is_some()
+    }
+
+    fn mark_local_mutated(&mut self, name: &str) {
+        for scope in self.scope_stack.iter_mut().rev() {
+            if scope.locals.contains(name) {
+                scope.mutated_locals.insert(name.to_string());
+                break;
+            }
+        }
+    }
+
     fn declaration_alias_overlay(&self, name: &str) -> Option<String> {
         self.declaration_alias_overlays
             .last()
@@ -1289,6 +1358,16 @@ impl Emitter {
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
                 "__bop_declaration_alias_read(ctx, &mut {overlay}, {module}, {alias}, {line})?",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            )
+        })
+    }
+
+    fn declaration_alias_namespace_src(&self, name: &str, line: u32) -> Option<String> {
+        self.declaration_alias_overlay(name).map(|overlay| {
+            format!(
+                "__bop_declaration_alias_namespace(ctx, &mut {overlay}, {module}, {alias}, {line})?",
                 module = rust_string_literal(&self.current_module),
                 alias = rust_string_literal(name),
             )
@@ -1806,6 +1885,11 @@ impl Emitter {
                     ));
                 }
                 self.bind_local(alias_name);
+                self.scope_stack
+                    .last_mut()
+                    .expect("use emission has a scope")
+                    .module_alias_locals
+                    .insert(alias_name.clone());
                 // Track the alias for compile-time resolution
                 // of namespaced references (`m.Color`). Emit-
                 // time resolution is sufficient here because
@@ -1916,6 +2000,8 @@ impl Emitter {
         // fn decls (already emitted) but handling imports /
         // lets / everything else. Track a fresh scope so the
         // emitter's Ident lookup resolves within the module.
+        self.callable_mutations
+            .push(callable_assignment_names(&entry.ast));
         self.push_scope();
         for stmt in &entry.ast {
             if matches!(&stmt.kind, StmtKind::FnDecl { .. }) {
@@ -1967,6 +2053,7 @@ impl Emitter {
         self.pad();
         self.out.push_str("Ok(__exports)\n");
         self.pop_scope();
+        self.callable_mutations.pop();
         self.indent -= 1;
         self.line("})();");
         self.line("if __load_result.is_err() {");
@@ -2299,6 +2386,8 @@ impl Emitter {
         let saved_top_level = self.in_top_level;
         self.in_top_level = true;
         self.emit_tick(0);
+        self.callable_mutations
+            .push(callable_assignment_names(stmts));
         self.push_scope();
         // Top-level fn decls were already emitted at module scope;
         // skip them here. The scope_stack deliberately stays empty
@@ -2311,6 +2400,7 @@ impl Emitter {
             self.emit_stmt(stmt)?;
         }
         self.pop_scope();
+        self.callable_mutations.pop();
         self.line("Ok(())");
         self.indent = 0;
         self.out.push_str("}\n\n");
@@ -2617,6 +2707,7 @@ impl Emitter {
                         ));
                     }
                 }
+                self.mark_local_mutated(name);
                 Ok(())
             }
             AssignTarget::Index { object, index } => {
@@ -2827,6 +2918,8 @@ impl Emitter {
             self.emit_declaration_alias_overlays(&declaration_aliases, &HashMap::new());
         self.declaration_alias_overlays
             .push(declaration_alias_overlays);
+        self.callable_mutations
+            .push(callable_assignment_names(body));
         // Fresh scope with the params bound; Rust-level fn scope
         // isolates outer locals anyway, but scope tracking is the
         // source of truth for lambda-capture analysis.
@@ -2843,6 +2936,7 @@ impl Emitter {
         }
         self.pop_scope();
         self.pop_scope();
+        self.callable_mutations.pop();
         self.declaration_alias_overlays.pop();
         self.scope_stack = saved_scope_stack;
         // Implicit `return none` if control falls off the end. The
@@ -3229,16 +3323,16 @@ impl Emitter {
     }
 
     fn call_src(&mut self, callee: &Expr, args: &[Expr], line: u32) -> Result<String, BopError> {
-        // Non-Ident callees go through the value-call path:
-        // evaluate the callee onto the stack, then dispatch via
-        // `__bop_call_value`. Captures `funcs[0](x)`,
+        // Non-Ident callees go through the value-call path. Evaluate
+        // arguments first, then the callee, matching the walker and the
+        // language's call-dispatch order. Captures `funcs[0](x)`,
         // `make_adder(5)(3)`, `(if cond { f } else { g })(x)`, etc.
         let name = match &callee.kind {
             ExprKind::Ident(n) => n.clone(),
             _ => {
                 let callee_src = self.expr_src(callee)?;
                 let callee_tmp = self.fresh_tmp();
-                let mut arg_lets = format!("let {} = {}; ", callee_tmp, callee_src);
+                let mut arg_lets = String::new();
                 let mut arg_names = Vec::with_capacity(args.len());
                 for arg in args {
                     let src = self.expr_src(arg)?;
@@ -3246,6 +3340,7 @@ impl Emitter {
                     write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
                     arg_names.push(tmp);
                 }
+                write!(arg_lets, "let {} = {}; ", callee_tmp, callee_src).unwrap();
                 let args_vec = if arg_names.is_empty() {
                     "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
                 } else {
@@ -3458,6 +3553,23 @@ impl Emitter {
         fields: &[(String, Expr)],
         line: u32,
     ) -> Result<String, BopError> {
+        if let Some(namespace) =
+            namespace.filter(|namespace| self.is_dynamic_namespace_local(namespace))
+        {
+            let namespace_value = if self.is_local(namespace) {
+                rust_user_ident(namespace)
+            } else {
+                self.declaration_alias_namespace_src(namespace, line)
+                    .expect("dynamic declaration namespace has an overlay")
+            };
+            return self.dynamic_struct_construct_src(
+                namespace,
+                &namespace_value,
+                type_name,
+                fields,
+                line,
+            );
+        }
         // Resolve the source-level type reference to its full
         // identity `(module_path, type_name)`. This is what
         // drives both the compile-time shape lookup *and* the
@@ -3494,7 +3606,13 @@ impl Emitter {
                         ty_lit = rust_string_literal(type_name),
                     )
                 } else {
-                    let value = self.ident_value_src(ns, line)?;
+                    let value = if let Some(value) =
+                        self.declaration_alias_namespace_src(ns, line)
+                    {
+                        value
+                    } else {
+                        self.ident_value_src(ns, line)?
+                    };
                     let tmp = self.fresh_tmp();
                     format!(
                         "let {tmp} = {value}; __bop_validate_namespace_type(&{tmp}, {ns_lit}, {ty_lit}, {line})?; ",
@@ -3571,6 +3689,80 @@ impl Emitter {
         ))
     }
 
+    fn dynamic_struct_construct_src(
+        &mut self,
+        namespace: &str,
+        namespace_value: &str,
+        type_name: &str,
+        fields: &[(String, Expr)],
+        line: u32,
+    ) -> Result<String, BopError> {
+        let mut candidates: Vec<(&String, &Vec<String>)> = self
+            .types
+            .structs
+            .iter()
+            .filter_map(|((module, candidate), fields)| {
+                (candidate == type_name).then_some((module, fields))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(b.0));
+        if candidates.is_empty() {
+            return Err(BopError::runtime(
+                bop::error_messages::struct_not_declared(type_name),
+                line,
+            ));
+        }
+
+        let mut shape_arms = String::new();
+        for (module, declared) in candidates {
+            let fields = declared
+                .iter()
+                .map(|field| rust_string_literal(field))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                shape_arms,
+                "{} => &[{}],",
+                rust_string_literal(module),
+                fields
+            )
+            .unwrap();
+        }
+        let provided_names = fields
+            .iter()
+            .map(|(name, _)| rust_string_literal(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut lets = String::new();
+        let mut provided = Vec::with_capacity(fields.len());
+        for (name, expr) in fields {
+            let src = self.expr_src(expr)?;
+            let tmp = self.fresh_tmp();
+            write!(lets, "let {} = {}; ", tmp, src).unwrap();
+            provided.push(format!(
+                "({}.to_string(), {})",
+                rust_string_literal(name),
+                tmp
+            ));
+        }
+        Ok(format!(
+            "{{ let __module_path = __bop_validate_namespace_type(&{namespace}, {alias}, {type_name}, {line})?; \
+                let __declared_fields: &'static [&'static str] = match __module_path.as_str() {{ {shape_arms} _ => return Err(::bop::error::BopError::runtime(::bop::error_messages::struct_not_declared({type_name}), {line})), }}; \
+                __bop_validate_named_fields(__declared_fields, &[{provided_names}], {type_name}, ::std::option::Option::None, {line})?; \
+                {lets}let __provided = vec![{provided}]; \
+                let __ordered = __bop_order_named_fields(__declared_fields, __provided); \
+                ::bop::value::Value::try_new_struct(__module_path, {type_name}.to_string(), __ordered, {line})? }}",
+            namespace = namespace_value,
+            alias = rust_string_literal(namespace),
+            type_name = rust_string_literal(type_name),
+            shape_arms = shape_arms,
+            provided_names = provided_names,
+            lets = lets,
+            provided = provided.join(", "),
+            line = line,
+        ))
+    }
+
     fn enum_construct_src(
         &mut self,
         namespace: Option<&str>,
@@ -3579,6 +3771,24 @@ impl Emitter {
         payload: &VariantPayload,
         line: u32,
     ) -> Result<String, BopError> {
+        if let Some(namespace) =
+            namespace.filter(|namespace| self.is_dynamic_namespace_local(namespace))
+        {
+            let namespace_value = if self.is_local(namespace) {
+                rust_user_ident(namespace)
+            } else {
+                self.declaration_alias_namespace_src(namespace, line)
+                    .expect("dynamic declaration namespace has an overlay")
+            };
+            return self.dynamic_enum_construct_src(
+                namespace,
+                &namespace_value,
+                type_name,
+                variant,
+                payload,
+                line,
+            );
+        }
         // Resolve the source-level reference to its declaring
         // module so the resulting `Value::EnumVariant` is tagged
         // with the right identity. Two modules declaring the
@@ -3633,7 +3843,13 @@ impl Emitter {
                         ty_lit = rust_string_literal(type_name),
                     )
                 } else {
-                    let value = self.ident_value_src(ns, line)?;
+                    let value = if let Some(value) =
+                        self.declaration_alias_namespace_src(ns, line)
+                    {
+                        value
+                    } else {
+                        self.ident_value_src(ns, line)?
+                    };
                     let tmp = self.fresh_tmp();
                     format!(
                         "let {tmp} = {value}; __bop_validate_namespace_type(&{tmp}, {ns_lit}, {ty_lit}, {line})?; ",
@@ -3767,6 +3983,135 @@ impl Emitter {
                 ),
                 line,
             )),
+        }
+    }
+
+    fn dynamic_enum_construct_src(
+        &mut self,
+        namespace: &str,
+        namespace_value: &str,
+        type_name: &str,
+        variant: &str,
+        payload: &VariantPayload,
+        line: u32,
+    ) -> Result<String, BopError> {
+        let mut candidates: Vec<(&String, &HashMap<String, VariantKind>)> = self
+            .types
+            .enums
+            .iter()
+            .filter_map(|((module, candidate), variants)| {
+                (candidate == type_name).then_some((module, variants))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(b.0));
+        if candidates.is_empty() {
+            return Err(BopError::runtime(
+                bop::error_messages::enum_not_declared(type_name),
+                line,
+            ));
+        }
+
+        let mut shape_arms = String::new();
+        for (module, variants) in candidates {
+            let shape = match variants.get(variant) {
+                Some(VariantKind::Unit) => "__BopDynamicVariantShape::Unit".to_string(),
+                Some(VariantKind::Tuple(fields)) => {
+                    format!("__BopDynamicVariantShape::Tuple({})", fields.len())
+                }
+                Some(VariantKind::Struct(fields)) => {
+                    let fields = fields
+                        .iter()
+                        .map(|field| rust_string_literal(field))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("__BopDynamicVariantShape::Struct(&[{}])", fields)
+                }
+                None => format!(
+                    "return Err(::bop::error::BopError::runtime(::bop::error_messages::enum_has_no_variant({}, {}), {}))",
+                    rust_string_literal(type_name),
+                    rust_string_literal(variant),
+                    line
+                ),
+            };
+            writeln!(
+                shape_arms,
+                "{} => {},",
+                rust_string_literal(module),
+                shape
+            )
+            .unwrap();
+        }
+
+        let namespace_check = format!(
+            "let __module_path = __bop_validate_namespace_type(&{}, {}, {}, {})?; \
+             let __variant_shape = match __module_path.as_str() {{ {} _ => return Err(::bop::error::BopError::runtime(::bop::error_messages::enum_not_declared({}), {})), }}; ",
+            namespace_value,
+            rust_string_literal(namespace),
+            rust_string_literal(type_name),
+            line,
+            shape_arms,
+            rust_string_literal(type_name),
+            line,
+        );
+        let type_lit = rust_string_literal(type_name);
+        let variant_lit = rust_string_literal(variant);
+        match payload {
+            VariantPayload::Unit => Ok(format!(
+                "{{ {namespace_check}match __variant_shape {{ \
+                    __BopDynamicVariantShape::Unit => {{}}, \
+                    __BopDynamicVariantShape::Tuple(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects positional arguments `(…)`\", {type_lit}, {variant_lit}), {line})), \
+                    __BopDynamicVariantShape::Struct(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects named fields `{{{{ … }}}}`\", {type_lit}, {variant_lit}), {line})), \
+                }} ::bop::value::Value::new_enum_unit(__module_path, {type_lit}.to_string(), {variant_lit}.to_string()) }}"
+            )),
+            VariantPayload::Tuple(args) => {
+                let mut lets = String::new();
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    let src = self.expr_src(arg)?;
+                    let tmp = self.fresh_tmp();
+                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
+                    values.push(tmp);
+                }
+                Ok(format!(
+                    "{{ {namespace_check}match __variant_shape {{ \
+                        __BopDynamicVariantShape::Unit => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` takes no payload\", {type_lit}, {variant_lit}), {line})), \
+                        __BopDynamicVariantShape::Tuple(__expected) if __expected == {actual} => {{}}, \
+                        __BopDynamicVariantShape::Tuple(__expected) => return Err(::bop::error::BopError::runtime(format!(\"`{{}}::{{}}` expects {{}} argument{{}}, but got {{}}\", {type_lit}, {variant_lit}, __expected, if __expected == 1 {{ \"\" }} else {{ \"s\" }}, {actual}), {line})), \
+                        __BopDynamicVariantShape::Struct(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects named fields `{{{{ … }}}}`\", {type_lit}, {variant_lit}), {line})), \
+                    }} {lets}::bop::value::Value::try_new_enum_tuple(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), vec![{values}], {line})? }}",
+                    actual = args.len(),
+                    values = values.join(", "),
+                ))
+            }
+            VariantPayload::Struct(fields) => {
+                let provided_names = fields
+                    .iter()
+                    .map(|(name, _)| rust_string_literal(name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut lets = String::new();
+                let mut provided = Vec::with_capacity(fields.len());
+                for (name, expr) in fields {
+                    let src = self.expr_src(expr)?;
+                    let tmp = self.fresh_tmp();
+                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
+                    provided.push(format!(
+                        "({}.to_string(), {})",
+                        rust_string_literal(name),
+                        tmp
+                    ));
+                }
+                Ok(format!(
+                    "{{ {namespace_check}let __declared_fields = match __variant_shape {{ \
+                        __BopDynamicVariantShape::Unit => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` takes no payload\", {type_lit}, {variant_lit}), {line})), \
+                        __BopDynamicVariantShape::Tuple(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects positional arguments `(…)`\", {type_lit}, {variant_lit}), {line})), \
+                        __BopDynamicVariantShape::Struct(__fields) => __fields, \
+                    }}; __bop_validate_named_fields(__declared_fields, &[{provided_names}], {type_lit}, ::std::option::Option::Some({variant_lit}), {line})?; \
+                    {lets}let __provided = vec![{provided}]; let __ordered = __bop_order_named_fields(__declared_fields, __provided); \
+                    ::bop::value::Value::try_new_enum_struct(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), __ordered, {line})? }}",
+                    provided = provided.join(", "),
+                ))
+            }
         }
     }
 
@@ -4066,9 +4411,12 @@ impl Emitter {
             self.emit_declaration_alias_overlays(&declaration_aliases, &alias_initializers);
         self.declaration_alias_overlays
             .push(declaration_alias_overlays);
+        self.callable_mutations
+            .push(callable_assignment_names(body));
         for s in body {
             self.emit_stmt(s)?;
         }
+        self.callable_mutations.pop();
         self.declaration_alias_overlays.pop();
         let body_src = core::mem::replace(&mut self.out, saved_out);
         self.indent = saved_indent;
@@ -4934,6 +5282,12 @@ struct __BopDeclarationAliasBinding {
     cached: ::std::option::Option<::bop::value::Value>,
 }
 
+enum __BopDynamicVariantShape {
+    Unit,
+    Tuple(usize),
+    Struct(&'static [&'static str]),
+}
+
 fn __bop_declaration_alias_optional(
     ctx: &Ctx<'_>,
     binding: &mut __BopDeclarationAliasBinding,
@@ -4969,6 +5323,21 @@ fn __bop_declaration_alias_read(
         })
 }
 
+fn __bop_declaration_alias_namespace(
+    ctx: &Ctx<'_>,
+    binding: &mut __BopDeclarationAliasBinding,
+    module: &str,
+    alias: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    __bop_declaration_alias_optional(ctx, binding, module, alias).ok_or_else(|| {
+        ::bop::error::BopError::runtime(
+            format!("`{}` isn't a module alias in scope", alias),
+            line,
+        )
+    })
+}
+
 fn __bop_declaration_alias_assign(
     ctx: &Ctx<'_>,
     binding: &mut __BopDeclarationAliasBinding,
@@ -4984,7 +5353,7 @@ fn __bop_declaration_alias_assign(
             .contains_key(&(module.to_string(), alias.to_string()))
     {
         return Err(::bop::error::BopError::runtime(
-            ::bop::error_messages::variable_not_found(alias),
+            format!("Variable `{}` doesn't exist yet", alias),
             line,
         ));
     }
@@ -5311,7 +5680,8 @@ fn __bop_field_get(
 
 /// Runtime guard for namespaced type access: verifies that the
 /// value behind the alias is actually a `Value::Module`, and that
-/// the module's published `types` list contains the name. Used by
+/// the module's published `types` list contains the name, then returns
+/// the module path that defines the constructed value's runtime identity. Used by
 /// struct / enum construct emission when `namespace` is `Some(...)`,
 /// so the AOT surfaces the same error as walker + VM when someone
 /// writes `m.MissingType { ... }` or uses a non-module as a namespace.
@@ -5321,11 +5691,11 @@ fn __bop_validate_namespace_type(
     alias: &str,
     type_name: &str,
     line: u32,
-) -> Result<(), ::bop::error::BopError> {
+) -> Result<String, ::bop::error::BopError> {
     match ns {
         ::bop::value::Value::Module(m) => {
             if m.types.iter().any(|t| t == type_name) {
-                Ok(())
+                Ok(m.path.clone())
             } else {
                 Err(::bop::error::BopError::runtime(
                     format!("`{}` isn't a type exported from `{}`", type_name, m.path),
@@ -5343,6 +5713,66 @@ fn __bop_validate_namespace_type(
             line,
         )),
     }
+}
+
+fn __bop_validate_named_fields(
+    declared: &[&str],
+    provided: &[&str],
+    type_name: &str,
+    variant: ::std::option::Option<&str>,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    for (index, field) in provided.iter().enumerate() {
+        if provided[..index].contains(field) {
+            let owner = match variant {
+                ::std::option::Option::Some(variant) => format!("{}::{}", type_name, variant),
+                ::std::option::Option::None => type_name.to_string(),
+            };
+            return Err(::bop::error::BopError::runtime(
+                format!("Field `{}` specified twice in `{}` construction", field, owner),
+                line,
+            ));
+        }
+        if !declared.contains(field) {
+            let message = match variant {
+                ::std::option::Option::Some(variant) => {
+                    ::bop::error_messages::variant_has_no_field(type_name, variant, field)
+                }
+                ::std::option::Option::None => {
+                    ::bop::error_messages::struct_has_no_field(type_name, field)
+                }
+            };
+            return Err(::bop::error::BopError::runtime(message, line));
+        }
+    }
+    for field in declared {
+        if !provided.contains(field) {
+            let owner = match variant {
+                ::std::option::Option::Some(variant) => format!("{}::{}", type_name, variant),
+                ::std::option::Option::None => type_name.to_string(),
+            };
+            return Err(::bop::error::BopError::runtime(
+                format!("Missing field `{}` in `{}` construction", field, owner),
+                line,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn __bop_order_named_fields(
+    declared: &[&str],
+    mut provided: ::std::vec::Vec<(String, ::bop::value::Value)>,
+) -> ::std::vec::Vec<(String, ::bop::value::Value)> {
+    let mut ordered = ::std::vec::Vec::with_capacity(declared.len());
+    for field in declared {
+        let index = provided
+            .iter()
+            .position(|(name, _)| name == field)
+            .expect("dynamic construction shape was validated before payload evaluation");
+        ordered.push(provided.remove(index));
+    }
+    ordered
 }
 
 /// Write a struct field on the owned live-binding value and return it.
