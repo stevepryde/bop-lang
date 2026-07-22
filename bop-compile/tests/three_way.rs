@@ -295,6 +295,10 @@ fn run_aot_batch(programs: &[CorpusEntry]) -> Vec<(String, Outcome)> {
         .arg("run")
         .arg("--quiet")
         .arg("--release")
+        // Cargo gives this precedence over RUSTFLAGS. Remove an
+        // inherited value so the warning-denial contract below
+        // cannot be bypassed (or poisoned) by the parent shell.
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env("RUSTFLAGS", "-D warnings")
         .current_dir(&dir)
         .stdout(Stdio::piped())
