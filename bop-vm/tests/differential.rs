@@ -583,6 +583,82 @@ fn for_with_break() {
     );
 }
 
+#[test]
+fn nested_for_break_preserves_outer_iterator_diff() {
+    let outcome = run_both(
+        r#"for i in [1, 2, 3] {
+    for j in [10, 20, 30] { break }
+    print(i)
+}"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1", "2", "3"]);
+}
+
+#[test]
+fn inner_repeat_break_preserves_outer_iterator_diff() {
+    assert_eq!(
+        say(r#"let seen = []
+for i in [1, 2, 3] {
+    repeat 5 {
+        if true { break }
+    }
+    seen.push(i)
+}
+print(seen)"#),
+        "[1, 2, 3]"
+    );
+}
+
+#[test]
+fn inner_while_break_does_not_pop_outer_iterator_diff() {
+    assert_eq!(
+        say(r#"let seen = []
+for i in [1, 2, 3] {
+    while true { break }
+    seen.push(i)
+}
+print(seen)"#),
+        "[1, 2, 3]"
+    );
+}
+
+#[test]
+fn mixed_nested_loop_control_preserves_function_frames_diff() {
+    let outcome = run_both(
+        r#"fn exercise() {
+    let seen = []
+    for outer in [1, 2] {
+        let n = 0
+        while n < 3 {
+            n += 1
+            repeat 3 {
+                if n == 1 { break }
+                for inner in [20, 10, 30] {
+                    if inner == 20 { continue }
+                    seen.push(outer * 100 + n * 10 + inner)
+                    break
+                }
+                break
+            }
+            if n < 3 { continue }
+            break
+        }
+    }
+    return seen
+}
+print(exercise())
+print(exercise())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        ["[130, 140, 230, 240]", "[130, 140, 230, 240]"]
+    );
+}
+
 // ─── Repeat ───────────────────────────────────────────────────────
 
 #[test]
@@ -2998,6 +3074,23 @@ let sum = 0
 for v in b { sum = sum + v }
 print(sum)"#),
         "60"
+    );
+}
+
+#[test]
+fn break_discards_user_iterator_sidecar_diff() {
+    set_modules(&[]);
+    assert_eq!(
+        say(r#"struct Bag { items }
+fn Bag.iter(self) { return self.items.iter() }
+let bag = Bag { items: [10, 20, 30] }
+let seen = []
+for outer in [1, 2, 3] {
+    for value in bag { break }
+    seen.push(outer)
+}
+print(seen)"#),
+        "[1, 2, 3]"
     );
 }
 

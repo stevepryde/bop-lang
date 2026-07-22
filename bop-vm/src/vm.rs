@@ -11,9 +11,10 @@
 //! either a [`Value`], an in-progress `for`-loop iterator, or an
 //! in-progress `repeat` counter. Iterators and counters are sidecar
 //! items pushed by [`Instr::MakeIter`] / [`Instr::MakeRepeatCount`]
-//! and consumed by [`Instr::IterNext`] / [`Instr::RepeatNext`]; only
-//! bytecode that participates in iteration ever sees them, so the
-//! rest of the dispatch loop treats the stack as a stack of `Value`.
+//! and consumed by [`Instr::IterNext`] / [`Instr::RepeatNext`] on
+//! exhaustion or [`Instr::PopLoopState`] on `break`; only bytecode that
+//! participates in iteration ever sees them, so the rest of the dispatch
+//! loop treats the stack as a stack of `Value`.
 //!
 //! # Frames
 //!
@@ -67,7 +68,7 @@ use bop::{BopHost, BopLimits};
 
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx, EnumVariantShape,
-    FnDef, FnIdx, Instr, NameIdx, PatternIdx, StructIdx,
+    FnDef, FnIdx, Instr, LoopStateKind, NameIdx, PatternIdx, StructIdx,
 };
 
 /// Hard cap on call depth; matches the tree-walker.
@@ -1273,6 +1274,26 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     self.stack.pop();
                     self.jump(target);
                 }
+            }
+            Instr::PopLoopState(kind) => {
+                let matches_kind = matches!(
+                    (kind, self.stack.last()),
+                    (
+                        LoopStateKind::Iterator,
+                        Some(Slot::Iter(_) | Slot::IterObject(_)),
+                    ) | (LoopStateKind::Repeat, Some(Slot::Repeat(_)))
+                );
+                if !matches_kind {
+                    let expected = match kind {
+                        LoopStateKind::Iterator => "iterator",
+                        LoopStateKind::Repeat => "repeat counter",
+                    };
+                    return Err(error(
+                        line,
+                        format!("VM: expected {expected} loop state on stack"),
+                    ));
+                }
+                self.stack.pop();
             }
 
             // ─── Control flow ─────────────────────────────────────
@@ -3624,4 +3645,43 @@ pub fn run<H: BopHost>(
     let stmts = bop::parse(source)?;
     let chunk = crate::compile(&stmts)?;
     execute(chunk, host, limits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SilentHost;
+
+    impl BopHost for SilentHost {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            None
+        }
+    }
+
+    #[test]
+    fn sequential_broken_loops_leave_the_value_stack_balanced() {
+        let mut source = String::new();
+        for _ in 0..128 {
+            source.push_str("for item in [1, 2, 3] { break }\n");
+            source.push_str("repeat 3 { break }\n");
+        }
+        let program = bop::parse(&source).expect("parse");
+        let chunk = crate::compile(&program).expect("compile");
+        let mut host = SilentHost;
+        let mut vm = Vm::new(chunk, &mut host, BopLimits::standard());
+
+        vm.run_internal().expect("execute");
+
+        assert!(
+            vm.stack.is_empty(),
+            "clean completion left {} loop sidecars on the value stack",
+            vm.stack.len()
+        );
+    }
 }

@@ -222,6 +222,10 @@ pub enum Instr {
     /// If the repeat counter at the top is non-zero, decrement it
     /// and fall through. Otherwise pop it and jump to `target`.
     RepeatNext { target: CodeOffset },
+    /// Discard the sidecar owned by a loop exited through `break`.
+    /// The VM checks the kind so broken compiler bookkeeping cannot
+    /// silently consume an enclosing loop's state.
+    PopLoopState(LoopStateKind),
 
     // ─── Control flow ─────────────────────────────────────────────
     Jump(CodeOffset),
@@ -366,6 +370,13 @@ pub struct InterpIdx(pub u32);
 /// Absolute instruction index within the same chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CodeOffset(pub u32);
+
+/// Internal stack state owned by a `for` or `repeat` loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopStateKind {
+    Iterator,
+    Repeat,
+}
 
 /// Index into a chunk's struct-definition pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

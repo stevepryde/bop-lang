@@ -10,8 +10,8 @@ use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind,
 
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx,
-    EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx,
-    InPlaceAssignOp, PatternIdx, SlotIdx, StructDef, StructIdx,
+    EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, InterpIdx, InterpRecipe, Instr,
+    LoopStateKind, NameIdx, PatternIdx, SlotIdx, StructDef, StructIdx,
 };
 use bop::parser::{ArrayRest, MatchArm, Pattern, VariantKind, VariantPatternPayload};
 
@@ -146,6 +146,10 @@ struct LoopCtx {
     /// Offsets of `Jump` instructions that need to be back-patched to
     /// the loop's exit once it's known.
     break_patches: Vec<CodeOffset>,
+    /// Sidecar owned by this exact loop. This is deliberately not an
+    /// inherited "nearest sidecar": breaking an inner `while` must leave
+    /// an enclosing `for` iterator untouched.
+    sidecar: Option<LoopStateKind>,
 }
 
 impl Compiler {
@@ -511,6 +515,7 @@ impl Compiler {
                 self.loops.push(LoopCtx {
                     continue_target: loop_start,
                     break_patches: Vec::new(),
+                    sidecar: None,
                 });
                 self.compile_scoped_block(body, line)?;
                 self.emit(Instr::Jump(loop_start), line);
@@ -533,6 +538,7 @@ impl Compiler {
                 self.loops.push(LoopCtx {
                     continue_target: loop_start,
                     break_patches: Vec::new(),
+                    sidecar: Some(LoopStateKind::Repeat),
                 });
                 self.compile_scoped_block(body, line)?;
                 self.emit(Instr::Jump(loop_start), line);
@@ -577,6 +583,7 @@ impl Compiler {
                 self.loops.push(LoopCtx {
                     continue_target: loop_start,
                     break_patches: Vec::new(),
+                    sidecar: Some(LoopStateKind::Iterator),
                 });
                 self.compile_block_no_scope(body)?;
                 if fast {
@@ -617,8 +624,13 @@ impl Compiler {
             }
 
             StmtKind::Break => {
-                if self.loops.is_empty() {
-                    return Err(err(line, "break used outside of a loop"));
+                let sidecar = self
+                    .loops
+                    .last()
+                    .ok_or_else(|| err(line, "break used outside of a loop"))?
+                    .sidecar;
+                if let Some(kind) = sidecar {
+                    self.emit(Instr::PopLoopState(kind), line);
                 }
                 let patch = self.emit(Instr::Jump(CodeOffset(0)), line);
                 self.loops.last_mut().unwrap().break_patches.push(patch);

@@ -10,7 +10,7 @@ use alloc::{format, string::{String, ToString}, vec::Vec};
 
 use bop::lexer::StringPart;
 
-use crate::chunk::{Chunk, Constant, Instr};
+use crate::chunk::{Chunk, Constant, Instr, LoopStateKind};
 
 /// Render a chunk as a string. One line per instruction; nested
 /// function bodies are indented and follow the main body.
@@ -183,6 +183,10 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::IterNext { target } => format!("IterNext -> {}", target.0),
         Instr::MakeRepeatCount => "MakeRepeatCount".to_string(),
         Instr::RepeatNext { target } => format!("RepeatNext -> {}", target.0),
+        Instr::PopLoopState(LoopStateKind::Iterator) => {
+            "PopLoopState iterator".to_string()
+        }
+        Instr::PopLoopState(LoopStateKind::Repeat) => "PopLoopState repeat".to_string(),
 
         Instr::Jump(t) => format!("Jump -> {}", t.0),
         Instr::JumpIfFalse(t) => format!("JumpIfFalse -> {}", t.0),
