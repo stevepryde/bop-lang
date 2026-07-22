@@ -365,6 +365,107 @@ print(sorted)"#,
 
 #[test]
 #[ignore]
+fn e2e_array_mutation_fast_path_semantics() {
+    let output = run_aot(
+        r#"let original = [1, 2]
+let alias = original
+original.push(3)
+print(original)
+print(alias)
+
+let nested = [1, 2]
+nested.push(nested.pop())
+print(nested)
+
+let transient_source = [7]
+(if true { transient_source } else { [] }).push(8)
+[9].push(10)
+print(transient_source)
+
+struct Accumulator { total }
+fn Accumulator.push(self, value) { return self.total + value }
+let accumulator = Accumulator { total: 7 }
+print(accumulator.push(5))
+
+let values = []
+let next = 0
+repeat 2048 {
+    values.push(next)
+    next += 1
+}
+print(values.len())
+print(values[0])
+print(values[-1])
+
+let changed = [4, 1, 3]
+print(changed.push(2))
+print(changed.insert(1, 5))
+print(changed.remove(2))
+print(changed.pop())
+changed.sort()
+changed.reverse()
+print(changed)
+
+let unchanged = [1, 2, 3]
+print(try_call(fn() { return unchanged.push() }).is_err())
+print(try_call(fn() { return unchanged.insert(99, 4) }).is_err())
+print(try_call(fn() { return unchanged.remove(99) }).is_err())
+print(unchanged)"#,
+        "array_mutation_fast_path_semantics",
+    );
+    assert_eq!(
+        output,
+        concat!(
+            "[1, 2, 3]\n",
+            "[1, 2]\n",
+            "[1, 2]\n",
+            "[7]\n",
+            "12\n",
+            "2048\n",
+            "0\n",
+            "2047\n",
+            "none\n",
+            "none\n",
+            "1\n",
+            "2\n",
+            "[5, 4, 3]\n",
+            "true\n",
+            "true\n",
+            "true\n",
+            "[1, 2, 3]"
+        )
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_array_push_depth_error_is_clean() {
+    let run = run_aot_with_opts(
+        r#"let deep = none
+repeat 64 { deep = [deep] }
+let values = []
+values.push(deep)"#,
+        "array_push_depth_error",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        run.status,
+        Some(1),
+        "expected a clean Bop error exit, not an abort; stderr:\n{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(bop::value::VALUE_DEPTH_ERROR_MESSAGE),
+        "expected value-depth diagnostic; got:\n{}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore]
 fn e2e_signed_indices_across_methods_and_subscripts() {
     let output = run_aot(
         r#"let values = [10, 20, 30, 40]

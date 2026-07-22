@@ -41,6 +41,11 @@ mod imp {
     pub fn would_exceed(bytes: usize) -> bool {
         USED.with(|u| LIMIT.with(|l| u.get().saturating_add(bytes) > l.get()))
     }
+
+    #[cfg(test)]
+    pub fn used() -> usize {
+        USED.get()
+    }
 }
 
 // ─── no-std: global statics (single-threaded only) ──────────────────────────
@@ -77,6 +82,11 @@ mod imp {
     pub fn would_exceed(bytes: usize) -> bool {
         USED.0.get().saturating_add(bytes) > LIMIT.0.get()
     }
+
+    #[cfg(test)]
+    pub fn used() -> usize {
+        USED.0.get()
+    }
 }
 
 // ─── Public API (delegates to the active impl) ─────────────────────────────
@@ -108,4 +118,10 @@ pub fn bop_memory_exceeded() -> bool {
 /// (string repeat, range) to avoid allocating memory we'll immediately reject.
 pub fn bop_would_exceed(bytes: usize) -> bool {
     imp::would_exceed(bytes)
+}
+
+/// Current tracked usage for deterministic allocation-accounting tests.
+#[cfg(test)]
+pub(crate) fn bop_memory_used() -> usize {
+    imp::used()
 }

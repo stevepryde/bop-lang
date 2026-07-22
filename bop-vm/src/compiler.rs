@@ -5,12 +5,13 @@
 use alloc::{string::{String, ToString}, vec, vec::Vec};
 
 use bop::error::BopError;
+use bop::methods;
 use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx,
     EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpRecipe, Instr, NameIdx,
-    PatternIdx, SlotIdx, StructDef, StructIdx,
+    InPlaceAssignOp, PatternIdx, SlotIdx, StructDef, StructIdx,
 };
 use bop::parser::{ArrayRest, MatchArm, Pattern, VariantKind, VariantPatternPayload};
 
@@ -790,25 +791,26 @@ impl Compiler {
                 };
                 let slot = self.current_resolver().and_then(|r| r.resolve(&name));
                 let name_idx = self.add_name(&name);
-
-                match op {
-                    AssignOp::Eq => {
-                        self.emit_load_var(slot, name_idx, line);
-                        self.compile_expr(index)?;
-                        self.compile_expr(value)?;
-                        self.emit(Instr::SetIndex, line);
-                    }
-                    compound => {
-                        self.emit_load_var(slot, name_idx, line);
-                        self.compile_expr(index)?;
-                        self.emit(Instr::Dup2, line);
-                        self.emit(Instr::GetIndex, line);
-                        self.compile_expr(value)?;
-                        self.emit(binop_for_compound(*compound), line);
-                        self.emit(Instr::SetIndex, line);
-                    }
+                if slot.is_none() {
+                    self.note_free_var(&name);
                 }
-                self.emit_store_var(slot, name_idx, line);
+                let target = slot
+                    .map(crate::chunk::AssignBack::Slot)
+                    .unwrap_or(crate::chunk::AssignBack::Name(name_idx));
+
+                // Match the walker/AOT: RHS first, then index, then read the
+                // current element (for compound ops) and mutate the live
+                // binding. The target-aware opcode performs the last two
+                // steps without ever cloning the receiver onto the stack.
+                self.compile_expr(value)?;
+                self.compile_expr(index)?;
+                self.emit(
+                    Instr::SetIndexInPlace {
+                        target,
+                        op: in_place_assign_op(*op),
+                    },
+                    line,
+                );
             }
             AssignTarget::Field { object, field } => {
                 // Only bare-`Ident` objects are assignable — the
@@ -826,22 +828,21 @@ impl Compiler {
                 let slot = self.current_resolver().and_then(|r| r.resolve(&name));
                 let name_idx = self.add_name(&name);
                 let field_idx = self.add_name(field);
-                match op {
-                    AssignOp::Eq => {
-                        self.emit_load_var(slot, name_idx, line);
-                        self.compile_expr(value)?;
-                        self.emit(Instr::FieldSet(field_idx), line);
-                    }
-                    compound => {
-                        self.emit_load_var(slot, name_idx, line);
-                        self.emit(Instr::Dup, line);
-                        self.emit(Instr::FieldGet(field_idx), line);
-                        self.compile_expr(value)?;
-                        self.emit(binop_for_compound(*compound), line);
-                        self.emit(Instr::FieldSet(field_idx), line);
-                    }
+                if slot.is_none() {
+                    self.note_free_var(&name);
                 }
-                self.emit_store_var(slot, name_idx, line);
+                let target = slot
+                    .map(crate::chunk::AssignBack::Slot)
+                    .unwrap_or(crate::chunk::AssignBack::Name(name_idx));
+                self.compile_expr(value)?;
+                self.emit(
+                    Instr::FieldSetInPlace {
+                        target,
+                        field: field_idx,
+                        op: in_place_assign_op(*op),
+                    },
+                    line,
+                );
             }
         }
         Ok(())
@@ -1028,6 +1029,10 @@ impl Compiler {
                         if let Some(slot) = self.current_resolver().and_then(|r| r.resolve(n)) {
                             Some(crate::chunk::AssignBack::Slot(slot))
                         } else {
+                            // The in-place opcode deliberately skips
+                            // `compile_expr(object)`, so record this unresolved
+                            // receiver explicitly for lambda capture analysis.
+                            self.note_free_var(n);
                             Some(crate::chunk::AssignBack::Name(self.add_name(n)))
                         }
                     }
@@ -1037,20 +1042,54 @@ impl Compiler {
                     &object.kind,
                     ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
                 );
-                self.compile_expr(object)?;
-                for arg in args {
-                    self.compile_expr(arg)?;
-                }
                 let method_idx = self.add_name(method);
-                self.emit(
-                    Instr::CallMethod {
-                        method: method_idx,
-                        argc: args.len() as u32,
-                        assign_back_to,
-                        nested_place,
-                    },
-                    line,
-                );
+                if methods::is_mutating_method(method) {
+                    if let Some(target) = assign_back_to {
+                        // Walker and AOT evaluate method arguments before a
+                        // bare identifier receiver. Resolve the live binding
+                        // only after the arguments so nested calls such as
+                        // `a.push(a.pop())` observe the same state everywhere.
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit(
+                            Instr::CallMethodInPlace {
+                                target,
+                                method: method_idx,
+                                argc: args.len() as u32,
+                            },
+                            line,
+                        );
+                    } else {
+                        self.compile_expr(object)?;
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit(
+                            Instr::CallMethod {
+                                method: method_idx,
+                                argc: args.len() as u32,
+                                assign_back_to: None,
+                                nested_place,
+                            },
+                            line,
+                        );
+                    }
+                } else {
+                    self.compile_expr(object)?;
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit(
+                        Instr::CallMethod {
+                            method: method_idx,
+                            argc: args.len() as u32,
+                            assign_back_to,
+                            nested_place,
+                        },
+                        line,
+                    );
+                }
             }
 
             ExprKind::Index { object, index } => {
@@ -1519,6 +1558,17 @@ fn binop_for_compound(op: AssignOp) -> Instr {
         AssignOp::MulEq => Instr::Mul,
         AssignOp::DivEq => Instr::Div,
         AssignOp::ModEq => Instr::Rem,
+    }
+}
+
+fn in_place_assign_op(op: AssignOp) -> InPlaceAssignOp {
+    match op {
+        AssignOp::Eq => InPlaceAssignOp::Eq,
+        AssignOp::AddEq => InPlaceAssignOp::Add,
+        AssignOp::SubEq => InPlaceAssignOp::Sub,
+        AssignOp::MulEq => InPlaceAssignOp::Mul,
+        AssignOp::DivEq => InPlaceAssignOp::Div,
+        AssignOp::ModEq => InPlaceAssignOp::Rem,
     }
 }
 

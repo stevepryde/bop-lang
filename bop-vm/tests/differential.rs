@@ -384,6 +384,64 @@ fn compound_assign() {
 }
 
 #[test]
+fn named_container_assignment_preserves_cow_value_semantics_diff() {
+    let outcome = run_both(
+        r#"let array = [1, 2]
+let old_array = array
+array[0] = 9
+array[1] += 3
+print(array)
+print(old_array)
+
+let dict = {"n": 4}
+let old_dict = dict
+dict["n"] += 6
+dict["extra"] = 8
+print(dict)
+print(old_dict)
+
+struct Counter { n, label }
+let counter = Counter { n: 3, label: "old" }
+let old_counter = counter
+counter.n *= 4
+counter.label = "new"
+print(counter.n)
+print(counter.label)
+print(old_counter.n)
+print(old_counter.label)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        [
+            "[9, 5]",
+            "[1, 2]",
+            r#"{"n": 10, "extra": 8}"#,
+            r#"{"n": 4}"#,
+            "12",
+            "new",
+            "3",
+            "old",
+        ]
+    );
+}
+
+#[test]
+fn named_index_assignment_observes_rhs_then_index_then_live_current_diff() {
+    assert_eq!(
+        say(r#"let values = [1, 2]
+values[0] += values.remove(0)
+print(values)"#),
+        "[3]"
+    );
+
+    let message = run_err(r#"let values = [0, 1]
+values[values.pop()] = 9"#);
+    assert!(message.contains("out of bounds"), "got: {}", message);
+}
+
+#[test]
 fn undefined_variable_error() {
     assert!(run_err("print(nope)").contains("not found"));
 }
@@ -1783,6 +1841,39 @@ print(add_n(3))"#),
 }
 
 #[test]
+fn closure_captures_array_used_only_by_in_place_method_diff() {
+    assert_eq!(
+        say(r#"fn make_mutator() {
+    let values = []
+    return fn() { values.push(1) }
+}
+let mutate = make_mutator()
+print(mutate())"#),
+        "none"
+    );
+}
+
+#[test]
+fn closure_captures_values_used_only_by_in_place_assignment_targets_diff() {
+    assert_eq!(
+        say(r#"struct Holder { n }
+fn make_mutator() {
+    let array = [0]
+    let dict = {"n": 0}
+    let holder = Holder { n: 0 }
+    return fn() {
+        array[0] = 1
+        dict["n"] += 2
+        holder.n = 3
+    }
+}
+let mutate = make_mutator()
+print(mutate())"#),
+        "none"
+    );
+}
+
+#[test]
 fn closure_ignores_unreferenced_max_depth_binding_diff() {
     assert_eq!(
         say(r#"let unrelated = none
@@ -1952,6 +2043,95 @@ print(a.len())"#),
 let last = a.pop()
 print(last)"#),
         "3"
+    );
+}
+
+#[test]
+fn array_mutation_fast_path_preserves_value_semantics_diff() {
+    let outcome = run_both(
+        r#"let original = [1, 2]
+let alias = original
+original.push(3)
+print(original)
+print(alias)
+
+let nested = [1, 2]
+nested.push(nested.pop())
+print(nested)
+
+let transient_source = [7]
+(if true { transient_source } else { [] }).push(8)
+[9].push(10)
+print(transient_source)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["[1, 2, 3]", "[1, 2]", "[1, 2]", "[7]"]);
+}
+
+#[test]
+fn array_push_name_dispatches_by_runtime_receiver_type_diff() {
+    assert_eq!(
+        say(r#"struct Accumulator { total }
+fn Accumulator.push(self, value) { return self.total + value }
+let accumulator = Accumulator { total: 7 }
+print(accumulator.push(5))"#),
+        "12"
+    );
+}
+
+#[test]
+fn array_large_append_loop_and_mutators_diff() {
+    let outcome = run_both(
+        r#"let values = []
+let next = 0
+repeat 2048 {
+    values.push(next)
+    next += 1
+}
+print(values.len())
+print(values[0])
+print(values[-1])
+
+let changed = [4, 1, 3]
+print(changed.push(2))
+print(changed.insert(1, 5))
+print(changed.remove(2))
+print(changed.pop())
+changed.sort()
+changed.reverse()
+print(changed)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        ["2048", "0", "2047", "none", "none", "1", "2", "[5, 4, 3]"]
+    );
+}
+
+#[test]
+fn array_mutation_errors_are_atomic_diff() {
+    let outcome = run_both(
+        r#"let values = [1, 2, 3]
+print(try_call(fn() { return values.push() }).is_err())
+print(try_call(fn() { return values.insert(99, 4) }).is_err())
+print(try_call(fn() { return values.remove(99) }).is_err())
+print(values)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["true", "true", "true", "[1, 2, 3]"]);
+}
+
+#[test]
+fn array_push_rejects_excessive_value_depth_diff() {
+    assert_both_value_depth_errors(
+        r#"let deep = none
+repeat 64 { deep = [deep] }
+let values = []
+values.push(deep)"#,
+        4,
     );
 }
 
@@ -3010,7 +3190,7 @@ repeat 100 { s = s + s }"#,
 fn safety_memory_bomb_array_growth() {
     let (tw, vm) = run_err_loose(
         r#"let arr = []
-repeat 500 {
+repeat 1000 {
     arr.push("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 }"#,
         tight(),

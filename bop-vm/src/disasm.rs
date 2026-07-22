@@ -89,6 +89,22 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
 
         Instr::GetIndex => "GetIndex".to_string(),
         Instr::SetIndex => "SetIndex".to_string(),
+        Instr::SetIndexInPlace { target, op } => match target {
+            crate::chunk::AssignBack::Name(var) => {
+                format!(
+                    "SetIndexInPlace{} (target {})",
+                    assign_op_suffix(*op),
+                    chunk.name(*var)
+                )
+            }
+            crate::chunk::AssignBack::Slot(slot) => {
+                format!(
+                    "SetIndexInPlace{} (target @{})",
+                    assign_op_suffix(*op),
+                    slot.0
+                )
+            }
+        },
 
         Instr::StringInterp(idx) => {
             let recipe = chunk.interp(*idx);
@@ -132,6 +148,25 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                     name, argc, slot.0
                 ),
                 None => format!("CallMethod .{}/{}", name, argc),
+            }
+        }
+        Instr::CallMethodInPlace {
+            target,
+            method,
+            argc,
+        } => {
+            let name = chunk.name(*method);
+            match target {
+                crate::chunk::AssignBack::Name(var) => format!(
+                    "CallMethodInPlace .{}/{} (target {})",
+                    name,
+                    argc,
+                    chunk.name(*var)
+                ),
+                crate::chunk::AssignBack::Slot(slot) => format!(
+                    "CallMethodInPlace .{}/{} (target @{})",
+                    name, argc, slot.0
+                ),
             }
         }
 
@@ -233,6 +268,20 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         }
         Instr::FieldGet(n) => format!("FieldGet .{}", chunk.name(*n)),
         Instr::FieldSet(n) => format!("FieldSet .{}", chunk.name(*n)),
+        Instr::FieldSetInPlace { target, field, op } => match target {
+            crate::chunk::AssignBack::Name(var) => format!(
+                "FieldSetInPlace{} .{} (target {})",
+                assign_op_suffix(*op),
+                chunk.name(*field),
+                chunk.name(*var)
+            ),
+            crate::chunk::AssignBack::Slot(slot) => format!(
+                "FieldSetInPlace{} .{} (target @{})",
+                assign_op_suffix(*op),
+                chunk.name(*field),
+                slot.0
+            ),
+        },
 
         Instr::MatchFail { pattern, on_fail } => {
             format!("MatchFail pat#{} -> {}", pattern.0, on_fail.0)
@@ -242,6 +291,17 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::TryUnwrap => "TryUnwrap".to_string(),
 
         Instr::Halt => "Halt".to_string(),
+    }
+}
+
+fn assign_op_suffix(op: crate::chunk::InPlaceAssignOp) -> &'static str {
+    match op {
+        crate::chunk::InPlaceAssignOp::Eq => "",
+        crate::chunk::InPlaceAssignOp::Add => " +=",
+        crate::chunk::InPlaceAssignOp::Sub => " -=",
+        crate::chunk::InPlaceAssignOp::Mul => " *=",
+        crate::chunk::InPlaceAssignOp::Div => " /=",
+        crate::chunk::InPlaceAssignOp::Rem => " %=",
     }
 }
 

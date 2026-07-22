@@ -282,18 +282,17 @@ print(double(5))"#,
 
 #[test]
 fn method_call_records_back_assign_for_ident() {
-    // `arr.push(1)` is mutating; the compiler records the back-assign
-    // target so the VM knows to write the mutated array back.
+    // `arr.push(1)` is mutating; the compiler records the live binding as an
+    // in-place target instead of deep-cloning it through `LoadVar`.
     assert_disasm(
         "let arr = []\narr.push(1)",
         r#"
         0: MakeArray 0
         1: DefineLocal arr
-        2: LoadVar arr
-        3: LoadConst 1
-        4: CallMethod .push/1 (back to arr)
-        5: Pop
-        6: Halt
+        2: LoadConst 1
+        3: CallMethodInPlace .push/1 (target arr)
+        4: Pop
+        5: Halt
         "#,
     );
 }
@@ -319,30 +318,61 @@ fn index_get_and_set() {
         1: LoadConst 2
         2: MakeArray 2
         3: DefineLocal a
-        4: LoadVar a
+        4: LoadConst 99
         5: LoadConst 0
-        6: LoadConst 99
-        7: SetIndex
-        8: StoreVar a
-        9: LoadVar a
-        10: LoadConst 1
-        11: GetIndex
-        12: Call print/1
-        13: Pop
-        14: Halt
+        6: SetIndexInPlace (target a)
+        7: LoadVar a
+        8: LoadConst 1
+        9: GetIndex
+        10: Call print/1
+        11: Pop
+        12: Halt
         "#,
     );
 }
 
 #[test]
-fn compound_assign_on_index_uses_dup2() {
-    // `arr[i] += 1` needs to keep (arr, i) for the SetIndex after
-    // computing the new value — that's what Dup2 is for.
+fn compound_assign_on_index_is_target_aware() {
     let d = disasm("let a = [1]\na[0] += 1");
-    assert!(d.contains("Dup2"), "compound index-assign missing Dup2:\n{}", d);
-    assert!(d.contains("GetIndex"), "should read current value:\n{}", d);
-    assert!(d.contains("Add"), "should apply the compound op:\n{}", d);
-    assert!(d.contains("SetIndex"), "should write back:\n{}", d);
+    assert!(
+        d.contains("SetIndexInPlace += (target a)"),
+        "should mutate the live binding:\n{}",
+        d
+    );
+    assert!(!d.contains("LoadVar a"), "must not clone receiver:\n{}", d);
+    assert!(!d.contains("StoreVar a"), "must not clone-store receiver:\n{}", d);
+}
+
+#[test]
+fn named_field_assign_uses_in_place_target() {
+    let d = disasm(
+        r#"struct Counter { n }
+let c = Counter { n: 1 }
+c.n += 2"#,
+    );
+    assert!(
+        d.contains("FieldSetInPlace += .n (target c)"),
+        "should mutate the live binding:\n{}",
+        d
+    );
+    assert!(!d.contains("LoadVar c"), "must not clone receiver:\n{}", d);
+    assert!(!d.contains("StoreVar c"), "must not clone-store receiver:\n{}", d);
+}
+
+#[test]
+fn function_assignment_targets_use_slots_in_place() {
+    let d = disasm(
+        r#"fn update(a) {
+    a[0] = 4
+    return a
+}
+print(update([1]))"#,
+    );
+    assert!(
+        d.contains("SetIndexInPlace (target @0)"),
+        "function local should use direct slot target:\n{}",
+        d
+    );
 }
 
 #[test]

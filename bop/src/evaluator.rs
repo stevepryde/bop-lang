@@ -619,6 +619,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         None
     }
 
+    fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(value) = scope.get_mut(name) {
+                return Some(value);
+            }
+        }
+        None
+    }
+
     fn set_var(&mut self, name: &str, value: Value) -> bool {
         for scope in self.scopes.iter_mut().rev() {
             if scope.contains_key(name) {
@@ -1695,20 +1704,35 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let val_to_set = match op {
                     AssignOp::Eq => new_val,
                     _ => {
-                        let obj = self.eval_expr(object)?;
-                        let current = ops::index_get(&obj, &idx, line)?;
+                        let name = match &object.kind {
+                            ExprKind::Ident(name) => name,
+                            _ => {
+                                return Err(error(
+                                    line,
+                                    "Can only assign to indexed variables (like `arr[0] = val`)",
+                                ));
+                            }
+                        };
+                        let current = if let Some(obj) = self.get_var(name) {
+                            ops::index_get(obj, &idx, line)?
+                        } else {
+                            // Preserve the identifier evaluator's existing
+                            // not-found hint / named-function fallback on the
+                            // error path without cloning ordinary receivers.
+                            let obj = self.eval_expr(object)?;
+                            ops::index_get(&obj, &idx, line)?
+                        };
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };
                 if let ExprKind::Ident(name) = &object.kind {
-                    let mut obj = self
-                        .get_var(name)
-                        .ok_or_else(|| {
-                            error(line, format!("Variable `{}` doesn't exist", name))
-                        })?
-                        .clone();
-                    ops::index_set(&mut obj, &idx, val_to_set, line)?;
-                    self.set_var(name, obj);
+                    let obj = self.get_var_mut(name).ok_or_else(|| {
+                        error(line, format!("Variable `{}` doesn't exist", name))
+                    })?;
+                    // Mutate through the live binding. Cloning the receiver
+                    // first would temporarily raise its CoW refcount and force
+                    // an otherwise-unnecessary full backing-store detach.
+                    ops::index_set(obj, &idx, val_to_set, line)?;
                     Ok(())
                 } else {
                     Err(error(
@@ -1732,16 +1756,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                 };
-                let mut obj = self
-                    .get_var(&name)
-                    .ok_or_else(|| {
-                        error(line, format!("Variable `{}` doesn't exist", name))
-                    })?
-                    .clone();
                 let val_to_set = match op {
                     AssignOp::Eq => new_val,
                     _ => {
-                        let current = match &obj {
+                        let obj = self.get_var(&name).ok_or_else(|| {
+                            error(line, format!("Variable `{}` doesn't exist", name))
+                        })?;
+                        let current = match obj {
                             Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
                                 error(
                                     line,
@@ -1764,7 +1785,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };
-                match &mut obj {
+                let obj = self.get_var_mut(&name).ok_or_else(|| {
+                    error(line, format!("Variable `{}` doesn't exist", name))
+                })?;
+                match obj {
                     Value::Struct(s) => {
                         let struct_type = s.type_name().to_string();
                         if !s.try_set_field(field, val_to_set, line)? {
@@ -1784,7 +1808,6 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         ));
                     }
                 }
-                self.set_var(&name, obj);
                 Ok(())
             }
         }
@@ -1951,6 +1974,24 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let mut eval_args = Vec::new();
                 for arg in args {
                     eval_args.push(self.eval_expr(arg)?);
+                }
+
+                // Bare array bindings have unique, by-value ownership. Mutate
+                // that storage directly after evaluating every argument so
+                // calls such as `a.push(a.pop())` observe the inner mutation
+                // and append loops do not clone the receiver twice per turn.
+                // Runtime non-arrays continue through user/common dispatch.
+                if methods::is_mutating_method(method) {
+                    if let ExprKind::Ident(name) = &object.kind {
+                        if let Some(Value::Array(arr)) = self.get_var_mut(name) {
+                            return methods::array_method_mut(
+                                arr,
+                                method,
+                                eval_args,
+                                expr.line,
+                            );
+                        }
+                    }
                 }
                 let obj_val = self.eval_expr(object)?;
 
@@ -3527,5 +3568,55 @@ impl ReplSession {
         // `imports` is shared via `Rc` — nothing to do; the
         // cache the Evaluator wrote into is the same one the
         // session holds.
+    }
+}
+
+#[cfg(test)]
+mod array_mutation_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct TestHost {
+        prints: Vec<String>,
+    }
+
+    impl BopHost for TestHost {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            None
+        }
+
+        fn on_print(&mut self, message: &str) {
+            self.prints.push(message.to_string());
+        }
+    }
+
+    fn run(source: &str) -> Vec<String> {
+        let statements = crate::parse(source).expect("program should parse");
+        let mut host = TestHost::default();
+        Evaluator::new(&mut host, crate::BopLimits::standard())
+            .run(&statements)
+            .expect("program should run");
+        host.prints
+    }
+
+    #[test]
+    fn bare_array_mutation_observes_argument_effects_first() {
+        assert_eq!(
+            run("let a = [1, 2]\na.push(a.pop())\nprint(a)"),
+            ["[1, 2]"]
+        );
+    }
+
+    #[test]
+    fn direct_mutation_preserves_value_semantic_aliases() {
+        assert_eq!(
+            run("let a = [1, 2]\nlet b = a\na.push(3)\nprint(a)\nprint(b)"),
+            ["[1, 2, 3]", "[1, 2]"]
+        );
     }
 }

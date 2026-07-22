@@ -463,8 +463,7 @@ pub enum AssignTarget {
     Index { object: Expr, index: Expr },
     /// Assignment to a struct field: `obj.field = v`. Like
     /// `Index`, only a bare `Ident` for `object` is currently
-    /// assignable — the runtime clones out, mutates, and writes
-    /// back through the variable.
+    /// assignable — the runtime mutates directly through that binding.
     Field { object: Expr, field: String },
 }
 

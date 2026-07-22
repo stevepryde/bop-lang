@@ -3080,8 +3080,6 @@ impl Emitter {
             arg_tmps.push(tmp);
         }
 
-        let obj_src = self.expr_src(object)?;
-        let obj_tmp = self.fresh_tmp();
         // Two slices of the same args: one for the user
         // dispatcher, one for the builtin fallback. Cloning lets
         // each site own its own copy and matches the walker's
@@ -3118,58 +3116,98 @@ impl Emitter {
             None
         };
 
-        let mut body = String::new();
-        write!(body, "{{ {}let {} = {}; ", arg_lets, obj_tmp, obj_src).unwrap();
-        // Try user-defined methods first — the dispatcher returns
-        // `Some(Value)` when a match is found, else `None`
-        // (meaning "fall through to the built-in method
-        // dispatch"). Matches walker / VM precedence.
-        match ident_target {
-            Some(target) => {
-                write!(
-                    body,
-                    "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
+        // A mutating method on a bare identifier is the one shape where the
+        // language writes the receiver back. Arrays are owned values, so the
+        // binding itself can be mutated without violating value semantics:
+        // copy-on-write detaches only when an earlier assignment / argument
+        // still shares the backing store. Crucially, do this only after all
+        // argument temporaries above have evaluated. Besides matching the
+        // walker, that makes nested calls such as `a.push(a.pop())` observe the
+        // current post-argument binding.
+        //
+        // The receiver is dynamically typed. A struct may define a user method
+        // named `push`, so non-arrays still clone once and go through the full
+        // user-method-before-builtin dispatcher. Only the built-in Array arm
+        // takes the in-place path.
+        if let Some(target) = ident_target {
+            let owned_args = if arg_tmps.is_empty() {
+                "::std::vec::Vec::new()".to_string()
+            } else {
+                format!("::std::vec![{}]", arg_tmps.join(", "))
+            };
+            let obj_tmp = self.fresh_tmp();
+            let mut body = String::new();
+            write!(
+                body,
+                "{{ {}let __ret = if let ::bop::value::Value::Array(__bop_array) = &mut {} {{ \
+                    ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                }} else {{ \
+                    let {} = {}.clone(); \
+                    match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
                         Some(v) => v, \
                         None => {{ \
                             let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
                             if let Some(__new_obj) = __mutated {{ {} = __new_obj; }} \
                             __r \
                         }}, \
-                    }}; __ret }}",
-                    obj_tmp, method_lit, args_arr, line, obj_tmp, method_lit, args_arr, line, target
-                )
-                .unwrap();
-            }
-            None => {
-                let nested_guard = if nested_place {
-                    format!(
-                        "::bop::methods::reject_nested_array_mutation(&{}, {}, {})?; ",
-                        obj_tmp, method_lit, line
-                    )
-                } else {
-                    String::new()
-                };
-                write!(
-                    body,
-                    "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
-                        Some(v) => v, \
-                        None => {{ \
-                            {}let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
-                        }}, \
-                    }}; __ret }}",
-                    obj_tmp,
-                    method_lit,
-                    args_arr,
-                    line,
-                    nested_guard,
-                    obj_tmp,
-                    method_lit,
-                    args_arr,
-                    line
-                )
-                .unwrap();
-            }
+                    }} \
+                }}; __ret }}",
+                arg_lets,
+                target,
+                method_lit,
+                owned_args,
+                line,
+                obj_tmp,
+                target,
+                obj_tmp,
+                method_lit,
+                args_arr,
+                line,
+                obj_tmp,
+                method_lit,
+                args_arr,
+                line,
+                target,
+            )
+            .unwrap();
+            return Ok(body);
         }
+
+        let obj_src = self.expr_src(object)?;
+        let obj_tmp = self.fresh_tmp();
+        let mut body = String::new();
+        write!(body, "{{ {}let {} = {}; ", arg_lets, obj_tmp, obj_src).unwrap();
+        // Try user-defined methods first — the dispatcher returns
+        // `Some(Value)` when a match is found, else `None`
+        // (meaning "fall through to the built-in method
+        // dispatch"). Matches walker / VM precedence.
+        let nested_guard = if nested_place {
+            format!(
+                "::bop::methods::reject_nested_array_mutation(&{}, {}, {})?; ",
+                obj_tmp, method_lit, line
+            )
+        } else {
+            String::new()
+        };
+        write!(
+            body,
+            "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
+                Some(v) => v, \
+                None => {{ \
+                    {}let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
+                }}, \
+            }}; __ret }}",
+            obj_tmp,
+            method_lit,
+            args_arr,
+            line,
+            nested_guard,
+            obj_tmp,
+            method_lit,
+            args_arr,
+            line
+        )
+        .unwrap();
         Ok(body)
     }
 
@@ -4406,9 +4444,8 @@ fn __bop_validate_namespace_type(
     }
 }
 
-/// Write a struct field in place (on the owned Value), returning
-/// the modified struct. Mirrors the walker's clone-mutate-store
-/// pattern.
+/// Write a struct field on the owned live-binding value and return it.
+/// Moving the value into this helper keeps a unique CoW backing store unique.
 #[inline]
 fn __bop_field_set(
     mut obj: ::bop::value::Value,
@@ -4720,3 +4757,63 @@ const MAIN_FN_SANDBOX: &str = r#"fn main() {
     }
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::emit;
+    use crate::Options;
+
+    fn emitted(source: &str) -> String {
+        let statements = bop::parse(source).expect("parse test program");
+        emit(&statements, &Options::default()).expect("emit test program")
+    }
+
+    #[test]
+    fn mutating_ident_array_uses_in_place_dispatch() {
+        let output = emitted("let a = [1]\na.push(2)");
+
+        assert!(
+            output.contains("if let ::bop::value::Value::Array(__bop_array) = &mut a"),
+            "missing direct mutable Array binding:\n{output}"
+        );
+        assert!(
+            output.contains("::bop::methods::array_method_mut(__bop_array, \"push\""),
+            "missing shared in-place array dispatch:\n{output}"
+        );
+        assert!(
+            output.contains("} else { let ")
+                && output.contains("= a.clone(); match __bop_try_user_method"),
+            "dynamic non-array fallback must retain user-method dispatch:\n{output}"
+        );
+    }
+
+    #[test]
+    fn nested_mutating_argument_is_emitted_before_outer_receiver_borrow() {
+        let output = emitted("let a = [1, 2]\na.push(a.pop())");
+        let pop = output
+            .find("::bop::methods::array_method_mut(__bop_array, \"pop\"")
+            .expect("inner pop fast path");
+        let push = output
+            .find("::bop::methods::array_method_mut(__bop_array, \"push\"")
+            .expect("outer push fast path");
+
+        assert!(
+            pop < push,
+            "argument expression must execute before the outer receiver borrow:\n{output}"
+        );
+    }
+
+    #[test]
+    fn mutating_non_ident_keeps_value_dispatch_path() {
+        let output = emitted("[1].push(2)");
+
+        assert!(
+            !output.contains("::bop::methods::array_method_mut(__bop_array, \"push\""),
+            "temporary receiver must not use identifier write-back fast path:\n{output}"
+        );
+        assert!(
+            output.contains("__bop_call_method(ctx,"),
+            "temporary receiver should retain generic value dispatch:\n{output}"
+        );
+    }
+}

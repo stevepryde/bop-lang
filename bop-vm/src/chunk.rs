@@ -135,6 +135,14 @@ pub enum Instr {
     GetIndex,
     /// `[.., obj, idx, val]` → `[.., obj']` with `obj'[idx] == val`.
     SetIndex,
+    /// `[.., rhs, idx]` → `[..]`, applying `op` through the live named
+    /// binding. Keeping the receiver off-stack preserves refcount-1 CoW
+    /// mutation; carrying `op` lets compound assignment read the current
+    /// element only after RHS and index evaluation, matching the walker.
+    SetIndexInPlace {
+        target: AssignBack,
+        op: InPlaceAssignOp,
+    },
 
     // ─── String interpolation ─────────────────────────────────────
     /// Interpolate using a recipe from the chunk's interp pool. The
@@ -177,6 +185,17 @@ pub enum Instr {
         argc: u32,
         assign_back_to: Option<AssignBack>,
         nested_place: bool,
+    },
+    /// Mutating method call on a named receiver. Unlike `CallMethod`, the
+    /// receiver is not copied onto the value stack: after evaluating the
+    /// arguments, the VM resolves `target` and mutates an array binding's
+    /// owned buffer directly. Non-array bindings fall back to ordinary method
+    /// dispatch so user-defined methods named `push`, `pop`, etc. retain their
+    /// existing behaviour.
+    CallMethodInPlace {
+        target: AssignBack,
+        method: NameIdx,
+        argc: u32,
     },
 
     // ─── Functions ────────────────────────────────────────────────
@@ -269,10 +288,16 @@ pub enum Instr {
     /// struct-shaped payloads.
     FieldGet(NameIdx),
     /// `[.., obj, val]` → `[.., obj']` with `obj'.field = val`.
-    /// Used as the building block for `foo.field = v` — the
-    /// compiler emits a `StoreVar` after to write the modified
-    /// struct back.
+    /// Generic owned-value building block; named field assignment uses
+    /// [`Self::FieldSetInPlace`] to preserve unique CoW ownership.
     FieldSet(NameIdx),
+    /// `[.., rhs]` → `[..]`, applying `op` to `field` through the live
+    /// named binding without putting a receiver clone on the value stack.
+    FieldSetInPlace {
+        target: AssignBack,
+        field: NameIdx,
+        op: InPlaceAssignOp,
+    },
 
     // ─── Pattern matching ───────────────────────────────────────
     /// Pattern-match the top-of-stack value against `pattern`.
@@ -389,6 +414,17 @@ pub enum AssignBack {
     /// first entry named `name`, overwrite it. Matches the
     /// pre-slot `CallMethod` behaviour.
     Name(NameIdx),
+}
+
+/// Assignment operation carried by direct named index/field stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InPlaceAssignOp {
+    Eq,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
 }
 
 // ─── Constants and recipes ─────────────────────────────────────────

@@ -107,7 +107,9 @@ print(x)         // 1 — outer x is unchanged
 
 ## Copying and passing values
 
-Every value in Bop is a **copy**. When you assign a variable, pass an argument to a function, or return a value, you get an independent copy — even for arrays, dicts, and structs. Changing the copy never affects the original.
+Arrays, dicts, structs, and enum variants have **value semantics**. When you assign one, pass it to a function, or return it, the destination behaves like an independent copy. Changing either value never affects the other.
+
+Bop implements these copies with copy-on-write storage: the operation itself is constant-time and shares the existing container safely. The backing storage is copied only if one of the values is later mutated. This is an implementation detail — programs observe the same independent values without paying for an eager deep copy.
 
 ### Assignment copies
 
@@ -147,7 +149,7 @@ original = add_item(original, 99)
 print(original)      // [1, 2, 3, 99]
 ```
 
-This applies to every value type — numbers, strings, bools, arrays, dicts, structs, enum variants. Closures (`Value::Fn`) and modules (`Value::Module`) are reference-counted, so passing one of those around is cheap and the shared state is visible from both handles.
+The same ordinary value behavior applies to numbers, strings, and bools. Closures and modules are shared handles, while iterators intentionally share their cursor: advancing one iterator handle advances its aliases too.
 
 ## Dynamic typing
 
