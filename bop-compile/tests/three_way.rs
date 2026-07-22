@@ -1180,6 +1180,128 @@ fn Wrapper.len(self) { return 99 }
 let w = Wrapper { data: [1, 2, 3] }
 print(w.len())"#,
     ),
+    (
+        "method_declarations_follow_direct_and_branch_source_order",
+        r#"struct Box { value }
+let box = Box { value: 7 }
+print(try_call(fn() { return box.read() }).is_err())
+fn Box.read(self) { return self.value }
+print(box.read())
+if false { fn Box.dead(self) { return 1 } }
+print(try_call(fn() { return box.dead() }).is_err())
+if true { fn Box.live(self) { return self.value + 1 } }
+print(box.live())"#,
+    ),
+    (
+        "method_declarations_in_loops_overwrite_body_and_arity",
+        r#"struct Box { value }
+let box = Box { value: 5 }
+let turn = 0
+repeat 2 {
+    if turn == 0 { fn Box.pick(self) { return 10 } }
+    else { fn Box.pick(self, extra) { return self.value + extra } }
+    turn += 1
+}
+print(try_call(fn() { return box.pick() }).is_err())
+print(box.pick(4))
+for ignored in [1] { fn Box.from_for(self) { return self.value + 6 } }
+print(box.from_for())
+fn Box.zero() { return 99 }
+print(try_call(fn() { return box.zero() }).is_err())"#,
+    ),
+    (
+        "callable_lambda_and_nested_method_sites_install_on_execution",
+        r#"struct Box { value }
+let box = Box { value: 3 }
+fn install_named() { fn Box.named(self) { return self.value + 1 } }
+let install_lambda = fn() { fn Box.lambda(self) { return self.value + 2 } }
+print(try_call(fn() { return box.named() }).is_err(), try_call(fn() { return box.lambda() }).is_err())
+install_named()
+install_lambda()
+print(box.named(), box.lambda())
+fn Box.install_inner(self) { fn Box.inner(self) { return self.value + 3 } }
+print(try_call(fn() { return box.inner() }).is_err())
+box.install_inner()
+print(box.inner())
+fn Box.replace_self(self) {
+    fn Box.replace_self(self) { return 9 }
+    return 8
+}
+print(box.replace_self(), box.replace_self())
+fn returns_early() { return none
+    fn Box.after_return(self) { return 100 }
+}
+returns_early()
+print(try_call(fn() { return box.after_return() }).is_err())"#,
+    ),
+    (
+        "method_sites_do_not_capture_installer_values_and_survive_caught_error",
+        r#"struct Box { value }
+let box = Box { value: 2 }
+fn install_bad(secret) { fn Box.bad(self) { return secret } }
+install_bad(9)
+print(try_call(fn() { return box.bad() }).is_err())
+fn install_then_fail() {
+    fn Box.kept(self) { return self.value + 5 }
+    let boom = 1 / 0
+}
+print(try_call(install_then_fail).is_err())
+print(box.kept())"#,
+    ),
+    (
+        "methods_register_before_type_and_receive_self_by_value",
+        r#"fn Later.bump(self) { self.value += 1
+    return self.value
+}
+struct Later { value }
+let value = Later { value: 4 }
+print(value.bump(), value.value)"#,
+    ),
+    (
+        "active_zero_parameter_method_reports_exact_arity_error",
+        r#"struct Empty { }
+fn Empty.zero() { return none }
+Empty { }.zero()"#,
+    ),
+    (
+        "method_installer_values_are_exactly_uncaptured",
+        r#"struct Empty { }
+fn install(secret) { fn Empty.bad(self) { return secret } }
+install(9)
+Empty { }.bad()"#,
+    ),
+    (
+        "struct_and_enum_same_identity_share_method_key",
+        r#"struct Dual { value }
+enum Dual { Wrapped { value } }
+fn Dual.read(self) { return self.value }
+print(Dual { value: 6 }.read(), (Dual::Wrapped { value: 7 }).read())"#,
+    ),
+    (
+        "active_user_methods_precede_common_and_iterator_protocol",
+        r#"struct Token { value }
+fn Token.type(self) { return "user-type" }
+fn Token.len(self) { return 41 }
+fn Token.iter(self) { return self }
+fn Token.next(self) { return Iter::Done }
+let token = Token { value: 1 }
+print(token.type(), token.len())
+for item in token { print(item) }
+print(token.next())"#,
+    ),
+    (
+        "method_call_arguments_evaluate_before_receiver_on_active_arity_error",
+        r#"struct Box { value }
+let box = Box { value: 1 }
+fn Box.only_self(self) { return self.value }
+fn make_arg() { print("arg")
+    return 2
+}
+fn make_receiver(value) { print("receiver")
+    return value
+}
+print(try_call(fn() { return make_receiver(box).only_self(make_arg()) }).is_err())"#,
+    ),
     // ─── Pattern matching (phase 4) ─────────────────────────────
     (
         "match_literal_number",
@@ -1550,6 +1672,69 @@ print(match r {
 type ImportCase = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
 
 const IMPORTS_CORPUS: &[ImportCase] = &[
+    (
+        "module_methods_keep_full_receiver_identity",
+        r#"use left as left
+use right as right
+let a = left.Same { value: 2 }
+let b = right.Same { value: 3 }
+print(a.read(), b.read())"#,
+        &[
+            (
+                "left",
+                "struct Same { value }\nfn Same.read(self) { return self.value + 10 }",
+            ),
+            (
+                "right",
+                "struct Same { value }\nfn Same.read(self) { return self.value + 20 }",
+            ),
+        ],
+    ),
+    (
+        "selective_and_aliased_use_execute_module_method_sites",
+        r#"use direct.{Direct}
+use aliased as api
+let a = Direct { value: 4 }
+let b = api.Aliased { value: 5 }
+print(a.read(), b.read())"#,
+        &[
+            (
+                "direct",
+                "struct Direct { value }\nfn Direct.read(self) { return self.value + 1 }",
+            ),
+            (
+                "aliased",
+                "struct Aliased { value }\nfn Aliased.read(self) { return self.value + 2 }",
+            ),
+        ],
+    ),
+    (
+        "failed_parent_module_keeps_dependency_methods",
+        r#"fn load_bad() { use bad }
+print(try_call(load_bad).is_err())
+print(try_call(load_bad).is_err())
+use dep
+let value = Shared { value: 8 }
+print(value.read())"#,
+        &[
+            (
+                "dep",
+                "print(\"dep-loaded\")\nstruct Shared { value }\nfn Shared.read(self) { return self.value + 30 }",
+            ),
+            (
+                "bad",
+                r#"use dep
+struct Probe { }
+let leaked = try_call(fn() { return Probe { }.mark() }).is_ok()
+if leaked {
+    print("leaked")
+} else {
+    fn Probe.mark(self) { return true }
+    let boom = 1 / 0
+}"#,
+            ),
+        ],
+    ),
     (
         "import_basic_let",
         r#"use math

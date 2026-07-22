@@ -1131,7 +1131,6 @@ fn type_free_callables_and_loops_do_not_clone_runtime_type_context() {
     repeat n { total += 1 }
     return match total { 0 => 0, value => value }
 }
-
 let closure = fn(n) {
     let total = 0
     repeat n { total += 1 }
@@ -1145,6 +1144,78 @@ print(hot(3), closure(2))"#,
     ));
     assert!(!output.contains(
         "let mut __bop_type_bindings = __bop_type_bindings.clone()"
+    ));
+}
+
+#[test]
+fn method_free_program_omits_slot_table_and_registration_machinery() {
+    let output = compile("let values = [1, 2]\nprint(values.len())");
+
+    assert!(!output.contains("__BopMethodFn"));
+    assert!(!output.contains("method_slots:"));
+    assert!(!output.contains("__bop_method_adapter_"));
+    contains_all(
+        &output,
+        &[
+            "let _ = (ctx, obj, method, args, line);",
+            "fn __bop_try_user_method(",
+            "Ok(None)",
+        ],
+    );
+}
+
+#[test]
+fn method_sites_are_unique_but_share_one_dense_key_slot() {
+    let output = compile(
+        r#"struct Item { value }
+if true { fn Item.read(self) { return 1 } }
+if false { fn Item.read(self, extra) { return extra } }
+let install = fn() { fn Item.read(self) { return 3 } }"#,
+    );
+
+    contains_all(
+        &output,
+        &[
+            "pub method_slots: [::std::option::Option<__BopMethodFn>; 1]",
+            "fn __bop_method_site_0(",
+            "fn __bop_method_adapter_0(",
+            "fn __bop_method_site_1(",
+            "fn __bop_method_adapter_1(",
+            "fn __bop_method_site_2(",
+            "fn __bop_method_adapter_2(",
+            "ctx.method_slots[0] = ::std::option::Option::Some(__bop_method_adapter_0)",
+            "ctx.method_slots[0] = ::std::option::Option::Some(__bop_method_adapter_1)",
+            "ctx.method_slots[0] = ::std::option::Option::Some(__bop_method_adapter_2)",
+            "Some(adapter) => Ok(Some(adapter(ctx, obj, args, line)?))",
+        ],
+    );
+}
+
+#[test]
+fn failed_module_with_methods_snapshots_only_its_dense_slots() {
+    let output = compile_with_modules(
+        "fn retry() { use bad }\nuse dep",
+        &[
+            ("dep", "fn Shared.read(self) { return 1 }"),
+            (
+                "bad",
+                "use dep\nfn Own.read(self) { return 2 }\nlet boom = 1 / 0",
+            ),
+        ],
+    )
+    .expect("transpile method-bearing failing module");
+
+    contains_all(
+        &output,
+        &[
+            "let __saved_method_slots = [ctx.method_slots[0]];",
+            "ctx.method_slots[0] = __saved_method_slots[0];",
+            "let __saved_method_slots = [ctx.method_slots[1]];",
+            "ctx.method_slots[1] = ::std::option::Option::Some",
+        ],
+    );
+    assert!(!output.contains(
+        "let __saved_method_slots = [ctx.method_slots[0], ctx.method_slots[1]];"
     ));
 }
 
