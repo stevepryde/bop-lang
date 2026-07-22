@@ -24,7 +24,7 @@ use crate::lexer::StringPart;
 use crate::methods;
 use crate::ops;
 use crate::parser::*;
-use crate::value::{BopFn, EnumPayload, FnBody, Value};
+use crate::value::{BopFn, BopTypeExports, EnumPayload, FnBody, Value};
 use crate::{BopHost, BopLimits};
 
 /// What the tree-walker stores for each imported module once it
@@ -66,6 +66,9 @@ struct ModuleBindings {
     /// type_name), method_name, fn_def)` — the importer merges
     /// these directly into its own `methods` table.
     methods: Vec<((String, String), String, FnDef)>,
+    /// Public type names exposed by this module, retaining each type's
+    /// declaration module across facade re-exports.
+    type_exports: BTreeMap<String, String>,
     /// Module-owned lexical metadata that named functions and methods need
     /// after the loading evaluator has gone away. Installed as a protected
     /// outer call frame so caller-local aliases/types cannot affect the
@@ -383,6 +386,10 @@ pub struct Evaluator<'h, H: BopHost> {
     /// declared for `paint.Color` isn't accidentally called on
     /// `other.Color`.
     methods: BTreeMap<(String, String), BTreeMap<String, FnDef>>,
+    /// Public type projection for the module currently being evaluated.
+    /// Unlike `type_bindings`, this excludes builtins, aliases, and nested
+    /// declarations and is therefore safe to cache as the module's exports.
+    type_exports: BTreeMap<String, String>,
     /// Per-scope bare-name → module_path bindings for types
     /// *and* module aliases. Parallels `scopes`: a declared
     /// type or an aliased `use` binds `name → module_path` in
@@ -469,6 +476,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             struct_defs,
             enum_defs,
             methods: BTreeMap::new(),
+            type_exports: BTreeMap::new(),
             type_bindings: vec![builtin_bindings],
             module_aliases: vec![BTreeMap::new()],
             imported_functions: vec![BTreeMap::new()],
@@ -513,6 +521,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             struct_defs,
             enum_defs,
             methods: BTreeMap::new(),
+            type_exports: BTreeMap::new(),
             type_bindings: vec![builtin_bindings],
             module_aliases: vec![BTreeMap::new()],
             imported_functions: vec![BTreeMap::new()],
@@ -685,6 +694,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             top.insert(name.to_string(), self.current_module.clone());
         }
         if self.is_module_top_scope() {
+            self.type_exports
+                .insert(name.to_string(), self.current_module.clone());
             self.refresh_root_lexical_context();
         }
     }
@@ -1308,14 +1319,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 exports.iter().map(|(k, _)| k.as_str()).collect();
             for wanted in list {
                 if !available.contains(wanted.as_str())
-                    && !bindings
-                        .struct_defs
-                        .iter()
-                        .any(|((_, n), _)| n == wanted)
-                    && !bindings
-                        .enum_defs
-                        .iter()
-                        .any(|((_, n), _)| n == wanted)
+                    && !bindings.type_exports.contains_key(wanted)
                 {
                     return Err(error(
                         line,
@@ -1337,20 +1341,18 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // exactly the listed names; the glob form takes
         // everything public; the aliased form never binds bare
         // names (the alias is the only way in).
-        let module_type_names: Vec<String> = bindings
-            .struct_defs
-            .iter()
-            .map(|((_, n), _)| n.clone())
-            .chain(bindings.enum_defs.iter().map(|((_, n), _)| n.clone()))
-            .collect();
-        let exposed_types: Vec<String> = match items {
-            Some(list) => module_type_names
-                .into_iter()
-                .filter(|n| list.iter().any(|i| i == n))
+        let exposed_types: BTreeMap<String, String> = match items {
+            Some(list) => bindings
+                .type_exports
+                .iter()
+                .filter(|(name, _)| list.iter().any(|item| item == *name))
+                .map(|(name, origin)| (name.clone(), origin.clone()))
                 .collect(),
-            None => module_type_names
-                .into_iter()
-                .filter(|n| !crate::naming::is_private(n))
+            None => bindings
+                .type_exports
+                .iter()
+                .filter(|(name, _)| alias.is_some() || !crate::naming::is_private(name))
+                .map(|(name, origin)| (name.clone(), origin.clone()))
                 .collect(),
         };
 
@@ -1384,10 +1386,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             // calls resolve through that module's cached bindings. Publishing
             // these entries in `self.functions` would make `helper()` visible
             // after `use module as alias`, violating the alias-only surface.
-            let module_rc = crate::value::BopModule::try_new(
+            let module_rc = crate::value::BopModule::try_new_with_type_exports(
                 path.to_string(),
                 exports,
-                exposed_types,
+                BopTypeExports::from_origins(exposed_types),
                 line,
             )?;
             // Bind the alias three ways:
@@ -1478,17 +1480,22 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             // values): first definition wins. Types without an
             // explicit bare binding remain reachable through
             // the alias form only.
-            for tn in &exposed_types {
+            for (type_name, origin) in &exposed_types {
                 let already_bound = self
                     .type_bindings
                     .last()
-                    .map(|s| s.contains_key(tn))
+                    .map(|s| s.contains_key(type_name))
                     .unwrap_or(false);
                 if already_bound {
                     continue;
                 }
                 if let Some(scope) = self.type_bindings.last_mut() {
-                    scope.insert(tn.clone(), path.to_string());
+                    scope.insert(type_name.clone(), origin.clone());
+                }
+                if module_top_scope {
+                    self.type_exports
+                        .entry(type_name.clone())
+                        .or_insert_with(|| origin.clone());
                 }
             }
         }
@@ -1636,6 +1643,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             struct_defs,
             enum_defs,
             methods,
+            type_exports: sub.type_exports,
             lexical_context,
         })
     }
@@ -1643,10 +1651,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     /// Validate `ns.Type` — the caller wrote `ns.Type { ... }`
     /// or `ns.Type::Variant(...)`. `ns` must be a
     /// `Value::Module` in scope, and `Type` must appear in that
-    /// module's list of exported type names. The return is
-    /// `Ok(())` for now because types still register under their
-    /// bare names globally; once qualified type names land, this
-    /// is where we translate `ns.Type` into its qualified form.
+    /// module's exported type map. Construction and patterns use
+    /// [`Self::resolve_type_ref`] to recover the declaration origin.
     fn validate_namespaced_type(
         &self,
         ns: &str,
@@ -1673,7 +1679,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     ));
                 }
             };
-            if !module.types.iter().any(|t| t == type_name) {
+            if !module.has_type(type_name) {
                 return Err(error(
                     line,
                     format!(
@@ -1685,7 +1691,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             return Ok(());
         }
         if let Some(module) = self.module_alias(ns) {
-            if !module.types.iter().any(|t| t == type_name) {
+            if !module.has_type(type_name) {
                 return Err(error(
                     line,
                     format!(
@@ -2389,7 +2395,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
                             return Ok(v.clone());
                         }
-                        if m.types.iter().any(|t| t == field) {
+                        if m.has_type(field) {
                             // Types aren't first-class values; the
                             // parser should have taken the namespaced
                             // struct-lit / variant-ctor path
@@ -3340,10 +3346,8 @@ fn resolve_type_in_evaluator_context(
         for scope in value_scopes.iter().rev() {
             if let Some(value) = scope.get(namespace) {
                 return match value {
-                    Value::Module(module)
-                        if module.types.iter().any(|candidate| candidate == type_name) =>
-                    {
-                        Some(module.path.clone())
+                    Value::Module(module) => {
+                        module.type_origin(type_name).map(str::to_string)
                     }
                     _ => None,
                 };
@@ -3354,22 +3358,12 @@ fn resolve_type_in_evaluator_context(
                 continue;
             }
             if let Some(module) = aliases.get(namespace) {
-                return module
-                    .types
-                    .iter()
-                    .any(|candidate| candidate == type_name)
-                    .then(|| module.path.clone());
+                return module.type_origin(type_name).map(str::to_string);
             }
         }
         return defining_context
             .and_then(|context| context.module_aliases.get(namespace))
-            .and_then(|module| {
-                module
-                    .types
-                    .iter()
-                    .any(|candidate| candidate == type_name)
-                    .then(|| module.path.clone())
-            });
+            .and_then(|module| module.type_origin(type_name).map(str::to_string));
     }
 
     for (index, bindings) in type_scopes.iter().enumerate().rev() {
@@ -3408,9 +3402,7 @@ where
         for scope in value_scopes.iter().rev() {
             if let Some(value) = scope.get(ns) {
                 if let Value::Module(module) = value {
-                    if module.types.iter().any(|ty| ty == type_name) {
-                        return Some(module.path.clone());
-                    }
+                    return module.type_origin(type_name).map(str::to_string);
                 }
                 return None;
             }
@@ -3420,10 +3412,7 @@ where
                 continue;
             }
             if let Some(module) = frame.borrow().get(ns) {
-                if module.types.iter().any(|ty| ty == type_name) {
-                    return Some(module.path.clone());
-                }
-                return None;
+                return module.type_origin(type_name).map(str::to_string);
             }
         }
         return None;
@@ -3675,6 +3664,7 @@ pub struct ReplSession {
     struct_defs: BTreeMap<(String, String), Vec<String>>,
     enum_defs: BTreeMap<(String, String), Vec<VariantDecl>>,
     methods: BTreeMap<(String, String), BTreeMap<String, FnDef>>,
+    type_exports: BTreeMap<String, String>,
     type_bindings: Vec<BTreeMap<String, String>>,
     module_aliases: Vec<BTreeMap<String, Rc<crate::value::BopModule>>>,
     imported_functions: Vec<BTreeMap<String, FnDef>>,
@@ -3702,6 +3692,7 @@ impl ReplSession {
             struct_defs,
             enum_defs,
             methods: BTreeMap::new(),
+            type_exports: BTreeMap::new(),
             type_bindings: vec![builtin_bindings],
             module_aliases: vec![BTreeMap::new()],
             imported_functions: vec![BTreeMap::new()],
@@ -3879,6 +3870,7 @@ impl ReplSession {
             struct_defs: core::mem::take(&mut self.struct_defs),
             enum_defs: core::mem::take(&mut self.enum_defs),
             methods: core::mem::take(&mut self.methods),
+            type_exports: core::mem::take(&mut self.type_exports),
             type_bindings: core::mem::take(&mut self.type_bindings),
             module_aliases: core::mem::take(&mut self.module_aliases),
             imported_functions: core::mem::take(&mut self.imported_functions),
@@ -3925,6 +3917,7 @@ impl ReplSession {
         self.struct_defs = eval.struct_defs;
         self.enum_defs = eval.enum_defs;
         self.methods = eval.methods;
+        self.type_exports = eval.type_exports;
         self.type_bindings = type_bindings;
         let mut module_aliases = eval.module_aliases;
         if module_aliases.len() > 1 {

@@ -3117,6 +3117,142 @@ print(dynamic(), assigned(other.Point { value: 7 }))"#,
 }
 
 #[test]
+fn reexported_type_origins_survive_two_facades_and_dynamic_namespaces_diff() {
+    set_modules(&[
+        (
+            "leaf",
+            r#"struct Point { value }
+enum Signal { Idle, Count(value), Named { value } }
+fn make_point(value) { return Point { value: value } }
+fn make_named(value) { return Signal::Named { value: value } }"#,
+        ),
+        ("middle", "use leaf"),
+        ("top", "use middle"),
+        ("other", "struct Point { other }"),
+    ]);
+    let outcome = run_both(
+        r#"use top
+use top.{Point, Signal, make_point, make_named} as api
+use other as other
+let bare = Point { value: 1 }
+let unit = api.Signal::Idle
+let tuple = api.Signal::Count(2)
+let named = api.make_named(3)
+fn read(namespace, value) {
+    return match value { namespace.Point { value: found } => found, _ => 0 }
+}
+print(bare.value, read(api, api.make_point(4)), read(other, bare))
+print(match unit { api.Signal::Idle => "idle", _ => "bad" })
+print(match tuple { api.Signal::Count(value) => value, _ => 0 })
+print(match named { api.Signal::Named { value } => value, _ => 0 })"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1 4 0", "idle", "2", "3"]);
+}
+
+#[test]
+fn reexported_type_origins_preserve_diamonds_and_first_win_diff() {
+    set_modules(&[
+        ("leaf", "struct Shared { value }"),
+        ("left", "use leaf"),
+        ("right", "use leaf"),
+        ("diamond", "use left\nuse right"),
+        ("a", "struct Same { a }"),
+        ("b", "struct Same { b }"),
+        ("fa", "use a"),
+        ("fb", "use b"),
+        ("order_ab", "use fa\nuse fb"),
+        ("order_ba", "use fb\nuse fa"),
+    ]);
+    let outcome = run_both(
+        r#"use diamond as diamond
+use order_ab as ab
+use order_ba as ba
+let shared = diamond.Shared { value: 1 }
+let first = ab.Same { a: 2 }
+let second = ba.Same { b: 3 }
+print(shared.value, first.a, second.b)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1 2 3"]);
+}
+
+#[test]
+fn reexported_type_privacy_and_local_overwrite_rules_diff() {
+    set_modules(&[
+        ("leaf", "struct Public { value }\nstruct _Hidden { value }"),
+        ("glob", "use leaf"),
+        ("selective", "use leaf.{_Hidden}"),
+        ("local_before", "struct Public { local }\nuse leaf"),
+        ("local_after", "use leaf\nstruct Public { local }"),
+        ("nested", "if true { struct Nested { value } }"),
+    ]);
+    let outcome = run_both(
+        r#"use leaf as direct
+use selective as selected
+use local_before as before
+use local_after as after
+print(direct._Hidden { value: 1 }.value)
+print(selected._Hidden { value: 2 }.value)
+print(before.Public { local: 3 }.local, after.Public { local: 4 }.local)"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["1", "2", "3 4"]);
+
+    let error = run_err("use glob as facade\nfacade._Hidden { value: 1 }");
+    assert!(error.contains("_Hidden"), "got: {error}");
+    let nested_error = run_err("use nested.{Nested}");
+    assert!(nested_error.contains("Nested"), "got: {nested_error}");
+}
+
+#[test]
+fn reexported_types_keep_callable_context_and_method_identity_diff() {
+    set_modules(&[
+        ("helper", "fn increment(value) { return value + 1 }"),
+        (
+            "leaf",
+            r#"use helper as dep
+struct Box { value }
+fn Box.bump(self) { return dep.increment(self.value) }"#,
+        ),
+        (
+            "facade",
+            r#"use leaf
+fn make(value) { return Box { value: value } }
+fn matcher() {
+    return fn(value) {
+        return match value { Box { value: found } => found, _ => 0 }
+    }
+}"#,
+        ),
+        (
+            "callers",
+            r#"use facade as dep
+fn make_alias(value) { return dep.Box { value: value } }
+fn alias_matcher() {
+    return fn(value) {
+        return match value { dep.Box { value: found } => found, _ => 0 }
+    }
+}"#,
+        ),
+    ]);
+    let outcome = run_both(
+        r#"use facade as api
+use callers as calls
+let value = api.make(4)
+let aliased = calls.make_alias(6)
+print(value.bump(), api.matcher()(value))
+print(aliased.bump(), calls.alias_matcher()(aliased))"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["5 4", "7 6"]);
+}
+
+#[test]
 fn declaration_alias_mutable_places_require_an_overlay_diff() {
     set_modules(&[("types", "struct Point { value }")]);
     let outcome = run_both(

@@ -8,6 +8,7 @@
 
 #[cfg(feature = "no_std")]
 use alloc::{
+    collections::BTreeMap,
     format,
     rc::Rc,
     string::{String, ToString},
@@ -16,7 +17,7 @@ use alloc::{
 };
 
 #[cfg(not(feature = "no_std"))]
-use std::rc::Rc;
+use std::{collections::BTreeMap, rc::Rc};
 
 use core::cell::RefCell;
 
@@ -673,6 +674,48 @@ impl Drop for BopIter {
     }
 }
 
+/// Public type surface of a module. Each exposed name retains the module that
+/// originally declared it, so facade re-exports do not rewrite type identity.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BopTypeExports(BTreeMap<String, String>);
+
+impl BopTypeExports {
+    pub fn from_names(module_path: &str, names: Vec<String>) -> Self {
+        Self(
+            names
+                .into_iter()
+                .map(|name| (name, module_path.to_string()))
+                .collect(),
+        )
+    }
+
+    pub fn from_origins(origins: impl IntoIterator<Item = (String, String)>) -> Self {
+        // A map makes duplicate exposed names unrepresentable. Engine export
+        // projection establishes first-win/local-overwrite precedence before
+        // construction; if a general caller supplies duplicates, the final
+        // pair is authoritative just like `BTreeMap::collect`.
+        Self(origins.into_iter().collect())
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
+
+    pub fn origin(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(name, origin)| (name.as_str(), origin.as_str()))
+    }
+}
+
 /// Exported surface of a module, as presented through an aliased
 /// `use` statement. `Rc<BopModule>` is what a `Value::Module`
 /// carries so cloning the Value stays cheap.
@@ -684,11 +727,11 @@ pub struct BopModule {
     /// Exported `let` / `fn` / `const` bindings, in declaration
     /// order. Accessed via `m.name` field reads.
     pub bindings: Vec<(String, Value)>,
-    /// Names of struct / enum types the module declared.
-    /// Construction through the namespace (`m.Entity { ... }`)
-    /// verifies the type name appears in this list before
-    /// falling through to the engine's type registry.
+    /// Exported type names retained for source compatibility with embedders.
+    /// Origin-sensitive engine logic uses [`Self::type_origin`].
     pub types: Vec<String>,
+    /// Exposed struct / enum names and the module that declared each type.
+    type_exports: BopTypeExports,
     depth: u16,
 }
 
@@ -701,13 +744,47 @@ impl BopModule {
         types: Vec<String>,
         line: u32,
     ) -> Result<Rc<Self>, BopError> {
+        let type_exports = BopTypeExports::from_names(&path, types.clone());
+        Self::try_new_parts(path, bindings, types, type_exports, line)
+    }
+
+    pub fn try_new_with_type_exports(
+        path: String,
+        bindings: Vec<(String, Value)>,
+        type_exports: BopTypeExports,
+        line: u32,
+    ) -> Result<Rc<Self>, BopError> {
+        let types = type_exports.names().map(str::to_string).collect();
+        Self::try_new_parts(path, bindings, types, type_exports, line)
+    }
+
+    fn try_new_parts(
+        path: String,
+        bindings: Vec<(String, Value)>,
+        types: Vec<String>,
+        type_exports: BopTypeExports,
+        line: u32,
+    ) -> Result<Rc<Self>, BopError> {
         let depth = checked_owner_depth(bindings.iter().map(|(_, value)| value), 1, line)?;
         Ok(Rc::new(Self {
             path,
             bindings,
             types,
+            type_exports,
             depth,
         }))
+    }
+
+    pub fn has_type(&self, name: &str) -> bool {
+        self.type_exports.contains(name)
+    }
+
+    pub fn type_origin(&self, name: &str) -> Option<&str> {
+        self.type_exports.origin(name)
+    }
+
+    pub fn type_names(&self) -> impl Iterator<Item = &str> {
+        self.type_exports.names()
     }
 }
 
@@ -1028,6 +1105,16 @@ impl Value {
         line: u32,
     ) -> Result<Self, BopError> {
         BopModule::try_new(path, bindings, types, line).map(Value::Module)
+    }
+
+    pub fn new_module_with_type_exports(
+        path: String,
+        bindings: Vec<(String, Value)>,
+        type_exports: BopTypeExports,
+        line: u32,
+    ) -> Result<Self, BopError> {
+        BopModule::try_new_with_type_exports(path, bindings, type_exports, line)
+            .map(Value::Module)
     }
 }
 
@@ -1680,6 +1767,53 @@ mod display_tests {
         assert!(matches!(BopIter::next(&mut iter), Some(Value::Int(1))));
         assert!(matches!(Iterator::next(&mut *iter), Some(Value::Int(2))));
         assert!(BopIter::next(&mut iter).is_none());
+    }
+}
+
+#[cfg(test)]
+mod module_type_export_tests {
+    use super::*;
+
+    #[test]
+    fn direct_module_types_default_to_the_module_path() {
+        let module = BopModule::try_new(
+            "leaf".to_string(),
+            Vec::new(),
+            vec![
+                "Signal".to_string(),
+                "Point".to_string(),
+                "Signal".to_string(),
+            ],
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(module.type_origin("Point"), Some("leaf"));
+        assert_eq!(module.type_origin("Signal"), Some("leaf"));
+        assert_eq!(module.type_origin("Missing"), None);
+        assert_eq!(module.types, ["Signal", "Point", "Signal"]);
+    }
+
+    #[test]
+    fn facade_module_types_retain_declaration_origins() {
+        let exports = BopTypeExports::from_origins([
+            ("Point".to_string(), "leaf".to_string()),
+            ("Local".to_string(), "facade".to_string()),
+            ("Point".to_string(), "replacement".to_string()),
+        ]);
+        let module = BopModule::try_new_with_type_exports(
+            "facade".to_string(),
+            Vec::new(),
+            exports,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(module.type_origin("Point"), Some("replacement"));
+        assert_eq!(module.type_origin("Local"), Some("facade"));
+        assert!(module.has_type("Point"));
+        assert_eq!(module.type_names().collect::<Vec<_>>(), ["Local", "Point"]);
+        assert_eq!(module.types, ["Local", "Point"]);
     }
 }
 

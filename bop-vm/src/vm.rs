@@ -414,6 +414,8 @@ struct ModuleArtifacts {
     /// `((module_path, type_name), method_name, FnEntry)` for
     /// every method the module declared on its own types.
     methods: Vec<ModuleMethodDef>,
+    /// Public type names exposed by this module and their declaration origins.
+    type_exports: BTreeMap<String, String>,
     /// Private module-owned context restored for calls declared in this
     /// module. This is intentionally separate from the exported surface.
     lexical_context: Rc<ModuleLexicalContext>,
@@ -477,6 +479,8 @@ pub struct Vm<'h, H: BopHost> {
     /// method name. A method declared for `paint.Color` doesn't
     /// fire on `other.Color` — identity is strict.
     user_methods: BTreeMap<(String, String), BTreeMap<String, Rc<FnEntry>>>,
+    /// Public type projection for the module currently executing.
+    type_exports: BTreeMap<String, String>,
     /// Parallel scope-stack for bare-name type and module-alias
     /// resolution. Pushed / popped in lockstep with frame scopes,
     /// plus a fresh frame at fn-call entry so a fn's own type
@@ -547,6 +551,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             struct_defs,
             enum_defs,
             user_methods: BTreeMap::new(),
+            type_exports: BTreeMap::new(),
             type_bindings: vec![builtin_bindings],
             module_aliases: vec![BTreeMap::new()],
             imported_functions: vec![BTreeMap::new()],
@@ -2561,6 +2566,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
             scope.insert(name.to_string(), self.current_module.clone());
         }
         if self.is_module_top_scope() {
+            self.type_exports
+                .insert(name.to_string(), self.current_module.clone());
             self.refresh_root_lexical_context();
         }
     }
@@ -3031,7 +3038,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
                     return Ok(v.clone());
                 }
-                if m.types.iter().any(|t| t == field) {
+                if m.has_type(field) {
                     return Err(error(
                         line,
                         format!("`{}` in `{}` is a type, not a value", field, m.path),
@@ -3115,10 +3122,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     .and_then(|namespace| namespace.slot_idx())
                 {
                     return match frame.slots.get(slot.0 as usize) {
-                        Some(Value::Module(module))
-                            if module.types.iter().any(|name| name == tn) =>
-                        {
-                            Some(module.path.clone())
+                        Some(Value::Module(module)) => {
+                            module.type_origin(tn).map(str::to_string)
                         }
                         _ => None,
                     };
@@ -3470,14 +3475,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 exports.iter().map(|(k, _)| k.as_str()).collect();
             for wanted in list {
                 if !available.contains(wanted.as_str())
-                    && !artifacts
-                        .struct_defs
-                        .iter()
-                        .any(|((_, n), _)| n == wanted)
-                    && !artifacts
-                        .enum_defs
-                        .iter()
-                        .any(|((_, n), _)| n == wanted)
+                    && !artifacts.type_exports.contains_key(wanted)
                 {
                     return Err(error(
                         line,
@@ -3499,20 +3497,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // listed items that are types; glob = all public
         // (non-`_`-prefixed) types; aliased = none at bare name
         // (only reachable through the alias).
-        let module_type_names: Vec<String> = artifacts
-            .struct_defs
-            .iter()
-            .map(|((_, n), _)| n.clone())
-            .chain(artifacts.enum_defs.iter().map(|((_, n), _)| n.clone()))
-            .collect();
-        let exposed_types: Vec<String> = match items {
-            Some(list) => module_type_names
-                .into_iter()
-                .filter(|n| list.iter().any(|i| i == n))
+        let exposed_types: BTreeMap<String, String> = match items {
+            Some(list) => artifacts
+                .type_exports
+                .iter()
+                .filter(|(name, _)| list.iter().any(|item| item == *name))
+                .map(|(name, origin)| (name.clone(), origin.clone()))
                 .collect(),
-            None => module_type_names
-                .into_iter()
-                .filter(|n| !bop::naming::is_private(n))
+            None => artifacts
+                .type_exports
+                .iter()
+                .filter(|(name, _)| alias.is_some() || !bop::naming::is_private(name))
+                .map(|(name, origin)| (name.clone(), origin.clone()))
                 .collect(),
         };
 
@@ -3542,10 +3538,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     ),
                 ));
             }
-            let module_rc = bop::value::BopModule::try_new(
+            let module_rc = bop::value::BopModule::try_new_with_type_exports(
                 path.to_string(),
                 exports,
-                exposed_types,
+                bop::value::BopTypeExports::from_origins(exposed_types),
                 line,
             )?;
             // Bind the alias three ways:
@@ -3621,17 +3617,22 @@ impl<'h, H: BopHost> Vm<'h, H> {
             // too — `Color::Red` now resolves to *this*
             // module's Color. First-win on conflict matches the
             // value-binding rule.
-            for tn in &exposed_types {
+            for (type_name, origin) in &exposed_types {
                 let already_bound = self
                     .type_bindings
                     .last()
-                    .map(|s| s.contains_key(tn))
+                    .map(|s| s.contains_key(type_name))
                     .unwrap_or(false);
                 if already_bound {
                     continue;
                 }
                 if let Some(scope) = self.type_bindings.last_mut() {
-                    scope.insert(tn.clone(), path.to_string());
+                    scope.insert(type_name.clone(), origin.clone());
+                }
+                if module_top_scope {
+                    self.type_exports
+                        .entry(type_name.clone())
+                        .or_insert_with(|| origin.clone());
                 }
             }
         }
@@ -3681,14 +3682,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 ));
             }
         };
-        if module.types.iter().any(|candidate| candidate == type_name) {
-            Ok(module.path.clone())
-        } else {
-            Err(error(
+        module.type_origin(type_name).map(str::to_string).ok_or_else(|| {
+            error(
                 line,
                 format!("`{type_name}` isn't a type exported from `{}`", module.path),
-            ))
-        }
+            )
+        })
     }
 
     fn validate_namespaced_type(
@@ -3721,7 +3720,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         ));
                     }
                 };
-                if !module.types.iter().any(|t| t == type_name) {
+                if !module.has_type(type_name) {
                     return Err(error(
                         line,
                         format!(
@@ -3734,7 +3733,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
         }
         if let Some(module) = self.module_alias(ns) {
-            if !module.types.iter().any(|t| t == type_name) {
+            if !module.has_type(type_name) {
                 return Err(error(
                     line,
                     format!(
@@ -3889,6 +3888,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             struct_defs,
             enum_defs,
             methods,
+            type_exports: sub.type_exports,
             lexical_context,
         })
     }
@@ -4315,10 +4315,8 @@ fn resolve_type_in_frame(
         for scope in value_scopes.iter().rev() {
             if let Some(value) = scope.get(namespace) {
                 return match value {
-                    Value::Module(module)
-                        if module.types.iter().any(|candidate| candidate == type_name) =>
-                    {
-                        Some(module.path.clone())
+                    Value::Module(module) => {
+                        module.type_origin(type_name).map(str::to_string)
                     }
                     _ => None,
                 };
@@ -4330,24 +4328,14 @@ fn resolve_type_in_frame(
                 continue;
             }
             if let Some(module) = aliases.get(namespace) {
-                return module
-                    .types
-                    .iter()
-                    .any(|candidate| candidate == type_name)
-                    .then(|| module.path.clone());
+                return module.type_origin(type_name).map(str::to_string);
             }
         }
         return frame
             .lexical_context
             .module_aliases
             .get(namespace)
-            .and_then(|module| {
-                module
-                    .types
-                    .iter()
-                    .any(|candidate| candidate == type_name)
-                    .then(|| module.path.clone())
-            });
+            .and_then(|module| module.type_origin(type_name).map(str::to_string));
     }
 
     let floor = frame.is_function.then_some(frame.type_scope_base.saturating_sub(1));
