@@ -864,12 +864,17 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
 
             StmtKind::FnDecl { name, params, body } => {
+                let module_path = self
+                    .function_modules
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| self.current_module.clone());
                 self.functions.insert(
                     name.clone(),
                     FnDef {
                         params: params.clone(),
                         body: body.clone(),
-                        module_path: self.current_module.clone(),
+                        module_path,
                     },
                 );
                 Ok(Signal::None)

@@ -641,6 +641,7 @@ fn collect_top_level_fn_params(stmts: &[Stmt]) -> HashMap<String, Vec<String>> {
 /// reachable from outside its defining block and therefore
 /// eligible to be turned into a first-class `Value::Fn` via an
 /// emitted wrapper.
+#[derive(Clone)]
 struct FnInfo {
     all_fns: HashMap<String, Vec<String>>,
     top_level_fns: HashSet<String>,
@@ -1593,21 +1594,39 @@ impl Emitter {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for ((_module_path, type_name, method_name), entry) in &entries {
+        for ((module_path, type_name, method_name), entry) in &entries {
+            let method_fn_name = rust_fn_name_with(
+                &method_fn_prefix(&entry.module_prefix, type_name),
+                method_name,
+            );
             let saved_prefix = std::mem::replace(
                 &mut self.module_prefix,
-                method_fn_prefix(&entry.module_prefix, type_name),
+                entry.module_prefix.clone(),
             );
+            let mut method_fn_info = collect_fn_info(&entry.body);
+            // The method's Rust symbol stays type-qualified, while calls in
+            // its body resolve against the declaring module's functions.
+            let module_fn_info = if module_path == bop::value::ROOT_MODULE_PATH {
+                self.fn_info.clone()
+            } else {
+                let module = self
+                    .modules
+                    .modules
+                    .get(module_path)
+                    .expect("method's declaring module must be in the module graph");
+                collect_fn_info(&module.ast)
+            };
+            for (name, params) in module_fn_info.all_fns {
+                method_fn_info.all_fns.entry(name).or_insert(params);
+            }
+            method_fn_info
+                .top_level_fns
+                .extend(module_fn_info.top_level_fns);
             let saved_fn_info = std::mem::replace(
                 &mut self.fn_info,
-                collect_fn_info(&entry.body),
+                method_fn_info,
             );
-            self.emit_fn_decl(
-                method_name,
-                &entry.params,
-                &entry.body,
-                0,
-            )?;
+            self.emit_fn_decl_as(&method_fn_name, &entry.params, &entry.body, 0)?;
             self.fn_info = saved_fn_info;
             self.module_prefix = saved_prefix;
         }
@@ -2129,6 +2148,16 @@ impl Emitter {
         line: u32,
     ) -> Result<(), BopError> {
         let fn_name = self.rust_fn_name(name);
+        self.emit_fn_decl_as(&fn_name, params, body, line)
+    }
+
+    fn emit_fn_decl_as(
+        &mut self,
+        fn_name: &str,
+        params: &[String],
+        body: &[Stmt],
+        line: u32,
+    ) -> Result<(), BopError> {
         let param_list = params
             .iter()
             .map(|p| format!("mut {}: ::bop::value::Value", rust_user_ident(p)))

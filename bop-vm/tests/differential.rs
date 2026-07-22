@@ -2321,8 +2321,13 @@ fn recurse(n) {
     if n == 0 { return 0 }
     return 1 + recurse(n - 1)
 }
+fn factory() {
+    fn nested(n) { return helper(n) }
+    return nested
+}
 let closure = fn(n) { return helper(n) }
 struct Thing { value }
+fn Thing.bump(self) { return helper(self.value) }
 let public = 10
 let _private = 99"#,
     )]);
@@ -2333,13 +2338,19 @@ print(module.twice(3))
 print(module.recurse(4))
 let returned = module.twice
 print(returned(5))
+let nested = module.factory()
+print(nested(7))
 print(module.closure(6))
 print(module.Thing { value: 7 }.value)
+print(module.Thing { value: 8 }.bump())
 print(module._private)"#,
         &standard(),
     );
     assert!(positive.is_ok(), "unexpected error: {:?}", positive.error);
-    assert_eq!(positive.prints, ["8", "4", "12", "7", "7", "99"]);
+    assert_eq!(
+        positive.prints,
+        ["8", "4", "12", "8", "7", "7", "9", "99"]
+    );
 
     let function_error = run_err(
         r#"use internal as module

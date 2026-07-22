@@ -1419,6 +1419,7 @@ print(module.recurse(4))
 let returned = module.twice
 print(returned(5))
 print(module.closure(6))
+print(module.Thing { value: 7 }.bump())
 print(module._private)"#,
         &[(
             "internal",
@@ -1429,6 +1430,8 @@ fn recurse(n) {
     return 1 + recurse(n - 1)
 }
 let closure = fn(n) { return helper(n) }
+struct Thing { value }
+fn Thing.bump(self) { return helper(self.value) }
 let _private = 99"#,
         )],
     ),
