@@ -3447,6 +3447,104 @@ print(final_value.api)"#,
 }
 
 #[test]
+fn type_bindings_follow_top_level_source_order_diff() {
+    set_modules(&[(
+        "types",
+        r#"struct Imported { value }
+enum ImportedSignal { Idle, Pair(left, right), Named { value } }"#,
+    )]);
+    let outcome = run_both(
+        r#"fn direct() { return Point { value: 1 } }
+fn direct_enum() { return Signal::Idle }
+fn imported() { return Imported { value: 2 } }
+fn imported_enum() { return ImportedSignal::Pair(3, 4) }
+fn direct_pattern() {
+    return match (Point { value: 5 }) { Point { value } => value, _ => 0 }
+}
+struct Runner { marker }
+fn Runner.build(self) { return Point { value: self.marker } }
+let runner = Runner { marker: 7 }
+let delayed = fn() { return Point { value: 6 } }
+print(try_call(direct).is_err(), try_call(direct_enum).is_err())
+print(try_call(delayed).is_err(), try_call(fn() { return runner.build() }).is_err())
+print(try_call(imported).is_err(), try_call(imported_enum).is_err())
+struct Point { value }
+enum Signal { Idle, Pair(left, right), Named { value } }
+print(direct().value, direct_pattern(), delayed().value, runner.build().value)
+print(match direct_enum() { Signal::Idle => "idle", _ => "bad" })
+print(match Signal::Pair(7, 8) { Signal::Pair(left, right) => left + right, _ => 0 })
+print(match (Signal::Named { value: 9 }) { Signal::Named { value } => value, _ => 0 })
+use types.{Imported}
+use types
+print(imported().value)
+print(match imported_enum() { ImportedSignal::Pair(left, right) => left + right, _ => 0 })"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        [
+            "true true",
+            "true true",
+            "true true",
+            "1 5 6 7",
+            "idle",
+            "15",
+            "9",
+            "2",
+            "7",
+        ]
+    );
+}
+
+#[test]
+fn imported_module_type_timing_and_retry_cleanup_diff() {
+    set_modules(&[
+        ("dep", "print(\"dep\")\nstruct P { value }"),
+        (
+            "timing",
+            r#"fn build() { return P { value: 10 } }
+fn matches() { return match (P { value: 11 }) { P { value } => value, _ => 0 } }
+print(try_call(build).is_err(), try_call(matches).is_err())
+use dep.{P}
+print(build().value, matches())"#,
+        ),
+        (
+            "bad",
+            r#"fn bare() { return P { value: 12 } }
+fn qualified() { return api.P { value: 13 } }
+print(try_call(bare).is_err(), try_call(qualified).is_err())
+use dep.{P}
+use dep as api
+print(try_call(bare).is_ok(), try_call(qualified).is_ok())
+let boom = 1 / 0"#,
+        ),
+    ]);
+    let outcome = run_both(
+        r#"use timing
+fn load_bad() { use bad }
+print(try_call(load_bad).is_err())
+print(try_call(load_bad).is_err())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        [
+            "true true",
+            "dep",
+            "10 11",
+            "true true",
+            "true true",
+            "true",
+            "true true",
+            "true true",
+            "true",
+        ]
+    );
+}
+
+#[test]
 fn declaration_alias_mutable_places_require_an_overlay_diff() {
     set_modules(&[("types", "struct Point { value }")]);
     let outcome = run_both(
