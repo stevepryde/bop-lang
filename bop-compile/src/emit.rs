@@ -36,7 +36,7 @@ use bop::error::BopError;
 use bop::lexer::StringPart;
 use bop::parser::{
     AssignOp, AssignTarget, BinOp, Expr, ExprKind, MatchArm, Stmt, StmtKind, UnaryOp, VariantKind,
-    VariantDecl, VariantPayload,
+    VariantDecl, VariantPayload, Visibility,
 };
 
 use crate::Options;
@@ -48,9 +48,69 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
     let modules = build_module_graph(stmts, opts)?;
     let info = collect_fn_info(stmts);
     let types = collect_type_registry(stmts, &modules)?;
-    let mut emitter = Emitter::new(opts.clone(), info, modules, types);
+    let functions = collect_function_registry(stmts, &modules);
+    let mut emitter = Emitter::new(opts.clone(), info, modules, types, functions);
     emitter.emit_program(stmts)?;
     Ok(emitter.finish())
+}
+
+// ─── Persistent function-site catalogue ──────────────────────────
+
+/// A unique source declaration that can participate in a persistent module
+/// environment. Names are deliberately not keys: repeated declarations must
+/// remain distinct so runtime source order can select the final executed site.
+#[derive(Clone)]
+struct FunctionSite {
+    id: usize,
+    module_path: String,
+    name: String,
+    params: Vec<String>,
+    visibility: Visibility,
+    line: u32,
+}
+
+#[derive(Clone, Default)]
+struct FunctionRegistry {
+    sites: Vec<FunctionSite>,
+}
+
+fn collect_function_registry(root: &[Stmt], modules: &ModuleGraph) -> FunctionRegistry {
+    fn collect_module_top_level(
+        stmts: &[Stmt],
+        module_path: &str,
+        sites: &mut Vec<FunctionSite>,
+    ) {
+        for stmt in stmts {
+            let StmtKind::FnDecl {
+                name,
+                params,
+                visibility,
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            sites.push(FunctionSite {
+                id: sites.len(),
+                module_path: module_path.to_string(),
+                name: name.clone(),
+                params: params.clone(),
+                visibility: *visibility,
+                line: stmt.line,
+            });
+        }
+    }
+
+    let mut sites = Vec::new();
+    collect_module_top_level(root, bop::value::ROOT_MODULE_PATH, &mut sites);
+    for module_path in &modules.order {
+        let module = modules
+            .modules
+            .get(module_path)
+            .expect("ordered module must exist");
+        collect_module_top_level(&module.ast, module_path, &mut sites);
+    }
+    FunctionRegistry { sites }
 }
 
 // ─── Type / method registry ────────────────────────────────────────
@@ -1094,6 +1154,9 @@ struct Emitter {
     fn_info: FnInfo,
     modules: ModuleGraph,
     types: TypeRegistry,
+    /// Unique top-level declaration sites used by sandboxed persistent-state
+    /// lowering. Kept separate from name-keyed call-resolution metadata.
+    functions: FunctionRegistry,
     /// Counter for temporary locals (`__t0`, `__t1`, …). Reset at
     /// the start of each fn / top-level program so the names stay
     /// short.
@@ -1184,6 +1247,7 @@ impl Emitter {
         fn_info: FnInfo,
         modules: ModuleGraph,
         types: TypeRegistry,
+        functions: FunctionRegistry,
     ) -> Self {
         // Seed the outermost type_bindings frame with the
         // engine-wide builtins so bare `Result::Ok(...)` and
@@ -1210,6 +1274,7 @@ impl Emitter {
             fn_info,
             modules,
             types,
+            functions,
             tmp_counter: 0,
             type_site_counter: 0,
             module_prefix: String::new(),
@@ -2686,10 +2751,37 @@ impl Emitter {
         };
         self.out
             .push_str(&ctx_template.replace("/*__BOP_METHOD_SLOTS__*/", &method_field));
+        if self.opts.sandbox {
+            self.emit_function_site_catalogue();
+        }
         self.out.push_str(RUNTIME_SHARED);
         if self.opts.sandbox {
             self.out.push_str(TICK_HELPER);
         }
+    }
+
+    fn emit_function_site_catalogue(&mut self) {
+        self.out
+            .push_str("const __BOP_FUNCTION_SITES: &[__BopFunctionSite] = &[\n");
+        for site in &self.functions.sites {
+            let params = site
+                .params
+                .iter()
+                .map(|param| rust_string_literal(param))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                self.out,
+                "    __BopFunctionSite {{ id: {id}, module_path: {module}, name: {name}, params: &[{params}], is_public: {is_public}, line: {line} }},",
+                id = site.id,
+                module = rust_string_literal(&site.module_path),
+                name = rust_string_literal(&site.name),
+                is_public = site.visibility == Visibility::Public,
+                line = site.line,
+            )
+            .unwrap();
+        }
+        self.out.push_str("];\n\n");
     }
 
     fn emit_public_entry(&mut self) {
@@ -5501,16 +5593,18 @@ const CTX_BASE: &str = r#"pub struct Ctx<'h> {
 
 "#;
 
-const CTX_SANDBOX: &str = r#"pub struct Ctx<'h> {
-    pub host: &'h mut dyn ::bop::BopHost,
+const CTX_SANDBOX: &str = r#"#[derive(Clone, Copy)]
+struct __BopFunctionSite {
+    id: usize,
+    module_path: &'static str,
+    name: &'static str,
+    params: &'static [&'static str],
+    is_public: bool,
+    line: u32,
+}
+
+struct __BopState {
     pub rand_state: u64,
-    /// Tick counter — bumped by `__bop_tick` at every loop
-    /// backedge and fn entry so runaway programs hit the step
-    /// budget before they exhaust the host.
-    pub steps: u64,
-    /// Upper bound on `steps`, populated from
-    /// `BopLimits::max_steps` at `run()` entry.
-    pub max_steps: u64,
     /// Per-program module cache keyed by the Bop module path (the
     /// dot-joined string). `load` fns use this to memoise imports
     /// and to spot circular dependencies via the `__ModuleLoading`
@@ -5537,6 +5631,32 @@ const CTX_SANDBOX: &str = r#"pub struct Ctx<'h> {
         >,
     >,
 /*__BOP_METHOD_SLOTS__*/
+}
+
+struct Ctx<'h> {
+    host: &'h mut dyn ::bop::BopHost,
+    state: &'h mut __BopState,
+    /// Tick counter — bumped by `__bop_tick` at every loop
+    /// backedge and fn entry so runaway programs hit the step
+    /// budget before they exhaust the host.
+    steps: u64,
+    /// Upper bound on `steps`, populated from
+    /// `BopLimits::max_steps` at operation entry.
+    max_steps: u64,
+}
+
+impl<'h> ::core::ops::Deref for Ctx<'h> {
+    type Target = __BopState;
+
+    fn deref(&self) -> &Self::Target {
+        self.state
+    }
+}
+
+impl<'h> ::core::ops::DerefMut for Ctx<'h> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.state
+    }
 }
 
 "#;
@@ -6678,17 +6798,20 @@ pub fn run<H: ::bop::BopHost>(
     limits: &::bop::BopLimits,
 ) -> Result<(), ::bop::error::BopError> {
     ::bop::memory::bop_memory_init(limits.max_memory);
-    let mut ctx = Ctx {
-        host: host as &mut dyn ::bop::BopHost,
+    let mut state = __BopState {
         rand_state: 0,
-        steps: 0,
-        max_steps: limits.max_steps,
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
         module_type_bindings: ::std::collections::HashMap::new(),
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),
 /*__BOP_METHOD_SLOTS_INIT__*/
+    };
+    let mut ctx = Ctx {
+        host: host as &mut dyn ::bop::BopHost,
+        state: &mut state,
+        steps: 0,
+        max_steps: limits.max_steps,
     };
     __bop_seed_builtin_type_defs(&mut ctx)?;
     run_program(&mut ctx)

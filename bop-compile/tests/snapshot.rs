@@ -690,6 +690,39 @@ fn sandbox_on_emits_tick_helper_and_limits_param() {
 }
 
 #[test]
+fn sandbox_state_is_persistent_while_operation_context_is_ephemeral() {
+    let sandbox = compile_sandbox("print(1)");
+    contains_all(
+        &sandbox,
+        &[
+            "struct __BopState",
+            "struct Ctx<'h>",
+            "state: &'h mut __BopState",
+            "impl<'h> ::core::ops::Deref for Ctx<'h>",
+            "let mut state = __BopState",
+            "state: &mut state",
+        ],
+    );
+    let unsandboxed = compile("print(1)");
+    assert!(!unsandboxed.contains("__BopState"));
+    assert!(!unsandboxed.contains("__BOP_FUNCTION_SITES"));
+}
+
+#[test]
+fn sandbox_catalogues_repeated_function_declarations_by_unique_site() {
+    let out = compile_sandbox(
+        "pub fn entry(x) { return x }\npub fn entry(x, y) { return y }",
+    );
+    contains_all(
+        &out,
+        &[
+            "__BopFunctionSite { id: 0, module_path: \"<root>\", name: \"entry\", params: &[\"x\"], is_public: true, line: 1 }",
+            "__BopFunctionSite { id: 1, module_path: \"<root>\", name: \"entry\", params: &[\"x\", \"y\"], is_public: true, line: 2 }",
+        ],
+    );
+}
+
+#[test]
 fn sandbox_emits_tick_at_while_iteration() {
     let out = norm(&compile_sandbox("while true { let x = 1 }"));
     assert!(
