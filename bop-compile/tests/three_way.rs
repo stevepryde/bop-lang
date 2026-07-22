@@ -379,6 +379,30 @@ const CORPUS: &[(&str, &str)] = &[
 let version = 2
 print("hi {name} v{version}!")"#,
     ),
+    (
+        "aot_identifier_hygiene",
+        r#"fn subtract(a, b) { return a - b }
+fn yield(crate, super, ctx) { return crate + super + ctx }
+struct Holder { n }
+fn Holder.read(self) {
+    let bop_self = 40
+    return self.n + bop_self
+}
+let __t0 = 1
+let __t1 = 2
+let __l = 4
+let ctx = 3
+let crate = 5
+let super = 6
+let x = 10
+let __bop_user_value_78 = 20
+let holder = Holder { n: 2 }
+print(subtract(__t1, __t0))
+print(1 + __l)
+print(yield(crate, super, ctx))
+print(x, __bop_user_value_78)
+print(holder.read())"#,
+    ),
     ("equality", "print(1 == 1)\nprint(1 == 2)\nprint(1 != 2)"),
     (
         "ordering",
@@ -1198,6 +1222,16 @@ print(square(7))"#,
         r#"use std.math
 print(e)"#,
         &[("std.math", "let e = 2")],
+    ),
+    (
+        "import_dot_underscore_slug_collision",
+        r#"use a.b as dotted
+use a_b as underscored
+print(dotted.helper(), dotted.ctx, underscored.helper(), underscored.yield)"#,
+        &[
+            ("a.b", "let ctx = 10\nfn helper() { return 1 }"),
+            ("a_b", "let yield = 20\nfn helper() { return 2 }"),
+        ],
     ),
     (
         "import_transitive",
