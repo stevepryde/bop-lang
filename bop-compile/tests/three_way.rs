@@ -1408,6 +1408,94 @@ print(square(7))"#,
         &[("math", "fn square(n) { return n * n }")],
     ),
     (
+        "reexported_type_origins_two_hop_facade",
+        r#"use top
+use top.{Point, Signal, make_point, make_named} as api
+use other as other
+let bare = Point { value: 1 }
+let unit = api.Signal::Idle
+let tuple = api.Signal::Count(2)
+let named = api.make_named(3)
+fn read(namespace, value) {
+    return match value { namespace.Point { value: found } => found, _ => 0 }
+}
+print(bare.value, read(api, api.make_point(4)), read(other, bare))
+print(match unit { api.Signal::Idle => "idle", _ => "bad" })
+print(match tuple { api.Signal::Count(value) => value, _ => 0 })
+print(match named { api.Signal::Named { value } => value, _ => 0 })"#,
+        &[
+            (
+                "leaf",
+                "struct Point { value }\nenum Signal { Idle, Count(value), Named { value } }\nfn make_point(value) { return Point { value: value } }\nfn make_named(value) { return Signal::Named { value: value } }",
+            ),
+            ("middle", "use leaf"),
+            ("top", "use middle"),
+            ("other", "struct Point { other }"),
+        ],
+    ),
+    (
+        "reexported_type_origins_diamond_and_first_win",
+        r#"use diamond as diamond
+use order_ab as ab
+use order_ba as ba
+let shared = diamond.Shared { value: 1 }
+let first = ab.Same { a: 2 }
+let second = ba.Same { b: 3 }
+print(shared.value, first.a, second.b)"#,
+        &[
+            ("leaf", "struct Shared { value }"),
+            ("left", "use leaf"),
+            ("right", "use leaf"),
+            ("diamond", "use left\nuse right"),
+            ("a", "struct Same { a }"),
+            ("b", "struct Same { b }"),
+            ("fa", "use a"),
+            ("fb", "use b"),
+            ("order_ab", "use fa\nuse fb"),
+            ("order_ba", "use fb\nuse fa"),
+        ],
+    ),
+    (
+        "reexported_type_origins_private_and_local_overwrite",
+        r#"use leaf as direct
+use selective as selected
+use local_before as before
+use local_after as after
+print(direct._Hidden { value: 1 }.value)
+print(selected._Hidden { value: 2 }.value)
+print(before.Public { local: 3 }.local, after.Public { local: 4 }.local)"#,
+        &[
+            ("leaf", "struct Public { value }\nstruct _Hidden { value }"),
+            ("selective", "use leaf.{_Hidden}"),
+            ("local_before", "struct Public { local }\nuse leaf"),
+            ("local_after", "use leaf\nstruct Public { local }"),
+        ],
+    ),
+    (
+        "reexported_types_callable_context_and_method_identity",
+        r#"use facade as api
+use callers as calls
+let value = api.make(4)
+let aliased = calls.make_alias(6)
+print(value.bump(), api.matcher()(value))
+print(aliased.bump(), calls.alias_matcher()(aliased))"#,
+        &[
+            ("helper", "fn increment(value) { return value + 1 }"),
+            (
+                "leaf",
+                "use helper as dep\nstruct Box { value }\nfn Box.bump(self) { return dep.increment(self.value) }",
+            ),
+            (
+                "facade",
+                "use leaf\nfn make(value) { return Box { value: value } }\nfn matcher() { return fn(value) { return match value { Box { value: found } => found, _ => 0 } } }",
+            ),
+            (
+                "callers",
+                "use facade as dep\nfn make_alias(value) { return dep.Box { value: value } }\nfn alias_matcher() { return fn(value) { return match value { dep.Box { value: found } => found, _ => 0 } } }",
+            ),
+        ],
+    ),
+    (
         "root_named_fn_declaration_alias_context",
         r#"use types as t
 fn build(value) {

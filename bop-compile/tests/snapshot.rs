@@ -1190,7 +1190,7 @@ let result = match value {
     .expect("an unselected pattern type remains a legal non-matching pattern");
 
     assert!(out.contains("Option::Some(\"narrowed\"), __tn"));
-    assert!(out.contains("__module.types.iter().any(|__type| __type == __tn)"));
+    assert!(out.contains("__module.type_origin(__tn).map(str::to_string)"));
 }
 
 #[test]
@@ -1236,11 +1236,36 @@ fn aliased_use_constructs_a_depth_checked_module_value() {
         .expect("transpile aliased module");
     contains_all(
         &out,
-        &["Value::new_module(\"helpers\".to_string()", ", 2)?;"],
+        &[
+            "Value::new_module_with_type_exports(\"helpers\".to_string()",
+            "BopTypeExports::from_origins(::std::vec![])",
+            ", 2)?;",
+        ],
     );
     assert!(
         !out.contains("BopModule {"),
         "generated code must not bypass BopModule's checked constructor:\n{out}"
+    );
+}
+
+#[test]
+fn aliased_facade_emits_the_declaration_module_for_reexported_types() {
+    let out = compile_with_modules(
+        "use facade as api\nlet value = api.Point { x: 1 }",
+        &[
+            ("leaf", "struct Point { x }"),
+            ("facade", "use leaf"),
+        ],
+    )
+    .expect("transpile an aliased facade type");
+
+    contains_all(
+        &out,
+        &[
+            "Value::new_module_with_type_exports(\"facade\".to_string()",
+            "(\"Point\".to_string(), \"leaf\".to_string())",
+            "m.type_origin(type_name).map(str::to_string)",
+        ],
     );
 }
 

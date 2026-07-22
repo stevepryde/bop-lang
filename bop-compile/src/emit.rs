@@ -28,7 +28,7 @@
 //! so the caller sees a clear "not yet supported" message instead of
 //! broken Rust.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use bop::error::BopError;
@@ -373,12 +373,9 @@ pub(crate) struct ModuleEntry {
     /// effective exports. Matches the walker's injection
     /// semantics (`use` re-exports by default).
     pub effective_exports: Vec<String>,
-    /// Every *type* (struct / enum) name reachable through this
-    /// module: its own declarations plus the types its imports
-    /// re-export. Used when packing a `Value::Module` for aliased
-    /// `use`, and when validating `use foo.{SomeType}` selective
-    /// items that name types rather than bindings.
-    pub effective_types: Vec<String>,
+    /// Every exposed type name and its declaration module. Facades retain the
+    /// origin rather than rebinding imported types to their own path.
+    pub effective_types: BTreeMap<String, String>,
     // Kept during analysis for potential future use (e.g. more
     // precise `let` vs `fn` handling in exports packing), but not
     // currently read by the emitter.
@@ -590,10 +587,9 @@ fn analyze_module(
 
     // Types follow the same flat glob/selective projection. Aliases
     // are value bindings and therefore never add bare type names.
-    // Types live in the global registry for AOT, so this list only
-    // drives `Value::Module.types` and selective-import validation.
-    let mut seen_types: BTreeSet<String> = BTreeSet::new();
-    let mut type_exports: Vec<String> = Vec::new();
+    // Definitions live in the global AOT registry; this map retains
+    // each exposed name's declaration origin for namespace identity.
+    let mut type_exports: BTreeMap<String, String> = BTreeMap::new();
     for import in &direct_imports {
         if import.alias.is_some() {
             continue;
@@ -604,24 +600,27 @@ fn analyze_module(
         match &import.items {
             Some(items) => {
                 for item in items {
-                    if module.effective_types.iter().any(|name| name == item) {
-                        push_unique(&mut type_exports, &mut seen_types, item);
+                    if let Some(origin) = module.effective_types.get(item) {
+                        type_exports
+                            .entry(item.clone())
+                            .or_insert_with(|| origin.clone());
                     }
                 }
             }
             None => {
-                for ty in &module.effective_types {
-                    if !ty.starts_with('_') {
-                        push_unique(&mut type_exports, &mut seen_types, ty);
+                for (type_name, origin) in &module.effective_types {
+                    if !type_name.starts_with('_') {
+                        type_exports
+                            .entry(type_name.clone())
+                            .or_insert_with(|| origin.clone());
                     }
                 }
             }
         }
     }
     for ty in &own_types {
-        push_unique(&mut type_exports, &mut seen_types, ty);
+        type_exports.insert(ty.clone(), name.to_string());
     }
-
 
     graph.modules.insert(
         name.to_string(),
@@ -839,8 +838,8 @@ fn collect_top_level_lets(stmts: &[Stmt]) -> Vec<String> {
 
 /// Gather the names of struct / enum types declared at the top
 /// level of `stmts`. Used to seed a module's `effective_types`
-/// list so aliased `use foo as m` can populate `m.types` for
-/// runtime namespace-validation of `m.Entity { ... }` etc.
+/// map so aliased `use foo as m` can populate its origin-aware
+/// runtime namespace surface for `m.Entity { ... }` etc.
 fn collect_top_level_types(stmts: &[Stmt]) -> Vec<String> {
     stmts
         .iter()
@@ -976,8 +975,7 @@ struct EmissionScope {
 
 #[derive(Clone)]
 struct ModuleAliasBinding {
-    module_path: String,
-    exposed_types: BTreeSet<String>,
+    exposed_types: BTreeMap<String, String>,
 }
 
 struct Emitter {
@@ -1139,17 +1137,13 @@ impl Emitter {
         if let Some(ns) = namespace {
             for frame in self.module_aliases.iter().rev() {
                 if let Some(binding) = frame.get(ns) {
-                    // Verify the alias actually exports this type.
-                    if binding.exposed_types.contains(type_name)
-                        && (self.types.structs.contains_key(&(
-                            binding.module_path.clone(),
-                            type_name.to_string(),
-                        )) || self.types.enums.contains_key(&(
-                            binding.module_path.clone(),
-                            type_name.to_string(),
-                        )))
-                    {
-                        return Some(binding.module_path.clone());
+                    if let Some(origin) = binding.exposed_types.get(type_name) {
+                        let key = (origin.clone(), type_name.to_string());
+                        if self.types.structs.contains_key(&key)
+                            || self.types.enums.contains_key(&key)
+                        {
+                            return Some(origin.clone());
+                        }
                     }
                     return None;
                 }
@@ -1187,14 +1181,12 @@ impl Emitter {
     fn bind_module_alias(
         &mut self,
         alias: &str,
-        module_path: &str,
-        exposed_types: &[String],
+        exposed_types: &[(String, String)],
     ) {
         if let Some(frame) = self.module_aliases.last_mut() {
             frame.insert(
                 alias.to_string(),
                 ModuleAliasBinding {
-                    module_path: module_path.to_string(),
                     exposed_types: exposed_types.iter().cloned().collect(),
                 },
             );
@@ -1275,7 +1267,7 @@ impl Emitter {
                 "::std::option::Option::None".to_string()
             };
             alias_arms.push_str(&format!(
-                "                        (::std::option::Option::Some({alias}), __tn) => match {value} {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) if __module.types.iter().any(|__type| __type == __tn) => ::std::option::Option::Some(__module.path.clone()), _ => ::std::option::Option::None }},\n",
+                "                        (::std::option::Option::Some({alias}), __tn) => match {value} {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) => __module.type_origin(__tn).map(str::to_string), _ => ::std::option::Option::None }},\n",
                 alias = rust_string_literal(alias),
                 value = value,
             ));
@@ -1288,7 +1280,7 @@ impl Emitter {
                 continue;
             }
             alias_arms.push_str(&format!(
-                "                        (::std::option::Option::Some({namespace}), __tn) => match ::std::option::Option::Some(&{value}) {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) if __module.types.iter().any(|__type| __type == __tn) => ::std::option::Option::Some(__module.path.clone()), _ => ::std::option::Option::None }},\n",
+                "                        (::std::option::Option::Some({namespace}), __tn) => match ::std::option::Option::Some(&{value}) {{ ::std::option::Option::Some(::bop::value::Value::Module(__module)) => __module.type_origin(__tn).map(str::to_string), _ => ::std::option::Option::None }},\n",
                 namespace = rust_string_literal(&namespace),
                 value = rust_user_ident(&namespace),
             ));
@@ -1457,10 +1449,10 @@ impl Emitter {
                 let exposed_types =
                     self.imported_type_names(path, items.as_deref(), alias.is_some());
                 if let Some(alias_name) = alias {
-                    self.bind_module_alias(alias_name, path, &exposed_types);
+                    self.bind_module_alias(alias_name, &exposed_types);
                 } else {
-                    for name in exposed_types {
-                        self.bind_imported_type(&name, path);
+                    for (name, origin) in exposed_types {
+                        self.bind_imported_type(&name, &origin);
                     }
                 }
             }
@@ -1526,21 +1518,25 @@ impl Emitter {
         module_path: &str,
         items: Option<&[String]>,
         aliased: bool,
-    ) -> Vec<String> {
+    ) -> Vec<(String, String)> {
         let Some(entry) = self.modules.modules.get(module_path) else {
             return Vec::new();
         };
         match items {
             Some(items) => items
                 .iter()
-                .filter(|name| entry.effective_types.iter().any(|ty| ty == *name))
-                .cloned()
+                .filter_map(|name| {
+                    entry
+                        .effective_types
+                        .get(name)
+                        .map(|origin| (name.clone(), origin.clone()))
+                })
                 .collect(),
             None => entry
                 .effective_types
                 .iter()
-                .filter(|name| aliased || !name.starts_with('_'))
-                .cloned()
+                .filter(|(name, _)| aliased || !name.starts_with('_'))
+                .map(|(name, origin)| (name.clone(), origin.clone()))
                 .collect(),
         }
     }
@@ -1796,7 +1792,7 @@ impl Emitter {
         if let Some(list) = items {
             for item in list {
                 let is_binding = entry.effective_exports.iter().any(|e| e == item);
-                let is_type = entry.effective_types.iter().any(|t| t == item);
+                let is_type = entry.effective_types.contains_key(item);
                 if !is_binding && !is_type {
                     return Err(BopError::runtime(
                         format!("Module `{}` has no export `{}`", path, item),
@@ -1820,17 +1816,21 @@ impl Emitter {
                 .cloned()
                 .collect(),
         };
-        let expose_types: Vec<String> = match items {
+        let expose_types: Vec<(String, String)> = match items {
             Some(list) => list
                 .iter()
-                .filter(|n| entry.effective_types.iter().any(|t| t == *n))
-                .cloned()
+                .filter_map(|name| {
+                    entry
+                        .effective_types
+                        .get(name)
+                        .map(|origin| (name.clone(), origin.clone()))
+                })
                 .collect(),
             None => entry
                 .effective_types
                 .iter()
-                .filter(|n| alias.is_some() || !n.starts_with('_'))
-                .cloned()
+                .filter(|(name, _)| alias.is_some() || !name.starts_with('_'))
+                .map(|(name, origin)| (name.clone(), origin.clone()))
                 .collect(),
         };
 
@@ -1854,7 +1854,13 @@ impl Emitter {
                     .join(", ");
                 let types_src: String = expose_types
                     .iter()
-                    .map(|t| format!("{}.to_string()", rust_string_literal(t)))
+                    .map(|(type_name, origin)| {
+                        format!(
+                            "({}.to_string(), {}.to_string())",
+                            rust_string_literal(type_name),
+                            rust_string_literal(origin),
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 if self.is_local_in_current_scope(alias_name)
@@ -1869,7 +1875,7 @@ impl Emitter {
                     ));
                 }
                 self.line(&format!(
-                    "let mut {alias}: ::bop::value::Value = ::bop::value::Value::new_module({path_lit}.to_string(), ::std::vec![{bindings}], ::std::vec![{types}], {line})?;",
+                    "let mut {alias}: ::bop::value::Value = ::bop::value::Value::new_module_with_type_exports({path_lit}.to_string(), ::std::vec![{bindings}], ::bop::value::BopTypeExports::from_origins(::std::vec![{types}]), {line})?;",
                     alias = rust_user_ident(alias_name),
                     path_lit = rust_string_literal(path),
                     bindings = bindings_src,
@@ -1895,7 +1901,7 @@ impl Emitter {
                 // time resolution is sufficient here because
                 // the AOT bakes module_path literals directly
                 // into construction + match sites.
-                self.bind_module_alias(alias_name, path, &expose_types);
+                self.bind_module_alias(alias_name, &expose_types);
             }
             None => {
                 // Non-aliased: inject each binding as a local.
@@ -1922,8 +1928,8 @@ impl Emitter {
                     ));
                     self.bind_local(name);
                 }
-                for tn in &expose_types {
-                    self.bind_imported_type(tn, path);
+                for (type_name, origin) in &expose_types {
+                    self.bind_imported_type(type_name, origin);
                 }
                 if items.is_none() {
                     self.scope_stack
@@ -5619,7 +5625,7 @@ fn __bop_result_callable_method(
 /// a runtime error with the type name in the message.
 ///
 /// Module field reads resolve against the module's `bindings`
-/// list. A field name that matches the module's own `types` list
+/// list. A field name that matches the module's public type exports
 /// raises a targeted error — types aren't first-class values at
 /// this stage, so `m.MyType` by itself is a programming mistake
 /// (callers reach types through `m.MyType { ... }` or
@@ -5657,7 +5663,7 @@ fn __bop_field_get(
             if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
                 return Ok(v.clone());
             }
-            if m.types.iter().any(|t| t == field) {
+            if m.has_type(field) {
                 return Err(::bop::error::BopError::runtime(
                     format!(
                         "`{}.{}` is a type, not a value — construct it with `{{ ... }}` or `::Variant(...)`",
@@ -5680,7 +5686,7 @@ fn __bop_field_get(
 
 /// Runtime guard for namespaced type access: verifies that the
 /// value behind the alias is actually a `Value::Module`, and that
-/// the module's published `types` list contains the name, then returns
+/// the module's published type exports contain the name, then returns
 /// the module path that defines the constructed value's runtime identity. Used by
 /// struct / enum construct emission when `namespace` is `Some(...)`,
 /// so the AOT surfaces the same error as walker + VM when someone
@@ -5694,14 +5700,12 @@ fn __bop_validate_namespace_type(
 ) -> Result<String, ::bop::error::BopError> {
     match ns {
         ::bop::value::Value::Module(m) => {
-            if m.types.iter().any(|t| t == type_name) {
-                Ok(m.path.clone())
-            } else {
-                Err(::bop::error::BopError::runtime(
+            m.type_origin(type_name).map(str::to_string).ok_or_else(|| {
+                ::bop::error::BopError::runtime(
                     format!("`{}` isn't a type exported from `{}`", type_name, m.path),
                     line,
-                ))
-            }
+                )
+            })
         }
         other => Err(::bop::error::BopError::runtime(
             format!(
