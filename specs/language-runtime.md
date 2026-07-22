@@ -58,6 +58,12 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   value `-9223372036854775808` is valid in expression and literal-pattern
   contexts; positive or larger magnitudes are rejected with source context,
   and arithmetic at either boundary remains checked.
+- **RUN-014 — Typed embedding conversions.** The public Rust API must support
+  documented, `no_std`-compatible conversions between `Value` and common Rust
+  scalar and collection types. Fallible conversions must preserve integer
+  range and Bop type distinctions, enforce tracked-constructor depth limits,
+  recognize only the canonical built-in `Result` shape, and identify a nested
+  failure with expected/actual descriptions plus a root-to-leaf path.
 
 ## Acceptance criteria
 
@@ -90,6 +96,11 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   cover `i64::MIN` expressions and patterns, exact integer type/value
   preservation, unary-minus and subtraction precedence, checked overflow, and
   rejection of one-beyond magnitudes on both signs with line and column.
+- **AC-RUN-010:** Public conversion tests cover scalar boundaries, borrowed and
+  owned extraction, recursive arrays/options/results/deterministic maps,
+  canonical built-in `Result` identity, nested error paths, macro hygiene,
+  depth-limit failure, and a real `BopHost` call. Standard, `no_std`, and WASM
+  checks compile the same conversion surface.
 
 ## Design notes
 

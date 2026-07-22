@@ -9,6 +9,7 @@ use alloc::{string::String, vec::Vec};
 pub mod error;
 pub mod error_messages;
 pub mod value;
+pub mod value_conversion;
 pub mod lexer;
 pub mod parser;
 pub mod math;
@@ -39,6 +40,7 @@ pub use error::BopError;
 pub use error::BopWarning;
 pub use parser::{Stmt, count_instructions};
 pub use value::Value;
+pub use value_conversion::{FromValue, IntoValue, ValueConversionError, ValuePathSegment};
 
 /// The core pattern matcher. Re-exported so engines beyond the
 /// tree-walker (the bytecode VM, the AOT runtime) can apply the
