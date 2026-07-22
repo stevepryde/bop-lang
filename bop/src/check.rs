@@ -1,81 +1,30 @@
-//! Static checks that run after parse, before execution.
+//! Static advisory checks that run after parsing and before execution.
 //!
-//! Currently the only check is **match exhaustiveness**: if
-//! every arm of a `match` is an enum-variant pattern on the
-//! same enum type and there's no catch-all, we can tell —
-//! from the declared variant list — whether the match covers
-//! them all. Missing variants surface as `BopWarning`s the CLI
-//! prints before running; uncovered variants *still* raise a
-//! "No match arm matched" runtime error if they ever fire, so
-//! the check is advisory rather than load-bearing.
-//!
-//! Kept deliberately narrow:
-//!
-//! - Only enum-shaped matches (all arms `EnumType::Variant`
-//!   with the same outer `EnumType`) are analysed. Literal
-//!   matches and heterogeneous matches are skipped — they'd
-//!   need a different notion of "coverage".
-//! - Guards on arms don't count toward coverage. `Variant(x)
-//!   if x > 0` matches a *subset* of the variant, so the arm
-//!   no longer fully covers `Variant`.
-//!
-//! Imports: `check_program` alone only sees enums declared in
-//! the analysed AST, so `match` arms over an imported enum
-//! would look under-covered. Callers with access to a module
-//! resolver (the CLI has one via `BopHost::resolve_module`)
-//! should use [`check_program_with_resolver`] instead — it
-//! walks every top-level `use` statement, parses the referenced
-//! module's source, and folds its (transitive) enum decls into
-//! the table before running the checks. A resolver that returns
-//! `None` or an error for a given module is treated as a
-//! silent opacity fallback rather than a hard failure; the
-//! checker is advisory.
+//! Match exhaustiveness is deliberately conservative. The checker follows
+//! source-ordered lexical type bindings and only warns when every relevant arm
+//! resolves to one proven runtime enum identity and one runtime-equivalent
+//! ordered shape. Ambiguous imports, control-flow alternatives, and value-
+//! shadowed namespaces suppress the advisory rather than risking a false
+//! diagnostic.
 
-#[cfg(feature = "no_std")]
-use alloc::{format, string::String, vec::Vec};
+mod source_order;
 
 use crate::error::BopWarning;
-use crate::parser::{
-    Expr, ExprKind, MatchArm, Pattern, Stmt, StmtKind, VariantDecl,
-};
+use crate::parser::Stmt;
 
 #[cfg(feature = "no_std")]
-use alloc_import::collections::{BTreeMap, BTreeSet};
-#[cfg(not(feature = "no_std"))]
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::{string::String, vec::Vec};
 
-#[cfg(feature = "no_std")]
-use alloc as alloc_import;
-
-/// Run every static check over `stmts` and collect the
-/// resulting warnings. Never errors — warnings are the only
-/// output.
-///
-/// See [`check_program_with_resolver`] for a variant that
-/// walks `use` statements to pick up imported enum
-/// declarations; this plain version treats imported enums as
-/// opaque and skips exhaustiveness warnings on them.
+/// Run static checks without module source. Imported types remain opaque.
 pub fn check_program(stmts: &[Stmt]) -> Vec<BopWarning> {
-    let mut warnings = Vec::new();
-    let enums = collect_enum_decls(stmts);
-    check_stmts(stmts, &enums, &mut warnings);
-    warnings
+    let mut resolver = |_path: &str| None;
+    source_order::check_program(stmts, &mut resolver)
 }
 
-/// Like [`check_program`] but follows `use` statements via a
-/// module resolver so `match` arms over imported enums can be
-/// exhaustiveness-checked. `resolver` has the same shape as
-/// `BopHost::resolve_module`:
+/// Run static checks with an advisory module resolver.
 ///
-/// - `Some(Ok(source))` — module source; parsed + its enums
-///   (transitively) folded into the table.
-/// - `Some(Err(_))` — resolver failed; treated the same as
-///   `None` (check skips the enum; advisory fallback).
-/// - `None` — not our module; skip.
-///
-/// The checker never surfaces a failure from the resolver — it
-/// simply falls back to "imported enums stay opaque" in that
-/// case, the same behaviour [`check_program`] has.
+/// Resolver, parse, and cycle failures are treated as opaque module surfaces;
+/// they never turn a warning pass into a hard error.
 pub fn check_program_with_resolver<R>(
     stmts: &[Stmt],
     resolver: &mut R,
@@ -83,403 +32,7 @@ pub fn check_program_with_resolver<R>(
 where
     R: FnMut(&str) -> Option<Result<String, crate::error::BopError>>,
 {
-    let mut warnings = Vec::new();
-    let mut enums = collect_enum_decls(stmts);
-    let mut visited: BTreeSet<String> = BTreeSet::new();
-    collect_imported_enum_decls(stmts, resolver, &mut enums, &mut visited);
-    check_stmts(stmts, &enums, &mut warnings);
-    warnings
-}
-
-/// Recursively walk `use` statements and fold each imported
-/// module's enum declarations into `enums`. Silently drops
-/// parse / resolver failures — the checker is advisory, not
-/// load-bearing.
-fn collect_imported_enum_decls<R>(
-    stmts: &[Stmt],
-    resolver: &mut R,
-    enums: &mut BTreeMap<String, Vec<VariantDecl>>,
-    visited: &mut BTreeSet<String>,
-) where
-    R: FnMut(&str) -> Option<Result<String, crate::error::BopError>>,
-{
-    for stmt in stmts {
-        if let StmtKind::Use { path, .. } = &stmt.kind {
-            if !visited.insert(path.clone()) {
-                // Already pulled in via a shallower import.
-                continue;
-            }
-            let source = match resolver(path) {
-                Some(Ok(s)) => s,
-                _ => continue,
-            };
-            let imported_stmts = match crate::parse(&source) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            // Same-name enums already declared in the root win
-            // (first-write-wins). Imported modules should only
-            // *supply* enums the root program doesn't already
-            // know about.
-            for (name, variants) in collect_enum_decls(&imported_stmts) {
-                enums.entry(name).or_insert(variants);
-            }
-            // Recurse so a module's own imports are followed.
-            collect_imported_enum_decls(&imported_stmts, resolver, enums, visited);
-        }
-    }
-}
-
-/// Walk every top-level `enum Foo { ... }` decl in the program
-/// so exhaustiveness checks can consult the variant list
-/// without re-walking the AST per match. Enums nested inside
-/// fn bodies are included too — Bop lets you declare types
-/// anywhere, and a match in a sibling fn can still reach them.
-fn collect_enum_decls(stmts: &[Stmt]) -> BTreeMap<String, Vec<VariantDecl>> {
-    let mut enums = BTreeMap::new();
-    collect_enum_decls_rec(stmts, &mut enums);
-    enums
-}
-
-fn collect_enum_decls_rec(stmts: &[Stmt], enums: &mut BTreeMap<String, Vec<VariantDecl>>) {
-    for stmt in stmts {
-        match &stmt.kind {
-            StmtKind::EnumDecl { name, variants } => {
-                enums.insert(name.clone(), variants.clone());
-            }
-            StmtKind::FnDecl { body, .. } => {
-                collect_enum_decls_rec(body, enums);
-            }
-            StmtKind::MethodDecl { body, .. } => {
-                collect_enum_decls_rec(body, enums);
-            }
-            StmtKind::If {
-                body,
-                else_ifs,
-                else_body,
-                ..
-            } => {
-                collect_enum_decls_rec(body, enums);
-                for (_, b) in else_ifs {
-                    collect_enum_decls_rec(b, enums);
-                }
-                if let Some(eb) = else_body {
-                    collect_enum_decls_rec(eb, enums);
-                }
-            }
-            StmtKind::While { body, .. }
-            | StmtKind::Repeat { body, .. }
-            | StmtKind::ForIn { body, .. } => {
-                collect_enum_decls_rec(body, enums);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn check_stmts(
-    stmts: &[Stmt],
-    enums: &BTreeMap<String, Vec<VariantDecl>>,
-    warnings: &mut Vec<BopWarning>,
-) {
-    for stmt in stmts {
-        check_stmt(stmt, enums, warnings);
-    }
-}
-
-fn check_stmt(
-    stmt: &Stmt,
-    enums: &BTreeMap<String, Vec<VariantDecl>>,
-    warnings: &mut Vec<BopWarning>,
-) {
-    match &stmt.kind {
-        StmtKind::Let { value, .. } => check_expr(value, enums, warnings),
-        StmtKind::Assign { value, .. } => check_expr(value, enums, warnings),
-        StmtKind::ExprStmt(expr) => check_expr(expr, enums, warnings),
-        StmtKind::Return { value: Some(expr) } => check_expr(expr, enums, warnings),
-        StmtKind::Return { value: None } => {}
-        StmtKind::If {
-            condition,
-            body,
-            else_ifs,
-            else_body,
-        } => {
-            check_expr(condition, enums, warnings);
-            check_stmts(body, enums, warnings);
-            for (c, b) in else_ifs {
-                check_expr(c, enums, warnings);
-                check_stmts(b, enums, warnings);
-            }
-            if let Some(eb) = else_body {
-                check_stmts(eb, enums, warnings);
-            }
-        }
-        StmtKind::While { condition, body } => {
-            check_expr(condition, enums, warnings);
-            check_stmts(body, enums, warnings);
-        }
-        StmtKind::Repeat { count, body } => {
-            check_expr(count, enums, warnings);
-            check_stmts(body, enums, warnings);
-        }
-        StmtKind::ForIn { iterable, body, .. } => {
-            check_expr(iterable, enums, warnings);
-            check_stmts(body, enums, warnings);
-        }
-        StmtKind::FnDecl { body, .. } => {
-            check_stmts(body, enums, warnings);
-        }
-        StmtKind::MethodDecl { body, .. } => {
-            check_stmts(body, enums, warnings);
-        }
-        // Declarations, imports, breaks, continues — no sub-expr
-        // to check.
-        _ => {}
-    }
-}
-
-fn check_expr(
-    expr: &Expr,
-    enums: &BTreeMap<String, Vec<VariantDecl>>,
-    warnings: &mut Vec<BopWarning>,
-) {
-    match &expr.kind {
-        ExprKind::Match { scrutinee, arms } => {
-            check_expr(scrutinee, enums, warnings);
-            for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    check_expr(guard, enums, warnings);
-                }
-                check_expr(&arm.body, enums, warnings);
-            }
-            check_match_exhaustive(arms, enums, expr.line, warnings);
-        }
-        // Recurse into every sub-expression that could contain
-        // a `match`. This is a bit verbose but avoids visitor
-        // boilerplate; add a variant to `walk_exprs` only if
-        // the recursion list grows much.
-        ExprKind::BinaryOp { left, right, .. } => {
-            check_expr(left, enums, warnings);
-            check_expr(right, enums, warnings);
-        }
-        ExprKind::UnaryOp { expr: e, .. } => check_expr(e, enums, warnings),
-        ExprKind::Call { callee, args } => {
-            check_expr(callee, enums, warnings);
-            for a in args {
-                check_expr(a, enums, warnings);
-            }
-        }
-        ExprKind::MethodCall { object, args, .. } => {
-            check_expr(object, enums, warnings);
-            for a in args {
-                check_expr(a, enums, warnings);
-            }
-        }
-        ExprKind::Index { object, index } => {
-            check_expr(object, enums, warnings);
-            check_expr(index, enums, warnings);
-        }
-        ExprKind::Array(items) => {
-            for item in items {
-                check_expr(item, enums, warnings);
-            }
-        }
-        ExprKind::Dict(entries) => {
-            for (_, v) in entries {
-                check_expr(v, enums, warnings);
-            }
-        }
-        ExprKind::IfExpr {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            check_expr(condition, enums, warnings);
-            check_expr(then_expr, enums, warnings);
-            check_expr(else_expr, enums, warnings);
-        }
-        ExprKind::Lambda { body, .. } => {
-            check_stmts(body, enums, warnings);
-        }
-        ExprKind::FieldAccess { object, .. } => check_expr(object, enums, warnings),
-        ExprKind::StructConstruct { fields, .. } => {
-            for (_, v) in fields {
-                check_expr(v, enums, warnings);
-            }
-        }
-        ExprKind::EnumConstruct { payload, .. } => {
-            use crate::parser::VariantPayload;
-            match payload {
-                VariantPayload::Unit => {}
-                VariantPayload::Tuple(args) => {
-                    for a in args {
-                        check_expr(a, enums, warnings);
-                    }
-                }
-                VariantPayload::Struct(fields) => {
-                    for (_, v) in fields {
-                        check_expr(v, enums, warnings);
-                    }
-                }
-            }
-        }
-        ExprKind::Try(inner) => check_expr(inner, enums, warnings),
-        // Literals, identifiers, string interpolation, none —
-        // nothing to recurse into.
-        _ => {}
-    }
-}
-
-/// Core of the check: given a match's arms and the declared
-/// enums, determine whether the match is exhaustive and emit
-/// a warning if not.
-fn check_match_exhaustive(
-    arms: &[MatchArm],
-    enums: &BTreeMap<String, Vec<VariantDecl>>,
-    match_line: u32,
-    warnings: &mut Vec<BopWarning>,
-) {
-    // Step 1: any catch-all arm without a guard makes the
-    // match trivially exhaustive (the fallback always fires).
-    // A guarded catch-all doesn't count — the guard can veto.
-    for arm in arms {
-        if arm.guard.is_some() {
-            continue;
-        }
-        if is_catch_all(&arm.pattern) {
-            return;
-        }
-    }
-
-    // Step 2: unify the enum under scrutiny. If every
-    // non-guarded arm's *top-level* pattern references the
-    // same `EnumType::*`, that's the enum we can check. If
-    // arms are heterogeneous (literals, structs, arrays, or
-    // two different enums), we bail — no coherent coverage
-    // analysis applies. `target_enum` is owned (rather than a
-    // borrow out of the AST) so the check pass doesn't need to
-    // thread lifetimes through every helper.
-    let mut target_enum: Option<String> = None;
-    let mut covered: Vec<String> = Vec::new();
-    for arm in arms {
-        // Guarded arms narrow their variant (the body only
-        // runs when the guard is truthy) so they don't
-        // contribute to coverage. Unguarded arms do.
-        let contributes = arm.guard.is_none();
-        if !gather_variants(&arm.pattern, &mut target_enum, &mut covered, contributes) {
-            return;
-        }
-    }
-
-    let Some(enum_name) = target_enum else {
-        // No enum-variant arm at all — pattern set is entirely
-        // literals / structs / etc., which we can't
-        // exhaustiveness-check at this level.
-        return;
-    };
-    let Some(decl) = enums.get(&enum_name) else {
-        // Enum isn't declared locally — could be imported;
-        // bail rather than warn on a potentially-complete
-        // match we can't verify.
-        return;
-    };
-
-    let missing: Vec<&str> = decl
-        .iter()
-        .filter(|v| !covered.iter().any(|c| c == &v.name))
-        .map(|v| v.name.as_str())
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-
-    let list = missing.join(", ");
-    let msg = format!(
-        "non-exhaustive `match` on `{}`: missing {}",
-        enum_name,
-        missing
-            .iter()
-            .map(|v| format!("`{}::{}`", enum_name, v))
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    let hint = format!(
-        "add an arm for each missing variant, or a `_` catch-all. Missing: {}",
-        list
-    );
-    warnings.push(BopWarning::at(msg, match_line).with_hint(hint));
-}
-
-/// A pattern that matches every value regardless of shape —
-/// wildcard or a bare binding. Or-patterns made entirely of
-/// catch-alls count too. Everything else is skipped for this
-/// check.
-fn is_catch_all(pattern: &Pattern) -> bool {
-    match pattern {
-        Pattern::Wildcard | Pattern::Binding(_) => true,
-        Pattern::Or(alts) => alts.iter().all(is_catch_all),
-        _ => false,
-    }
-}
-
-/// Fold the variants an arm's pattern references into
-/// `covered`. Returns `true` if the arm fits the "all arms
-/// reference the same enum" precondition; `false` to bail the
-/// check entirely. `contributes` is `false` for guarded arms —
-/// we still want to confirm the arm's enum matches, but we
-/// won't count it toward coverage.
-fn gather_variants(
-    pattern: &Pattern,
-    target_enum: &mut Option<String>,
-    covered: &mut Vec<String>,
-    contributes: bool,
-) -> bool {
-    // Catch-all arms can't happen here — the outer scan
-    // returns early on them. A guarded binding *can*, and is
-    // treated as "contributes nothing, but doesn't break the
-    // precondition".
-    match pattern {
-        Pattern::Wildcard | Pattern::Binding(_) => true,
-        Pattern::EnumVariant {
-            type_name,
-            variant,
-            ..
-        } => {
-            // `target_enum` is owned (`Option<String>`) so the
-            // first enum-variant pattern seeds it and every
-            // subsequent arm compares against the stored name.
-            // No lifetimes, no leaks — the extra allocation is
-            // one `String` per analysed match, which is
-            // negligible next to the rest of the check pass.
-            match target_enum {
-                None => {
-                    *target_enum = Some(type_name.clone());
-                    if contributes {
-                        covered.push(variant.clone());
-                    }
-                    true
-                }
-                Some(existing) if existing == type_name => {
-                    if contributes {
-                        covered.push(variant.clone());
-                    }
-                    true
-                }
-                _ => false, // two different enums in one match
-            }
-        }
-        Pattern::Or(alts) => {
-            for alt in alts {
-                if !gather_variants(alt, target_enum, covered, contributes) {
-                    return false;
-                }
-            }
-            true
-        }
-        // Literal / struct / array patterns on an enum scrutinee
-        // don't fit coverage analysis — bail.
-        _ => false,
-    }
+    source_order::check_program(stmts, resolver)
 }
 
 #[cfg(test)]
@@ -781,5 +334,490 @@ let _ = match c {
             "expected no warning: root's Color is fully covered, got: {:?}",
             ws
         );
+    }
+
+    #[test]
+    fn sibling_branch_enum_sites_do_not_cross_contaminate() {
+        let ws = warnings(
+            r#"if true {
+    enum Choice { Left }
+    let _ = match Choice::Left { Choice::Left => 1 }
+} else {
+    enum Choice { Right }
+}"#,
+        );
+        assert!(ws.is_empty(), "sibling declaration leaked: {ws:?}");
+
+        let ws = warnings(
+            r#"if true {
+    enum Choice { Left, Extra }
+    let _ = match Choice::Left { Choice::Left => 1 }
+} else if false {
+    enum Choice { Left }
+}"#,
+        );
+        assert_eq!(ws.len(), 1, "later sibling hid a missing variant: {ws:?}");
+        assert!(ws[0].message.contains("`Choice::Extra`"));
+    }
+
+    #[test]
+    fn branch_and_loop_declarations_are_lexically_scoped() {
+        let ws = warnings(
+            r#"if true { enum BranchOnly { A, B } }
+while false { enum LoopOnly { A, B } }
+let _ = match none { BranchOnly::A => 1 }
+let _ = match none { LoopOnly::A => 1 }"#,
+        );
+        assert!(ws.is_empty(), "nested declarations escaped their frames: {ws:?}");
+
+        let ws = warnings(
+            r#"repeat 1 {
+    enum Local { A, B }
+    let _ = match Local::A { Local::A => 1 }
+}"#,
+        );
+        assert_eq!(ws.len(), 1);
+        assert!(ws[0].message.contains("`Local::B`"));
+    }
+
+    #[test]
+    fn declaration_is_not_visible_before_its_statement() {
+        let ws = warnings(
+            r#"let _ = match none { Later::A => 1 }
+enum Later { A, B }"#,
+        );
+        assert!(ws.is_empty(), "future declaration leaked backwards: {ws:?}");
+    }
+
+    #[test]
+    fn callable_local_declarations_do_not_leak_to_siblings() {
+        let ws = warnings(
+            r#"fn first(x) {
+    enum Private { A, B }
+    return match x { Private::A => 1 }
+}
+fn second(x) { return match x { Private::A => 1 } }
+let f = fn(x) {
+    enum LambdaPrivate { A, B }
+    return match x { LambdaPrivate::A => 1 }
+}
+let g = fn(x) { return match x { LambdaPrivate::A => 1 } }"#,
+        );
+        assert_eq!(ws.len(), 2, "only the two declaring callables should warn: {ws:?}");
+        assert!(ws.iter().any(|warning| warning.message.contains("`Private::B`")));
+        assert!(ws.iter().any(|warning| warning.message.contains("`LambdaPrivate::B`")));
+    }
+
+    #[test]
+    fn callable_base_requires_runtime_equivalent_ordered_shapes() {
+        let equivalent = warnings(
+            r#"enum E { Pair(left, right), End }
+enum E { Pair(x, y), End }
+fn f(value) { return match value { E::Pair(a, b) => a } }"#,
+        );
+        assert_eq!(equivalent.len(), 1, "tuple field names are not runtime shape: {equivalent:?}");
+        assert!(equivalent[0].message.contains("`E::End`"));
+
+        for source in [
+            r#"enum E { A, B }
+enum E { B, A }
+fn f(value) { return match value { E::A => 1 } }"#,
+            r#"enum E { Pair(a, b), End }
+enum E { Pair(a), End }
+fn f(value) { return match value { E::Pair(a) => a } }"#,
+            r#"enum E { Item { left, right }, End }
+enum E { Item { right, left }, End }
+fn f(value) { return match value { E::Item { left, right } => left } }"#,
+        ] {
+            assert!(warnings(source).is_empty(), "non-equivalent shape was treated as known");
+        }
+    }
+
+    #[test]
+    fn catch_all_or_alternative_makes_the_arm_exhaustive() {
+        let ws = warnings(
+            r#"enum E { A, B }
+let _ = match E::A { _ | E::A => 1 }"#,
+        );
+        assert!(ws.is_empty(), "an OR catch-all must use any-alternative semantics: {ws:?}");
+    }
+
+    #[test]
+    fn alias_write_effects_respect_frame_provenance() {
+        let modules = &[("types", "enum E { A, B }")];
+        let inherited = warnings_with_modules(
+            r#"use types as api
+if true { api = 1 }
+let _ = match none { api.E::A => 1 }"#,
+            modules,
+        );
+        assert!(inherited.is_empty(), "conditional outer write must poison the alias");
+
+        let child_local = warnings_with_modules(
+            r#"use types as api
+if true {
+    use types as api
+    api = 1
+}
+let _ = match none { api.E::A => 1 }"#,
+            modules,
+        );
+        assert_eq!(child_local.len(), 1, "child-local write poisoned the outer alias");
+        assert!(child_local[0].message.contains("`E::B`"));
+    }
+
+    #[test]
+    fn function_declaration_does_not_shadow_an_existing_module_alias() {
+        let ws = warnings_with_modules(
+            r#"use types as api
+fn api() { return 1 }
+let _ = match none { api.E::A => 1 }"#,
+            &[("types", "enum E { A, B }")],
+        );
+        assert_eq!(ws.len(), 1, "function registry entry incorrectly hid the alias: {ws:?}");
+        assert!(ws[0].message.contains("`E::B`"));
+    }
+
+    #[test]
+    fn earlier_function_declaration_blocks_a_later_module_alias() {
+        let ws = warnings_with_modules(
+            r#"fn api() { return 1 }
+use types as api
+let _ = match none { api.E::A => 1 }"#,
+            &[("types", "enum E { A, B }")],
+        );
+        assert!(ws.is_empty(), "checker trusted an alias the runtime rejects: {ws:?}");
+    }
+
+    #[test]
+    fn imported_value_and_function_names_block_later_aliases() {
+        let modules = &[
+            ("values", "let api = 1"),
+            ("functions", "fn api() { return 1 }"),
+            ("facade", "use values.{api}"),
+            ("types", "enum E { A, B }"),
+        ];
+        for source in [
+            "use values\nuse types as api\nlet _ = match none { api.E::A => 1 }",
+            "use values.{api}\nuse types as api\nlet _ = match none { api.E::A => 1 }",
+            "use functions\nuse types as api\nlet _ = match none { api.E::A => 1 }",
+            "use functions.{api}\nuse types as api\nlet _ = match none { api.E::A => 1 }",
+            "use facade\nuse types as api\nlet _ = match none { api.E::A => 1 }",
+        ] {
+            assert!(
+                warnings_with_modules(source, modules).is_empty(),
+                "imported runtime value did not block a later alias for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exported_function_wins_over_same_named_module_value_at_boundary() {
+        let ws = warnings_with_modules(
+            "use bridge\nlet _ = match none { api.E::A => 1 }",
+            &[
+                ("types", "enum E { A, B }"),
+                (
+                    "bridge",
+                    "use types as api\nfn api() { return 1 }\nlet _ = match none { api.E::A => 1 }",
+                ),
+            ],
+        );
+        assert!(
+            ws.is_empty(),
+            "module boundary exported a shadowed namespace instead of the function: {ws:?}"
+        );
+    }
+
+    #[test]
+    fn imported_values_shadow_outer_aliases_but_not_same_frame_winners() {
+        let modules = &[
+            ("types", "enum E { A, B }"),
+            ("values", "let api = 1"),
+            ("functions", "fn api() { return 1 }"),
+        ];
+        for imported in ["values", "functions"] {
+            let nested = format!(
+                "use types as api\nif true {{ use {imported}\nlet _ = match none {{ api.E::A => 1 }} }}"
+            );
+            assert!(
+                warnings_with_modules(&nested, modules).is_empty(),
+                "imported value failed to shadow outer alias for {imported}"
+            );
+
+            let same_frame = format!(
+                "use types as api\nuse {imported}\nlet _ = match none {{ api.E::A => 1 }}"
+            );
+            let ws = warnings_with_modules(&same_frame, modules);
+            assert_eq!(ws.len(), 1, "same-frame first winner was not preserved: {ws:?}");
+            assert!(ws[0].message.contains("`E::B`"));
+        }
+    }
+
+    #[test]
+    fn callable_base_sees_conditional_outer_alias_writes() {
+        let ws = warnings_with_modules(
+            r#"use types as api
+if true { api = 1 }
+fn f(value) { return match value { api.E::A => 1 } }"#,
+            &[("types", "enum E { A, B }")],
+        );
+        assert!(ws.is_empty(), "callable base ignored a possible outer alias write: {ws:?}");
+    }
+
+    #[test]
+    fn import_alias_shadowing_and_assignment_are_opaque() {
+        let modules = &[("types", "enum E { A, B }")];
+        for source in [
+            r#"use types as api
+let api = 1
+let _ = match none { api.E::A => 1 }"#,
+            r#"use types as api
+api = 1
+let _ = match none { api.E::A => 1 }"#,
+            r#"use types as api
+fn f(api) { return match none { api.E::A => 1 } }"#,
+            r#"use types as api
+for api in [1] { let _ = match none { api.E::A => 1 } }"#,
+        ] {
+            assert!(warnings_with_modules(source, modules).is_empty());
+        }
+    }
+
+    #[test]
+    fn direct_selective_aliased_and_transitive_imports_preserve_origin() {
+        let modules = &[
+            ("types", "enum E { A, B }"),
+            ("bridge", "use types.{E}"),
+        ];
+        for source in [
+            "use types\nlet _ = match none { E::A => 1 }",
+            "use types.{E}\nlet _ = match none { E::A => 1 }",
+            "use types.{E} as api\nlet _ = match none { api.E::A => 1 }",
+            "use bridge\nlet _ = match none { E::A => 1 }",
+        ] {
+            let ws = warnings_with_modules(source, modules);
+            assert_eq!(ws.len(), 1, "import origin was lost for {source:?}: {ws:?}");
+            assert!(ws[0].message.contains("`E::B`"));
+        }
+    }
+
+    #[test]
+    fn first_import_wins_and_struct_surface_blocks_later_enum() {
+        let modules = &[
+            ("left", "enum E { A, B }"),
+            ("right", "enum E { A, C }"),
+            ("record", "struct E { value }"),
+        ];
+        let first_enum = warnings_with_modules(
+            "use left\nuse right\nlet _ = match none { E::A => 1 }",
+            modules,
+        );
+        assert_eq!(first_enum.len(), 1);
+        assert!(first_enum[0].message.contains("`E::B`"));
+        assert!(!first_enum[0].message.contains("`E::C`"));
+
+        let struct_first = warnings_with_modules(
+            "use record\nuse left\nlet _ = match none { E::A => 1 }",
+            modules,
+        );
+        assert!(struct_first.is_empty(), "later enum bypassed first imported type");
+    }
+
+    #[test]
+    fn resolver_cycles_are_opaque_through_the_whole_active_chain() {
+        let ws = warnings_with_modules(
+            "use a as api\nlet _ = match none { api.E::A => 1 }",
+            &[("a", "use b"), ("b", "enum E { A, B }\nuse a")],
+        );
+        assert!(ws.is_empty(), "partial surface escaped a circular import: {ws:?}");
+    }
+
+    #[test]
+    fn branches_are_analyzed_without_constant_folding_and_restore_outer_types() {
+        let ws = warnings(
+            r#"enum E { Outer, Missing }
+if false {
+    enum E { Inner, BranchMissing }
+    let _ = match none { E::Inner => 1 }
+} else {
+    enum E { ElseOnly }
+    let _ = match none { E::ElseOnly => 1 }
+}
+let _ = match none { E::Outer => 1 }"#,
+        );
+        assert_eq!(ws.len(), 2, "all arms plus restored outer type must be analyzed: {ws:?}");
+        assert!(ws[0].message.contains("`E::BranchMissing`"));
+        assert!(ws[1].message.contains("`E::Missing`"));
+    }
+
+    #[test]
+    fn callable_local_exact_type_overrides_ambiguous_published_shape() {
+        let ws = warnings(
+            r#"enum E { A, B }
+enum E { A, C }
+fn f(value) {
+    enum E { A, LocalMissing }
+    return match value { E::A => 1 }
+}"#,
+        );
+        assert_eq!(ws.len(), 1);
+        assert!(ws[0].message.contains("`E::LocalMissing`"));
+    }
+
+    #[test]
+    fn callable_scope_rules_cover_lambdas_and_methods() {
+        let ws = warnings(
+            r#"if true {
+    enum BlockOnly { A, B }
+    let f = fn(value) { return match value { BlockOnly::A => 1 } }
+}
+fn Holder.inspect(self, value) {
+    enum MethodOnly { A, B }
+    return match value { MethodOnly::A => 1 }
+}"#,
+        );
+        assert_eq!(ws.len(), 1, "lambda captured block-local type or method local was missed: {ws:?}");
+        assert!(ws[0].message.contains("`MethodOnly::B`"));
+    }
+
+    #[test]
+    fn same_module_struct_and_enum_coexist_without_erasing_enum_knowledge() {
+        for source in [
+            "struct E { value }\nenum E { A, B }\nlet _ = match none { E::A => 1 }",
+            "enum E { A, B }\nstruct E { value }\nlet _ = match none { E::A => 1 }",
+        ] {
+            let ws = warnings(source);
+            assert_eq!(ws.len(), 1, "struct declaration erased same-module enum: {ws:?}");
+            assert!(ws[0].message.contains("`E::B`"));
+        }
+    }
+
+    #[test]
+    fn match_pattern_binding_shadows_module_alias_in_guard_and_body() {
+        let ws = warnings_with_modules(
+            r#"use types as api
+let _ = match 1 {
+    api if match none { api.E::A => true } => match none { api.E::A => 1 },
+}
+let _ = match none { api.E::A => 1 }"#,
+            &[("types", "enum E { A, B }")],
+        );
+        assert_eq!(ws.len(), 1, "pattern binding did not shadow alias only within its arm: {ws:?}");
+        assert!(ws[0].message.contains("`E::B`"));
+    }
+
+    #[test]
+    fn selective_and_distinct_alias_imports_are_origin_aware() {
+        let modules = &[
+            ("left", "enum E { A, LeftMissing }\nlet helper = 1"),
+            ("right", "enum E { A, RightMissing }"),
+        ];
+        assert!(
+            warnings_with_modules(
+                "use left.{helper}\nlet _ = match none { E::A => 1 }",
+                modules,
+            )
+            .is_empty(),
+            "an excluded enum entered a selective surface"
+        );
+
+        let ws = warnings_with_modules(
+            r#"use left as l
+use right as r
+let _ = match none { l.E::A => 1 }
+let _ = match none { r.E::A => 1 }
+let _ = match none { l.E::A => 1, r.E::A => 2 }"#,
+            modules,
+        );
+        assert_eq!(ws.len(), 2, "mixed runtime identities should suppress only their match: {ws:?}");
+        assert!(ws[0].message.contains("`E::LeftMissing`"));
+        assert!(ws[1].message.contains("`E::RightMissing`"));
+    }
+
+    #[test]
+    fn transitive_aliased_reexport_keeps_leaf_runtime_origin() {
+        let ws = warnings_with_modules(
+            "use bridge as api\nlet _ = match none { api.E::A => 1 }",
+            &[
+                ("leaf", "enum E { A, B }"),
+                ("bridge", "use leaf.{E}"),
+            ],
+        );
+        assert_eq!(ws.len(), 1, "leaf origin was lost through aliased re-export: {ws:?}");
+        assert!(ws[0].message.contains("`E::B`"));
+    }
+
+    #[test]
+    fn nested_matches_are_postorder_and_missing_variants_keep_declaration_order() {
+        let ws = warnings(
+            r#"enum Inner { A, Z, B }
+enum Outer { A, B }
+let _ = match match none { Inner::A => Outer::A } { Outer::A => 1 }"#,
+        );
+        assert_eq!(ws.len(), 2);
+        assert!(ws[0].message.contains("`Inner::Z`, `Inner::B`"));
+        assert!(ws[1].message.contains("`Outer::B`"));
+    }
+
+    #[test]
+    fn matches_in_assignment_targets_and_payload_edges_are_visited() {
+        let ws = warnings(
+            r#"enum E { A, B }
+struct Box { value }
+enum Wrap { Value(value) }
+let values = [0]
+values[match none { E::A => 0 }] = Box {
+    value: Wrap::Value(try (match none { E::A => 1 })),
+}"#,
+        );
+        assert_eq!(ws.len(), 2, "an assignment-target or payload/try edge was skipped: {ws:?}");
+        assert!(ws.iter().all(|warning| warning.message.contains("`E::B`")));
+    }
+
+    #[test]
+    fn reversed_branch_order_keeps_each_declaration_site_exact() {
+        let ws = warnings(
+            r#"if false {
+    enum Choice { Wrong, Extra }
+} else if true {
+    enum Choice { Right }
+    let _ = match none { Choice::Right => 1 }
+}"#,
+        );
+        assert!(ws.is_empty(), "earlier sibling contaminated the later exact site: {ws:?}");
+    }
+
+    #[test]
+    fn every_loop_form_is_analyzed_without_iteration_folding() {
+        let ws = warnings(
+            r#"while false {
+    enum W { A, B }
+    let _ = match none { W::A => 1 }
+}
+repeat 0 {
+    enum R { A, B }
+    let _ = match none { R::A => 1 }
+}
+for item in [] {
+    enum F { A, B }
+    let _ = match none { F::A => item }
+}"#,
+        );
+        assert_eq!(ws.len(), 3, "a loop form was folded or skipped: {ws:?}");
+        assert!(ws[0].message.contains("`W::B`"));
+        assert!(ws[1].message.contains("`R::B`"));
+        assert!(ws[2].message.contains("`F::B`"));
+    }
+
+    #[test]
+    fn local_struct_overwrites_imported_enum_in_callable_base() {
+        let ws = warnings_with_modules(
+            r#"use dep
+struct E { value }
+fn f(input) { return match input { E::A => 1 } }"#,
+            &[("dep", "enum E { A, B }")],
+        );
+        assert!(ws.is_empty(), "imported enum survived a local struct binding: {ws:?}");
     }
 }
