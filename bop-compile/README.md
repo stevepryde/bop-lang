@@ -71,6 +71,13 @@ one-shot `run` API. See the [stateful embedding
 guide](https://bop-lang.com/docs/embedding/instances/) for the
 full lifecycle contract.
 
+Generated Rust preserves Bop's transactional `ref` semantics in both sandboxed
+and unsandboxed output: explicit parameter modes, valid-target checks,
+copy-in/copy-out staging, multi-target commit, error rollback, forwarding, and
+mutating receiver behavior match the walker and VM. Generated persistent
+`BopInstance` calls remain value-only. See the [reference-parameters
+guide](https://bop-lang.com/docs/functions/reference-parameters/).
+
 ## Selling points
 
 - **Native-speed scripts.** The transpiled output is ordinary Rust — rustc optimises it the same way it optimises hand-written code.

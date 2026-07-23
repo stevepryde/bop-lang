@@ -34,6 +34,11 @@ History is persisted at `$HOME/.bop_history`. Meta-commands are:
 Piped input uses the same multiline submission rules. A parse or runtime error
 sets a failing exit status but does not discard later transcript input.
 
+The REPL, `bop run`, and `bop compile` all support transactional `ref`
+parameters. See the [reference-parameters
+guide](https://bop-lang.com/docs/functions/reference-parameters/) for syntax,
+target restrictions, rollback, and host-boundary rules.
+
 ## `bop compile`
 
 Transpiles the script via [`bop-compile`](https://crates.io/crates/bop-compile), drops the result into a scratch cargo project, builds it, and copies the binary next to the script (or wherever `-o` points).

@@ -21,7 +21,7 @@ Bop dispatches methods with `.name(args...)`. Every built-in method on primitive
 Array methods such as `push`, `pop`, `insert`, `remove`, `reverse`, and `sort`
 mutate a mutable plain-variable receiver using the same transactional
 copy-in/copy-out model as a [`ref`
-parameter](/docs/functions/defining-functions/#reference-parameters). Method
+parameter](/docs/functions/reference-parameters/). Method
 arguments run first, then Bop snapshots the receiver, and a normal return writes
 the updated value back.
 

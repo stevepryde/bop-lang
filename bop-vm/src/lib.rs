@@ -89,6 +89,20 @@
 //! );
 //! ```
 //!
+//! # Reference parameters
+//!
+//! The VM implements Bop's explicit `ref` parameters with the same
+//! transactional copy-in/copy-out semantics as the tree-walker and AOT
+//! engine. Mutable plain-variable targets commit together after a normal
+//! return and roll back together on runtime or resource errors. Parameter
+//! modes remain attached to first-class callable values.
+//!
+//! Rust [`BopInstance::call`] and [`BopInstance::call_value`] arguments are
+//! value-only and reject ref-bearing callables before execution. See the
+//! [reference-parameters
+//! guide](https://bop-lang.com/docs/functions/reference-parameters/) for the
+//! complete target, forwarding, evaluation-order, and method rules.
+//!
 //! # Features
 //!
 //! - `bop-std` (default) forwards to `bop-lang/bop-std` so hosts can

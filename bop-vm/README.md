@@ -87,6 +87,13 @@ assert_eq!(second.inspect(), "2");
 The walker and VM instance APIs are equivalent: `load`, `entry_points`,
 `call`, and `call_value`.
 
+The VM implements Bop's transactional `ref` parameters with the same
+copy-in/copy-out, target validation, commit, rollback, and diagnostic behavior
+as the walker and AOT engine. Rust `BopInstance::call` and `call_value`
+arguments remain value-only; expose a value-only `pub fn` that performs any
+ref call inside Bop. See the [reference-parameters
+guide](https://bop-lang.com/docs/functions/reference-parameters/).
+
 ## Bytecode tooling
 
 For tooling and caches, `compile` returns a public `Chunk`,

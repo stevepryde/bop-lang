@@ -144,7 +144,7 @@ function expressions, or declarations nested in a block or callable.
 argument at the call site. Although the grammar accepts an expression after an
 argument marker so parsing stays independent of the dynamic callee, semantic
 validation requires a mutable, uncaptured plain variable. See
-[Reference parameters](/docs/functions/defining-functions/#reference-parameters).
+[Reference Parameters](/docs/functions/reference-parameters/).
 
 `methodDecl`, enum variant `IDENT`s, and `struct` names must start with an
 uppercase letter. `IDENT` bound by `let`, `fn`, parameters, `for`, etc. must

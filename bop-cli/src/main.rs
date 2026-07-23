@@ -27,6 +27,11 @@
 //! Parse and runtime errors retain line/column information, source snippets,
 //! hints, and the owning source for failures raised from imported modules.
 //!
+//! The REPL, VM runner, walker runner, and AOT compiler support the same
+//! transactional `ref` parameter semantics. See the
+//! [reference-parameters
+//! guide](https://bop-lang.com/docs/functions/reference-parameters/).
+//!
 //! Full command documentation is available at
 //! <https://bop-lang.com/docs/cli/>.
 

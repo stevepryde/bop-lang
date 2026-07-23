@@ -63,6 +63,34 @@
 //! assert_eq!(host.output, ["42"]);
 //! ```
 //!
+//! # Reference parameters
+//!
+//! Bop normally passes independent values. User-defined functions may opt
+//! into explicit, second-class reference parameters by writing `ref` at both
+//! the declaration and call:
+//!
+//! ```bop
+//! fn increment(ref value) {
+//!   value += 1
+//! }
+//!
+//! let count = 0
+//! increment(ref count)
+//! print(count)    // 1
+//! ```
+//!
+//! A reference argument must be a distinct mutable plain-variable binding.
+//! The callee receives a staged copy; every reference target commits together
+//! only after a normal return and rolls back together on runtime or resource
+//! errors. Reference parameters may be forwarded but not captured. Built-in
+//! and host functions are value-only.
+//!
+//! [`BopInstance::call`] and [`BopInstance::call_value`] also accept values,
+//! not Bop bindings, and reject ref-bearing callables before execution. Keep
+//! host-facing `pub fn` entries value-only and perform ref calls inside Bop.
+//! The complete language contract is in the [reference-parameters
+//! guide](https://bop-lang.com/docs/functions/reference-parameters/).
+//!
 //! # Persistent programs
 //!
 //! A persistent program explicitly publishes its host-callable ABI with

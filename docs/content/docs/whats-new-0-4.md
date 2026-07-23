@@ -119,6 +119,42 @@ Diagnostics suggest the corrected spelling. See
 [Variables → Constants](/docs/basics/variables/#constants) and
 [Name shapes](/docs/basics/variables/#name-shapes-are-checked).
 
+## Transactional `ref` parameters
+
+User-defined functions can explicitly update mutable caller variables. The
+`ref` marker is required in both the parameter declaration and the call:
+
+```bop
+fn swap(ref left, ref right) {
+  let old = left
+  left = right
+  right = old
+}
+
+let first = 1
+let second = 2
+swap(ref first, ref second)
+print([first, second])    // [2, 1]
+```
+
+References are second-class parameters rather than general aliasing values.
+Each target must be a distinct mutable plain variable; constants, expressions,
+indexes, fields, and captured bindings are rejected. The callee works on staged
+copies, then commits every target together only after a normal return. Runtime
+and fatal sandbox errors roll the call back, including errors caught by
+`try_call`; a returned `Result::Err` is an ordinary return and commits.
+
+Reference parameters work through first-class function aliases, may be
+forwarded into another ref call, and are supported by the walker, VM, and AOT
+engines. Built-in and host functions remain value-only, as do Rust
+`BopInstance::call` and `call_value` arguments. User-defined methods can place
+explicit refs after their value receiver, while built-in array mutators use the
+same transaction model implicitly for a named receiver.
+
+Read [Reference Parameters](/docs/functions/reference-parameters/) for target
+rules, evaluation order, forwarding, rollback, methods, and embedding
+boundaries.
+
 ## Methods replace utility globals
 
 Operations that belong to a value now use method syntax:

@@ -17,6 +17,8 @@ Hand your users or your AI a real programming language at runtime, without shipp
   remain live
 - **`BopHost` trait** — the only thing embedders need to implement to wire Bop into their Rust app
 - **`Value` type + builtin operators** — the shared runtime surface every Bop engine uses
+- **Transactional `ref` parameters** — explicit copy-in/copy-out updates to
+  mutable caller variables, with rollback on errors
 - **Resource limits** (`BopLimits`) — step and tracked-memory budgets, plus a fixed function-call depth cap
 
 For a faster runtime (2–3× this crate's tree-walker, same semantics), add [`bop-vm`](https://crates.io/crates/bop-vm). For an AOT path to native Rust, see [`bop-compile`](https://crates.io/crates/bop-compile).
@@ -61,9 +63,27 @@ impl BopHost for MyHost {
 fn main() {
     let mut host = MyHost;
     let limits = BopLimits::standard();
-    run(r#"print(greet())"#, &mut host, &limits).unwrap();
+run(r#"print(greet())"#, &mut host, &limits).unwrap();
 }
 ```
+
+The language normally passes independent values. A user-defined function can
+opt into a caller update with `ref` at both sites:
+
+```bop
+fn increment(ref value) {
+  value += 1
+}
+
+let count = 0
+increment(ref count)
+print(count)    // 1
+```
+
+Reference calls stage their changes and commit only after a normal return.
+See the [reference-parameters
+guide](https://bop-lang.com/docs/functions/reference-parameters/) for target,
+rollback, forwarding, method, and host-boundary rules.
 
 For a stateful plugin rather than a one-shot script, declare root entry points
 with `pub fn`, then load and call an instance:

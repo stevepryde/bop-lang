@@ -187,6 +187,12 @@ print(original)      // [1, 2, 3, 99]
 
 The same ordinary value behavior applies to numbers, strings, and bools. Closures and modules are shared handles, while iterators intentionally share their cursor: advancing one iterator handle advances its aliases too.
 
+When a function is intentionally designed to update a caller variable, declare
+and call an explicit [`ref` parameter](/docs/functions/reference-parameters/).
+References are second-class transactional parameters, not general values or
+aliases: ordinary assignment and ordinary function arguments keep the value
+semantics described above.
+
 ## Dynamic typing
 
 Variables can hold any type. You can even change the type of a variable by reassigning it:

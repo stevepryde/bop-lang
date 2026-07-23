@@ -178,14 +178,18 @@ impl Expr {
 /// call preflight before evaluating argument expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamMode {
+    /// An ordinary positional argument passed with value semantics.
     Value,
+    /// A transactional copy-in/copy-out argument marked with `ref`.
     Ref,
 }
 
 /// One declared function parameter, including its call-site passing mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
+    /// The binding name visible inside the function body.
     pub name: String,
+    /// Whether the parameter is value-only or must be called with `ref`.
     pub mode: ParamMode,
 }
 
@@ -193,7 +197,9 @@ pub struct Parameter {
 /// makes mode information survive aliases and dynamic callable dispatch.
 #[derive(Debug, Clone)]
 pub struct CallArg {
+    /// The source expression associated with this positional argument.
     pub value: Expr,
+    /// Whether the call site wrote an explicit `ref` marker.
     pub mode: ParamMode,
 }
 

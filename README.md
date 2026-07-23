@@ -17,6 +17,8 @@ A small, dynamically-typed, **embeddable** programming language for Rust hosts �
   state remain live across host calls.
 - **Explicit in-place APIs.** Second-class `ref` parameters make caller
   mutation visible at both sites and commit transactionally on normal return.
+  Read the [reference-parameters
+  guide](https://bop-lang.com/docs/functions/reference-parameters/).
 - **`no_std` + WASM.** Core crate builds clean for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade.
 - **Small, stable grammar.** Functions, closures, arrays, dicts, structs, enums, pattern matching, string interpolation, modules, `Result` / `Iter` built-ins. Deliberately small — easy to teach, easy for tooling to target.
 - **Helpful errors.** Parse and runtime errors include the source snippet, a caret under the offending column, and `hint:` suggestions (`"I don't know what 'pritn' is — did you mean 'print'?"`).
@@ -64,6 +66,13 @@ fn parse_positive(s) {
     if n <= 0 { return Err("must be positive") }
     return Ok(n)
 }
+
+// Explicit, transactional caller updates
+fn add_score(ref score, amount) {
+    score += amount
+}
+let score = 10
+add_score(ref score, 5)
 
 // Stdlib
 use std.math

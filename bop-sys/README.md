@@ -19,6 +19,10 @@ If you're writing a command-line tool or a desktop / server app that runs Bop sc
 - `unix_time()` / `unix_time_ms()` — current time, seconds / milliseconds since epoch
 - `print` is provided by `bop-lang` itself; `StdHost` routes output to stdout
 
+Host functions always receive value arguments. Explicit `ref` arguments are
+supported only by user-defined Bop functions; write a Bop wrapper when a
+script needs to update one of its own variables transactionally.
+
 ## Quick start
 
 ```toml

@@ -78,6 +78,11 @@
         "path": "/docs/functions/defining-functions/"
       },
       {
+        "title": "Reference Parameters",
+        "source": "functions/reference-parameters.md",
+        "path": "/docs/functions/reference-parameters/"
+      },
+      {
         "title": "Modules",
         "source": "modules.md",
         "path": "/docs/modules/"

@@ -5,8 +5,8 @@ weight = 14
 template = "docs/page.html"
 page_template = "docs/page.html"
 [extra.previous]
-title = "Defining Functions"
-path = "/docs/functions/defining-functions/"
+title = "Reference Parameters"
+path = "/docs/functions/reference-parameters/"
 [extra.next]
 title = "Error Handling"
 path = "/docs/errors/"

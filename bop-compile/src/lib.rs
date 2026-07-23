@@ -7,9 +7,10 @@
 //!
 //! The AOT engine implements the same language semantics as the tree-walker
 //! and bytecode VM, including methods, closures, string interpolation,
-//! indexed and field mutation, structs and enums, pattern matching,
-//! `Result`, lazy iteration, and all forms of `use`. A three-engine
-//! differential suite exercises their observable behavior together.
+//! indexed and field mutation, transactional `ref` parameters, structs and
+//! enums, pattern matching, `Result`, lazy iteration, and all forms of `use`.
+//! A three-engine differential suite exercises their observable behavior
+//! together.
 //!
 //! # Basic transpilation
 //!
@@ -57,6 +58,14 @@
 //! `BopInstance` API with `load`, `entry_points`, `call`, and `call_value`.
 //! Globals, modules, functions, callbacks, types, methods, and random-number
 //! state remain live between calls.
+//!
+//! Rust calls into the generated `BopInstance` remain value-only and reject
+//! ref-bearing entries or callbacks before execution. A value-only public
+//! entry can use reference parameters internally. Generated ref calls preserve
+//! the language's target validation, copy-in/copy-out staging, atomic commit,
+//! error rollback, forwarding, and mutating receiver behavior. See the
+//! [reference-parameters
+//! guide](https://bop-lang.com/docs/functions/reference-parameters/).
 //!
 //! Unsandboxed library output exposes the one-shot `run` API and deliberately
 //! omits accounting overhead. Do not run untrusted programs through that
