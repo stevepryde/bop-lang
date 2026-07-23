@@ -211,18 +211,37 @@ impl Compiler {
         self.resolvers.last_mut()
     }
 
+    /// Return whether a name is currently supplied by a runtime scope rather
+    /// than a function-local slot. Match-arm bindings take this path because
+    /// `MatchFail` discovers their values at runtime.
+    fn has_runtime_binding(&self, name: &str) -> bool {
+        self.runtime_bindings
+            .iter()
+            .rev()
+            .any(|scope| scope.iter().any(|bound| bound == name))
+    }
+
+    /// Resolve a function-local slot unless a dynamic binding shadows it.
+    ///
+    /// Match-arm captures live in the VM's scope maps, so compiling a
+    /// same-named parameter/local as `LoadLocal` or `AssignBack::Slot` would
+    /// bypass the capture entirely.
+    fn resolve_local_slot(&self, name: &str) -> Option<SlotIdx> {
+        if self.has_runtime_binding(name) {
+            None
+        } else {
+            self.current_resolver()
+                .and_then(|resolver| resolver.resolve(name))
+        }
+    }
+
     /// Record an identifier that didn't resolve to a slot in the
     /// innermost function's resolver — it's either a capture
     /// (resolved when the lambda is built) or a reference to
     /// something reachable only at runtime (named fn, import).
     /// No-op at module top-level.
     fn note_free_var(&mut self, name: &str) {
-        if self
-            .runtime_bindings
-            .iter()
-            .rev()
-            .any(|scope| scope.iter().any(|bound| bound == name))
-        {
+        if self.has_runtime_binding(name) {
             return;
         }
         if let Some(list) = self.free_vars.as_mut() {
@@ -527,7 +546,7 @@ impl Compiler {
     }
 
     fn namespace_ref(&mut self, name: &str) -> NamespaceRef {
-        let slot = self.current_resolver().and_then(|resolver| resolver.resolve(name));
+        let slot = self.resolve_local_slot(name);
         if slot.is_none() {
             self.note_free_var(name);
         }
@@ -902,7 +921,7 @@ impl Compiler {
         // re-doing the resolver dance by hand.
         match target {
             AssignTarget::Variable(name) => {
-                let slot = self.current_resolver().and_then(|r| r.resolve(name));
+                let slot = self.resolve_local_slot(name);
                 let n = self.add_name(name);
                 match op {
                     AssignOp::Eq => {
@@ -953,7 +972,7 @@ impl Compiler {
                         ));
                     }
                 };
-                let slot = self.current_resolver().and_then(|r| r.resolve(&name));
+                let slot = self.resolve_local_slot(&name);
                 let name_idx = self.add_name(&name);
                 if slot.is_none() {
                     self.note_free_var(&name);
@@ -989,7 +1008,7 @@ impl Compiler {
                         ));
                     }
                 };
-                let slot = self.current_resolver().and_then(|r| r.resolve(&name));
+                let slot = self.resolve_local_slot(&name);
                 let name_idx = self.add_name(&name);
                 let field_idx = self.add_name(field);
                 if slot.is_none() {
@@ -1073,9 +1092,7 @@ impl Compiler {
                             resolved.push(InterpPart::Literal(value.clone()));
                         }
                         bop::lexer::StringPart::Variable(name) => {
-                            if let Some(slot) =
-                                self.current_resolver().and_then(|r| r.resolve(name))
-                            {
+                            if let Some(slot) = self.resolve_local_slot(name) {
                                 resolved.push(InterpPart::Local(slot));
                             } else {
                                 self.note_free_var(name);
@@ -1101,7 +1118,7 @@ impl Compiler {
                 // variable so `compile_function` can lift it into
                 // the enclosing function's captures list when
                 // this happens inside a lambda body.
-                if let Some(slot) = self.current_resolver().and_then(|r| r.resolve(name)) {
+                if let Some(slot) = self.resolve_local_slot(name) {
                     self.emit(Instr::LoadLocal(slot), line);
                 } else {
                     self.note_free_var(name);
@@ -1140,7 +1157,7 @@ impl Compiler {
                 //     `make_adder(5)(3)`) — evaluate arguments
                 //     first, then the callee, and use `CallValue`.
                 if let ExprKind::Ident(name) = &callee.kind {
-                    if let Some(slot) = self.current_resolver().and_then(|r| r.resolve(name)) {
+                    if let Some(slot) = self.resolve_local_slot(name) {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
@@ -1202,7 +1219,7 @@ impl Compiler {
                 // fallback via `AssignBack::Name`.
                 let assign_back_to = match &object.kind {
                     ExprKind::Ident(n) => {
-                        if let Some(slot) = self.current_resolver().and_then(|r| r.resolve(n)) {
+                        if let Some(slot) = self.resolve_local_slot(n) {
                             Some(crate::chunk::AssignBack::Slot(slot))
                         } else {
                             // The in-place opcode deliberately skips
@@ -1696,10 +1713,7 @@ impl Compiler {
         let resolutions: Vec<(String, CaptureSource)> = free
             .into_iter()
             .map(|name| {
-                let slot = self
-                    .resolvers
-                    .last()
-                    .and_then(|p| p.resolve(&name));
+                let slot = self.resolve_local_slot(&name);
                 let source = match slot {
                     Some(slot) => CaptureSource::ParentSlot(slot),
                     None => CaptureSource::ParentScope(name.clone()),
