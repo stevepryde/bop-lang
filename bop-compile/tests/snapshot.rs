@@ -54,7 +54,7 @@ fn targeted_parser_diagnostics_are_preserved_at_the_aot_boundary() {
             "`match` pattern binding `Y` looks like a constant, but a value name is required here",
             2,
             11,
-            "names bound by `let` / `fn` / params start with a lowercase letter. Did you mean to declare a constant? (`const Y = ...`)",
+            "uppercase names can't be pattern bindings. To match against the value of `Y`, bind a lowercase name and compare it in a guard: `n if n == Y => ...`",
         ),
     ];
 
