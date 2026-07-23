@@ -25,6 +25,9 @@ use crate::error::BopError;
 use crate::memory::MemoryReceipt;
 use crate::parser::Stmt;
 
+mod dict_index;
+use dict_index::DictKeyIndex;
+
 /// Maximum number of recursively owned runtime values.
 ///
 /// This is deliberately an unconditional runtime invariant rather than a
@@ -91,27 +94,42 @@ pub struct BopArray(Rc<ArrayData>);
 struct ArrayData {
     items: Vec<Value>,
     depth: u16,
-    depth_counts: ArrayDepthCounts,
+    depth_counts: OrderedDepthCounts,
     receipt: MemoryReceipt,
 }
 
-/// Exact child-depth frequencies for an array. Flat values dominate normal
-/// programs, so depth zero stays inline; only nested values allocate entries.
-/// The sparse vector has at most [`MAX_VALUE_DEPTH`] entries, keeping depth
-/// maintenance independent of the array's length without inflating every
-/// `Value` by a fixed 64-element table.
+/// Exact child-depth frequencies for an insertion-ordered container. Flat
+/// values dominate normal programs, so depth zero stays inline; only nested
+/// values allocate entries. The sparse vector has at most
+/// [`MAX_VALUE_DEPTH`] entries, keeping depth maintenance independent of the
+/// container's length without inflating every `Value` by a fixed 64-element
+/// table.
 #[derive(Debug, Clone)]
-struct ArrayDepthCounts {
+struct OrderedDepthCounts {
     flat: usize,
     nested: Vec<(u16, usize)>,
-    /// Stable depth recorded when each element enters the array. Re-reading an
-    /// iterator's depth can fail conservatively while a host holds its
-    /// `RefCell` borrow, so removals and replacements use this parallel cache.
+    /// Stable depth recorded when each value enters the container. Re-reading
+    /// an iterator's depth can fail conservatively while a host holds its
+    /// `RefCell` borrow, so mutations use this parallel cache.
     child_depths: Vec<u16>,
 }
 
-impl ArrayDepthCounts {
+impl OrderedDepthCounts {
     fn from_values(values: &[Value], line: u32) -> Result<Self, BopError> {
+        Self::from_depths(values.iter().map(Value::ownership_depth), line)
+    }
+
+    fn from_entries(entries: &[(String, Value)], line: u32) -> Result<Self, BopError> {
+        Self::from_depths(
+            entries.iter().map(|(_, value)| value.ownership_depth()),
+            line,
+        )
+    }
+
+    fn from_depths(
+        depths: impl ExactSizeIterator<Item = u16>,
+        line: u32,
+    ) -> Result<Self, BopError> {
         let mut counts = Self {
             flat: 0,
             nested: Vec::new(),
@@ -119,10 +137,9 @@ impl ArrayDepthCounts {
         };
         counts
             .child_depths
-            .try_reserve_exact(values.len())
+            .try_reserve_exact(depths.len())
             .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
-        for value in values {
-            let depth = value.ownership_depth();
+        for depth in depths {
             counts.child_depths.push(depth);
             if depth == 0 {
                 counts.flat += 1;
@@ -190,7 +207,7 @@ impl ArrayDepthCounts {
             .nested
             .iter()
             .position(|(entry_depth, _)| *entry_depth == depth)
-            .expect("array depth metadata contains every child");
+            .expect("container depth metadata contains every child");
         if self.nested[index].1 == 1 {
             self.nested.remove(index);
         } else {
@@ -219,8 +236,20 @@ pub struct BopDict(Rc<DictData>);
 #[derive(Debug)]
 struct DictData {
     entries: Vec<(String, Value)>,
+    key_bytes: usize,
+    key_index: DictKeyIndex,
     depth: u16,
+    depth_counts: OrderedDepthCounts,
     receipt: MemoryReceipt,
+}
+
+fn try_copy_dict_key(key: &str, line: u32) -> Result<String, BopError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(key.len())
+        .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
+    owned.push_str(key);
+    Ok(owned)
 }
 
 /// A user-defined struct value. Carries the module it was
@@ -308,16 +337,28 @@ impl Clone for ArrayData {
 
 impl DictData {
     fn tracked_bytes(&self) -> usize {
-        let key_bytes: usize = self.entries.iter().map(|(key, _)| key.capacity()).sum();
-        self.entries.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes
+        self.entries.capacity() * core::mem::size_of::<(String, Value)>()
+            + self.key_bytes
+            + self.key_index.tracked_bytes()
+            + self.depth_counts.tracked_bytes()
+    }
+
+    fn sync_receipt(&mut self) {
+        let bytes = self.tracked_bytes();
+        self.receipt.resize(bytes);
     }
 }
 
 impl Clone for DictData {
     fn clone(&self) -> Self {
+        let entries = self.entries.clone();
+        let key_bytes = entries.iter().map(|(key, _)| key.capacity()).sum();
         let cloned = Self {
-            entries: self.entries.clone(),
+            entries,
+            key_bytes,
+            key_index: self.key_index.clone(),
             depth: self.depth,
+            depth_counts: self.depth_counts.clone(),
             receipt: MemoryReceipt::new(0),
         };
         let mut cloned = cloned;
@@ -998,7 +1039,7 @@ impl Value {
 
     pub fn try_new_array(items: Vec<Value>, line: u32) -> Result<Self, BopError> {
         let depth = checked_owner_depth(&items, 1, line)?;
-        let depth_counts = ArrayDepthCounts::from_values(&items, line)?;
+        let depth_counts = OrderedDepthCounts::from_values(&items, line)?;
         let mut data = ArrayData {
             items,
             depth,
@@ -1023,7 +1064,17 @@ impl Value {
 
     pub fn try_new_dict(entries: Vec<(String, Value)>, line: u32) -> Result<Self, BopError> {
         let depth = checked_owner_depth(entries.iter().map(|(_, value)| value), 1, line)?;
-        let mut data = DictData { entries, depth, receipt: MemoryReceipt::new(0) };
+        let depth_counts = OrderedDepthCounts::from_entries(&entries, line)?;
+        let key_index = DictKeyIndex::try_from_entries(&entries, line)?;
+        let key_bytes = entries.iter().map(|(key, _)| key.capacity()).sum();
+        let mut data = DictData {
+            entries,
+            key_bytes,
+            key_index,
+            depth,
+            depth_counts,
+            receipt: MemoryReceipt::new(0),
+        };
         data.receipt.resize(data.tracked_bytes());
         Ok(Value::Dict(BopDict(Rc::new(data))))
     }
@@ -1506,9 +1557,13 @@ impl Value {
                             .map(|value| (key.clone(), value))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let key_bytes = entries.iter().map(|(key, _)| key.capacity()).sum();
                 let mut data = DictData {
                     entries,
+                    key_bytes,
+                    key_index: value.0.key_index.clone(),
                     depth: value.0.depth,
+                    depth_counts: value.0.depth_counts.clone(),
                     receipt: MemoryReceipt::new(0),
                 };
                 data.receipt.resize(data.tracked_bytes());
@@ -2078,6 +2133,10 @@ impl BopStruct {
         let Some(index) = self.0.fields.iter().position(|(key, _)| key == name) else {
             return Ok(false);
         };
+        // Struct keys are a fixed declared field set: writes cannot add fields
+        // incrementally, and field counts are typically small. Keeping their
+        // lookup and depth refresh linear avoids a second index/metadata
+        // allocation without recreating dictionary construction's O(n²) path.
         let depth = checked_owner_depth(
             self.0
                 .fields
@@ -2142,34 +2201,71 @@ impl BopDict {
     }
 
     /// Line-aware, atomic variant of [`Self::set_key`].
+    ///
+    /// Depth rejection and key-copy allocation happen before CoW detachment.
+    /// A later recoverable allocation error can leave a detached backing or
+    /// larger reserved capacities, but entries, lookup mappings, depth counts,
+    /// and cached key bytes remain logically unchanged and mutually coherent.
     pub fn try_set_key(&mut self, key: &str, val: Value, line: u32) -> Result<(), BopError> {
-        let existing = self
-            .0
-            .entries
-            .iter()
-            .position(|(entry_key, _)| entry_key == key);
-        let depth = checked_owner_depth(
-            self.0
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(i, (_, value))| (Some(i) != existing).then_some(value))
-                .chain(core::iter::once(&val)),
-            1,
-            line,
-        )?;
+        let new_child_depth = val.ownership_depth();
+        if new_child_depth.saturating_add(1) > MAX_VALUE_DEPTH {
+            return Err(value_depth_error(line));
+        }
+        let existing = self.0.key_index.get(&self.0.entries, key);
+        let owned_key = if existing.is_none() {
+            Some(try_copy_dict_key(key, line)?)
+        } else {
+            None
+        };
+        let old_child_depth = existing.map(|index| self.0.depth_counts.child_depths[index]);
 
         self.ensure_active_owner();
         let data = Rc::make_mut(&mut self.0);
         if let Some(index) = existing {
+            if old_child_depth != Some(new_child_depth) {
+                data.depth_counts.ensure_depth(new_child_depth, line)?;
+            }
             data.entries[index].1 = val;
+            data.depth_counts.child_depths[index] = new_child_depth;
+            if let Some(old_child_depth) =
+                old_child_depth.filter(|old_child_depth| *old_child_depth != new_child_depth)
+            {
+                data.depth_counts.remove(old_child_depth);
+                data.depth_counts.add(new_child_depth);
+                data.depth = data.depth_counts.owner_depth();
+            }
         } else {
-            let key = key.to_string();
+            let updated_key_bytes = data
+                .key_bytes
+                .checked_add(
+                    owned_key
+                        .as_ref()
+                        .expect("absent dictionary key was copied before mutation")
+                        .capacity(),
+                )
+                .ok_or_else(|| BopError::fatal("Memory limit exceeded", line))?;
+            data.depth_counts.ensure_depth(new_child_depth, line)?;
+            data.sync_receipt();
+            data.depth_counts.try_reserve_child(line)?;
+            data.sync_receipt();
+            data.entries
+                .try_reserve(1)
+                .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
+            data.sync_receipt();
+            data.key_index
+                .ensure_insert_capacity(&data.entries, line)?;
+            data.sync_receipt();
+            let key = owned_key.expect("absent dictionary key was copied before mutation");
+            let entry_index = data.entries.len();
             data.entries.push((key, val));
+            data.key_index
+                .insert_new(&data.entries[entry_index].0, entry_index);
+            data.key_bytes = updated_key_bytes;
+            data.depth_counts.child_depths.push(new_child_depth);
+            data.depth_counts.add(new_child_depth);
+            data.depth = data.depth_counts.owner_depth();
         }
-        data.depth = depth;
-        let bytes = data.tracked_bytes();
-        data.receipt.resize(bytes);
+        data.sync_receipt();
         Ok(())
     }
 }
@@ -2599,12 +2695,37 @@ mod depth_tests {
         assert_eq!(array_value.0.depth, 1);
 
         let mut dict = Value::try_new_dict(vec![("x".into(), Value::Int(1))], 1).unwrap();
+        let dict_snapshot = dict.clone();
         let Value::Dict(dict_value) = &mut dict else {
             unreachable!()
         };
+        let original_backing = Rc::as_ptr(&dict_value.0);
+        let original_key_bytes = dict_value.0.key_bytes;
+        let original_index_entries = dict_value.0.key_index.entry_count();
         dict_value.try_set_key("x", child.clone(), 32).unwrap_err();
+        dict_value.try_set_key("y", child.clone(), 32).unwrap_err();
+        assert_eq!(Rc::as_ptr(&dict_value.0), original_backing);
         assert!(matches!(&dict_value[0].1, Value::Int(1)));
+        assert_eq!(dict_value.len(), 1);
         assert_eq!(dict_value.0.depth, 1);
+        assert_eq!(dict_value.0.depth_counts.child_depths, [0]);
+        assert_eq!(dict_value.0.key_bytes, original_key_bytes);
+        assert_eq!(
+            dict_value.0.key_index.entry_count(),
+            original_index_entries
+        );
+        assert_eq!(
+            dict_value.0.key_index.get(&dict_value.0.entries, "x"),
+            Some(0)
+        );
+        assert_eq!(
+            dict_value.0.key_index.get(&dict_value.0.entries, "y"),
+            None
+        );
+        assert!(matches!(
+            dict_snapshot,
+            Value::Dict(ref snapshot) if Rc::ptr_eq(&snapshot.0, &dict_value.0)
+        ));
 
         let mut structure =
             Value::try_new_struct("m".into(), "S".into(), vec![("x".into(), Value::Int(1))], 1)
@@ -2644,6 +2765,46 @@ mod depth_tests {
         assert!(array.is_empty());
         assert_eq!(array.0.depth, 1);
         assert_eq!(array.0.depth_counts.flat, 0);
+    }
+
+    #[test]
+    fn dict_mutations_keep_exact_sparse_depth_metadata_and_insertion_order() {
+        let mut value = Value::try_new_dict(
+            vec![
+                ("flat".into(), Value::Int(1)),
+                ("deep".into(), nested_array(4)),
+                ("middle".into(), nested_array(2)),
+            ],
+            1,
+        )
+        .unwrap();
+        let Value::Dict(dict) = &mut value else {
+            unreachable!()
+        };
+
+        assert_eq!(dict.0.depth, 5);
+        assert_eq!(dict.0.depth_counts.flat, 1);
+        assert_eq!(dict.0.depth_counts.nested.len(), 2);
+        assert_eq!(dict.0.depth_counts.child_depths, [0, 4, 2]);
+
+        dict.try_set_key("deep", Value::Int(2), 1).unwrap();
+        assert_eq!(dict.0.depth, 3);
+        assert_eq!(dict.0.depth_counts.flat, 2);
+        assert_eq!(dict.0.depth_counts.nested, [(2, 1)]);
+        assert_eq!(dict.0.depth_counts.child_depths, [0, 0, 2]);
+
+        dict.try_set_key("flat", nested_array(2), 1).unwrap();
+        assert_eq!(dict.0.depth_counts.flat, 1);
+        assert_eq!(dict.0.depth_counts.nested, [(2, 2)]);
+        assert_eq!(dict.0.depth_counts.child_depths, [2, 0, 2]);
+
+        dict.try_set_key("tail", nested_array(5), 1).unwrap();
+        assert_eq!(dict.0.depth, 6);
+        assert_eq!(dict.0.depth_counts.child_depths, [2, 0, 2, 5]);
+        assert_eq!(
+            dict.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+            ["flat", "deep", "middle", "tail"]
+        );
     }
 
     #[test]
@@ -2719,6 +2880,207 @@ mod depth_tests {
         assert!(matches!(array.first(), Some(Value::Int(9))));
         assert_eq!(array.0.depth, 1);
         drop(borrow);
+    }
+
+    #[test]
+    fn dict_mutation_uses_cached_depth_while_iterator_is_borrowed() {
+        let iterator = Value::new_array_iter(vec![Value::Int(1)]);
+        let handle = match &iterator {
+            Value::Iter(handle) => Rc::clone(handle),
+            _ => unreachable!(),
+        };
+        let mut value = Value::try_new_dict(
+            vec![
+                ("target".into(), Value::Int(0)),
+                ("borrowed".into(), iterator),
+            ],
+            1,
+        )
+        .unwrap();
+        let borrow = handle.borrow_mut();
+        let Value::Dict(dict) = &mut value else {
+            unreachable!()
+        };
+
+        dict.try_set_key("target", nested_array(2), 51).unwrap();
+        dict.try_set_key("inserted", Value::Int(2), 51).unwrap();
+        dict.try_set_key("borrowed", Value::Int(3), 51).unwrap();
+
+        assert_eq!(dict.0.depth, 3);
+        assert_eq!(dict.0.depth_counts.child_depths, [2, 0, 0]);
+        assert_eq!(
+            dict.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+            ["target", "borrowed", "inserted"]
+        );
+        drop(borrow);
+    }
+
+    #[test]
+    fn large_dict_updates_do_not_reinspect_existing_values() {
+        const ENTRY_COUNT: usize = 4_096;
+        const UPDATE_COUNT: usize = 4_096;
+
+        let iterator = Value::new_array_iter(vec![Value::Int(1)]);
+        let handle = match &iterator {
+            Value::Iter(handle) => Rc::clone(handle),
+            _ => unreachable!(),
+        };
+        let mut entries = Vec::with_capacity(ENTRY_COUNT);
+        entries.push(("borrowed-sentinel".into(), iterator));
+        for index in 1..ENTRY_COUNT - 1 {
+            entries.push((format!("key-{index}"), Value::Int(index as i64)));
+        }
+        entries.push(("target".into(), Value::Int(0)));
+
+        let mut value = Value::try_new_dict(entries, 1).unwrap();
+        let borrow = handle.borrow_mut();
+        let Value::Dict(dict) = &mut value else {
+            unreachable!()
+        };
+        dict.0.key_index.reset_probes();
+
+        // A full-value scan would call `ownership_depth` on the borrowed first
+        // entry and reject the write; a linear key scan would compare all
+        // 4,096 keys to find the final entry. Counted index probes establish
+        // that neither path is used without relying on wall-clock timing.
+        for update in 0..UPDATE_COUNT {
+            let replacement = if update % 2 == 0 {
+                nested_array(1)
+            } else {
+                Value::Int(update as i64)
+            };
+            dict.try_set_key("target", replacement, 61).unwrap();
+        }
+
+        assert_eq!(dict.len(), ENTRY_COUNT);
+        assert_eq!(dict[0].0, "borrowed-sentinel");
+        assert_eq!(dict[ENTRY_COUNT - 1].0, "target");
+        assert_eq!(dict.0.depth, 2);
+        assert_eq!(dict.0.depth_counts.child_depths.len(), ENTRY_COUNT);
+        assert!(
+            dict.0.key_index.probes() < UPDATE_COUNT * 8,
+            "existing-key updates performed too many lookup probes: {}",
+            dict.0.key_index.probes()
+        );
+        drop(borrow);
+    }
+
+    #[test]
+    fn incremental_dict_construction_has_amortized_index_work_and_exact_accounting() {
+        const ENTRY_COUNT: usize = 4_096;
+
+        bop_memory_init(usize::MAX);
+        let mut value = Value::try_new_dict(Vec::new(), 1).unwrap();
+        let Value::Dict(dict) = &mut value else {
+            unreachable!()
+        };
+        let unique_backing = Rc::as_ptr(&dict.0);
+        dict.0.key_index.reset_probes();
+
+        for index in 0..ENTRY_COUNT {
+            dict.try_set_key(&format!("key-{index}"), Value::Int(index as i64), 1)
+                .unwrap();
+        }
+
+        assert_eq!(dict.len(), ENTRY_COUNT);
+        assert_eq!(dict.0.key_index.entry_count(), ENTRY_COUNT);
+        assert!(dict.0.key_index.slot_count() >= ENTRY_COUNT * 2);
+        assert!(dict.0.key_index.slot_count().is_power_of_two());
+        assert!(
+            dict.0.key_index.rehash_moves() < ENTRY_COUNT * 2,
+            "geometric rehashing moved too many entries: {}",
+            dict.0.key_index.rehash_moves()
+        );
+        assert!(
+            dict.0.key_index.probes() < ENTRY_COUNT * 16,
+            "incremental construction performed too many lookup probes: {}",
+            dict.0.key_index.probes()
+        );
+        assert_eq!(
+            dict.0.key_bytes,
+            dict.iter().map(|(key, _)| key.capacity()).sum()
+        );
+        assert_eq!(
+            Rc::as_ptr(&dict.0),
+            unique_backing,
+            "unique incremental writes must not detach the dictionary backing"
+        );
+        assert_eq!(bop_memory_used(), dict.0.tracked_bytes());
+
+        drop(value);
+        assert_eq!(bop_memory_used(), 0);
+    }
+
+    #[test]
+    fn duplicate_constructor_keys_keep_first_match_replacement_semantics() {
+        let mut value = Value::try_new_dict(
+            vec![
+                ("same".into(), Value::Int(1)),
+                ("same".into(), Value::Int(2)),
+            ],
+            1,
+        )
+        .unwrap();
+        let Value::Dict(dict) = &mut value else {
+            unreachable!()
+        };
+
+        assert_eq!(dict.0.key_index.entry_count(), 1);
+        dict.try_set_key("same", Value::Int(3), 1).unwrap();
+        assert!(matches!(dict[0].1, Value::Int(3)));
+        assert!(matches!(dict[1].1, Value::Int(2)));
+        assert_eq!(dict.len(), 2);
+    }
+
+    #[test]
+    fn dict_compatibility_snapshots_copy_exact_depth_metadata() {
+        bop_memory_init(usize::MAX);
+        let value = Value::try_new_dict(
+            vec![
+                ("flat".into(), Value::Int(1)),
+                ("nested".into(), nested_array(3)),
+            ],
+            1,
+        )
+        .unwrap();
+        let authoritative_bytes = bop_memory_used();
+        let snapshot_value = value.__compatibility_snapshot(1).unwrap();
+        assert_eq!(
+            bop_memory_used(),
+            authoritative_bytes,
+            "compatibility snapshot must not retain the active account"
+        );
+
+        let (Value::Dict(original), Value::Dict(snapshot)) = (&value, &snapshot_value) else {
+            unreachable!()
+        };
+        assert!(!Rc::ptr_eq(&original.0, &snapshot.0));
+        assert_eq!(snapshot.0.depth, original.0.depth);
+        assert_eq!(
+            snapshot.0.depth_counts.child_depths,
+            original.0.depth_counts.child_depths
+        );
+        assert_eq!(
+            snapshot.0.depth_counts.nested,
+            original.0.depth_counts.nested
+        );
+        assert_eq!(
+            snapshot.0.depth_counts.flat,
+            original.0.depth_counts.flat
+        );
+        assert_eq!(
+            snapshot.0.key_index.get(&snapshot.0.entries, "nested"),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot.0.key_bytes,
+            snapshot.iter().map(|(key, _)| key.capacity()).sum()
+        );
+
+        drop(value);
+        assert_eq!(bop_memory_used(), 0);
+        drop(snapshot_value);
+        assert_eq!(bop_memory_used(), 0);
     }
 
     #[test]
@@ -2872,6 +3234,44 @@ mod depth_tests {
         drop(structure);
         drop(dict_clone);
         drop(dict);
+        assert_eq!(bop_memory_used(), 0);
+    }
+
+    #[test]
+    fn shared_dict_insertion_keeps_cloned_key_and_index_accounting_exact() {
+        bop_memory_init(usize::MAX);
+
+        let mut key = String::with_capacity(64);
+        key.push_str("existing");
+        let mut value = Value::try_new_dict(vec![(key, Value::Int(1))], 1).unwrap();
+        let snapshot = value.clone();
+        let before_detach = bop_memory_used();
+        let Value::Dict(dict) = &mut value else {
+            unreachable!()
+        };
+        let shared_backing = Rc::as_ptr(&dict.0);
+
+        dict.try_set_key("inserted", Value::Int(2), 1).unwrap();
+        assert_ne!(Rc::as_ptr(&dict.0), shared_backing);
+        assert_eq!(
+            dict.0.key_bytes,
+            dict.iter().map(|(key, _)| key.capacity()).sum()
+        );
+        let Value::Dict(snapshot_dict) = &snapshot else {
+            unreachable!()
+        };
+        assert_eq!(
+            bop_memory_used() - before_detach,
+            dict.0.tracked_bytes(),
+            "shared insertion must charge exactly one detached backing"
+        );
+        assert_eq!(
+            bop_memory_used(),
+            dict.0.tracked_bytes() + snapshot_dict.0.tracked_bytes()
+        );
+
+        drop(value);
+        drop(snapshot);
         assert_eq!(bop_memory_used(), 0);
     }
 
