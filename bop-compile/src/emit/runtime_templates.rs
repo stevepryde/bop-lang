@@ -46,6 +46,17 @@ pub(super) const CTX_BASE: &str = r#"pub struct Ctx<'h> {
         (::std::string::String, ::std::string::String),
         ::bop::value::Value,
     >,
+    pub bindings: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        ::bop::value::Value,
+    >,
+    pub binding_origins: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        (::std::string::String, ::std::string::String),
+    >,
+    pub binding_claims: ::std::collections::HashSet<
+        (::std::string::String, ::std::string::String),
+    >,
     pub module_type_bindings: ::std::collections::HashMap<
         ::std::string::String,
         ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
@@ -124,6 +135,13 @@ struct __BopState {
     bindings: ::std::collections::HashMap<
         (::std::string::String, ::std::string::String),
         ::bop::value::Value,
+    >,
+    binding_origins: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        (::std::string::String, ::std::string::String),
+    >,
+    binding_claims: ::std::collections::HashSet<
+        (::std::string::String, ::std::string::String),
     >,
     abi_declarations: ::std::vec::Vec<usize>,
 /*__BOP_METHOD_SLOTS__*/
@@ -254,6 +272,150 @@ pub(super) const RUNTIME_SHARED: &str = r#"/// Sentinel type inserted into `modu
 /// state it means a circular import — the runtime returns a clear
 /// error and halts.
 pub struct __ModuleLoading;
+
+type __BopBindingKey = (::std::string::String, ::std::string::String);
+
+fn __bop_binding_key(module_path: &str, name: &str) -> __BopBindingKey {
+    (module_path.to_string(), name.to_string())
+}
+
+fn __bop_resolve_binding_key(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+) -> ::std::option::Option<__BopBindingKey> {
+    let mut key = __bop_binding_key(module_path, name);
+    let mut remaining = ctx.binding_origins.len() + 1;
+    loop {
+        if ctx.bindings.contains_key(&key) {
+            return ::std::option::Option::Some(key);
+        }
+        if remaining == 0 {
+            return ::std::option::Option::None;
+        }
+        let next = ctx.binding_origins.get(&key)?.clone();
+        key = next;
+        remaining -= 1;
+    }
+}
+
+fn __bop_binding_value(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+) -> ::std::option::Option<::bop::value::Value> {
+    let key = __bop_resolve_binding_key(ctx, module_path, name)?;
+    ctx.bindings.get(&key).cloned()
+}
+
+fn __bop_has_binding(ctx: &Ctx<'_>, module_path: &str, name: &str) -> bool {
+    let key = __bop_binding_key(module_path, name);
+    ctx.bindings.contains_key(&key)
+        || ctx.binding_origins.contains_key(&key)
+        || ctx.binding_claims.contains(&key)
+}
+
+fn __bop_define_binding(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    value: ::bop::value::Value,
+) {
+    let key = __bop_binding_key(module_path, name);
+    ctx.binding_origins.remove(&key);
+    ctx.binding_claims.insert(key.clone());
+    ctx.bindings.insert(key, value);
+}
+
+fn __bop_claim_binding(ctx: &mut Ctx<'_>, module_path: &str, name: &str) {
+    let key = __bop_binding_key(module_path, name);
+    if !__bop_has_binding(ctx, module_path, name) {
+        ctx.binding_claims.insert(key);
+    }
+}
+
+fn __bop_import_binding_alias(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    origin_module_path: &str,
+    origin_name: &str,
+) {
+    if __bop_has_binding(ctx, module_path, name) {
+        return;
+    }
+    let key = __bop_binding_key(module_path, name);
+    let origin = __bop_binding_key(origin_module_path, origin_name);
+    ctx.binding_origins.insert(key.clone(), origin);
+    ctx.binding_claims.insert(key);
+}
+
+fn __bop_import_binding_value(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    value: ::bop::value::Value,
+) {
+    if __bop_has_binding(ctx, module_path, name) {
+        return;
+    }
+    let key = __bop_binding_key(module_path, name);
+    ctx.binding_claims.insert(key.clone());
+    ctx.bindings.insert(key, value);
+}
+
+fn __bop_read_binding(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    __bop_binding_value(ctx, module_path, name)
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(name),
+            line,
+        ))
+}
+
+fn __bop_binding_mut<'a>(
+    ctx: &'a mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<&'a mut ::bop::value::Value, ::bop::error::BopError> {
+    let key = __bop_resolve_binding_key(ctx, module_path, name);
+    key.and_then(|key| ctx.bindings.get_mut(&key))
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(name),
+            line,
+        ))
+}
+
+fn __bop_binding_mut_option<'a>(
+    ctx: &'a mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+) -> ::std::option::Option<&'a mut ::bop::value::Value> {
+    let key = __bop_resolve_binding_key(ctx, module_path, name)?;
+    ctx.bindings.get_mut(&key)
+}
+
+fn __bop_binding_is_array(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<bool, ::bop::error::BopError> {
+    Ok(matches!(
+        __bop_resolve_binding_key(ctx, module_path, name)
+            .and_then(|key| ctx.bindings.get(&key))
+            .ok_or_else(|| ::bop::error::BopError::runtime(
+                ::bop::error_messages::variable_not_found(name),
+                line,
+            ))?,
+        ::bop::value::Value::Array(_)
+    ))
+}
 
 type __BopTypeFrame =
     ::std::collections::BTreeMap<::std::string::String, ::std::string::String>;
@@ -1333,6 +1495,9 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         rand_state: 0,
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
+        bindings: ::std::collections::HashMap::new(),
+        binding_origins: ::std::collections::HashMap::new(),
+        binding_claims: ::std::collections::HashSet::new(),
         module_type_bindings: ::std::collections::HashMap::new(),
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),
@@ -1383,6 +1548,8 @@ fn __bop_load_state(
         active_function_sites: ::std::collections::HashMap::new(),
         module_imported_function_sites: ::std::collections::HashMap::new(),
         bindings: ::std::collections::HashMap::new(),
+        binding_origins: ::std::collections::HashMap::new(),
+        binding_claims: ::std::collections::HashSet::new(),
         abi_declarations: ::std::vec::Vec::new(),
 /*__BOP_METHOD_SLOTS_INIT__*/
     };
