@@ -463,20 +463,6 @@ fn __bop_module_member(
     __bop_binding_value(ctx, &module.path, name).or_else(|| module.__binding(name))
 }
 
-/// Current value of a module-alias member. The live binding wins when
-/// the name (or its re-export origin — `__bop_binding_value` chases
-/// `binding_origins`, so facades resolve to the deepest origin) is
-/// still tracked as a rebindable binding; fn exports and anything the
-/// module never defined as a binding fall back to the import-time
-/// snapshot. Mirrors the walker's `module_binding`.
-fn __bop_module_member(
-    ctx: &Ctx<'_>,
-    module: &::bop::value::BopModule,
-    name: &str,
-) -> ::std::option::Option<::bop::value::Value> {
-    __bop_binding_value(ctx, &module.path, name).or_else(|| module.__binding(name))
-}
-
 fn __bop_read_binding(
     ctx: &Ctx<'_>,
     module_path: &str,
