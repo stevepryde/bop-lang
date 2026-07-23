@@ -64,6 +64,29 @@ for _ in 0..1000 {
 }
 ```
 
+That deliberately starts with fresh runtime state on every `execute`. When a
+plugin's globals, modules, callbacks, types, methods, or RNG state must survive
+between host calls, use `bop_vm::BopInstance` instead:
+
+```rust
+use bop::{BopLimits, Value};
+use bop_vm::BopInstance;
+
+let mut instance = BopInstance::load(
+    "let count = 0\npub fn next() { count += 1; return count }",
+    &mut host,
+    &BopLimits::standard(),
+)?;
+
+let first = instance.call("next", &[], &mut host)?;
+let second = instance.call("next", &[], &mut host)?;
+assert_eq!(first.inspect(), "1");
+assert_eq!(second.inspect(), "2");
+```
+
+The walker and VM instance APIs are equivalent: `load`, `entry_points`,
+`call`, and `call_value`.
+
 ## Features
 
 | feature | default | what it does |

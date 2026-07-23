@@ -52,13 +52,18 @@ Call `StandardHost::new().with_module_root(<path>)` to enable filesystem module 
 
 Bop ships three execution engines — all of them share the `BopHost` trait, `BopError`, `BopLimits`, and `Value` types, so the same program and host work with any of them. Pick whichever fits your workload:
 
-| Engine | Entry point | When it's best |
-|--------|-------------|----------------|
-| Tree-walker | `bop::run(src, host, limits)` | Lowest start-up cost. Best for one-off scripts, REPL, small inputs, no_std / wasm. |
-| Bytecode VM | `bop_vm::run(src, host, limits)` | 2–3× faster than the walker on hot loops. Same program, no compilation to disk. |
-| AOT transpiler | `bop_compile::transpile(src, opts)` → `cargo build` | Bop → Rust source, compiled to a native binary. Maximum throughput, at the cost of a `cargo build` step. |
+| Engine | One-shot entry point | Persistent entry point | When it's best |
+|--------|----------------------|------------------------|----------------|
+| Tree-walker | `bop::run(src, host, limits)` | `bop::BopInstance` | Lowest start-up cost. Best for one-off scripts, REPL, small inputs, no_std / wasm. |
+| Bytecode VM | `bop_vm::run(src, host, limits)` | `bop_vm::BopInstance` | 2–3× faster than the walker on hot loops. Same program, no compilation to disk. |
+| AOT transpiler | `bop_compile::transpile(src, opts)` → `cargo build` | Generated `BopInstance` in sandbox mode | Bop → Rust source, compiled to a native binary. Maximum throughput, at the cost of a `cargo build` step. |
 
 All three obey the same `BopLimits` and surface errors as `BopError` — the engine choice is an implementation detail from the host's perspective.
+
+Use the one-shot functions when a program should start from scratch on every
+run. For plugin-style programs whose globals, imports, callbacks, types, and
+random-number state must survive host calls, see [Stateful
+instances](embedding/instances.md).
 
 ## The `BopHost` trait
 
@@ -376,6 +381,10 @@ assert_eq!(session.binding_names(), vec!["x".to_string(), "y".to_string()]);
 ```
 
 Each `eval` still respects the `BopLimits` you pass — useful if you want to allow a higher step budget per cell than for a batch-run program. The built-in `bop` CLI's `repl` subcommand is the canonical consumer: it adds rustyline, multi-line input, `:help` / `:vars` / `:reset` / `:quit` meta-commands, tab completion, and a persistent history file. See [REPL](repl.md) for the user-facing view.
+
+`ReplSession` accepts and evaluates new source over time. If the source is
+loaded once and the host should call an explicit, stable set of functions,
+prefer [`BopInstance`](embedding/instances.md).
 
 ## Error rendering
 

@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-44072e71.js";
+            window.path_to_searchindex_js = "../searchindex-06d3552d.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-4a0c6a8e.js"></script>
+        <script src="../toc-3658d16e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -199,6 +199,17 @@ items[0] = 99
 print(items)    // [99, 20, 30]
 </code></pre>
 <h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
+<p>Mutating methods such as <code>push</code>, <code>pop</code>, <code>insert</code>, <code>remove</code>, <code>reverse</code>, and
+<code>sort</code> write their updated array back to a variable receiver. Nested index and
+field receivers are not write-back places yet: <code>dict["items"].push(value)</code> and
+<code>holder.items.sort()</code> raise a runtime error with the workaround rather than
+silently doing nothing. Use an explicit variable and assignment:</p>
+<pre><code class="language-bop">let items = dict["items"]
+items.push(value)
+dict["items"] = items
+</code></pre>
+<p>True temporary receivers remain valid. <code>[1, 2].push(3)</code> mutates the temporary,
+discards it, and returns <code>none</code>.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -210,9 +221,9 @@ print(items)    // [99, 20, 30]
 <tr><td><code>arr.pop()</code></td><td>value</td><td>Remove and return last element</td></tr>
 <tr><td><code>arr.has(val)</code></td><td>bool</td><td>Whether the array contains the value</td></tr>
 <tr><td><code>arr.index_of(val)</code></td><td>int</td><td>Index of first occurrence, or <code>-1</code></td></tr>
-<tr><td><code>arr.insert(i, val)</code></td><td>none</td><td>Insert at index, shifting elements right</td></tr>
-<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at index, shifting elements left</td></tr>
-<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>New sub-array</td></tr>
+<tr><td><code>arr.insert(i, val)</code></td><td>none</td><td>Insert at a signed index, shifting right. Negative indices count from the end; <code>len</code> appends</td></tr>
+<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at a signed index. Negative indices count from the end</td></tr>
+<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>Half-open sub-array. Negative bounds count from the end; out-of-range bounds clamp</td></tr>
 <tr><td><code>arr.reverse()</code></td><td>none</td><td>Reverse in place</td></tr>
 <tr><td><code>arr.sort()</code></td><td>none</td><td>Sort in place</td></tr>
 <tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join elements into a string</td></tr>
@@ -292,22 +303,6 @@ print(names.join(", "))    // "Alice, Bob, Charlie"
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

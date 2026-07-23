@@ -43,6 +43,34 @@ let rust_source = transpile(
 
 `Options` controls the output shape: standalone program vs. library, module name wrapping, sandbox mode for step/memory enforcement, and the module resolver callback for `use` statements.
 
+### Persistent sandboxed output
+
+Sandbox mode can generate a stateful library surface for plugin-style AOT
+embedding. Mark direct root entries with `pub fn`, disable `main`, and compile
+the generated Rust into the host application:
+
+```rust
+let rust_source = transpile(
+    "let count = 0\npub fn next() { count += 1; return count }",
+    &Options {
+        emit_main: false,
+        use_bop_sys: false,
+        sandbox: true,
+        ..Options::default()
+    },
+)?;
+```
+
+The generated module exposes `BopInstance::load(host, limits)`,
+`entry_points()`, `call(name, args, host)`, and
+`call_value(callback, args, host)`. It retains program and module state across
+calls and enforces instance affinity, re-entry, and resource limits.
+
+The persistent API is sandbox-only. Unsandboxed generated output retains its
+one-shot `run` API. See the [stateful embedding
+guide](https://stevepryde.github.io/bop-lang/embedding/instances.html) for the
+full lifecycle contract.
+
 ## Selling points
 
 - **Native-speed scripts.** The transpiled output is ordinary Rust — rustc optimises it the same way it optimises hand-written code.

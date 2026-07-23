@@ -43,3 +43,4 @@
 # Embedding
 
 - [Embedding Bop](embedding.md)
+- [Stateful instances](embedding/instances.md)

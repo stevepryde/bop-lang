@@ -140,7 +140,10 @@ fn tag(r, label) {
 }
 ```
 
-This is the same discipline Go enforces: a type's behaviour lives where the type is declared. It keeps dispatch coherent (no surprising overrides, no load-order dependence) at the cost of the extensions you'd get in Swift / Kotlin / Ruby.
+This is the same discipline Go enforces: a type's behaviour lives where the
+type is declared. It keeps dispatch ownership coherent at the cost of the
+extensions you'd get in Swift / Kotlin / Ruby. Within the owning module,
+execution order still determines when a method becomes available.
 
 ### Methods return a new value
 
@@ -182,3 +185,31 @@ Two types with the same name declared in different modules are **distinct** — 
 ## Redeclaring the same shape is fine
 
 Declaring the exact same struct or enum twice inside one module is a no-op — matches the "idempotent re-import" rule `use` already follows. Declaring two different shapes with the same name in the same module is a hard error.
+
+## Declarations execute in source order
+
+Struct, enum, and method declarations take effect when execution reaches their
+statement; they are not hoisted. A declaration in a branch that is not taken
+does not run, and a declaration inside a function does not run until that
+function is called:
+
+```bop
+struct Box { value }
+let box = Box { value: 4 }
+
+if true {
+  fn Box.read(self) { return self.value }
+}
+
+print(box.read())
+```
+
+Nested type names follow ordinary lexical scope. Runtime validation also
+happens when the declaration executes, so an invalid declaration in dead code
+does not fail a program that never reaches it.
+
+Methods are installed in their type's declaring module when their declaration
+executes. A method declared by a called function remains installed after that
+function returns, and the last executed declaration for the same method name
+determines its body and arity. This is intentionally dynamic; use top-level
+declarations for the least surprising API.

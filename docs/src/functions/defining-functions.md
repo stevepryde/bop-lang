@@ -13,6 +13,26 @@ greet()    // "Hello!"
 greet()    // "Hello!"
 ```
 
+### Public host entry points
+
+At the direct root of a program, `pub fn` marks a function as callable through
+a stateful embedder's `BopInstance` ABI:
+
+```bop
+let visits = 0
+
+pub fn visit(name) {
+  visits += 1
+  return "hello {name}; visit {visits}"
+}
+```
+
+`pub` does not change how Bop code resolves or calls the function. It is
+metadata for the host API, and is rejected on nested functions, methods, and
+function expressions. Only declarations that execute during instance loading
+are exposed; see [Stateful instances](../embedding/instances.md#declaring-host-entry-points)
+for redeclaration and entry-order rules.
+
 ## Parameters
 
 Functions can take parameters — values you pass in when calling:
@@ -140,7 +160,9 @@ print([mul(2, 3), mul(4, 5)])    // [6, 20]
 
 ### Closures
 
-Function expressions capture variables from the enclosing scope. The capture is a **snapshot** taken at the moment the closure is built — mutating the outer variable afterwards doesn't change what the closure sees:
+Function expressions capture lexical locals from the enclosing scope. Those
+local captures are a **snapshot** taken when the closure is built — mutating a
+captured local afterwards doesn't change what the closure sees:
 
 ```bop
 let n = 5
@@ -161,6 +183,27 @@ let add10 = make_adder(10)
 print(add5(3))       // 8
 print(add10(3))      // 13
 ```
+
+A function expression created directly at the program root also snapshots the
+root bindings it uses. There is one important stateful-embedding distinction:
+a callback created while a named function is running keeps snapshot-captured
+locals, but names resolved from that function's defining module remain live.
+That lets a callback returned from `BopInstance::call` observe later updates to
+the same instance's module globals:
+
+```bop
+let count = 0
+
+pub fn make_counter(step) {
+  return fn() {
+    count += step
+    return count
+  }
+}
+```
+
+Here `step` is the callback's captured local and `count` is live instance
+state. The callback must be invoked through the same instance that created it.
 
 ### Recursion in lambdas
 

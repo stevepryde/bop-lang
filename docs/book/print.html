@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-44072e71.js";
+            window.path_to_searchindex_js = "searchindex-06d3552d.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4a0c6a8e.js"></script>
+        <script src="toc-3658d16e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -291,7 +291,7 @@ let item3 = "hello"
 <p>Spaces and tabs are insignificant — use whatever indentation style you like. Only newlines matter (they end statements).</p>
 <h2 id="keywords"><a class="header" href="#keywords">Keywords</a></h2>
 <p>These words are reserved and can’t be used as identifiers:</p>
-<pre><code>let const fn return
+<pre><code>let const pub fn return
 if else while for in repeat break continue
 use as struct enum match try
 true false none
@@ -336,6 +336,7 @@ print(s.type())      // "string"
 print(1 + 1.0)       // 2       (int + number → number, prints as whole)
 print(1 == 1.0)      // true    (cross-type numeric equality)
 </code></pre>
+<p>Ints cover the full signed 64-bit range, from <code>-9223372036854775808</code> through <code>9223372036854775807</code>. The minimum value is written with unary <code>-</code> directly before its magnitude (spaces or comments may separate the tokens); the positive magnitude <code>9223372036854775808</code> is out of range. Integer literals never silently become <code>number</code> values when they are too large.</p>
 <p>Use <code>.to_int()</code> to truncate a number to an integer (toward zero), and <code>.to_float()</code> to widen an int to a number:</p>
 <pre><code class="language-bop">print((3.7).to_int())      // 3
 print((-2.7).to_int())     // -2
@@ -444,6 +445,14 @@ const MAX_SIZE = 100
 <pre><code class="language-bop">const MAX_SIZE = 100
 MAX_SIZE = 200      // Error: can't reassign a constant
 </code></pre>
+<p>Index and field assignments respect the same rule. An assignment cannot reach
+through a constant array, dict, or struct binding to change part of its value:</p>
+<pre><code class="language-bop">const ORIGIN = [0, 0]
+ORIGIN[0] = 10      // Error: can't reassign `ORIGIN` — it's a constant
+
+const OPTIONS = {"retries": 3}
+OPTIONS["retries"] += 1   // Same error
+</code></pre>
 <p>Constants must be <strong>all-caps</strong> (with digits / underscores allowed). <code>const Pi = 3.14</code> is rejected: the parser will suggest <code>const PI = 3.14</code> instead.</p>
 <h2 id="reassignment"><a class="header" href="#reassignment">Reassignment</a></h2>
 <p>After declaration, reassign with just <code>=</code>:</p>
@@ -497,7 +506,8 @@ if true {
 print(x)         // 1 — outer x is unchanged
 </code></pre>
 <h2 id="copying-and-passing-values"><a class="header" href="#copying-and-passing-values">Copying and passing values</a></h2>
-<p>Every value in Bop is a <strong>copy</strong>. When you assign a variable, pass an argument to a function, or return a value, you get an independent copy — even for arrays, dicts, and structs. Changing the copy never affects the original.</p>
+<p>Arrays, dicts, structs, and enum variants have <strong>value semantics</strong>. When you assign one, pass it to a function, or return it, the destination behaves like an independent copy. Changing either value never affects the other.</p>
+<p>Bop implements these copies with copy-on-write storage: the operation itself is constant-time and shares the existing container safely. The backing storage is copied only if one of the values is later mutated. This is an implementation detail — programs observe the same independent values without paying for an eager deep copy.</p>
 <h3 id="assignment-copies"><a class="header" href="#assignment-copies">Assignment copies</a></h3>
 <pre><code class="language-bop">let a = [1, 2, 3]
 let b = a           // b is a separate copy
@@ -526,7 +536,7 @@ let original = [1, 2, 3]
 original = add_item(original, 99)
 print(original)      // [1, 2, 3, 99]
 </code></pre>
-<p>This applies to every value type — numbers, strings, bools, arrays, dicts, structs, enum variants. Closures (<code>Value::Fn</code>) and modules (<code>Value::Module</code>) are reference-counted, so passing one of those around is cheap and the shared state is visible from both handles.</p>
+<p>The same ordinary value behavior applies to numbers, strings, and bools. Closures and modules are shared handles, while iterators intentionally share their cursor: advancing one iterator handle advances its aliases too.</p>
 <h2 id="dynamic-typing"><a class="header" href="#dynamic-typing">Dynamic typing</a></h2>
 <p>Variables can hold any type. You can even change the type of a variable by reassigning it:</p>
 <pre><code class="language-bop">let val = 42
@@ -886,6 +896,12 @@ let _ = match Color::Red {
 </code></pre>
 <p>A wildcard or a bare-name catch-all (<code>_</code> or <code>other</code>) marks the match as exhaustive. Guards don’t count toward coverage — a guarded arm covers only the guarded subset, so a partially-guarded match still needs a catch-all.</p>
 <p>The checker follows <code>use</code> statements when the embedder supplies a module resolver, so imported enums aren’t opaque — missing-variant warnings fire on them too.</p>
+<p>Exhaustiveness analysis follows the same source-ordered lexical declaration
+model as execution. A type is not visible before its declaration, declarations
+inside one branch or callable do not leak into siblings, and shadowed or
+ambiguous type/module bindings suppress the advisory instead of risking a
+false warning. This check is a warning only; a <code>match</code> with no matching arm
+still raises a runtime error.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="arrays-1"><a class="header" href="#arrays-1">Arrays</a></h1>
 <p>Arrays are ordered, mutable collections that can hold any mix of types.</p>
@@ -909,6 +925,17 @@ items[0] = 99
 print(items)    // [99, 20, 30]
 </code></pre>
 <h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
+<p>Mutating methods such as <code>push</code>, <code>pop</code>, <code>insert</code>, <code>remove</code>, <code>reverse</code>, and
+<code>sort</code> write their updated array back to a variable receiver. Nested index and
+field receivers are not write-back places yet: <code>dict["items"].push(value)</code> and
+<code>holder.items.sort()</code> raise a runtime error with the workaround rather than
+silently doing nothing. Use an explicit variable and assignment:</p>
+<pre><code class="language-bop">let items = dict["items"]
+items.push(value)
+dict["items"] = items
+</code></pre>
+<p>True temporary receivers remain valid. <code>[1, 2].push(3)</code> mutates the temporary,
+discards it, and returns <code>none</code>.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -920,9 +947,9 @@ print(items)    // [99, 20, 30]
 <tr><td><code>arr.pop()</code></td><td>value</td><td>Remove and return last element</td></tr>
 <tr><td><code>arr.has(val)</code></td><td>bool</td><td>Whether the array contains the value</td></tr>
 <tr><td><code>arr.index_of(val)</code></td><td>int</td><td>Index of first occurrence, or <code>-1</code></td></tr>
-<tr><td><code>arr.insert(i, val)</code></td><td>none</td><td>Insert at index, shifting elements right</td></tr>
-<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at index, shifting elements left</td></tr>
-<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>New sub-array</td></tr>
+<tr><td><code>arr.insert(i, val)</code></td><td>none</td><td>Insert at a signed index, shifting right. Negative indices count from the end; <code>len</code> appends</td></tr>
+<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at a signed index. Negative indices count from the end</td></tr>
+<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>Half-open sub-array. Negative bounds count from the end; out-of-range bounds clamp</td></tr>
 <tr><td><code>arr.reverse()</code></td><td>none</td><td>Reverse in place</td></tr>
 <tr><td><code>arr.sort()</code></td><td>none</td><td>Sort in place</td></tr>
 <tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join elements into a string</td></tr>
@@ -1023,7 +1050,7 @@ print(full)    // "Hello, world!"
 <tr><td><code>s.upper()</code></td><td>string</td><td>Uppercase copy</td></tr>
 <tr><td><code>s.lower()</code></td><td>string</td><td>Lowercase copy</td></tr>
 <tr><td><code>s.trim()</code></td><td>string</td><td>Copy with leading/trailing whitespace removed</td></tr>
-<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring</td></tr>
+<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Half-open substring by code-point index. Negative bounds count from the end; out-of-range bounds clamp</td></tr>
 <tr><td><code>s.to_int()</code></td><td>int</td><td>Parse. <code>"3.7".to_int()</code> → <code>3</code> (float-then-truncate). Raises on junk.</td></tr>
 <tr><td><code>s.to_float()</code></td><td>number</td><td>Parse. Raises on junk.</td></tr>
 </tbody>
@@ -1237,7 +1264,10 @@ fn tag(r, label) {
   }
 }
 </code></pre>
-<p>This is the same discipline Go enforces: a type’s behaviour lives where the type is declared. It keeps dispatch coherent (no surprising overrides, no load-order dependence) at the cost of the extensions you’d get in Swift / Kotlin / Ruby.</p>
+<p>This is the same discipline Go enforces: a type’s behaviour lives where the
+type is declared. It keeps dispatch ownership coherent at the cost of the
+extensions you’d get in Swift / Kotlin / Ruby. Within the owning module,
+execution order still determines when a method becomes available.</p>
 <h3 id="methods-return-a-new-value"><a class="header" href="#methods-return-a-new-value">Methods return a new value</a></h3>
 <p>Because values are copy-by-value, a method can’t mutate the receiver in place. Return a new instance and reassign:</p>
 <pre><code class="language-bop">fn Point.shift(self, dx, dy) {
@@ -1265,6 +1295,28 @@ print(p == r)            // false (field differs)
 <p>Two types with the same name declared in different modules are <strong>distinct</strong> — see <a href="#type-identity">Modules</a>.</p>
 <h2 id="redeclaring-the-same-shape-is-fine"><a class="header" href="#redeclaring-the-same-shape-is-fine">Redeclaring the same shape is fine</a></h2>
 <p>Declaring the exact same struct or enum twice inside one module is a no-op — matches the “idempotent re-import” rule <code>use</code> already follows. Declaring two different shapes with the same name in the same module is a hard error.</p>
+<h2 id="declarations-execute-in-source-order"><a class="header" href="#declarations-execute-in-source-order">Declarations execute in source order</a></h2>
+<p>Struct, enum, and method declarations take effect when execution reaches their
+statement; they are not hoisted. A declaration in a branch that is not taken
+does not run, and a declaration inside a function does not run until that
+function is called:</p>
+<pre><code class="language-bop">struct Box { value }
+let box = Box { value: 4 }
+
+if true {
+  fn Box.read(self) { return self.value }
+}
+
+print(box.read())
+</code></pre>
+<p>Nested type names follow ordinary lexical scope. Runtime validation also
+happens when the declaration executes, so an invalid declaration in dead code
+does not fail a program that never reaches it.</p>
+<p>Methods are installed in their type’s declaring module when their declaration
+executes. A method declared by a called function remains installed after that
+function returns, and the last executed declaration for the same method name
+determines its body and arity. This is intentionally dynamic; use top-level
+declarations for the least surprising API.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="defining-functions"><a class="header" href="#defining-functions">Defining Functions</a></h1>
 <p>Functions let you name a sequence of actions and reuse it. Bop has first-class functions — you can store them in variables, pass them to other functions, return them from other functions, and stash them in arrays.</p>
@@ -1276,6 +1328,21 @@ print(p == r)            // false (field differs)
 greet()    // "Hello!"
 greet()    // "Hello!"
 </code></pre>
+<h3 id="public-host-entry-points"><a class="header" href="#public-host-entry-points">Public host entry points</a></h3>
+<p>At the direct root of a program, <code>pub fn</code> marks a function as callable through
+a stateful embedder’s <code>BopInstance</code> ABI:</p>
+<pre><code class="language-bop">let visits = 0
+
+pub fn visit(name) {
+  visits += 1
+  return "hello {name}; visit {visits}"
+}
+</code></pre>
+<p><code>pub</code> does not change how Bop code resolves or calls the function. It is
+metadata for the host API, and is rejected on nested functions, methods, and
+function expressions. Only declarations that execute during instance loading
+are exposed; see <a href="#declaring-host-entry-points">Stateful instances</a>
+for redeclaration and entry-order rules.</p>
 <h2 id="parameters"><a class="header" href="#parameters">Parameters</a></h2>
 <p>Functions can take parameters — values you pass in when calling:</p>
 <pre><code class="language-bop">fn repeat_string(text, times) {
@@ -1367,7 +1434,9 @@ let mul = fn(a, b) { return a * b }
 print([mul(2, 3), mul(4, 5)])    // [6, 20]
 </code></pre>
 <h3 id="closures"><a class="header" href="#closures">Closures</a></h3>
-<p>Function expressions capture variables from the enclosing scope. The capture is a <strong>snapshot</strong> taken at the moment the closure is built — mutating the outer variable afterwards doesn’t change what the closure sees:</p>
+<p>Function expressions capture lexical locals from the enclosing scope. Those
+local captures are a <strong>snapshot</strong> taken when the closure is built — mutating a
+captured local afterwards doesn’t change what the closure sees:</p>
 <pre><code class="language-bop">let n = 5
 let add_n = fn(x) { return x + n }
 n = 100
@@ -1383,6 +1452,23 @@ let add10 = make_adder(10)
 print(add5(3))       // 8
 print(add10(3))      // 13
 </code></pre>
+<p>A function expression created directly at the program root also snapshots the
+root bindings it uses. There is one important stateful-embedding distinction:
+a callback created while a named function is running keeps snapshot-captured
+locals, but names resolved from that function’s defining module remain live.
+That lets a callback returned from <code>BopInstance::call</code> observe later updates to
+the same instance’s module globals:</p>
+<pre><code class="language-bop">let count = 0
+
+pub fn make_counter(step) {
+  return fn() {
+    count += step
+    return count
+  }
+}
+</code></pre>
+<p>Here <code>step</code> is the callback’s captured local and <code>count</code> is live instance
+state. The callback must be invoked through the same instance that created it.</p>
 <h3 id="recursion-in-lambdas"><a class="header" href="#recursion-in-lambdas">Recursion in lambdas</a></h3>
 <p>An anonymous <code>fn(...)</code> can’t see itself by name. If a lambda needs to recurse, assign it to a named <code>fn</code> instead — named fns are visible inside their own body:</p>
 <pre><code class="language-bop">fn fib(n) {
@@ -1488,7 +1574,7 @@ print(label(o.Color::Red))   // "other-red"
 </code></pre>
 <p>This is Bop’s answer to the “same-named type, different shape, in different modules” problem. No renames required.</p>
 <h2 id="re-exports-are-transitive"><a class="header" href="#re-exports-are-transitive">Re-exports are transitive</a></h2>
-<p>A module’s effective exports include everything it <code>use</code>s from other modules (minus privacy filtering). If <code>a</code> does <code>use b</code> and <code>b</code> declares <code>fn foo()</code>, then <code>use a</code> in the top-level program makes <code>foo</code> visible too. The same applies to types — importing <code>a</code> brings <code>b</code>’s public types in scope.</p>
+<p>A module re-exports the bindings that its own <code>use</code> statements introduce. If <code>a</code> does <code>use b</code> and <code>b</code> declares <code>fn foo()</code>, then <code>use a</code> in the top-level program makes <code>foo</code> visible too. Selective imports re-export only their selected names, including a private name selected explicitly. Aliased imports re-export only the alias: if <code>a</code> does <code>use b as dep</code>, an importer of <code>a</code> can reach <code>dep</code>, but does not receive <code>b</code>’s exports as bare names. The same shape rules apply to types, and glob privacy filtering is applied at every module boundary.</p>
 <h2 id="builtin-types"><a class="header" href="#builtin-types">Builtin types</a></h2>
 <p><code>Result</code> and <code>RuntimeError</code> are engine built-ins. They’re always in scope — you don’t need any <code>use</code> to write <code>Result::Ok(v)</code> or to match on <code>RuntimeError { message, line }</code>. The combinators (<code>unwrap</code>, <code>map</code>, <code>and_then</code>, …) live as <a href="#result-methods--result">methods on the <code>Result</code> type</a>, also always available. See <a href="#error-handling">Error Handling</a>.</p>
 <h2 id="cycles"><a class="header" href="#cycles">Cycles</a></h2>
@@ -1852,7 +1938,10 @@ score *= 2     // 14
 <li>Index positions: <code>items[0] = ...</code>, <code>dict["key"] = ...</code></li>
 <li>Struct fields: <code>point.x = ...</code></li>
 </ul>
-<p>Reassigning an all-caps identifier is a parse error (“can’t reassign a constant”).</p>
+<p>Reassigning an all-caps identifier is a parse error (“can’t reassign a constant”).
+The rule follows the base binding through index and field targets, so
+<code>VALUES[0] = ...</code> and <code>CONFIG.retries += ...</code> are also rejected when <code>VALUES</code>
+or <code>CONFIG</code> is a constant.</p>
 <h2 id="field-access--method-call"><a class="header" href="#field-access--method-call">Field access / method call</a></h2>
 <div class="table-wrapper">
 <table>
@@ -1931,7 +2020,8 @@ range(10, 0, -3)   // [10, 7, 4, 1]
 <li>With 2 args: <code>range(start, end)</code> auto-detects direction.</li>
 <li>With 3 args: explicit <code>step</code> (error if <code>step == 0</code>).</li>
 <li>All arguments must be <code>int</code> — floats are rejected.</li>
-<li>Maximum 10,000 elements. Bigger ranges raise a runtime error so loops can’t build gigabyte arrays by accident.</li>
+<li>Maximum 10,000 elements. Bigger ranges raise a fatal resource error before
+allocating, so they cannot be silently truncated or hidden with <code>try_call</code>.</li>
 </ul>
 <h2 id="randn"><a class="header" href="#randn"><code>rand(n)</code></a></h2>
 <p>Returns a random integer from <code>0</code> to <code>n - 1</code>, inclusive. <code>n</code> must be a positive integer.</p>
@@ -2084,7 +2174,7 @@ print((3.7).floor().type())         // "int"
 <tr><td><code>s.replace(old, new)</code></td><td>string</td><td>Replace every occurrence.</td></tr>
 <tr><td><code>s.upper()</code>, <code>s.lower()</code></td><td>string</td><td>Case conversion.</td></tr>
 <tr><td><code>s.trim()</code></td><td>string</td><td>Strip leading / trailing whitespace.</td></tr>
-<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Substring by code-point index.</td></tr>
+<tr><td><code>s.slice(start, end)</code></td><td>string</td><td>Half-open substring by code-point index. Negative bounds count from the end; out-of-range bounds clamp.</td></tr>
 <tr><td><code>s.to_int()</code></td><td>int</td><td>Parse. <code>"3.7".to_int()</code> parses as float then truncates → <code>3</code>. Raises on junk.</td></tr>
 <tr><td><code>s.to_float()</code></td><td>number</td><td>Parse. Raises on junk.</td></tr>
 <tr><td><code>s.iter()</code></td><td>iter</td><td>Lazy iterator over Unicode code points. See <a href="#iter-methods--iter">Iter methods</a>.</td></tr>
@@ -2093,6 +2183,13 @@ print((3.7).floor().type())         // "int"
 </div>
 <h2 id="array-methods--array"><a class="header" href="#array-methods--array">Array methods — <code>array</code></a></h2>
 <p>See <a href="#arrays-1">Arrays</a> for worked examples.</p>
+<p>Mutating methods write back when the receiver is a variable (<code>items.push(x)</code>).
+Calling one on a genuine temporary, such as <code>[1].push(2)</code> or
+<code>make_items().pop()</code>, is legal; the temporary is mutated and then discarded.
+An index or field read is not yet a write-back place, so
+<code>dict["items"].push(x)</code> and <code>holder.items.pop()</code> raise a runtime error instead
+of silently losing the mutation. Assign the nested array to a variable first,
+then explicitly store it back when needed.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -2104,9 +2201,9 @@ print((3.7).floor().type())         // "int"
 <tr><td><code>arr.pop()</code></td><td>value</td><td>Remove and return the last element.</td></tr>
 <tr><td><code>arr.has(v)</code></td><td>bool</td><td>Structural equality check.</td></tr>
 <tr><td><code>arr.index_of(v)</code></td><td>int</td><td>Index of first match, or <code>-1</code>.</td></tr>
-<tr><td><code>arr.insert(i, v)</code></td><td>none</td><td>Insert at index, shifting right.</td></tr>
-<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at index, returning the removed value.</td></tr>
-<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>Sub-array.</td></tr>
+<tr><td><code>arr.insert(i, v)</code></td><td>none</td><td>Insert at a signed index, shifting right. Negative indices count from the end; <code>len</code> appends.</td></tr>
+<tr><td><code>arr.remove(i)</code></td><td>value</td><td>Remove at a signed index, returning the removed value. Negative indices count from the end.</td></tr>
+<tr><td><code>arr.slice(start, end)</code></td><td>array</td><td>Half-open sub-array. Negative bounds count from the end; out-of-range bounds clamp.</td></tr>
 <tr><td><code>arr.reverse()</code></td><td>none</td><td>In-place.</td></tr>
 <tr><td><code>arr.sort()</code></td><td>none</td><td>In-place, numeric or lexicographic depending on element types.</td></tr>
 <tr><td><code>arr.join(sep)</code></td><td>string</td><td>Join after stringifying each element.</td></tr>
@@ -2226,7 +2323,7 @@ print(m.type())         // "module"   (universal method, not an export)
 <h1 id="grammar"><a class="header" href="#grammar">Grammar</a></h1>
 <p>An informal grammar for the Bop language, plus the complete list of reserved words.</p>
 <h2 id="reserved-words"><a class="header" href="#reserved-words">Reserved words</a></h2>
-<pre><code>let const fn return
+<pre><code>let const pub fn return
 if else while for in repeat break continue
 use as struct enum match try
 true false none
@@ -2266,7 +2363,7 @@ ifStmt      = "if" expr block ("else" "if" expr block)* ("else" block)?
 whileStmt   = "while" expr block
 repeatStmt  = "repeat" expr block
 forStmt     = "for" IDENT "in" expr block
-fnDecl      = "fn" IDENT "(" params? ")" block
+fnDecl      = "pub"? "fn" IDENT "(" params? ")" block
 returnStmt  = "return" expr?
 breakStmt   = "break"
 continueStmt = "continue"
@@ -2313,8 +2410,8 @@ primary     = INT | NUMBER | STRING | "true" | "false" | "none"
 
 resultShorthandExpr = ("Ok" | "Err") "(" expr ("," expr)* ")"  // sugar for Result::Ok/Err
 
-arrayLit    = "[" (expr ("," expr)*)? "]"
-dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)*)? "}"
+arrayLit    = "[" (expr ("," expr)* ","?)? "]"
+dictLit     = "{" (STRING ":" expr ("," STRING ":" expr)* ","?)? "}"
 ifExpr      = "if" expr "{" expr "}" "else" "{" expr "}"
 matchExpr   = "match" expr "{" arm ("," arm)* ","? "}"
 arm         = pattern ("if" expr)? "=&gt;" expr
@@ -2336,7 +2433,15 @@ arrayRest      = ".." | ".." IDENT
 params      = IDENT ("," IDENT)*
 args        = expr ("," expr)*
 </code></pre>
-<p>Note: <code>methodDecl</code>, enum variant <code>IDENT</code>s, and <code>struct</code> names must start with an uppercase letter. <code>IDENT</code> bound by <code>let</code>, <code>fn</code>, parameters, <code>for</code>, etc. must start with lowercase or <code>_</code>. <code>const</code> names must be all-caps. Mis-shaped declarations parse-error with a “did you mean?” suggestion — see <a href="#name-shapes-are-checked">Variables</a>.</p>
+<p><code>INT</code> is an exact signed 64-bit integer after unary parsing. Decimal magnitudes through <code>9223372036854775807</code> are ordinary primary expressions; the boundary spelling <code>-9223372036854775808</code> is accepted when unary <code>-</code> directly owns that magnitude, including in literal patterns. A bare <code>9223372036854775808</code>, <code>0 - 9223372036854775808</code>, or any larger magnitude is out of range rather than being converted to a floating-point <code>number</code>.</p>
+<p>Note: <code>pub</code> is accepted only on a named <code>fn</code> at the direct program root; it
+marks an entry for the stateful embedding ABI. It is not valid on methods,
+function expressions, or declarations nested in a block or callable.</p>
+<p><code>methodDecl</code>, enum variant <code>IDENT</code>s, and <code>struct</code> names must start with an
+uppercase letter. <code>IDENT</code> bound by <code>let</code>, <code>fn</code>, parameters, <code>for</code>, etc. must
+start with lowercase or <code>_</code>. <code>const</code> names must be all-caps. Mis-shaped
+declarations parse-error with a “did you mean?” suggestion — see
+<a href="#name-shapes-are-checked">Variables</a>.</p>
 <h2 id="automatic-semicolons"><a class="header" href="#automatic-semicolons">Automatic semicolons</a></h2>
 <p>Bop automatically inserts a semicolon at the end of a line if the last token is one of:</p>
 <ul>
@@ -2345,6 +2450,27 @@ args        = expr ("," expr)*
 <li><code>break</code>, <code>continue</code>, <code>return</code></li>
 <li><code>)</code>, <code>]</code>, <code>}</code></li>
 </ul>
+<p>Newlines do not insert semicolons while the innermost open delimiter is <code>(</code> or <code>[</code>. This makes calls, conditions, array literals, and index expressions safe to lay out over multiple lines. A newline immediately before a closing <code>)</code>, <code>]</code>, or <code>}</code> is also ignored, so the final item in a multiline literal does not require a trailing comma.</p>
+<p>Braces remain statement-capable even when their block is nested inside parentheses or brackets. Newlines between statements in a function or control-flow block still insert semicolons:</p>
+<pre><code class="language-bop">let callbacks = [
+  fn() {
+    let x = 1
+    return x
+  },
+]
+</code></pre>
+<p>A line starting with <code>.</code> continues a preceding value, including across blank lines or comments:</p>
+<pre><code class="language-bop">let size = values
+  // Continue the same expression.
+  .len()
+  .to_str()
+</code></pre>
+<p><code>return</code> itself remains a semicolon trigger. A newline immediately after it therefore means a bare <code>return</code> whose value is <code>none</code>; put the value on the same line, or open a parenthesized expression on that line when it needs multiline layout:</p>
+<pre><code class="language-bop">return (
+  left +
+  right
+)
+</code></pre>
 <p>This means the opening <code>{</code> of a block must be on the same line as its keyword:</p>
 <pre><code class="language-bop">// Correct
 if x &gt; 3 {
@@ -2891,16 +3017,20 @@ fn main() {
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Engine</th><th>Entry point</th><th>When it’s best</th></tr>
+<tr><th>Engine</th><th>One-shot entry point</th><th>Persistent entry point</th><th>When it’s best</th></tr>
 </thead>
 <tbody>
-<tr><td>Tree-walker</td><td><code>bop::run(src, host, limits)</code></td><td>Lowest start-up cost. Best for one-off scripts, REPL, small inputs, no_std / wasm.</td></tr>
-<tr><td>Bytecode VM</td><td><code>bop_vm::run(src, host, limits)</code></td><td>2–3× faster than the walker on hot loops. Same program, no compilation to disk.</td></tr>
-<tr><td>AOT transpiler</td><td><code>bop_compile::transpile(src, opts)</code> → <code>cargo build</code></td><td>Bop → Rust source, compiled to a native binary. Maximum throughput, at the cost of a <code>cargo build</code> step.</td></tr>
+<tr><td>Tree-walker</td><td><code>bop::run(src, host, limits)</code></td><td><code>bop::BopInstance</code></td><td>Lowest start-up cost. Best for one-off scripts, REPL, small inputs, no_std / wasm.</td></tr>
+<tr><td>Bytecode VM</td><td><code>bop_vm::run(src, host, limits)</code></td><td><code>bop_vm::BopInstance</code></td><td>2–3× faster than the walker on hot loops. Same program, no compilation to disk.</td></tr>
+<tr><td>AOT transpiler</td><td><code>bop_compile::transpile(src, opts)</code> → <code>cargo build</code></td><td>Generated <code>BopInstance</code> in sandbox mode</td><td>Bop → Rust source, compiled to a native binary. Maximum throughput, at the cost of a <code>cargo build</code> step.</td></tr>
 </tbody>
 </table>
 </div>
 <p>All three obey the same <code>BopLimits</code> and surface errors as <code>BopError</code> — the engine choice is an implementation detail from the host’s perspective.</p>
+<p>Use the one-shot functions when a program should start from scratch on every
+run. For plugin-style programs whose globals, imports, callbacks, types, and
+random-number state must survive host calls, see <a href="#stateful-instances">Stateful
+instances</a>.</p>
 <h2 id="the-bophost-trait"><a class="header" href="#the-bophost-trait">The <code>BopHost</code> trait</a></h2>
 <p>The <code>BopHost</code> trait is the integration point between your application and Bop:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -2966,6 +3096,63 @@ impl BopHost for MyHost {
 }
 <span class="boring">}</span></code></pre>
 <p>Bop scripts now call <code>square(5)</code> as if it were built-in.</p>
+<h3 id="typed-value-conversions"><a class="header" href="#typed-value-conversions">Typed <code>Value</code> conversions</a></h3>
+<p>Use <code>IntoValue</code> and <code>Value::to_rust</code> at the host boundary instead of manually
+matching every nested array or dictionary. Extraction borrows the input, so
+targets such as <code>&amp;str</code> do not copy; owned targets such as <code>String</code>, <code>Vec&lt;T&gt;</code>,
+<code>Option&lt;T&gt;</code>, <code>Result&lt;T, E&gt;</code>, and <code>BTreeMap&lt;String, T&gt;</code> are supported too.</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop::{BopError, BopHost, IntoValue, Value};
+
+struct MathHost;
+
+impl BopHost for MathHost {
+    fn call(
+        &amp;mut self,
+        name: &amp;str,
+        args: &amp;[Value],
+        line: u32,
+    ) -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt; {
+        if name != "sum_values" {
+            return None;
+        }
+        Some((|| {
+            let values: Vec&lt;i64&gt; = args
+                .first()
+                .ok_or_else(|| BopError::runtime("missing array", line))?
+                .to_rust()
+                .map_err(|error| BopError::runtime(error.to_string(), line))?;
+            values
+                .into_iter()
+                .sum::&lt;i64&gt;()
+                .into_value()
+                .map_err(|error| BopError::runtime(error.to_string(), line))
+        })())
+    }
+}
+<span class="boring">}</span></code></pre>
+<p>Infallible scalars also implement standard <code>From</code>. Recursive values use the
+fallible trait because Bop enforces a maximum safe value depth. Integer
+conversion is strict (<code>Int</code> is not silently accepted as <code>Number</code>, or vice
+versa), and nested errors include paths such as <code>$[0]["stats"]["hp"]</code>.</p>
+<p>For literals, <code>bop_value!</code> provides JSON-like array/dict syntax and returns a
+<code>Result</code> for the same reason:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop::bop_value;
+
+let request = bop_value!({
+    "name": "Ada",
+    "scores": [10, 20, 30],
+    "nickname": none,
+})?;
+<span class="boring">Ok::&lt;(), bop::ValueConversionError&gt;(())
+</span><span class="boring">}</span></code></pre>
+<p><code>Result&lt;T, E&gt;</code> maps to the engine’s canonical built-in <code>Result::Ok(value)</code> or
+<code>Result::Err(error)</code>. Deterministic dictionary conversion deliberately uses
+<code>BTreeMap</code>; no <code>std::collections::HashMap</code> implementation is provided, keeping
+the API available under <code>no_std</code> and its output order stable.</p>
 <h3 id="on_print--capturing-output"><a class="header" href="#on_print--capturing-output"><code>on_print</code> — Capturing output</a></h3>
 <p>Override <code>on_print</code> to redirect <code>print()</code> output to a buffer, log, UI widget — anywhere that isn’t stdout:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -3138,6 +3325,9 @@ assert!(session.get("x").is_some());
 assert_eq!(session.binding_names(), vec!["x".to_string(), "y".to_string()]);
 <span class="boring">}</span></code></pre>
 <p>Each <code>eval</code> still respects the <code>BopLimits</code> you pass — useful if you want to allow a higher step budget per cell than for a batch-run program. The built-in <code>bop</code> CLI’s <code>repl</code> subcommand is the canonical consumer: it adds rustyline, multi-line input, <code>:help</code> / <code>:vars</code> / <code>:reset</code> / <code>:quit</code> meta-commands, tab completion, and a persistent history file. See <a href="#repl">REPL</a> for the user-facing view.</p>
+<p><code>ReplSession</code> accepts and evaluates new source over time. If the source is
+loaded once and the host should call an explicit, stable set of functions,
+prefer <a href="#stateful-instances"><code>BopInstance</code></a>.</p>
 <h2 id="error-rendering"><a class="header" href="#error-rendering">Error rendering</a></h2>
 <p><code>BopError::render(source)</code> produces a terminal-friendly error with a source snippet and a <code>^</code> carat under the offending column (when the error carries column info). Parse errors always have columns; runtime errors do when the failing expression was parsed from source.</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -3254,6 +3444,184 @@ fn main() {
         Err(e) =&gt; eprintln!("{}", e.render(source)),
     }
 }</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="stateful-instances"><a class="header" href="#stateful-instances">Stateful instances</a></h1>
+<p><code>BopInstance</code> loads a program once and lets the host call its public entry
+points repeatedly. It is the plugin-style counterpart to the one-shot
+<code>bop::run</code> and <code>bop_vm::run</code> functions.</p>
+<p>The instance retains the state produced while loading and by later calls:</p>
+<ul>
+<li>root and imported-module bindings;</li>
+<li>functions and returned callbacks;</li>
+<li>type and method declarations;</li>
+<li>module aliases and the import cache;</li>
+<li>the random-number generator state.</li>
+</ul>
+<p>The tree-walker and VM expose the same API. Sandboxed AOT output generates an
+equivalent API with the source already compiled into it.</p>
+<h2 id="declaring-host-entry-points"><a class="header" href="#declaring-host-entry-points">Declaring host entry points</a></h2>
+<p>Mark a direct root function with <code>pub</code> to include it in the instance ABI:</p>
+<pre><code class="language-bop">let count = 0
+
+pub fn increment(by) {
+  count += by
+  return count
+}
+
+pub fn make_reader() {
+  return fn() { return count }
+}
+
+fn private_helper() {
+  return count
+}
+</code></pre>
+<p><code>pub fn</code> is only valid at the direct program root. It does not make a function
+globally visible to ordinary Bop code, and <code>pub</code> declarations inside imported
+modules are not root instance entries. It only opts the final executed root
+declaration into the host-callable ABI.</p>
+<p>Loading executes top-level code before the entry list is collected. Therefore:</p>
+<ul>
+<li>a declaration after a top-level <code>return</code> is not an entry;</li>
+<li>redeclaring a public name replaces its earlier ABI position and arity;</li>
+<li>a later private <code>fn</code> with the same name removes it from the ABI;</li>
+<li><code>entry_points()</code> reports the final surviving entries in declaration order.</li>
+</ul>
+<p>Ordinary Bop calls continue to use normal lexical name lookup. Host
+<code>BopInstance::call</code> uses the dedicated public-entry table, so assigning another
+value to an ordinary name cannot redirect the host ABI.</p>
+<h2 id="tree-walker-instance"><a class="header" href="#tree-walker-instance">Tree-walker instance</a></h2>
+<pre class="playground"><code class="language-rust">use bop::{BopHost, BopInstance, BopLimits, Value};
+
+<span class="boring">struct Host;
+</span><span class="boring">impl BopHost for Host {
+</span><span class="boring">    fn call(&amp;mut self, _: &amp;str, _: &amp;[Value], _: u32)
+</span><span class="boring">        -&gt; Option&lt;Result&lt;Value, bop::BopError&gt;&gt; { None }
+</span><span class="boring">}
+</span><span class="boring">fn main() -&gt; Result&lt;(), bop::BopError&gt; {
+</span>let source = r#"
+    let count = 0
+    pub fn increment(by) {
+        count += by
+        return count
+    }
+    pub fn make_reader() {
+        return fn() { return count }
+    }
+"#;
+
+let mut host = Host;
+let limits = BopLimits::standard();
+let mut instance = BopInstance::load(source, &amp;mut host, &amp;limits)?;
+
+for entry in instance.entry_points() {
+    println!("{}/{}", entry.name(), entry.arity());
+}
+
+let first = instance.call("increment", &amp;[Value::Int(2)], &amp;mut host)?;
+assert_eq!(first.inspect(), "2");
+
+let reader = instance.call("make_reader", &amp;[], &amp;mut host)?;
+instance.call("increment", &amp;[Value::Int(3)], &amp;mut host)?;
+let current = instance.call_value(&amp;reader, &amp;[], &amp;mut host)?;
+assert_eq!(current.inspect(), "5");
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p><code>call</code> validates the public name and arity. <code>call_value</code> accepts a function
+value created by that exact instance, including a callback returned by another
+call.</p>
+<h2 id="bytecode-vm-instance"><a class="header" href="#bytecode-vm-instance">Bytecode VM instance</a></h2>
+<p>The VM is a drop-in replacement at this API boundary:</p>
+<pre class="playground"><code class="language-rust">use bop::{BopHost, BopLimits, Value};
+use bop_vm::BopInstance;
+
+<span class="boring">struct Host;
+</span><span class="boring">impl BopHost for Host {
+</span><span class="boring">    fn call(&amp;mut self, _: &amp;str, _: &amp;[Value], _: u32)
+</span><span class="boring">        -&gt; Option&lt;Result&lt;Value, bop::BopError&gt;&gt; { None }
+</span><span class="boring">}
+</span><span class="boring">fn main() -&gt; Result&lt;(), bop::BopError&gt; {
+</span>let mut host = Host;
+let mut instance = BopInstance::load(
+    "let total = 0\npub fn add(n) { total += n; return total }",
+    &amp;mut host,
+    &amp;BopLimits::standard(),
+)?;
+
+assert_eq!(
+    instance.call("add", &amp;[Value::Int(4)], &amp;mut host)?.inspect(),
+    "4",
+);
+assert_eq!(
+    instance.call("add", &amp;[Value::Int(5)], &amp;mut host)?.inspect(),
+    "9",
+);
+<span class="boring">Ok(())
+</span><span class="boring">}</span></code></pre>
+<p>Use <code>compile</code> plus <code>execute</code> when you want to reuse bytecode but intentionally
+start with fresh program state on every execution. Use <code>BopInstance</code> when the
+state itself must persist.</p>
+<h2 id="sandboxed-aot-instances"><a class="header" href="#sandboxed-aot-instances">Sandboxed AOT instances</a></h2>
+<p>The AOT transpiler emits a persistent <code>BopInstance</code> only when
+<code>Options::sandbox</code> is enabled. Generate library-shaped Rust and compile it into
+the host application:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop_compile::{Options, transpile};
+
+let generated = transpile(
+    "let count = 0\npub fn next() { count += 1; return count }",
+    &amp;Options {
+        emit_main: false,
+        use_bop_sys: false,
+        sandbox: true,
+        ..Options::default()
+    },
+)?;
+<span class="boring">}</span></code></pre>
+<p>The generated module provides:</p>
+<pre><code class="language-rust ignore">let mut instance = BopInstance::load(&amp;mut host, &amp;limits)?;
+let entries = instance.entry_points();
+let value = instance.call("next", &amp;[], &amp;mut host)?;
+let value = instance.call_value(&amp;callback, &amp;[], &amp;mut host)?;</code></pre>
+<p>Because the Bop source is already compiled into the generated Rust,
+<code>BopInstance::load</code> takes only <code>host</code> and <code>limits</code>, not a source string.
+Unsandboxed output remains a one-shot <code>run</code> API and does not emit the
+persistent instance surface.</p>
+<p>Generated code also contains hygienically named convenience wrappers for
+potential direct-root public declarations. They delegate to <code>call</code>, so the
+runtime entry table remains authoritative when top-level control flow skips or
+replaces a declaration.</p>
+<h2 id="hosts-and-re-entry"><a class="header" href="#hosts-and-re-entry">Hosts and re-entry</a></h2>
+<p>An instance borrows a <code>BopHost</code> only for <code>load</code> or one call; it never stores the
+host. Later operations may use a different compatible host. This also keeps
+host-owned allocations outside the instance’s memory account.</p>
+<p>The same instance cannot be re-entered while one of its operations is active.
+For example, a host function called by instance A must not recursively call A.
+It may call a different instance B, and B keeps independent state, limits, and
+memory accounting.</p>
+<p>Function values have instance affinity. Pass a callback back only to the
+instance that created it; <code>call_value</code>, public entries, and callback-taking
+builtins reject functions from another walker, VM, or generated AOT instance.</p>
+<h2 id="limits-and-failed-calls"><a class="header" href="#limits-and-failed-calls">Limits and failed calls</a></h2>
+<p><code>load</code> and every later operation enforce the limits captured at load time:</p>
+<ul>
+<li>the step counter and fixed call-depth guard start fresh for each operation;</li>
+<li>tracked memory belongs to the instance and remains accounted across calls;</li>
+<li>returned values continue to charge the originating instance while they keep
+instance-owned storage alive.</li>
+</ul>
+<p>A step or call-depth failure unwinds transient call frames and leaves the
+instance callable again. Calls are not transactions: mutations completed
+before an ordinary or fatal error remain visible to later calls.</p>
+<p>Memory exhaustion is different because the retained state may itself still be
+over budget. The instance continues returning a fatal memory error until
+enough charged values are released. If an over-budget value was stored in a
+persistent global, the instance can remain unusable.</p>
+<h2 id="instances-versus-repl-sessions"><a class="header" href="#instances-versus-repl-sessions">Instances versus REPL sessions</a></h2>
+<p>Use <a href="#stateful-repl-sessions"><code>ReplSession</code></a> when each interaction
+introduces more source, as in a REPL or notebook. Use <code>BopInstance</code> when the
+program is loaded once and exposes a deliberate host ABI through <code>pub fn</code>.</p>
 
                     </main>
 
@@ -3278,22 +3646,6 @@ fn main() {
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

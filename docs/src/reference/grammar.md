@@ -5,7 +5,7 @@ An informal grammar for the Bop language, plus the complete list of reserved wor
 ## Reserved words
 
 ```
-let const fn return
+let const pub fn return
 if else while for in repeat break continue
 use as struct enum match try
 true false none
@@ -47,7 +47,7 @@ ifStmt      = "if" expr block ("else" "if" expr block)* ("else" block)?
 whileStmt   = "while" expr block
 repeatStmt  = "repeat" expr block
 forStmt     = "for" IDENT "in" expr block
-fnDecl      = "fn" IDENT "(" params? ")" block
+fnDecl      = "pub"? "fn" IDENT "(" params? ")" block
 returnStmt  = "return" expr?
 breakStmt   = "break"
 continueStmt = "continue"
@@ -120,7 +120,15 @@ args        = expr ("," expr)*
 
 `INT` is an exact signed 64-bit integer after unary parsing. Decimal magnitudes through `9223372036854775807` are ordinary primary expressions; the boundary spelling `-9223372036854775808` is accepted when unary `-` directly owns that magnitude, including in literal patterns. A bare `9223372036854775808`, `0 - 9223372036854775808`, or any larger magnitude is out of range rather than being converted to a floating-point `number`.
 
-Note: `methodDecl`, enum variant `IDENT`s, and `struct` names must start with an uppercase letter. `IDENT` bound by `let`, `fn`, parameters, `for`, etc. must start with lowercase or `_`. `const` names must be all-caps. Mis-shaped declarations parse-error with a "did you mean?" suggestion — see [Variables](../basics/variables.md#name-shapes-are-checked).
+Note: `pub` is accepted only on a named `fn` at the direct program root; it
+marks an entry for the stateful embedding ABI. It is not valid on methods,
+function expressions, or declarations nested in a block or callable.
+
+`methodDecl`, enum variant `IDENT`s, and `struct` names must start with an
+uppercase letter. `IDENT` bound by `let`, `fn`, parameters, `for`, etc. must
+start with lowercase or `_`. `const` names must be all-caps. Mis-shaped
+declarations parse-error with a "did you mean?" suggestion — see
+[Variables](../basics/variables.md#name-shapes-are-checked).
 
 ## Automatic semicolons
 
