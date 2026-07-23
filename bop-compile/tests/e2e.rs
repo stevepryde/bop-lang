@@ -207,6 +207,46 @@ fn e2e_sandbox_function_sites_preserve_redeclaration_and_exact_self() {
             "3",
         ),
         (
+            "if true { fn h() { return 7 } }\nprint(h())",
+            "sandbox_reached_block_function_persists",
+            "7",
+        ),
+        (
+            "fn install() { fn h() { return 8 } }\ninstall()\nprint(h())",
+            "sandbox_called_function_installs_global_function",
+            "8",
+        ),
+        (
+            "let install = fn() { fn h() { return 9 } }\ninstall()\nprint(h())",
+            "sandbox_lambda_installs_global_function",
+            "9",
+        ),
+        (
+            "let install = match 1 { 1 => fn() { fn h() { return 10 } }, _ => fn() { fn h() { return 11 } } }\ninstall()\nprint(h())",
+            "sandbox_match_arm_lambda_installs_global_function",
+            "10",
+        ),
+        (
+            "fn f() { return 1 }\nif true { fn f() { return 2 } }\nprint(f())",
+            "sandbox_reached_nested_redeclaration_updates_ordinary_lookup",
+            "2",
+        ),
+        (
+            "fn f() { return 1 }\nif false { fn f() { return 2 } }\nprint(f())",
+            "sandbox_dead_nested_redeclaration_preserves_ordinary_lookup",
+            "1",
+        ),
+        (
+            "fn f() { return 1 }\nfn get() { return f }\nfn f() { return 2 }\nprint(get()())",
+            "sandbox_non_self_function_values_resolve_active_site",
+            "2",
+        ),
+        (
+            "struct S {}\nfn S.install(self) { fn h() { return 14 } }\nlet s = S {}\ns.install()\nprint(h())",
+            "sandbox_method_body_installs_global_function",
+            "14",
+        ),
+        (
             "fn f(n) { if n == 0 { return 1 } return f(n - 1) }\nlet old = f\nfn f(n) { return 9 }\nprint(old(2))",
             "sandbox_retained_self_recursion",
             "1",
@@ -251,7 +291,7 @@ fn e2e_sandbox_unreached_nested_functions_are_not_statically_callable() {
 #[test]
 #[ignore]
 fn e2e_sandbox_abi_uses_final_reached_public_declaration_sites() {
-    let source = "pub fn first() { return 1 }\npub fn hidden() { return 2 }\nfn hidden() { return 3 }\npub fn first(x) { return x }\nreturn\npub fn skipped() { return 4 }";
+    let source = "pub fn first() { return 1 }\npub fn hidden() { return 2 }\nfn hidden() { return 3 }\npub fn first(x) { return x }\nfn install() { fn first(x) { return 99 } }\ninstall()\nreturn\npub fn skipped() { return 4 }";
     let mut rust_src = transpile(
         source,
         &Options {
@@ -277,12 +317,253 @@ fn main() {
     let site = state.abi_declarations.iter().copied().find(|site| __BOP_FUNCTION_SITES[*site].name == "first" && __BOP_FUNCTION_SITES[*site].is_public).unwrap();
     let mut ctx = Ctx { host: &mut host, state: &mut state, steps: 0, max_steps: limits.max_steps };
     println!("{}", __bop_call_function_site(&mut ctx, site, vec![::bop::value::Value::Int(7)], 0).unwrap());
+    println!("{}", __bop_call_active_function(&mut ctx, "<root>", "first", vec![::bop::value::Value::Int(7)], 0).unwrap());
 }
 "#,
     );
     let run = run_generated_source("sandbox_exact_final_abi", rust_src);
     assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
-    assert_eq!(run.stdout, "first/1\n7");
+    assert_eq!(run.stdout, "first/1\n7\n99");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_failed_module_load_rolls_back_reached_nested_function_sites() {
+    let mut opts = Options {
+        emit_main: false,
+        use_bop_sys: false,
+        sandbox: true,
+        ..Options::default()
+    };
+    opts.module_resolver = Some(modules_from_map([
+        ("bad", "let value = 1\nif true { fn leaked() { return 1 } }\nmissing()"),
+    ]));
+    let mut rust_src = transpile(
+        "let attempt = fn() { use bad }\ntry_call(attempt)",
+        &opts,
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct Host;
+impl ::bop::BopHost for Host {
+    fn call(&mut self, _name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> { None }
+}
+fn main() {
+    let limits = ::bop::BopLimits::standard();
+    let mut host = Host;
+    let state = __bop_load_state(&mut host, &limits).unwrap();
+    assert!(!state.active_function_sites.keys().any(|(module, _)| module == "bad"));
+    assert!(!state.bindings.keys().any(|(module, _)| module == "bad"));
+    println!("clean");
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_failed_module_nested_site_rollback", rust_src);
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "clean");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_dynamic_module_function_exports_follow_runtime_presence() {
+    let opts = Options {
+        sandbox: true,
+        ..Options::default()
+    };
+    let reached = "if true { fn h() { return 12 } }";
+    for (source, name) in [
+        ("use m.{h}\nprint(h())", "sandbox_dynamic_export_selective"),
+        ("use m\nprint(h())", "sandbox_dynamic_export_glob"),
+        ("use m as x\nprint(x.h())", "sandbox_dynamic_export_alias"),
+    ] {
+        let run = run_aot_with_modules_and_opts(source, name, &[("m", reached)], &opts);
+        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert_eq!(run.stdout, "12");
+    }
+
+    let run = run_aot_with_modules_and_opts(
+        "use facade.{h}\nprint(h())",
+        "sandbox_dynamic_export_facade",
+        &[("m", reached), ("facade", "use m")],
+        &opts,
+    );
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "12");
+
+    let dead = "if false { fn h() { return 13 } }";
+    for (source, name) in [
+        (
+            "let load = fn() { use m.{h} }\nprint(try_call(load))",
+            "sandbox_dead_dynamic_export_selective",
+        ),
+        (
+            "use m\nlet invoke = fn() { return h() }\nprint(try_call(invoke))",
+            "sandbox_dead_dynamic_export_glob",
+        ),
+        (
+            "use m as x\nlet invoke = fn() { return x.h() }\nprint(try_call(invoke))",
+            "sandbox_dead_dynamic_export_alias",
+        ),
+    ] {
+        let run = run_aot_with_modules_and_opts(source, name, &[("m", dead)], &opts);
+        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert!(run.stdout.contains("Err("), "unexpected output: {}", run.stdout);
+    }
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_optional_imports_preserve_presence_and_lambda_snapshots() {
+    let opts = Options {
+        sandbox: true,
+        ..Options::default()
+    };
+    let module = "if true { fn h() { return 12 } }";
+    for (source, name, expected) in [
+        (
+            "fn make() { use m.{h}\nlet saved = fn() { return h() }\nh = 3\nreturn saved }\nprint(make()())",
+            "sandbox_local_import_lambda_snapshot",
+            "12",
+        ),
+        (
+            "use m\nlet saved = fn() { return h() }\nh = 3\nprint(saved())",
+            "sandbox_persistent_import_lambda_snapshot",
+            "12",
+        ),
+        (
+            "use m\nlet saved = fn() { return h() }\nfn h() { return 20 }\nprint(saved())\nprint(h())",
+            "sandbox_import_before_function_stays_bound_and_captured",
+            "12\n12",
+        ),
+        (
+            "fn h() { return 20 }\nuse m\nprint(h())",
+            "sandbox_function_before_import_blocks_binding",
+            "20",
+        ),
+    ] {
+        let run = run_aot_with_modules_and_opts(source, name, &[("m", module)], &opts);
+        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert_eq!(run.stdout, expected);
+    }
+
+    let run = run_aot_with_modules_and_opts(
+        "fn make() { use m\nreturn fn() { return h() } }\nlet saved = make()\nprint(try_call(saved))",
+        "sandbox_absent_import_lambda_falls_back_at_call_time",
+        &[("m", "if false { fn h() { return 13 } }")],
+        &opts,
+    );
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert!(run.stdout.contains("Err("), "unexpected output: {}", run.stdout);
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_dynamic_value_exports_follow_early_return_presence() {
+    let opts = Options {
+        sandbox: true,
+        ..Options::default()
+    };
+    let module = "let before = 1\nreturn\nlet after = 2";
+    let present = run_aot_with_modules_and_opts(
+        "use m.{before}\nprint(before)",
+        "sandbox_early_return_value_export_present",
+        &[("m", module)],
+        &opts,
+    );
+    assert_eq!(present.status, Some(0), "generated program failed: {}", present.stderr);
+    assert_eq!(present.stdout, "1");
+
+    for (source, name, modules) in [
+        (
+            "let load = fn() { use m.{after} }\nprint(try_call(load))",
+            "sandbox_early_return_value_selective_absent",
+            vec![("m", module)],
+        ),
+        (
+            "use m\nlet read = fn() { return after }\nprint(try_call(read))",
+            "sandbox_early_return_value_glob_absent",
+            vec![("m", module)],
+        ),
+        (
+            "use m as x\nlet read = fn() { return x.after }\nprint(try_call(read))",
+            "sandbox_early_return_value_alias_absent",
+            vec![("m", module)],
+        ),
+        (
+            "use facade\nlet read = fn() { return after }\nprint(try_call(read))",
+            "sandbox_early_return_value_facade_absent",
+            vec![("m", module), ("facade", "use m")],
+        ),
+    ] {
+        let run = run_aot_with_modules_and_opts(source, name, &modules, &opts);
+        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert!(run.stdout.contains("Err("), "unexpected output: {}", run.stdout);
+    }
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_local_imported_value_beats_same_named_host_function() {
+    let mut opts = Options {
+        emit_main: false,
+        use_bop_sys: false,
+        sandbox: true,
+        ..Options::default()
+    };
+    opts.module_resolver = Some(modules_from_map([("m", "fn h() { return 12 }")]));
+    let mut rust_src = transpile(
+        "fn invoke() { use m.{h}\nreturn h() }\nprint(invoke())",
+        &opts,
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct Host { calls: usize }
+impl ::bop::BopHost for Host {
+    fn call(&mut self, name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        if name == "h" { self.calls += 1; Some(Ok(::bop::value::Value::Int(99))) } else { None }
+    }
+    fn on_print(&mut self, message: &str) { println!("{}", message); }
+}
+fn main() {
+    let limits = ::bop::BopLimits::standard();
+    let mut host = Host { calls: 0 };
+    run(&mut host, &limits).unwrap();
+    println!("calls={}", host.calls);
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_local_import_host_precedence", rust_src);
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "12\ncalls=0");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_state_backed_mutation_preserves_receiver_semantics() {
+    let source = r#"let a = [1, 2]
+a.push(3)
+let b = a
+a.push(4)
+print(a)
+print(b)
+[8].push(9)
+let d = { "a": [1] }
+let nested = fn() { d["a"].push(2) }
+print(try_call(nested))"#;
+    let run = run_aot_with_opts(
+        source,
+        "sandbox_state_backed_receiver_semantics",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout.lines().next(), Some("[1, 2, 3, 4]"));
+    assert_eq!(run.stdout.lines().nth(1), Some("[1, 2, 3]"));
+    assert!(run.stdout.lines().nth(2).is_some_and(|line| line.contains("Err(")));
 }
 
 #[test]

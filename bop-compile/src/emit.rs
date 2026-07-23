@@ -55,7 +55,7 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
 
 // ─── Persistent function-site catalogue ──────────────────────────
 
-/// A unique source declaration that can participate in a persistent module
+/// A unique source declaration that can participate in a module
 /// environment. Names are deliberately not keys: repeated declarations must
 /// remain distinct so runtime source order can select the final executed site.
 #[derive(Clone)]
@@ -66,7 +66,7 @@ struct FunctionSite {
     params: Vec<String>,
     visibility: Visibility,
     line: u32,
-    persistent: bool,
+    abi_eligible: bool,
 }
 
 #[derive(Clone, Default)]
@@ -344,6 +344,9 @@ pub(crate) struct ModuleEntry {
     /// effective exports. Matches the walker's injection
     /// semantics (`use` re-exports by default).
     pub effective_exports: Vec<String>,
+    /// Presence-aware function candidates propagated through flat imports.
+    /// Unlike value exports, any one of these may be absent at runtime.
+    effective_function_exports: BTreeSet<String>,
     /// Every exposed type name and its declaration module. Facades retain the
     /// origin rather than rebinding imported types to their own path.
     pub effective_types: BTreeMap<String, String>,
@@ -433,6 +436,7 @@ fn build_module_graph(
             &mut graph,
             &mut visiting,
             &mut visited,
+            opts.sandbox,
         )?;
     }
     Ok(graph)
@@ -497,6 +501,7 @@ fn analyze_module(
     graph: &mut ModuleGraph,
     visiting: &mut BTreeSet<String>,
     visited: &mut BTreeSet<String>,
+    sandbox: bool,
 ) -> Result<(), BopError> {
     if visiting.contains(name) {
         return Err(BopError::runtime(
@@ -525,11 +530,14 @@ fn analyze_module(
             graph,
             visiting,
             visited,
+            sandbox,
         )?;
     }
 
     let own_lets = collect_top_level_lets(&ast);
     let own_fns = collect_top_level_fn_params(&ast);
+    let function_candidates: BTreeSet<String> =
+        collect_fn_info(&ast).all_fns.into_keys().collect();
     let own_types = collect_top_level_types(&ast);
 
     // Effective exports mirror the bindings that each `use` shape
@@ -540,6 +548,7 @@ fn analyze_module(
     // De-dup while preserving import/declaration order.
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut exports: Vec<String> = Vec::new();
+    let mut effective_function_exports = BTreeSet::new();
     for import in &direct_imports {
         if let Some(alias) = &import.alias {
             push_unique(&mut exports, &mut seen, alias);
@@ -553,6 +562,9 @@ fn analyze_module(
                 for item in items {
                     if module.effective_exports.iter().any(|name| name == item) {
                         push_unique(&mut exports, &mut seen, item);
+                        if module.effective_function_exports.contains(item) {
+                            effective_function_exports.insert(item.clone());
+                        }
                     }
                 }
             }
@@ -560,6 +572,9 @@ fn analyze_module(
                 for name in &module.effective_exports {
                     if !name.starts_with('_') {
                         push_unique(&mut exports, &mut seen, name);
+                        if module.effective_function_exports.contains(name) {
+                            effective_function_exports.insert(name.clone());
+                        }
                     }
                 }
             }
@@ -568,8 +583,15 @@ fn analyze_module(
     for name in &own_lets {
         push_unique(&mut exports, &mut seen, name);
     }
-    for name in own_fns.keys() {
-        push_unique(&mut exports, &mut seen, name);
+    if sandbox {
+        for name in &function_candidates {
+            push_unique(&mut exports, &mut seen, name);
+            effective_function_exports.insert(name.clone());
+        }
+    } else {
+        for name in own_fns.keys() {
+            push_unique(&mut exports, &mut seen, name);
+        }
     }
 
     // Types follow the same flat glob/selective projection. Aliases
@@ -620,6 +642,7 @@ fn analyze_module(
             own_lets,
             direct_imports: direct_imports.into_iter().map(|import| import.path).collect(),
             effective_exports: exports,
+            effective_function_exports,
             effective_types: type_exports,
             effective_value_exports,
             effective_module_exports: module_value_exports,
@@ -699,6 +722,12 @@ fn effective_module_value_exports(
                 };
                 for name in exposed_names {
                     if value_bindings.contains(name) || functions.contains(name) {
+                        continue;
+                    }
+                    if module.effective_function_exports.contains(name)
+                        && !module.effective_value_exports.contains(name)
+                    {
+                        functions.insert(name.clone());
                         continue;
                     }
                     value_bindings.insert(name.clone());
@@ -1030,28 +1059,139 @@ fn collect_nested_fns(stmts: &[Stmt], all: &mut HashMap<String, Vec<String>>) {
 
 fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<String>>) {
     match &stmt.kind {
+        StmtKind::Let { value, .. } => collect_nested_fns_in_expr(value, all),
+        StmtKind::Assign { target, value, .. } => {
+            collect_nested_fns_in_assign_target(target, all);
+            collect_nested_fns_in_expr(value, all);
+        }
         StmtKind::FnDecl { name, params, body, .. } => {
             all.insert(name.clone(), params.clone());
             collect_nested_fns(body, all);
         }
         StmtKind::If {
+            condition,
             body,
             else_ifs,
             else_body,
-            ..
         } => {
+            collect_nested_fns_in_expr(condition, all);
             collect_nested_fns(body, all);
-            for (_, b) in else_ifs {
+            for (condition, b) in else_ifs {
+                collect_nested_fns_in_expr(condition, all);
                 collect_nested_fns(b, all);
             }
             if let Some(b) = else_body {
                 collect_nested_fns(b, all);
             }
         }
-        StmtKind::While { body, .. } => collect_nested_fns(body, all),
-        StmtKind::Repeat { body, .. } => collect_nested_fns(body, all),
-        StmtKind::ForIn { body, .. } => collect_nested_fns(body, all),
+        StmtKind::While { condition, body } => {
+            collect_nested_fns_in_expr(condition, all);
+            collect_nested_fns(body, all);
+        }
+        StmtKind::Repeat { count, body } => {
+            collect_nested_fns_in_expr(count, all);
+            collect_nested_fns(body, all);
+        }
+        StmtKind::ForIn { iterable, body, .. } => {
+            collect_nested_fns_in_expr(iterable, all);
+            collect_nested_fns(body, all);
+        }
+        StmtKind::MethodDecl { body, .. } => collect_nested_fns(body, all),
+        StmtKind::Return { value: Some(value) } | StmtKind::ExprStmt(value) => {
+            collect_nested_fns_in_expr(value, all);
+        }
         _ => {}
+    }
+}
+
+fn collect_nested_fns_in_assign_target(
+    target: &AssignTarget,
+    all: &mut HashMap<String, Vec<String>>,
+) {
+    match target {
+        AssignTarget::Variable(_) => {}
+        AssignTarget::Index { object, index } => {
+            collect_nested_fns_in_expr(object, all);
+            collect_nested_fns_in_expr(index, all);
+        }
+        AssignTarget::Field { object, .. } => collect_nested_fns_in_expr(object, all),
+    }
+}
+
+fn collect_nested_fns_in_expr(expr: &Expr, all: &mut HashMap<String, Vec<String>>) {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::StringInterp(_)
+        | ExprKind::Bool(_)
+        | ExprKind::None
+        | ExprKind::Ident(_) => {}
+        ExprKind::BinaryOp { left, right, .. }
+        | ExprKind::Index { object: left, index: right } => {
+            collect_nested_fns_in_expr(left, all);
+            collect_nested_fns_in_expr(right, all);
+        }
+        ExprKind::UnaryOp { expr, .. }
+        | ExprKind::Try(expr)
+        | ExprKind::FieldAccess { object: expr, .. } => {
+            collect_nested_fns_in_expr(expr, all);
+        }
+        ExprKind::Call { callee, args } => {
+            collect_nested_fns_in_expr(callee, all);
+            for arg in args {
+                collect_nested_fns_in_expr(arg, all);
+            }
+        }
+        ExprKind::MethodCall { object, args, .. } => {
+            collect_nested_fns_in_expr(object, all);
+            for arg in args {
+                collect_nested_fns_in_expr(arg, all);
+            }
+        }
+        ExprKind::StructConstruct { fields, .. } => {
+            for (_, value) in fields {
+                collect_nested_fns_in_expr(value, all);
+            }
+        }
+        ExprKind::EnumConstruct { payload, .. } => match payload {
+            VariantPayload::Unit => {}
+            VariantPayload::Tuple(values) => {
+                for value in values {
+                    collect_nested_fns_in_expr(value, all);
+                }
+            }
+            VariantPayload::Struct(fields) => {
+                for (_, value) in fields {
+                    collect_nested_fns_in_expr(value, all);
+                }
+            }
+        },
+        ExprKind::Array(values) => {
+            for value in values {
+                collect_nested_fns_in_expr(value, all);
+            }
+        }
+        ExprKind::Dict(entries) => {
+            for (_, value) in entries {
+                collect_nested_fns_in_expr(value, all);
+            }
+        }
+        ExprKind::IfExpr { condition, then_expr, else_expr } => {
+            collect_nested_fns_in_expr(condition, all);
+            collect_nested_fns_in_expr(then_expr, all);
+            collect_nested_fns_in_expr(else_expr, all);
+        }
+        ExprKind::Lambda { body, .. } => collect_nested_fns(body, all),
+        ExprKind::Match { scrutinee, arms } => {
+            collect_nested_fns_in_expr(scrutinee, all);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_nested_fns_in_expr(guard, all);
+                }
+                collect_nested_fns_in_expr(&arm.body, all);
+            }
+        }
     }
 }
 
@@ -1098,10 +1238,38 @@ fn callable_assignment_names(stmts: &[Stmt]) -> HashSet<String> {
 #[derive(Default)]
 struct EmissionScope {
     locals: HashSet<String>,
+    persistent_bindings: HashSet<String>,
+    optional_imports: HashMap<String, OptionalImportBinding>,
     module_alias_locals: HashSet<String>,
     mutated_locals: HashSet<String>,
     plain_glob_imports: HashSet<String>,
     function_sites: HashMap<String, usize>,
+}
+
+#[derive(Clone)]
+enum OptionalImportBinding {
+    Local {
+        value: String,
+        function_site: String,
+    },
+    Persistent,
+}
+
+#[derive(Clone)]
+enum BindingStorage {
+    RustLocal {
+        ident: String,
+    },
+    Persistent {
+        module: String,
+        name: String,
+    },
+    OptionalImport {
+        bindings: Vec<OptionalImportBinding>,
+        fallback: Option<Box<BindingStorage>>,
+        module: String,
+        name: String,
+    },
 }
 
 #[derive(Clone)]
@@ -1119,6 +1287,10 @@ struct Emitter {
     /// Unique top-level declaration sites used by sandboxed persistent-state
     /// lowering. Kept separate from name-keyed call-resolution metadata.
     functions: FunctionRegistry,
+    /// Declaration occurrence pointer -> catalogue site. Registration and
+    /// emission walk the same stable parsed statement slices, so identical
+    /// same-line declarations remain distinguishable without a source key.
+    function_sites_by_stmt: HashMap<usize, usize>,
     /// Direct module/root declaration sites in source order. Runtime module
     /// bodies replay this exact sequence to activate declarations as reached.
     direct_function_sites: HashMap<String, Vec<usize>>,
@@ -1239,6 +1411,7 @@ impl Emitter {
             modules,
             types,
             functions: FunctionRegistry::default(),
+            function_sites_by_stmt: HashMap::new(),
             direct_function_sites: HashMap::new(),
             tmp_counter: 0,
             type_site_counter: 0,
@@ -1454,13 +1627,48 @@ impl Emitter {
         }
     }
 
+    fn bind_persistent(&mut self, name: &str) {
+        self.scope_stack
+            .last_mut()
+            .expect("persistent bindings are emitted inside a scope")
+            .persistent_bindings
+            .insert(name.to_string());
+    }
+
+    fn is_persistent_binding(&self, name: &str) -> bool {
+        self.scope_stack
+            .iter()
+            .rev()
+            .any(|scope| scope.persistent_bindings.contains(name))
+    }
+
     fn emit_module_alias_context_sync(&mut self, name: &str) {
-        if !self.is_module_top_scope() {
+        let authoritative_alias = self.opts.sandbox
+            && (self.has_declaration_alias_overlay(name)
+                || self.has_module_alias_candidate(name));
+        if !self.is_module_top_scope() && !authoritative_alias {
             return;
         }
+        let value = if self.is_local(name) {
+            format!("{}.clone()", rust_user_ident(name))
+        } else if self.opts.sandbox {
+            self.binding_storage(name).map_or_else(
+                || {
+                    format!(
+                        "__bop_read_binding(ctx, {}, {}, 0)?",
+                        rust_string_literal(&self.current_module),
+                        rust_string_literal(name),
+                    )
+                },
+                |storage| self.storage_read_src(&storage, 0),
+            )
+        } else {
+            format!("{}.clone()", rust_user_ident(name))
+        };
+        let value_tmp = self.fresh_tmp();
+        self.line(&format!("let {value_tmp} = {value};"));
         self.line(&format!(
-            "if matches!(&{value}, ::bop::value::Value::Module(_)) {{ ctx.module_aliases.insert(({module}.to_string(), {name}.to_string()), {value}.clone()); }} else {{ ctx.module_aliases.remove(&({module}.to_string(), {name}.to_string())); }}",
-            value = rust_user_ident(name),
+            "if matches!(&{value_tmp}, ::bop::value::Value::Module(_)) {{ ctx.module_aliases.insert(({module}.to_string(), {name}.to_string()), {value_tmp}.clone()); }} else {{ ctx.module_aliases.remove(&({module}.to_string(), {name}.to_string())); }}",
             module = rust_string_literal(&self.current_module),
             name = rust_string_literal(name),
         ));
@@ -1577,6 +1785,175 @@ impl Emitter {
             .is_some_and(|scope| scope.locals.contains(name))
     }
 
+    fn binding_storage(&self, name: &str) -> Option<BindingStorage> {
+        let mut optional = Vec::new();
+        let module = self.current_module.clone();
+        for scope in self.scope_stack.iter().rev() {
+            let hard = if scope.locals.contains(name) {
+                Some(BindingStorage::RustLocal {
+                    ident: rust_user_ident(name),
+                })
+            } else if scope.persistent_bindings.contains(name) {
+                Some(BindingStorage::Persistent {
+                    module: module.clone(),
+                    name: name.to_string(),
+                })
+            } else {
+                None
+            };
+            if let Some(hard) = hard {
+                return if optional.is_empty() {
+                    Some(hard)
+                } else {
+                    Some(BindingStorage::OptionalImport {
+                        bindings: optional,
+                        fallback: Some(Box::new(hard)),
+                        module,
+                        name: name.to_string(),
+                    })
+                };
+            }
+            if let Some(binding) = scope.optional_imports.get(name) {
+                optional.push(binding.clone());
+            }
+        }
+        if optional.is_empty() {
+            None
+        } else {
+            Some(BindingStorage::OptionalImport {
+                bindings: optional,
+                fallback: None,
+                module,
+                name: name.to_string(),
+            })
+        }
+    }
+
+    fn optional_import_in_current_scope(&self, name: &str) -> Option<OptionalImportBinding> {
+        self.scope_stack
+            .last()
+            .and_then(|scope| scope.optional_imports.get(name))
+            .cloned()
+    }
+
+    fn bind_optional_import(&mut self, name: &str, binding: OptionalImportBinding) {
+        self.scope_stack
+            .last_mut()
+            .expect("imports are emitted inside a scope")
+            .optional_imports
+            .insert(name.to_string(), binding);
+    }
+
+    fn optional_import_value_src(&self, binding: &OptionalImportBinding, name: &str) -> String {
+        match binding {
+            OptionalImportBinding::Local { value, .. } => format!("{value}.clone()"),
+            OptionalImportBinding::Persistent => format!(
+                "ctx.bindings.get(&({}.to_string(), {}.to_string())).cloned()",
+                rust_string_literal(&self.current_module),
+                rust_string_literal(name),
+            ),
+        }
+    }
+
+    fn storage_optional_value_src(&self, storage: &BindingStorage, line: u32) -> Option<String> {
+        let BindingStorage::OptionalImport {
+            bindings,
+            fallback,
+            name,
+            ..
+        } = storage else {
+            return None;
+        };
+        let mut parts = bindings
+            .iter()
+            .map(|binding| self.optional_import_value_src(binding, name))
+            .collect::<Vec<_>>();
+        if let Some(fallback) = fallback {
+            parts.push(format!(
+                "::std::option::Option::Some({})",
+                self.storage_read_src(fallback, line)
+            ));
+        }
+        Some(parts.join(".or(" ) + &")".repeat(parts.len().saturating_sub(1)))
+    }
+
+    fn storage_read_src(&self, storage: &BindingStorage, line: u32) -> String {
+        match storage {
+            BindingStorage::RustLocal { ident } => format!("{ident}.clone()"),
+            BindingStorage::Persistent { module, name } => format!(
+                "__bop_read_binding(ctx, {}, {}, {line})?",
+                rust_string_literal(module),
+                rust_string_literal(name),
+            ),
+            BindingStorage::OptionalImport { module, name, .. } => {
+                let optional = self
+                    .storage_optional_value_src(storage, line)
+                    .expect("optional storage");
+                format!(
+                    "match {optional} {{ ::std::option::Option::Some(__value) => __value, ::std::option::Option::None => __bop_active_function_value(ctx, {}, {}, {line})? }}",
+                    rust_string_literal(module),
+                    rust_string_literal(name),
+                )
+            }
+        }
+    }
+
+    fn storage_mut_option_sources(&self, storage: &BindingStorage) -> Vec<String> {
+        match storage {
+            BindingStorage::RustLocal { ident } => {
+                vec![format!("::std::option::Option::Some(&mut {ident})")]
+            }
+            BindingStorage::Persistent { module, name } => vec![format!(
+                "ctx.bindings.get_mut(&({}.to_string(), {}.to_string()))",
+                rust_string_literal(module),
+                rust_string_literal(name),
+            )],
+            BindingStorage::OptionalImport {
+                bindings,
+                fallback,
+                module,
+                name,
+            } => {
+                let mut sources = bindings
+                    .iter()
+                    .map(|binding| match binding {
+                        OptionalImportBinding::Local { value, .. } => {
+                            format!("{value}.as_mut()")
+                        }
+                        OptionalImportBinding::Persistent => format!(
+                            "ctx.bindings.get_mut(&({}.to_string(), {}.to_string()))",
+                            rust_string_literal(module),
+                            rust_string_literal(name),
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(fallback) = fallback {
+                    sources.extend(self.storage_mut_option_sources(fallback));
+                }
+                sources
+            }
+        }
+    }
+
+    fn storage_mut_src(&self, storage: &BindingStorage, name: &str, line: u32) -> String {
+        let sources = self.storage_mut_option_sources(storage);
+        let mut body = String::from("{");
+        for (index, source) in sources.iter().enumerate() {
+            if index == 0 {
+                write!(body, " if let ::std::option::Option::Some(__value) = {source} {{ __value }}").unwrap();
+            } else {
+                write!(body, " else if let ::std::option::Option::Some(__value) = {source} {{ __value }}").unwrap();
+            }
+        }
+        write!(
+            body,
+            " else {{ return Err(::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({}), {line})); }} }}",
+            rust_string_literal(name),
+        )
+        .unwrap();
+        body
+    }
+
     fn is_dynamic_namespace_local(&self, name: &str) -> bool {
         for scope in self.scope_stack.iter().rev() {
             if scope.locals.contains(name) {
@@ -1588,7 +1965,10 @@ impl Emitter {
                         .is_some_and(|names| names.contains(name));
             }
         }
-        self.declaration_alias_overlay(name).is_some()
+        self.has_declaration_alias_overlay(name)
+            || (self.opts.sandbox
+                && self.has_module_alias_candidate(name)
+                && self.binding_storage(name).is_some())
     }
 
     fn mark_local_mutated(&mut self, name: &str) {
@@ -1601,13 +1981,25 @@ impl Emitter {
     }
 
     fn declaration_alias_overlay(&self, name: &str) -> Option<String> {
+        if self.opts.sandbox {
+            return None;
+        }
         self.declaration_alias_overlays
             .last()
             .filter(|aliases| aliases.contains(name))
             .map(|_| declaration_alias_overlay_ident(name))
     }
 
+    fn has_declaration_alias_overlay(&self, name: &str) -> bool {
+        self.declaration_alias_overlays
+            .last()
+            .is_some_and(|aliases| aliases.contains(name))
+    }
+
     fn declaration_alias_read_src(&self, name: &str, line: u32) -> Option<String> {
+        if self.opts.sandbox {
+            return None;
+        }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
                 "__bop_declaration_alias_read(ctx, &mut {overlay}, {module}, {alias}, {line})?",
@@ -1618,6 +2010,15 @@ impl Emitter {
     }
 
     fn declaration_alias_namespace_src(&self, name: &str, line: u32) -> Option<String> {
+        if self.opts.sandbox {
+            return self.has_declaration_alias_overlay(name).then(|| {
+                format!(
+                    "__bop_authoritative_alias_namespace(ctx, {}, {}, {line})?",
+                    rust_string_literal(&self.current_module),
+                    rust_string_literal(name),
+                )
+            });
+        }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
                 "__bop_declaration_alias_namespace(ctx, &mut {overlay}, {module}, {alias}, {line})?",
@@ -1628,6 +2029,9 @@ impl Emitter {
     }
 
     fn declaration_alias_optional_src(&self, name: &str) -> Option<String> {
+        if self.opts.sandbox {
+            return None;
+        }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
                 "__bop_declaration_alias_optional(ctx, &mut {overlay}, {module}, {alias})",
@@ -1638,6 +2042,9 @@ impl Emitter {
     }
 
     fn declaration_alias_mut_src(&self, name: &str, line: u32) -> Option<String> {
+        if self.opts.sandbox {
+            return None;
+        }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
                 "__bop_declaration_alias_mut(&mut {overlay}, {alias}, {line})?",
@@ -1652,6 +2059,9 @@ impl Emitter {
         value: &str,
         line: u32,
     ) -> Option<String> {
+        if self.opts.sandbox {
+            return None;
+        }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
                 "__bop_declaration_alias_assign(ctx, &mut {overlay}, {value}, {module}, {alias}, {line})?;",
@@ -1668,22 +2078,20 @@ impl Emitter {
             Ok(alias)
         } else if self.opts.sandbox {
             if let Some(site) = self.local_function_site(name) {
-                if self.functions.sites[site].persistent {
-                    Ok(format!(
-                        "__bop_function_site_value(ctx, {}, {})?",
-                        site, line
-                    ))
-                } else {
-                    Ok(self.lexical_function_site_value_src(site, line))
-                }
-            } else if self.fn_info.top_level_fns.contains(name) {
                 Ok(format!(
-                    "{}(ctx, {})?",
-                    self.wrapper_fn_name(name), line
+                    "__bop_function_site_value(ctx, {}, {})?",
+                    site, line
                 ))
-            } else if self.fn_info.all_fns.contains_key(name) {
-                Err(BopError::runtime(
-                    format!("bop-compile: function `{name}` isn't visible at this site"),
+            } else if let Some(storage) = self.binding_storage(name) {
+                Ok(self.storage_read_src(&storage, line))
+            } else if self.fn_info.top_level_fns.contains(name)
+                || self.fn_info.all_fns.contains_key(name)
+                || self.has_declaration_alias_overlay(name)
+            {
+                Ok(format!(
+                    "__bop_active_function_value(ctx, {}, {}, {})?",
+                    rust_string_literal(&self.current_module),
+                    rust_string_literal(name),
                     line,
                 ))
             } else if self.in_non_capturing_method {
@@ -1693,7 +2101,12 @@ impl Emitter {
                     line,
                 ))
             } else {
-                Ok(format!("{}.clone()", rust_user_ident(name)))
+                Ok(format!(
+                    "__bop_active_function_value(ctx, {}, {}, {})?",
+                    rust_string_literal(&self.current_module),
+                    rust_string_literal(name),
+                    line,
+                ))
             }
         } else if self.fn_info.top_level_fns.contains(name) {
             Ok(format!("{}({})?", self.wrapper_fn_name(name), line))
@@ -1734,7 +2147,7 @@ impl Emitter {
         params: &[String],
         visibility: Visibility,
         line: u32,
-        persistent: bool,
+        abi_eligible: bool,
     ) -> usize {
         let id = self.functions.sites.len();
         self.functions.sites.push(FunctionSite {
@@ -1744,9 +2157,13 @@ impl Emitter {
             params: params.to_vec(),
             visibility,
             line,
-            persistent,
+            abi_eligible,
         });
         id
+    }
+
+    fn function_site_for_stmt(&self, stmt: &Stmt) -> usize {
+        self.function_sites_by_stmt[&(stmt as *const Stmt as usize)]
     }
 
     fn bind_function_site(&mut self, name: &str, site: usize) {
@@ -1787,32 +2204,6 @@ impl Emitter {
             format!(", {}", arg_names.join(", "))
         };
         format!("{}(ctx{})?", function_site_fn_name(site_id), args)
-    }
-
-    fn lexical_function_site_value_src(&self, site_id: usize, line: u32) -> String {
-        let site = &self.functions.sites[site_id];
-        let params = site
-            .params
-            .iter()
-            .map(|param| format!("{}.to_string()", rust_string_literal(param)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let arity = site.params.len();
-        let args = (0..arity)
-            .map(|_| "args.remove(0)")
-            .collect::<Vec<_>>()
-            .join(", ");
-        let call = if args.is_empty() {
-            format!("{}(ctx)", function_site_fn_name(site_id))
-        } else {
-            format!("{}(ctx, {})", function_site_fn_name(site_id), args)
-        };
-        format!(
-            "{{ let callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"`{name}` expects {arity} argument{plural}, but got {{}}\", args.len()), 0)); }} {call} }}); __bop_wrap_callable(vec![{params}], ::std::vec::Vec::new(), Some({name_lit}.to_string()), 0u16, {line}, callable)? }}",
-            name = site.name,
-            plural = if arity == 1 { "" } else { "s" },
-            name_lit = rust_string_literal(&site.name),
-        )
     }
 
     fn finish(self) -> String {
@@ -2099,10 +2490,15 @@ impl Emitter {
         )
         .unwrap();
         for export in &entry.effective_exports {
+            let value_type = if self.opts.sandbox {
+                "::std::option::Option<__BopExport>"
+            } else {
+                "::bop::value::Value"
+            };
             writeln!(
                 self.out,
-                "    {ident}: ::bop::value::Value,",
-                ident = rust_user_ident(export)
+                "    {ident}: {value_type},",
+                ident = rust_user_ident(export),
             )
             .unwrap();
         }
@@ -2188,6 +2584,15 @@ impl Emitter {
                         line,
                     ));
                 }
+                if self.opts.sandbox && is_binding && !is_type {
+                    self.line(&format!(
+                        "if {tmp}.{ident}.is_none() {{ return Err(::bop::error::BopError::runtime({}, {line})); }}",
+                        rust_string_literal(&format!(
+                            "`{item}` isn't exported from `{path}` (selective import)"
+                        )),
+                        ident = rust_user_ident(item),
+                    ));
+                }
             }
         }
 
@@ -2229,18 +2634,25 @@ impl Emitter {
                 // under the alias. All reads through the alias
                 // (`m.helper`, `m.Entity { ... }`) resolve at
                 // runtime by inspecting this value.
-                let bindings_src: String = expose_bindings
-                    .iter()
-                    .map(|n| {
-                        format!(
-                            "({}.to_string(), {tmp}.{ident}.clone())",
-                            rust_string_literal(n),
-                            tmp = tmp,
-                            ident = rust_user_ident(n)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let bindings_tmp = self.fresh_tmp();
+                self.line(&format!(
+                    "let mut {bindings_tmp}: ::std::vec::Vec<(::std::string::String, ::bop::value::Value)> = ::std::vec::Vec::new();"
+                ));
+                for name in &expose_bindings {
+                    let ident = rust_user_ident(name);
+                    if self.opts.sandbox {
+                        self.line(&format!(
+                            "match {tmp}.{ident}.clone() {{ ::std::option::Option::Some(__BopExport::Value(__value)) => {bindings_tmp}.push(({}.to_string(), __value)), ::std::option::Option::Some(__BopExport::Function(__site)) => {bindings_tmp}.push(({}.to_string(), __bop_function_site_value(ctx, __site, {line})?)), ::std::option::Option::None => {{}} }}",
+                            rust_string_literal(name),
+                            rust_string_literal(name),
+                        ));
+                    } else {
+                        self.line(&format!(
+                            "{bindings_tmp}.push(({}.to_string(), {tmp}.{ident}.clone()));",
+                            rust_string_literal(name),
+                        ));
+                    }
+                }
                 let types_src: String = expose_types
                     .iter()
                     .map(|(type_name, origin)| {
@@ -2265,10 +2677,10 @@ impl Emitter {
                     ));
                 }
                 self.line(&format!(
-                    "let mut {alias}: ::bop::value::Value = ::bop::value::Value::new_module_with_type_exports({path_lit}.to_string(), ::std::vec![{bindings}], ::bop::value::BopTypeExports::from_origins(::std::vec![{types}]), {line})?;",
+                    "let mut {alias}: ::bop::value::Value = ::bop::value::Value::new_module_with_type_exports({path_lit}.to_string(), {bindings}, ::bop::value::BopTypeExports::from_origins(::std::vec![{types}]), {line})?;",
                     alias = rust_user_ident(alias_name),
                     path_lit = rust_string_literal(path),
-                    bindings = bindings_src,
+                    bindings = bindings_tmp,
                     types = types_src,
                     line = line,
                 ));
@@ -2280,12 +2692,22 @@ impl Emitter {
                         alias = rust_user_ident(alias_name),
                     ));
                 }
-                self.bind_local(alias_name);
-                self.scope_stack
-                    .last_mut()
-                    .expect("use emission has a scope")
-                    .module_alias_locals
-                    .insert(alias_name.clone());
+                if self.opts.sandbox && module_top_scope {
+                    self.line(&format!(
+                        "__bop_define_binding(ctx, {}, {}, {});",
+                        rust_string_literal(&self.current_module),
+                        rust_string_literal(alias_name),
+                        rust_user_ident(alias_name),
+                    ));
+                    self.bind_persistent(alias_name);
+                } else {
+                    self.bind_local(alias_name);
+                    self.scope_stack
+                        .last_mut()
+                        .expect("use emission has a scope")
+                        .module_alias_locals
+                        .insert(alias_name.clone());
+                }
                 // Track the alias for compile-time resolution
                 // of namespaced references (`m.Color`). Emit-
                 // time resolution is sufficient here because
@@ -2301,6 +2723,20 @@ impl Emitter {
                 // construction + pattern sites can resolve
                 // the bare name to the right module path.
                 for name in &expose_bindings {
+                    if self.opts.sandbox && module_top_scope {
+                        self.line(&format!(
+                            "__bop_import_export(ctx, {}, {}, {tmp}.{ident}.clone(), {line})?;",
+                            rust_string_literal(&self.current_module),
+                            rust_string_literal(name),
+                            ident = rust_user_ident(name),
+                        ));
+                        self.bind_optional_import(name, OptionalImportBinding::Persistent);
+                        if let Some(module_export) = entry.effective_module_exports.get(name) {
+                            self.bind_module_export(name, module_export);
+                            self.emit_module_alias_context_sync(name);
+                        }
+                        continue;
+                    }
                     // Every non-aliased import form is first-win in
                     // the current frame. An outer-frame binding is
                     // not a clash: this new Rust block should shadow
@@ -2312,10 +2748,42 @@ impl Emitter {
                     {
                         continue;
                     }
+                    if self.opts.sandbox {
+                        let candidate = self.fresh_tmp();
+                        self.line(&format!(
+                            "let {candidate} = {tmp}.{ident}.clone();",
+                            ident = rust_user_ident(name),
+                        ));
+                        if let Some(OptionalImportBinding::Local {
+                            value,
+                            function_site,
+                        }) = self.optional_import_in_current_scope(name)
+                        {
+                            self.line(&format!(
+                                "if {value}.is_none() {{ {function_site} = __bop_export_function_site(&{candidate}); {value} = __bop_export_value(ctx, {candidate}, {line})?; }}"
+                            ));
+                        } else {
+                            let function_site = self.fresh_tmp();
+                            let value = self.fresh_tmp();
+                            self.line(&format!(
+                                "let mut {function_site}: ::std::option::Option<usize> = __bop_export_function_site(&{candidate});"
+                            ));
+                            self.line(&format!(
+                                "let mut {value}: ::std::option::Option<::bop::value::Value> = __bop_export_value(ctx, {candidate}, {line})?;"
+                            ));
+                            self.bind_optional_import(
+                                name,
+                                OptionalImportBinding::Local {
+                                    value,
+                                    function_site,
+                                },
+                            );
+                        }
+                        continue;
+                    }
                     self.line(&format!(
                         "let mut {ident}: ::bop::value::Value = {tmp}.{ident}.clone();",
                         ident = rust_user_ident(name),
-                        tmp = tmp
                     ));
                     self.bind_local(name);
                     if let Some(module_export) = entry.effective_module_exports.get(name) {
@@ -2418,7 +2886,23 @@ impl Emitter {
                 rust_string_literal(name),
             ));
             self.line(&format!(
+                "let __saved_imported_function_sites: ::std::vec::Vec<_> = ctx.module_imported_function_sites.iter().filter(|((module, _), _)| module == {}).map(|(key, site)| (key.clone(), *site)).collect();",
+                rust_string_literal(name),
+            ));
+            self.line(&format!(
+                "let __saved_value_bindings: ::std::vec::Vec<_> = ctx.bindings.iter().filter(|((module, _), _)| module == {}).map(|(key, value)| (key.clone(), value.clone())).collect();",
+                rust_string_literal(name),
+            ));
+            self.line(&format!(
                 "ctx.active_function_sites.retain(|(module, _), _| module != {});",
+                rust_string_literal(name),
+            ));
+            self.line(&format!(
+                "ctx.module_imported_function_sites.retain(|(module, _), _| module != {});",
+                rust_string_literal(name),
+            ));
+            self.line(&format!(
+                "ctx.bindings.retain(|(module, _), _| module != {});",
                 rust_string_literal(name),
             ));
         }
@@ -2456,6 +2940,12 @@ impl Emitter {
         self.callable_mutations
             .push(callable_assignment_names(&entry.ast));
         self.push_scope();
+        let saved_top_level = self.in_top_level;
+        if self.opts.sandbox {
+            self.line("let __bop_module_body = (|| -> Result<(), ::bop::error::BopError> {");
+            self.indent += 1;
+            self.in_top_level = true;
+        }
         let direct_function_sites = self
             .direct_function_sites
             .get(name)
@@ -2473,6 +2963,13 @@ impl Emitter {
             }
             self.emit_stmt(stmt)?;
         }
+        if self.opts.sandbox {
+            self.line("Ok(())");
+            self.in_top_level = saved_top_level;
+            self.indent -= 1;
+            self.line("})();");
+            self.line("__bop_module_body?;");
+        }
 
         // Pack every effective export. Top-level lets are Rust
         // locals at this point. Imports injected their names as
@@ -2488,16 +2985,23 @@ impl Emitter {
         .unwrap();
         for export in &entry.effective_exports {
             self.pad();
-            if entry.own_fns.contains_key(export)
-                && !entry.effective_value_exports.contains(export)
-            {
-                let wrapper_args = if self.opts.sandbox { "ctx, 0" } else { "0" };
+            if self.opts.sandbox {
                 writeln!(
                     self.out,
-                    "    {ident}: {wrapper}({wrapper_args})?,",
+                    "    {ident}: match ctx.bindings.get(&({module}.to_string(), {name}.to_string())).cloned() {{ ::std::option::Option::Some(__value) => ::std::option::Option::Some(__BopExport::Value(__value)), ::std::option::Option::None => ctx.active_function_sites.get(&({module}.to_string(), {name}.to_string())).or_else(|| ctx.module_imported_function_sites.get(&({module}.to_string(), {name}.to_string()))).copied().map(__BopExport::Function) }},",
+                    ident = rust_user_ident(export),
+                    module = rust_string_literal(name),
+                    name = rust_string_literal(export),
+                )
+                .unwrap();
+            } else if entry.own_fns.contains_key(export)
+                && !entry.effective_value_exports.contains(export)
+            {
+                writeln!(
+                    self.out,
+                    "    {ident}: {wrapper}(0)?,",
                     ident = rust_user_ident(export),
                     wrapper = self.wrapper_fn_name(export),
-                    wrapper_args = wrapper_args,
                 )
                 .unwrap();
             } else {
@@ -2547,6 +3051,16 @@ impl Emitter {
                 rust_string_literal(name),
             ));
             self.line("ctx.active_function_sites.extend(__saved_function_sites);");
+            self.line(&format!(
+                "ctx.module_imported_function_sites.retain(|(module, _), _| module != {});",
+                rust_string_literal(name),
+            ));
+            self.line("ctx.module_imported_function_sites.extend(__saved_imported_function_sites);");
+            self.line(&format!(
+                "ctx.bindings.retain(|(module, _), _| module != {});",
+                rust_string_literal(name),
+            ));
+            self.line("ctx.bindings.extend(__saved_value_bindings);");
         }
         self.line(&format!(
             "ctx.module_cache.remove({});",
@@ -2581,26 +3095,189 @@ impl Emitter {
     /// subsequently skipped inside `emit_run_program` so they don't
     /// emit twice.
     fn emit_top_level_fn_decls(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
+        if self.opts.sandbox {
+            self.function_sites_by_stmt.clear();
+            self.register_named_function_sites(stmts, true);
+            return self.emit_registered_function_bodies(stmts);
+        }
         for stmt in stmts {
-            if let StmtKind::FnDecl {
-                name,
-                params,
-                body,
-                visibility,
-            } = &stmt.kind
-            {
-                if self.opts.sandbox {
+            if let StmtKind::FnDecl { name, params, body, .. } = &stmt.kind {
+                self.emit_fn_decl(name, params, body, stmt.line)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn register_named_function_sites(&mut self, stmts: &[Stmt], direct: bool) {
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::Let { value, .. } => {
+                    self.register_named_function_sites_in_expr(value);
+                }
+                StmtKind::Assign { target, value, .. } => {
+                    self.register_named_function_sites_in_target(target);
+                    self.register_named_function_sites_in_expr(value);
+                }
+                StmtKind::FnDecl { name, params, body, visibility } => {
+                    let abi_eligible = direct
+                        && self.current_module == bop::value::ROOT_MODULE_PATH;
                     let site = self.register_function_site(
                         name,
                         params,
                         *visibility,
                         stmt.line,
-                        true,
+                        abi_eligible,
                     );
-                    self.direct_function_sites
-                        .entry(self.current_module.clone())
-                        .or_default()
-                        .push(site);
+                    self.function_sites_by_stmt
+                        .insert(stmt as *const Stmt as usize, site);
+                    if direct {
+                        self.direct_function_sites
+                            .entry(self.current_module.clone())
+                            .or_default()
+                            .push(site);
+                    }
+                    self.register_named_function_sites(body, false);
+                }
+                StmtKind::If { condition, body, else_ifs, else_body } => {
+                    self.register_named_function_sites_in_expr(condition);
+                    self.register_named_function_sites(body, false);
+                    for (condition, body) in else_ifs {
+                        self.register_named_function_sites_in_expr(condition);
+                        self.register_named_function_sites(body, false);
+                    }
+                    if let Some(body) = else_body {
+                        self.register_named_function_sites(body, false);
+                    }
+                }
+                StmtKind::While { condition, body } => {
+                    self.register_named_function_sites_in_expr(condition);
+                    self.register_named_function_sites(body, false);
+                }
+                StmtKind::Repeat { count, body } => {
+                    self.register_named_function_sites_in_expr(count);
+                    self.register_named_function_sites(body, false);
+                }
+                StmtKind::ForIn { iterable, body, .. } => {
+                    self.register_named_function_sites_in_expr(iterable);
+                    self.register_named_function_sites(body, false);
+                }
+                // Method bodies are cloned into the method-site registry. They
+                // are registered from that stable slice immediately before
+                // method emission so duplicate occurrences keep their IDs.
+                StmtKind::MethodDecl { .. } => {}
+                StmtKind::Return { value: Some(value) }
+                | StmtKind::ExprStmt(value) => {
+                    self.register_named_function_sites_in_expr(value);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn register_named_function_sites_in_target(&mut self, target: &AssignTarget) {
+        match target {
+            AssignTarget::Variable(_) => {}
+            AssignTarget::Index { object, index } => {
+                self.register_named_function_sites_in_expr(object);
+                self.register_named_function_sites_in_expr(index);
+            }
+            AssignTarget::Field { object, .. } => {
+                self.register_named_function_sites_in_expr(object);
+            }
+        }
+    }
+
+    fn register_named_function_sites_in_expr(&mut self, expr: &Expr) {
+        match &expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::Number(_)
+            | ExprKind::Str(_)
+            | ExprKind::StringInterp(_)
+            | ExprKind::Bool(_)
+            | ExprKind::None
+            | ExprKind::Ident(_) => {}
+            ExprKind::BinaryOp { left, right, .. }
+            | ExprKind::Index { object: left, index: right } => {
+                self.register_named_function_sites_in_expr(left);
+                self.register_named_function_sites_in_expr(right);
+            }
+            ExprKind::UnaryOp { expr, .. }
+            | ExprKind::Try(expr)
+            | ExprKind::FieldAccess { object: expr, .. } => {
+                self.register_named_function_sites_in_expr(expr);
+            }
+            ExprKind::Call { callee, args } => {
+                self.register_named_function_sites_in_expr(callee);
+                for arg in args {
+                    self.register_named_function_sites_in_expr(arg);
+                }
+            }
+            ExprKind::MethodCall { object, args, .. } => {
+                self.register_named_function_sites_in_expr(object);
+                for arg in args {
+                    self.register_named_function_sites_in_expr(arg);
+                }
+            }
+            ExprKind::StructConstruct { fields, .. } => {
+                for (_, value) in fields {
+                    self.register_named_function_sites_in_expr(value);
+                }
+            }
+            ExprKind::EnumConstruct { payload, .. } => match payload {
+                VariantPayload::Unit => {}
+                VariantPayload::Tuple(values) => {
+                    for value in values {
+                        self.register_named_function_sites_in_expr(value);
+                    }
+                }
+                VariantPayload::Struct(fields) => {
+                    for (_, value) in fields {
+                        self.register_named_function_sites_in_expr(value);
+                    }
+                }
+            },
+            ExprKind::Array(values) => {
+                for value in values {
+                    self.register_named_function_sites_in_expr(value);
+                }
+            }
+            ExprKind::Dict(entries) => {
+                for (_, value) in entries {
+                    self.register_named_function_sites_in_expr(value);
+                }
+            }
+            ExprKind::IfExpr { condition, then_expr, else_expr } => {
+                self.register_named_function_sites_in_expr(condition);
+                self.register_named_function_sites_in_expr(then_expr);
+                self.register_named_function_sites_in_expr(else_expr);
+            }
+            ExprKind::Lambda { body, .. } => {
+                self.register_named_function_sites(body, false);
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.register_named_function_sites_in_expr(scrutinee);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.register_named_function_sites_in_expr(guard);
+                    }
+                    self.register_named_function_sites_in_expr(&arm.body);
+                }
+            }
+        }
+    }
+
+    fn emit_registered_function_bodies(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::Let { value, .. } => {
+                    self.emit_registered_function_bodies_in_expr(value)?;
+                }
+                StmtKind::Assign { target, value, .. } => {
+                    self.emit_registered_function_bodies_in_target(target)?;
+                    self.emit_registered_function_bodies_in_expr(value)?;
+                }
+                StmtKind::FnDecl { name, params, body, .. } => {
+                    let site = self.function_site_for_stmt(stmt);
                     self.emit_fn_decl_as_site(
                         &function_site_fn_name(site),
                         params,
@@ -2608,8 +3285,136 @@ impl Emitter {
                         stmt.line,
                         Some((name, site)),
                     )?;
-                } else {
-                    self.emit_fn_decl(name, params, body, stmt.line)?;
+                    self.emit_registered_function_bodies(body)?;
+                }
+                StmtKind::If { condition, body, else_ifs, else_body } => {
+                    self.emit_registered_function_bodies_in_expr(condition)?;
+                    self.emit_registered_function_bodies(body)?;
+                    for (condition, body) in else_ifs {
+                        self.emit_registered_function_bodies_in_expr(condition)?;
+                        self.emit_registered_function_bodies(body)?;
+                    }
+                    if let Some(body) = else_body {
+                        self.emit_registered_function_bodies(body)?;
+                    }
+                }
+                StmtKind::While { condition, body } => {
+                    self.emit_registered_function_bodies_in_expr(condition)?;
+                    self.emit_registered_function_bodies(body)?;
+                }
+                StmtKind::Repeat { count, body } => {
+                    self.emit_registered_function_bodies_in_expr(count)?;
+                    self.emit_registered_function_bodies(body)?;
+                }
+                StmtKind::ForIn { iterable, body, .. } => {
+                    self.emit_registered_function_bodies_in_expr(iterable)?;
+                    self.emit_registered_function_bodies(body)?;
+                }
+                StmtKind::MethodDecl { .. } => {}
+                StmtKind::Return { value: Some(value) }
+                | StmtKind::ExprStmt(value) => {
+                    self.emit_registered_function_bodies_in_expr(value)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_registered_function_bodies_in_target(
+        &mut self,
+        target: &AssignTarget,
+    ) -> Result<(), BopError> {
+        match target {
+            AssignTarget::Variable(_) => {}
+            AssignTarget::Index { object, index } => {
+                self.emit_registered_function_bodies_in_expr(object)?;
+                self.emit_registered_function_bodies_in_expr(index)?;
+            }
+            AssignTarget::Field { object, .. } => {
+                self.emit_registered_function_bodies_in_expr(object)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_registered_function_bodies_in_expr(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<(), BopError> {
+        match &expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::Number(_)
+            | ExprKind::Str(_)
+            | ExprKind::StringInterp(_)
+            | ExprKind::Bool(_)
+            | ExprKind::None
+            | ExprKind::Ident(_) => {}
+            ExprKind::BinaryOp { left, right, .. }
+            | ExprKind::Index { object: left, index: right } => {
+                self.emit_registered_function_bodies_in_expr(left)?;
+                self.emit_registered_function_bodies_in_expr(right)?;
+            }
+            ExprKind::UnaryOp { expr, .. }
+            | ExprKind::Try(expr)
+            | ExprKind::FieldAccess { object: expr, .. } => {
+                self.emit_registered_function_bodies_in_expr(expr)?;
+            }
+            ExprKind::Call { callee, args } => {
+                self.emit_registered_function_bodies_in_expr(callee)?;
+                for arg in args {
+                    self.emit_registered_function_bodies_in_expr(arg)?;
+                }
+            }
+            ExprKind::MethodCall { object, args, .. } => {
+                self.emit_registered_function_bodies_in_expr(object)?;
+                for arg in args {
+                    self.emit_registered_function_bodies_in_expr(arg)?;
+                }
+            }
+            ExprKind::StructConstruct { fields, .. } => {
+                for (_, value) in fields {
+                    self.emit_registered_function_bodies_in_expr(value)?;
+                }
+            }
+            ExprKind::EnumConstruct { payload, .. } => match payload {
+                VariantPayload::Unit => {}
+                VariantPayload::Tuple(values) => {
+                    for value in values {
+                        self.emit_registered_function_bodies_in_expr(value)?;
+                    }
+                }
+                VariantPayload::Struct(fields) => {
+                    for (_, value) in fields {
+                        self.emit_registered_function_bodies_in_expr(value)?;
+                    }
+                }
+            },
+            ExprKind::Array(values) => {
+                for value in values {
+                    self.emit_registered_function_bodies_in_expr(value)?;
+                }
+            }
+            ExprKind::Dict(entries) => {
+                for (_, value) in entries {
+                    self.emit_registered_function_bodies_in_expr(value)?;
+                }
+            }
+            ExprKind::IfExpr { condition, then_expr, else_expr } => {
+                self.emit_registered_function_bodies_in_expr(condition)?;
+                self.emit_registered_function_bodies_in_expr(then_expr)?;
+                self.emit_registered_function_bodies_in_expr(else_expr)?;
+            }
+            ExprKind::Lambda { body, .. } => {
+                self.emit_registered_function_bodies(body)?;
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.emit_registered_function_bodies_in_expr(scrutinee)?;
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.emit_registered_function_bodies_in_expr(guard)?;
+                    }
+                    self.emit_registered_function_bodies_in_expr(&arm.body)?;
                 }
             }
         }
@@ -2792,6 +3597,10 @@ impl Emitter {
             );
             let saved_non_capturing_method = self.in_non_capturing_method;
             self.in_non_capturing_method = true;
+            if self.opts.sandbox {
+                self.register_named_function_sites(&site.body, false);
+                self.emit_registered_function_bodies(&site.body)?;
+            }
             self.emit_fn_decl_as(&method_fn_name, &site.params, &site.body, site.line)?;
             self.in_non_capturing_method = saved_non_capturing_method;
             self.emit_method_adapter(site);
@@ -2938,11 +3747,12 @@ impl Emitter {
                 .join(", ");
             writeln!(
                 self.out,
-                "    __BopFunctionSite {{ id: {id}, module_path: {module}, name: {name}, params: &[{params}], is_public: {is_public}, line: {line} }},",
+                "    __BopFunctionSite {{ id: {id}, module_path: {module}, name: {name}, params: &[{params}], is_public: {is_public}, abi_eligible: {abi_eligible}, line: {line} }},",
                 id = site.id,
                 module = rust_string_literal(&site.module_path),
                 name = rust_string_literal(&site.name),
                 is_public = site.visibility == Visibility::Public,
+                abi_eligible = site.abi_eligible,
                 line = site.line,
             )
             .unwrap();
@@ -2952,13 +3762,83 @@ impl Emitter {
 
     fn emit_function_site_dispatcher(&mut self) {
         self.out.push_str(
-            r#"fn __bop_activate_function(ctx: &mut Ctx<'_>, site_id: usize) {
+            r#"fn __bop_define_binding(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    value: ::bop::value::Value,
+) {
+    ctx.bindings.insert((module_path.to_string(), name.to_string()), value);
+}
+
+fn __bop_read_binding(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    ctx.bindings
+        .get(&(module_path.to_string(), name.to_string()))
+        .cloned()
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(name),
+            line,
+        ))
+}
+
+fn __bop_authoritative_alias_namespace(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    alias: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    ctx.bindings
+        .get(&(module_path.to_string(), alias.to_string()))
+        .cloned()
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            format!("`{}` isn't a module alias in scope", alias),
+            line,
+        ))
+}
+
+fn __bop_binding_mut<'a>(
+    ctx: &'a mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<&'a mut ::bop::value::Value, ::bop::error::BopError> {
+    ctx.bindings
+        .get_mut(&(module_path.to_string(), name.to_string()))
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(name),
+            line,
+        ))
+}
+
+fn __bop_binding_is_array(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<bool, ::bop::error::BopError> {
+    Ok(matches!(
+        ctx.bindings
+            .get(&(module_path.to_string(), name.to_string()))
+            .ok_or_else(|| ::bop::error::BopError::runtime(
+                ::bop::error_messages::variable_not_found(name),
+                line,
+            ))?,
+        ::bop::value::Value::Array(_)
+    ))
+}
+
+fn __bop_activate_function(ctx: &mut Ctx<'_>, site_id: usize) {
     let site = &__BOP_FUNCTION_SITES[site_id];
     ctx.active_function_sites.insert(
         (site.module_path.to_string(), site.name.to_string()),
         site_id,
     );
-    if site.module_path == "<root>" {
+    if site.abi_eligible {
         ctx.abi_declarations.retain(|existing| {
             __BOP_FUNCTION_SITES[*existing].name != site.name
         });
@@ -2974,11 +3854,84 @@ fn __bop_active_function_site(
 ) -> Result<usize, ::bop::error::BopError> {
     ctx.active_function_sites
         .get(&(module_path.to_string(), name.to_string()))
+        .or_else(|| ctx.module_imported_function_sites.get(&(module_path.to_string(), name.to_string())))
         .copied()
         .ok_or_else(|| ::bop::error::BopError::runtime(
             ::bop::error_messages::function_not_found(name),
             line,
         ))
+}
+
+fn __bop_import_function_site(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    site_id: ::std::option::Option<usize>,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    if let ::std::option::Option::Some(site_id) = site_id {
+        let key = (module_path.to_string(), name.to_string());
+        if !ctx.bindings.contains_key(&key)
+            && !ctx.active_function_sites.contains_key(&key)
+            && !ctx.module_imported_function_sites.contains_key(&key)
+        {
+            let value = __bop_function_site_value(ctx, site_id, line)?;
+            ctx.bindings.insert(key.clone(), value);
+            ctx.module_imported_function_sites.insert(key, site_id);
+        }
+    }
+    Ok(())
+}
+
+fn __bop_import_export(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    export: ::std::option::Option<__BopExport>,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    let key = (module_path.to_string(), name.to_string());
+    if ctx.bindings.contains_key(&key)
+        || ctx.active_function_sites.contains_key(&key)
+        || ctx.module_imported_function_sites.contains_key(&key)
+    {
+        return Ok(());
+    }
+    match export {
+        ::std::option::Option::Some(__BopExport::Value(value)) => {
+            ctx.bindings.insert(key, value);
+        }
+        ::std::option::Option::Some(__BopExport::Function(site_id)) => {
+            let value = __bop_function_site_value(ctx, site_id, line)?;
+            ctx.bindings.insert(key.clone(), value);
+            ctx.module_imported_function_sites.insert(key, site_id);
+        }
+        ::std::option::Option::None => {}
+    }
+    Ok(())
+}
+
+fn __bop_export_function_site(
+    export: &::std::option::Option<__BopExport>,
+) -> ::std::option::Option<usize> {
+    match export {
+        ::std::option::Option::Some(__BopExport::Function(site_id)) => Some(*site_id),
+        _ => None,
+    }
+}
+
+fn __bop_export_value(
+    ctx: &mut Ctx<'_>,
+    export: ::std::option::Option<__BopExport>,
+    line: u32,
+) -> Result<::std::option::Option<::bop::value::Value>, ::bop::error::BopError> {
+    match export {
+        ::std::option::Option::Some(__BopExport::Value(value)) => Ok(Some(value)),
+        ::std::option::Option::Some(__BopExport::Function(site_id)) => {
+            __bop_function_site_value(ctx, site_id, line).map(Some)
+        }
+        ::std::option::Option::None => Ok(None),
+    }
 }
 
 fn __bop_call_active_function(
@@ -2988,8 +3941,36 @@ fn __bop_call_active_function(
     args: ::std::vec::Vec<::bop::value::Value>,
     line: u32,
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    if let ::std::option::Option::Some(value) = ctx.bindings
+        .get(&(module_path.to_string(), name.to_string()))
+        .cloned()
+    {
+        return __bop_call_named_value(ctx, value, args, name, line);
+    }
     let site_id = __bop_active_function_site(ctx, module_path, name, line)?;
     __bop_call_function_site(ctx, site_id, args, line)
+}
+
+fn __bop_active_function_value(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    if let ::std::option::Option::Some(value) = ctx.bindings
+        .get(&(module_path.to_string(), name.to_string()))
+    {
+        return Ok(value.clone());
+    }
+    let site_id = ctx.active_function_sites
+        .get(&(module_path.to_string(), name.to_string()))
+        .or_else(|| ctx.module_imported_function_sites.get(&(module_path.to_string(), name.to_string())))
+        .copied()
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(name),
+            line,
+        ))?;
+    __bop_function_site_value(ctx, site_id, line)
 }
 
 fn __bop_function_site_value(
@@ -3040,7 +4021,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         self.out.push_str("    if args.len() != site.params.len() {\n");
         self.out.push_str("        return Err(::bop::error::BopError::runtime(format!(\"`{}` expects {} argument{}, but got {}\", site.name, site.params.len(), if site.params.len() == 1 { \"\" } else { \"s\" }, args.len()), line));\n");
         self.out.push_str("    }\n    match site_id {\n");
-        for site in self.functions.sites.iter().filter(|site| site.persistent) {
+        for site in &self.functions.sites {
             let args = (0..site.params.len())
                 .map(|_| "args.remove(0)")
                 .collect::<Vec<_>>()
@@ -3192,6 +4173,18 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         match &stmt.kind {
             StmtKind::Let { name, value, is_const: _ } => {
                 let rhs = self.expr_src(value)?;
+                if self.opts.sandbox && self.is_module_top_scope() {
+                    let value_tmp = self.fresh_tmp();
+                    self.line(&format!("let {value_tmp} = {rhs};"));
+                    self.line(&format!(
+                        "__bop_define_binding(ctx, {}, {}, {value_tmp});",
+                        rust_string_literal(&self.current_module),
+                        rust_string_literal(name),
+                    ));
+                    self.bind_persistent(name);
+                    self.emit_module_alias_context_sync(name);
+                    return Ok(());
+                }
                 let ident = rust_user_ident(name);
                 self.line(&format!("let mut {}: ::bop::value::Value = {};", ident, rhs));
                 self.bind_local(name);
@@ -3302,21 +4295,17 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
 
             StmtKind::FnDecl {
                 name,
-                params,
-                body,
-                visibility,
+                params: _,
+                body: _,
+                visibility: _,
             } => {
                 if self.opts.sandbox {
-                    let site = self.register_function_site(name, params, *visibility, line, false);
-                    self.emit_fn_decl_as_site(
-                        &function_site_fn_name(site),
-                        params,
-                        body,
-                        line,
-                        Some((name, site)),
-                    )?;
-                    self.bind_function_site(name, site);
+                    let site = self.function_site_for_stmt(stmt);
+                    self.line(&format!("__bop_activate_function(ctx, {site});"));
                 } else {
+                    let StmtKind::FnDecl { params, body, .. } = &stmt.kind else {
+                        unreachable!()
+                    };
                     self.emit_fn_decl(name, params, body, line)?;
                 }
             }
@@ -3513,7 +4502,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             AssignTarget::Variable(name) => {
                 let ident = rust_user_ident(name);
                 let rhs_src = self.expr_src(value)?;
-                if !self.is_local(name) {
+                if !self.opts.sandbox && !self.is_local(name) {
                     if let Some(overlay) = self.declaration_alias_overlay(name) {
                         let rhs_tmp = self.fresh_tmp();
                         self.line(&format!("let {} = {};", rhs_tmp, rhs_src));
@@ -3545,6 +4534,47 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         }
                         return Ok(());
                     }
+                }
+                if self.opts.sandbox && !self.is_local(name) {
+                    let rhs_tmp = self.fresh_tmp();
+                    let target_tmp = self.fresh_tmp();
+                    self.line(&format!("let {rhs_tmp} = {rhs_src};"));
+                    if matches!(op, AssignOp::Eq)
+                        && self.has_declaration_alias_overlay(name)
+                    {
+                        self.line(&format!(
+                            "if !ctx.bindings.contains_key(&({}.to_string(), {}.to_string())) {{ return Err(::bop::error::BopError::runtime({}, {line})); }}",
+                            rust_string_literal(&self.current_module),
+                            rust_string_literal(name),
+                            rust_string_literal(&format!("Variable `{name}` doesn't exist yet")),
+                        ));
+                    }
+                    let storage = self.binding_storage(name).unwrap_or_else(|| {
+                        BindingStorage::Persistent {
+                            module: self.current_module.clone(),
+                            name: name.to_string(),
+                        }
+                    });
+                    let target_src = self.storage_mut_src(&storage, name, line);
+                    self.line(&format!(
+                        "let {target_tmp}: &mut ::bop::value::Value = {target_src};"
+                    ));
+                    match op {
+                        AssignOp::Eq => {
+                            self.line(&format!("*{target_tmp} = {rhs_tmp};"));
+                        }
+                        compound => {
+                            let current_tmp = self.fresh_tmp();
+                            let next_tmp = self.fresh_tmp();
+                            self.line(&format!("let {current_tmp} = {target_tmp}.clone();"));
+                            self.line(&format!(
+                                "let {next_tmp} = {}(&{current_tmp}, &{rhs_tmp}, {line})?;",
+                                compound_op_path(*compound),
+                            ));
+                            self.line(&format!("*{target_tmp} = {next_tmp};"));
+                        }
+                    }
+                    return Ok(());
                 }
                 match op {
                     AssignOp::Eq => {
@@ -3584,29 +4614,34 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 let idx_tmp = self.fresh_tmp();
                 self.line(&format!("let {} = {};", val_tmp, val_src));
                 self.line(&format!("let {} = {};", idx_tmp, idx_src));
-                let (target_read, target_write) = if !self.is_local(target_name) {
+                let target_tmp = self.fresh_tmp();
+                let target_src = if !self.is_local(target_name) {
                     if let Some(target_src) =
                         self.declaration_alias_mut_src(target_name, line)
                     {
-                        let target_tmp = self.fresh_tmp();
-                        self.line(&format!(
-                            "let {}: &mut ::bop::value::Value = {};",
-                            target_tmp, target_src
-                        ));
-                        (format!("&*{}", target_tmp), format!("&mut *{}", target_tmp))
+                        target_src
+                    } else if self.opts.sandbox {
+                        let storage = self.binding_storage(target_name).unwrap_or_else(|| {
+                            BindingStorage::Persistent {
+                                module: self.current_module.clone(),
+                                name: target_name.to_string(),
+                            }
+                        });
+                        self.storage_mut_src(&storage, target_name, line)
                     } else {
-                        let target = rust_user_ident(target_name);
-                        (format!("&{}", target), format!("&mut {}", target))
+                        format!("&mut {}", rust_user_ident(target_name))
                     }
                 } else {
-                    let target = rust_user_ident(target_name);
-                    (format!("&{}", target), format!("&mut {}", target))
+                    format!("&mut {}", rust_user_ident(target_name))
                 };
+                self.line(&format!(
+                    "let {target_tmp}: &mut ::bop::value::Value = {target_src};"
+                ));
                 match op {
                     AssignOp::Eq => {
                         self.line(&format!(
                             "::bop::ops::index_set({}, &{}, {}, {})?;",
-                            target_write, idx_tmp, val_tmp, line
+                            target_tmp, idx_tmp, val_tmp, line
                         ));
                     }
                     compound => {
@@ -3615,7 +4650,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         let new_tmp = self.fresh_tmp();
                         self.line(&format!(
                             "let {} = ::bop::ops::index_get({}, &{}, {})?;",
-                            cur_tmp, target_read, idx_tmp, line
+                            cur_tmp, target_tmp, idx_tmp, line
                         ));
                         self.line(&format!(
                             "let {} = {}(&{}, &{}, {})?;",
@@ -3623,7 +4658,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         ));
                         self.line(&format!(
                             "::bop::ops::index_set({}, &{}, {}, {})?;",
-                            target_write, idx_tmp, new_tmp, line
+                            target_tmp, idx_tmp, new_tmp, line
                         ));
                     }
                 }
@@ -3647,7 +4682,19 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     format!("&mut {}", rust_user_ident(target_name))
                 } else {
                     self.declaration_alias_mut_src(target_name, line)
-                        .unwrap_or_else(|| format!("&mut {}", rust_user_ident(target_name)))
+                        .unwrap_or_else(|| {
+                            if self.opts.sandbox {
+                                let storage = self.binding_storage(target_name).unwrap_or_else(|| {
+                                    BindingStorage::Persistent {
+                                        module: self.current_module.clone(),
+                                        name: target_name.to_string(),
+                                    }
+                                });
+                                self.storage_mut_src(&storage, target_name, line)
+                            } else {
+                                format!("&mut {}", rust_user_ident(target_name))
+                            }
+                        })
                 };
                 self.line(&format!(
                     "let {}: &mut ::bop::value::Value = {};",
@@ -4283,7 +5330,27 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             }
         }
 
-        let body = match name.as_str() {
+        let binding_storage = if self.opts.sandbox {
+            self.binding_storage(&name)
+        } else {
+            None
+        };
+        if let Some(storage @ (BindingStorage::RustLocal { .. } | BindingStorage::Persistent { .. })) =
+            binding_storage.as_ref()
+        {
+            let callee = self.storage_read_src(storage, line);
+            let args_vec = if arg_names.is_empty() {
+                "::std::vec::Vec::new()".to_string()
+            } else {
+                format!("::std::vec![{}]", arg_names.join(", "))
+            };
+            return Ok(format!(
+                "{{ {arg_lets}__bop_call_named_value(ctx, {callee}, {args_vec}, {name}, {line})? }}",
+                name = rust_string_literal(&name),
+            ));
+        }
+
+        let mut body = match name.as_str() {
             "print" => {
                 let args_expr = build_arg_array(&arg_names);
                 format!(
@@ -4351,21 +5418,13 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         format!("vec![{}]", arg_names.join(", "))
                     };
                     let fallback = if self.opts.sandbox {
-                        if self.fn_info.top_level_fns.contains(&name) {
-                            format!(
-                                "__bop_call_active_function(ctx, {}, {}, {}, {})?",
-                                rust_string_literal(&self.current_module),
-                                rust_string_literal(&name),
-                                site_args,
-                                line,
-                            )
-                        } else {
-                            format!(
-                                "return Err(::bop::error::BopError::runtime(::bop::error_messages::function_not_found({}), {}))",
-                                rust_string_literal(&name),
-                                line,
-                            )
-                        }
+                        format!(
+                            "__bop_call_active_function(ctx, {}, {}, {}, {})?",
+                            rust_string_literal(&self.current_module),
+                            rust_string_literal(&name),
+                            site_args,
+                            line,
+                        )
                     } else {
                         let fn_name = self.rust_fn_name(&name);
                         let fn_args = if arg_names.is_empty() {
@@ -4391,13 +5450,52 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         "{{ let hint = ctx.host.function_hint(); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}); e.friendly_hint = Some(hint.to_string()); e }} }}",
                         name, line, name, line
                     );
-                    format!(
-                        "match ctx.host.call({:?}, &{}, {}) {{ Some(r) => r?, None => return Err({}), }}",
-                        name, cloned_args, line, hint_fallback
-                    )
+                    if self.opts.sandbox {
+                        format!(
+                            "match ctx.host.call({name:?}, &{cloned_args}, {line}) {{ Some(r) => r?, None => match __bop_call_active_function(ctx, {module}, {name_lit}, {args}, {line}) {{ Ok(value) => value, Err(error) if error.message == ::bop::error_messages::function_not_found({name_lit}) => return Err({hint}), Err(error) => return Err(error), }}, }}",
+                            name = name,
+                            module = rust_string_literal(&self.current_module),
+                            name_lit = rust_string_literal(&name),
+                            args = if arg_names.is_empty() {
+                                "::std::vec::Vec::new()".to_string()
+                            } else {
+                                format!("::std::vec![{}]", arg_names.join(", "))
+                            },
+                            hint = hint_fallback,
+                        )
+                    } else {
+                        format!(
+                            "match ctx.host.call({:?}, &{}, {}) {{ Some(r) => r?, None => return Err({}), }}",
+                            name, cloned_args, line, hint_fallback
+                        )
+                    }
                 }
             }
         };
+
+        if self.opts.sandbox {
+            let args_vec = if arg_names.is_empty() {
+                "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
+            } else {
+                format!("::std::vec![{}]", arg_names.join(", "))
+            };
+            body = format!(
+                "match ctx.bindings.get(&({module}.to_string(), {name}.to_string())).cloned() {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
+                module = rust_string_literal(&self.current_module),
+                name = rust_string_literal(&name),
+            );
+            if let Some(storage @ BindingStorage::OptionalImport { .. }) =
+                binding_storage.as_ref()
+            {
+                let optional = self
+                    .storage_optional_value_src(storage, line)
+                    .expect("optional import storage");
+                body = format!(
+                    "match {optional} {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
+                    name = rust_string_literal(&name),
+                );
+            }
+        }
 
         if let Some(alias) = self.declaration_alias_optional_src(&name) {
             let args_vec = if arg_names.is_empty() {
@@ -4474,7 +5572,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 rust_user_ident(namespace)
             } else {
                 self.declaration_alias_namespace_src(namespace, line)
-                    .expect("dynamic declaration namespace has an overlay")
+                    .unwrap_or(self.ident_value_src(namespace, line)?)
             };
             let module_path_src = format!(
                 "__bop_validate_namespace_type(&{}, {}, {}, {})?",
@@ -4583,7 +5681,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 rust_user_ident(namespace)
             } else {
                 self.declaration_alias_namespace_src(namespace, line)
-                    .expect("dynamic declaration namespace has an overlay")
+                    .unwrap_or(self.ident_value_src(namespace, line)?)
             };
             let module_path_src = format!(
                 "__bop_validate_namespace_type(&{}, {}, {}, {})?",
@@ -4864,6 +5962,49 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     .unwrap();
                     return Ok(body);
                 }
+                if self.opts.sandbox {
+                    let storage = self.binding_storage(&target_name).unwrap_or_else(|| {
+                        BindingStorage::Persistent {
+                            module: self.current_module.clone(),
+                            name: target_name.clone(),
+                        }
+                    });
+                    let target_src = self.storage_mut_src(&storage, &target_name, line);
+                    let read_src = self.storage_read_src(&storage, line);
+                    let target_tmp = self.fresh_tmp();
+                    let mut body = String::new();
+                    write!(
+                        body,
+                        "{{ {}let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
+                            let {target_tmp}: &mut ::bop::value::Value = {target_src}; let ::bop::value::Value::Array(__bop_array) = &mut *{target_tmp} else {{ unreachable!() }}; ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                        }} else {{ \
+                            let {} = {read_src}; \
+                            match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
+                                Some(v) => v, \
+                                None => {{ \
+                                    let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
+                                    if let Some(__new_obj) = __mutated {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; *{target_tmp} = __new_obj; }} \
+                                    __r \
+                                }}, \
+                            }} \
+                        }}; __ret }}",
+                        arg_lets,
+                        method_lit,
+                        owned_args,
+                        line,
+                        obj_tmp,
+                        obj_tmp,
+                        method_lit,
+                        args_arr,
+                        line,
+                        obj_tmp,
+                        method_lit,
+                        args_arr,
+                        line,
+                    )
+                    .unwrap();
+                    return Ok(body);
+                }
             }
             let target = rust_user_ident(&target_name);
             let mut body = String::new();
@@ -4968,6 +6109,10 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         );
         dependencies.required.extend(dependencies.pattern_namespaces);
         let captures_ordered: Vec<String> = dependencies.required.into_iter().collect();
+        let capture_storages = captures_ordered
+            .iter()
+            .map(|name| self.binding_storage(name))
+            .collect::<Vec<_>>();
 
         // Switch into the lambda's lexical context before emitting
         // its body: outer scope is hidden (so Ident lookups inside
@@ -4979,8 +6124,21 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         for p in params {
             self.bind_local(p);
         }
-        for cap in &captures_ordered {
-            self.bind_local(cap);
+        for (index, cap) in captures_ordered.iter().enumerate() {
+            if matches!(
+                capture_storages[index],
+                Some(BindingStorage::OptionalImport { .. })
+            ) {
+                self.bind_optional_import(
+                    cap,
+                    OptionalImportBinding::Local {
+                        value: format!("__bop_optional_capture_{index}"),
+                        function_site: format!("__bop_optional_capture_site_{index}"),
+                    },
+                );
+            } else {
+                self.bind_local(cap);
+            }
         }
         let declaration_aliases =
             self.declaration_aliases_for_callable(params, body);
@@ -5037,23 +6195,47 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let mut capture_prelude = String::new();
         let mut capture_moves = String::new();
         for (i, cap) in captures_ordered.iter().enumerate() {
+            let optional_capture = matches!(
+                capture_storages[i],
+                Some(BindingStorage::OptionalImport { .. })
+            );
+            let capture_source = match capture_storages[i].as_ref() {
+                Some(storage @ BindingStorage::OptionalImport { .. }) => self
+                    .storage_optional_value_src(storage, line)
+                    .expect("optional capture storage"),
+                Some(storage) => self.storage_read_src(storage, line),
+                None if self.is_persistent_binding(cap) => format!(
+                    "__bop_read_binding(ctx, {}, {}, {})?",
+                    rust_string_literal(&self.current_module),
+                    rust_string_literal(cap),
+                    line,
+                ),
+                None => format!("{}.clone()", rust_user_ident(cap)),
+            };
             writeln!(
                 capture_prelude,
-                "let __cap_{i} = {ident}.clone();",
+                "let __cap_{i} = {capture_source};",
                 i = i,
-                ident = rust_user_ident(cap)
             )
             .unwrap();
             // `Fn` closures can be invoked repeatedly, so captures
             // must stay owned by the closure body. Clone per
             // invocation; the outer capture is the stable source.
-            writeln!(
-                capture_moves,
-                "let mut {ident}: ::bop::value::Value = __cap_{i}.clone();",
-                ident = rust_user_ident(cap),
-                i = i
-            )
-            .unwrap();
+            if optional_capture {
+                writeln!(
+                    capture_moves,
+                    "let mut __bop_optional_capture_{i}: ::std::option::Option<::bop::value::Value> = __cap_{i}.clone(); let mut __bop_optional_capture_site_{i}: ::std::option::Option<usize> = ::std::option::Option::None;",
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    capture_moves,
+                    "let mut {ident}: ::bop::value::Value = __cap_{i}.clone();",
+                    ident = rust_user_ident(cap),
+                    i = i
+                )
+                .unwrap();
+            }
         }
         for (capture, parent_overlay) in &alias_captures {
             writeln!(
@@ -5062,12 +6244,19 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             )
             .unwrap();
         }
-        let mut opaque_body_depth = captures_ordered
-            .iter()
-            .enumerate()
-            .fold(String::from("0u16"), |depth, (i, _)| {
-                format!("{depth}.max(__cap_{i}.ownership_depth())")
-            });
+        let mut opaque_body_depth = captures_ordered.iter().enumerate().fold(
+            String::from("0u16"),
+            |depth, (i, _)| {
+                if matches!(
+                    capture_storages[i],
+                    Some(BindingStorage::OptionalImport { .. })
+                ) {
+                    format!("{depth}.max(__cap_{i}.as_ref().map_or(0u16, ::bop::value::Value::ownership_depth))")
+                } else {
+                    format!("{depth}.max(__cap_{i}.ownership_depth())")
+                }
+            },
+        );
         for (capture, _) in &alias_captures {
             opaque_body_depth = format!(
                 "{opaque_body_depth}.max({capture}.as_ref().map_or(0u16, ::bop::value::Value::ownership_depth))"
@@ -5567,10 +6756,7 @@ fn scan_free_vars_expr(
             // lambda), record it as a capture. Top-level fns and
             // the `self_name` of the enclosing decl don't need to
             // be captured — they stay callable directly.
-            if !known.contains(name)
-                && !fn_info.top_level_fns.contains(name)
-                && is_outer_local(name, outer_scopes)
-            {
+            if !known.contains(name) && is_outer_local(name, outer_scopes) {
                 free.required.insert(name.clone());
             }
         }
@@ -5717,7 +6903,11 @@ fn scan_free_vars_expr(
 fn is_outer_local(name: &str, outer_scopes: &[EmissionScope]) -> bool {
     outer_scopes
         .iter()
-        .any(|scope| scope.locals.contains(name))
+        .any(|scope| {
+            scope.locals.contains(name)
+                || scope.persistent_bindings.contains(name)
+                || scope.optional_imports.contains_key(name)
+        })
 }
 
 // ─── Free helpers ──────────────────────────────────────────────────
@@ -5976,7 +7166,14 @@ struct __BopFunctionSite {
     name: &'static str,
     params: &'static [&'static str],
     is_public: bool,
+    abi_eligible: bool,
     line: u32,
+}
+
+#[derive(Clone)]
+enum __BopExport {
+    Value(::bop::value::Value),
+    Function(usize),
 }
 
 /// Opaque generated program state. This type and its fields are implementation
@@ -6011,6 +7208,14 @@ struct __BopState {
     active_function_sites: ::std::collections::HashMap<
         (::std::string::String, ::std::string::String),
         usize,
+    >,
+    module_imported_function_sites: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        usize,
+    >,
+    bindings: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        ::bop::value::Value,
     >,
     abi_declarations: ::std::vec::Vec<usize>,
 /*__BOP_METHOD_SLOTS__*/
@@ -7191,6 +8396,8 @@ fn __bop_load_state(
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),
         active_function_sites: ::std::collections::HashMap::new(),
+        module_imported_function_sites: ::std::collections::HashMap::new(),
+        bindings: ::std::collections::HashMap::new(),
         abi_declarations: ::std::vec::Vec::new(),
 /*__BOP_METHOD_SLOTS_INIT__*/
     };

@@ -572,7 +572,8 @@ fn index_assign_routes_through_ops_index_set() {
     contains_all(
         &out,
         &[
-            "::bop::ops::index_set(&mut __bop_user_value_61,",
+            "let __t6: &mut ::bop::value::Value = &mut __bop_user_value_61;",
+            "::bop::ops::index_set(__t6, &__t5, __t4, 2)?;",
         ],
     );
 }
@@ -583,9 +584,10 @@ fn compound_index_assign_reads_then_writes() {
     contains_all(
         &out,
         &[
-            "::bop::ops::index_get(&__bop_user_value_61,",
-            "::bop::ops::add(",
-            "::bop::ops::index_set(&mut __bop_user_value_61,",
+            "let __t5: &mut ::bop::value::Value = &mut __bop_user_value_61;",
+            "let __t6 = ::bop::ops::index_get(__t5, &__t4, 2)?;",
+            "let __t7 = ::bop::ops::add(&__t6, &__t3, 2)?;",
+            "::bop::ops::index_set(__t5, &__t4, __t7, 2)?;",
         ],
     );
 }
@@ -635,8 +637,9 @@ fn const_index_reads_in_mutable_targets_still_emit_aot() {
         &out,
         &[
             "__bop_user_value_494e444558.clone()",
-            "::bop::ops::index_get(&__bop_user_value_76616c756573,",
-            "::bop::ops::index_set(&mut __bop_user_value_76616c756573,",
+            "let __t5: &mut ::bop::value::Value = &mut __bop_user_value_76616c756573;",
+            "let __t6 = ::bop::ops::index_get(__t5, &__t4, 3)?;",
+            "::bop::ops::index_set(__t5, &__t4, __t7, 3)?;",
         ],
     );
 }
@@ -737,8 +740,8 @@ fn sandbox_catalogues_repeated_function_declarations_by_unique_site() {
     contains_all(
         &out,
         &[
-            "__BopFunctionSite { id: 0, module_path: \"<root>\", name: \"entry\", params: &[\"x\"], is_public: true, line: 1 }",
-            "__BopFunctionSite { id: 1, module_path: \"<root>\", name: \"entry\", params: &[\"x\", \"y\"], is_public: true, line: 2 }",
+            "__BopFunctionSite { id: 0, module_path: \"<root>\", name: \"entry\", params: &[\"x\"], is_public: true, abi_eligible: true, line: 1 }",
+            "__BopFunctionSite { id: 1, module_path: \"<root>\", name: \"entry\", params: &[\"x\", \"y\"], is_public: true, abi_eligible: true, line: 2 }",
         ],
     );
 }
@@ -1393,9 +1396,11 @@ fn from_api() { return api.Second { value: 2 } }"#,
     contains_all(
         &output,
         &[
-            "matches!(&__bop_user_value_636f7079, ::bop::value::Value::Module(_))",
+            "let __t4 = __bop_user_value_636f7079.clone();",
+            "matches!(&__t4, ::bop::value::Value::Module(_))",
             "(\"<root>\".to_string(), \"copy\".to_string())",
-            "matches!(&__bop_user_value_617069, ::bop::value::Value::Module(_))",
+            "let __t5 = __bop_user_value_617069.clone();",
+            "matches!(&__t5, ::bop::value::Value::Module(_))",
             "ctx.module_aliases.remove(&(\"<root>\".to_string(), \"api\".to_string()))",
         ],
     );
