@@ -35,7 +35,11 @@ fn ident_shape_error_at(
         site, actual, actual_label, expected
     );
     let mut err = BopError::runtime_at(message, line, column);
-    err.friendly_hint = Some(naming::hint_for(expected, actual));
+    err.friendly_hint = Some(if site.starts_with("`match` pattern") {
+        naming::pattern_binding_hint(actual)
+    } else {
+        naming::hint_for(expected, actual)
+    });
     err
 }
 
@@ -3129,7 +3133,7 @@ mod pattern_binding_name_tests {
         assert_eq!(error.column, Some(column), "source: {source}");
         assert_eq!(
             error.friendly_hint.as_deref(),
-            Some(naming::hint_for("value", name).as_str()),
+            Some(naming::pattern_binding_hint(name).as_str()),
             "source: {source}"
         );
     }

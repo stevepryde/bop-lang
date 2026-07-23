@@ -148,6 +148,25 @@ pub fn hint_for(expected_kind: &str, actual: &str) -> String {
     }
 }
 
+/// Hint for a mis-shaped identifier in a `match` pattern binding
+/// position. Unlike `let` / `fn` / param sites, an all-uppercase
+/// name here usually means the user wanted to match *against* an
+/// existing constant's value — not to declare one — so suggest
+/// the guard form that expresses that, instead of `hint_for`'s
+/// "declare a constant" wording (the parser can't know whether
+/// the constant already exists).
+pub fn pattern_binding_hint(actual: &str) -> String {
+    let is_all_upper = actual.chars().all(|c| !c.is_ascii_lowercase());
+    if is_all_upper && actual.chars().any(|c| c.is_ascii_alphabetic()) {
+        return format!(
+            "uppercase names can't be pattern bindings. To match against the value of \
+             `{actual}`, bind a lowercase name and compare it in a guard: \
+             `n if n == {actual} => ...`"
+        );
+    }
+    hint_for("value", actual)
+}
+
 fn capitalize_first(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut first = true;
