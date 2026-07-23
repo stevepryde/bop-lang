@@ -1665,6 +1665,29 @@ repeat 1000 {
     }
 
     #[test]
+    fn safety_deep_parse_nesting_fits_a_2_mib_stack() {
+        // Unlike the walker test above, the *parser's* depth cap must
+        // hold within the default ~2 MiB stack of a spawned thread —
+        // embedders commonly parse on worker threads, and a parse of
+        // hostile input that aborts the process instead of returning
+        // "nested too deeply" breaks the sandbox promise. This pins
+        // the frame-size budget deliberately: growing `BopError` (or
+        // parser frames) past what MAX_PARSE_DEPTH levels fit in
+        // 2 MiB must fail here, not in embedders' processes.
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let code = "(".repeat(200) + "1" + &")".repeat(200);
+                parse(&code).unwrap_err().message
+            })
+            .expect("spawn parse test thread");
+        let msg = handle
+            .join()
+            .expect("deep parse must not overflow a 2 MiB stack");
+        assert!(msg.contains("nested too deeply"), "got: {}", msg);
+    }
+
+    #[test]
     fn safety_string_repeat_bomb() {
         let msg = run_err_with_limits(r#"let s = "x" * 999999"#, tight_limits());
         assert!(msg.contains("Memory limit"), "got: {}", msg);
