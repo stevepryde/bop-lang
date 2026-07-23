@@ -3430,8 +3430,23 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if let Some(val) = self.pending_try_return.take() {
                         return Ok(val);
                     }
+                    return Err(err);
                 }
-                Err(err)
+                // A runtime error escaping the fn body carries line
+                // numbers from the fn's *defining* module, not the
+                // caller's source. Attach the owning module so
+                // rendering never quotes an unrelated root-file (or
+                // outer-module) line. Deepest context wins, so a
+                // nested call that already attached its own module
+                // is preserved; root-declared fns attach the root
+                // sentinel, which renders as plain root source but
+                // blocks an enclosing module fn (e.g. one invoking
+                // a root callback) from claiming the error.
+                let owner = func
+                    .module_path
+                    .as_deref()
+                    .unwrap_or(crate::value::ROOT_MODULE_PATH);
+                Err(err.with_module(owner))
             }
         }
     }
