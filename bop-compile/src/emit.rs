@@ -1571,7 +1571,7 @@ impl Emitter {
                 format!("{snapshot}.as_ref()")
             } else if self.is_local(alias) {
                 format!("::std::option::Option::Some(&{})", rust_user_ident(alias))
-            } else if self.opts.sandbox && self.has_declaration_alias_overlay(alias) {
+            } else if self.opts.sandbox {
                 format!(
                     "ctx.bindings.get(&({module}.to_string(), {alias}.to_string()))",
                     module = rust_string_literal(&self.current_module),

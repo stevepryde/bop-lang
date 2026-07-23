@@ -576,7 +576,11 @@ let first_value = dep.Point { value: 1 }
 print(probe(first_value))
 select_second()
 let second_value = dep.Point { value: 2 }
-print(probe(second_value))"#;
+print(probe(second_value))
+print(match second_value {
+    dep.Point { value: found } => found,
+    _ => 0,
+})"#;
     let run = run_aot_with_modules_and_opts(
         source,
         "sandbox_reassigned_alias_patterns_read_authoritative_binding",
@@ -590,7 +594,39 @@ print(probe(second_value))"#;
         },
     );
     assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
-    assert_eq!(run.stdout, "1\n2");
+    assert_eq!(run.stdout, "1\n2\n2");
+
+    let module_body = run_aot_with_modules_and_opts(
+        "use switched\nprint(result)",
+        "sandbox_reassigned_alias_module_body_pattern_reads_authoritative_binding",
+        &[
+            ("first", "struct Point { value }"),
+            ("second", "struct Point { value }"),
+            (
+                "switched",
+                r#"use first as dep
+use second as other
+fn select_second() { dep = other }
+select_second()
+let value = dep.Point { value: 3 }
+let result = match value {
+    dep.Point { value: found } => found,
+    _ => 0,
+}"#,
+            ),
+        ],
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        module_body.status,
+        Some(0),
+        "generated program failed: {}",
+        module_body.stderr
+    );
+    assert_eq!(module_body.stdout, "3");
 }
 
 #[test]
