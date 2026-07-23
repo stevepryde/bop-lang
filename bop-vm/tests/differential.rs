@@ -614,6 +614,73 @@ fn const_container_assignment_is_rejected_by_both_engines_diff() {
 }
 
 #[test]
+fn const_array_mutating_methods_are_rejected_by_both_engines_diff() {
+    for call in [
+        "VALUES.push(4)",
+        "VALUES.pop()",
+        "VALUES.insert(0, 4)",
+        "VALUES.remove(0)",
+        "VALUES.reverse()",
+        "(VALUES).sort()",
+    ] {
+        let source = format!("const VALUES = [3, 1, 2]\n{call}");
+        assert_eq!(
+            run_err(&source),
+            "can't reassign `VALUES` — it's a constant",
+            "source: {source}"
+        );
+    }
+
+    assert_eq!(
+        run_err(
+            r#"fn mutate() {
+    const VALUES = [3, 1, 2]
+    VALUES.sort()
+}
+mutate()"#
+        ),
+        "can't reassign `VALUES` — it's a constant"
+    );
+}
+
+#[test]
+fn const_non_array_receivers_keep_ordinary_method_dispatch_diff() {
+    assert_eq!(
+        say(
+            r#"struct Accumulator { total }
+fn Accumulator.push(self, value) { return self.total + value }
+fn Accumulator.pop(self) { return self.total }
+const ACCUMULATOR = Accumulator { total: 7 }
+const LOOKUP = {"n": 1}
+print([ACCUMULATOR.push(5), ACCUMULATOR.pop(), LOOKUP.keys()])"#
+        ),
+        r#"[12, 7, ["n"]]"#
+    );
+    assert_eq!(
+        run_err(r#"const LOOKUP = {"n": 1}
+LOOKUP.remove("n")"#),
+        "Dict doesn't have a .remove() method"
+    );
+}
+
+#[test]
+fn lowercase_array_mutating_methods_remain_valid_diff() {
+    assert_eq!(
+        say(
+            r#"let values = [3, 1, 2]
+values.sort()
+values.reverse()
+values.insert(1, 4)
+values.remove(0)
+values.push(5)
+values.pop()
+print(values)"#
+        ),
+        "[4, 2, 1]"
+    );
+}
+
+#[test]
 fn const_declaration_shadowing_remains_engine_consistent_diff() {
     assert_eq!(
         say("const VALUE = [1]\nconst VALUE = [2]\nprint(VALUE[0])"),

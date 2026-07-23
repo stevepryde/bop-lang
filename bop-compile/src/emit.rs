@@ -34,6 +34,7 @@ use std::fmt::Write as _;
 use bop::ast_visit::{DeclarationSiteVisitor, visit_declaration_sites};
 use bop::error::BopError;
 use bop::lexer::StringPart;
+use bop::methods;
 use bop::parser::{
     AssignOp, AssignTarget, BinOp, Expr, ExprKind, MatchArm, Stmt, StmtKind, UnaryOp, VariantKind,
     VariantDecl, VariantPayload, Visibility,
@@ -6172,7 +6173,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         // up "is this mutating?" up-front so we only emit the
         // back-assign branch when it's actually needed.
         let method_lit = rust_string_literal(method);
-        let mutating = is_mutating_method(method);
+        let mutating = methods::is_mutating_method(method);
         let nested_place = matches!(
             &object.kind,
             ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
@@ -6206,6 +6207,12 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 format!("::std::vec![{}]", arg_tmps.join(", "))
             };
             let obj_tmp = self.fresh_tmp();
+            let constant_guard = format!(
+                "::bop::methods::reject_constant_array_mutation({}, {}, {})?; ",
+                rust_string_literal(&target_name),
+                method_lit,
+                line,
+            );
             if !self.is_local(&target_name) {
                 if let Some(overlay) = self.declaration_alias_overlay(&target_name) {
                     let read = self
@@ -6215,7 +6222,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     write!(
                         body,
                         "{{ {}let __ret = if let ::std::option::Option::Some(::bop::value::Value::Array(__bop_array)) = {}.overlay.as_mut() {{ \
-                            ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                            {constant_guard}::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
                         }} else {{ \
                             let {} = {}; \
                             match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
@@ -6260,7 +6267,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 write!(
                     body,
                     "{{ {}let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
-                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; let ::bop::value::Value::Array(__bop_array) = &mut *{target_tmp} else {{ unreachable!() }}; ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; let ::bop::value::Value::Array(__bop_array) = &mut *{target_tmp} else {{ unreachable!() }}; {constant_guard}::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
                     }} else {{ \
                         let {} = {read_src}; \
                         match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
@@ -6294,7 +6301,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             write!(
                 body,
                 "{{ {}let __ret = if let ::bop::value::Value::Array(__bop_array) = &mut {} {{ \
-                    ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                    {constant_guard}::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
                 }} else {{ \
                     let {} = {}.clone(); \
                     match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
@@ -7316,16 +7323,6 @@ fn module_load_fn_name(path: &str) -> String {
 
 fn module_exports_type_name(path: &str) -> String {
     format!("BopModule{}Exports", module_slug(path))
-}
-
-/// Kept in sync with `bop::methods::is_mutating_method` —
-/// duplicated here so the emitter can make the decision at compile
-/// time and skip the back-assign boilerplate for pure methods.
-fn is_mutating_method(method: &str) -> bool {
-    matches!(
-        method,
-        "push" | "pop" | "insert" | "remove" | "reverse" | "sort"
-    )
 }
 
 /// Render `f64` such that the emitted Rust preserves bit-exactness

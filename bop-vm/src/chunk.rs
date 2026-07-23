@@ -200,9 +200,11 @@ pub enum Instr {
     /// arguments, the VM resolves `target` and mutates an array binding's
     /// owned buffer directly. Non-array bindings fall back to ordinary method
     /// dispatch so user-defined methods named `push`, `pop`, etc. retain their
-    /// existing behaviour.
+    /// existing behaviour. `NamespaceRef` packs both the source spelling and
+    /// optional local slot so constant checks retain the exact receiver name
+    /// without growing this hot instruction.
     CallMethodInPlace {
-        target: AssignBack,
+        target: NamespaceRef,
         method: NameIdx,
         argc: u32,
     },

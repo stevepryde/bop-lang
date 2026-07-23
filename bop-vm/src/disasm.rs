@@ -179,14 +179,13 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
             argc,
         } => {
             let name = chunk.name(*method);
-            match target {
-                crate::chunk::AssignBack::Name(var) => format!(
+            let receiver = chunk.name(target.name_idx());
+            match target.slot_idx() {
+                None => format!(
                     "CallMethodInPlace .{}/{} (target {})",
-                    name,
-                    argc,
-                    chunk.name(*var)
+                    name, argc, receiver
                 ),
-                crate::chunk::AssignBack::Slot(slot) => format!(
+                Some(slot) => format!(
                     "CallMethodInPlace .{}/{} (target @{})",
                     name, argc, slot.0
                 ),

@@ -723,6 +723,63 @@ fn const_container_assignment_is_rejected_before_aot_emission() {
 }
 
 #[test]
+fn const_array_mutation_emits_the_shared_runtime_guard() {
+    for method_call in [
+        "VALUES.push(4)",
+        "VALUES.pop()",
+        "VALUES.insert(0, 4)",
+        "VALUES.remove(0)",
+        "VALUES.reverse()",
+        "VALUES.sort()",
+    ] {
+        let source = format!("const VALUES = [3, 1, 2]\n{method_call}");
+        let output = compile(&source);
+        assert!(
+            output.contains(
+                "::bop::methods::reject_constant_array_mutation(\"VALUES\","
+            ),
+            "source: {source}\noutput: {output}"
+        );
+    }
+
+    let output = compile(
+        r#"fn mutate() {
+    const VALUES = [3, 1, 2]
+    VALUES.sort()
+}
+mutate()"#,
+    );
+    assert!(
+        output.contains(
+            "::bop::methods::reject_constant_array_mutation(\"VALUES\", \"sort\", 3)"
+        ),
+        "output: {output}"
+    );
+}
+
+#[test]
+fn const_non_array_mutator_names_still_emit_dynamic_dispatch() {
+    let output = compile(
+        r#"struct Accumulator { total }
+fn Accumulator.push(self, value) { return self.total + value }
+const ACCUMULATOR = Accumulator { total: 7 }
+print(ACCUMULATOR.push(5))"#,
+    );
+    contains_all(
+        &output,
+        &[
+            "__bop_try_user_method",
+            "::bop::methods::reject_constant_array_mutation(\"ACCUMULATOR\", \"push\"",
+        ],
+    );
+
+    compile(
+        r#"const LOOKUP = {"n": 1}
+LOOKUP.remove("n")"#,
+    );
+}
+
+#[test]
 fn const_index_reads_in_mutable_targets_still_emit_aot() {
     let out = compile("const INDEX = 0\nlet values = [1]\nvalues[INDEX] += 2");
     contains_all(

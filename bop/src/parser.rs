@@ -2592,7 +2592,7 @@ fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError
     // receives an AST in which const mutation is unrepresentable.
     if let Some(name) = assignable_root_name(&expr) {
         if naming::is_constant_name(name) {
-            return Err(const_assignment_error(name, line));
+            return Err(crate::error_messages::constant_mutation_error(name, line));
         }
     }
 
@@ -2633,22 +2633,6 @@ fn assignable_root_name(expr: &Expr) -> Option<&str> {
         }
         _ => None,
     }
-}
-
-fn const_assignment_error(name: &str, line: u32) -> BopError {
-    // All-caps LHS → reassigning a constant. Refused at parse
-    // time without scope tracking: value bindings cannot use an
-    // all-caps shape, so an assignable all-caps root denotes a
-    // constant (or an undeclared name for which this remains the
-    // most actionable diagnostic).
-    let mut err = BopError::runtime(
-        format!("can't reassign `{}` — it's a constant", name),
-        line,
-    );
-    err.friendly_hint = Some(
-        "constants are immutable. Use `let` if you want a mutable binding.".to_string(),
-    );
-    err
 }
 
 pub fn fmt_token(token: &Token) -> &'static str {

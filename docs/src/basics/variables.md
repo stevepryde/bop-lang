@@ -48,6 +48,17 @@ const OPTIONS = {"retries": 3}
 OPTIONS["retries"] += 1   // Same error
 ```
 
+Built-in mutating array methods are assignments through their receiver, so
+they cannot change a constant either:
+
+```bop
+const SCORES = [3, 1, 2]
+SCORES.sort()       // Error: can't reassign `SCORES` — it's a constant
+```
+
+Read-only methods remain valid. User-defined methods are value calls, even
+when their names happen to match an array mutator.
+
 Constants must be **all-caps** (with digits / underscores allowed). `const Pi = 3.14` is rejected: the parser will suggest `const PI = 3.14` instead.
 
 ## Reassignment

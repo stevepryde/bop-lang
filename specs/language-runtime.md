@@ -50,9 +50,11 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
 - **RUN-012 — Constant bindings are immutable assignment roots.** No assignment
   target whose base binding is a constant may mutate that value, including
   direct, index, field, compound, grouped, and syntactically nested place
-  forms. Reads through a constant and writes through lowercase mutable
-  bindings remain valid. A new `const` declaration is a declaration, not an
-  assignment target.
+  forms. A built-in mutating method cannot mutate an Array through a named
+  constant receiver either. Reads through a constant, pure user-defined methods
+  (including names that collide with built-in mutators), and writes through
+  lowercase mutable bindings remain valid. A new `const` declaration is a
+  declaration, not an assignment target.
 - **RUN-013 — Exact signed integer literals.** Decimal integer source must map
   to exact signed 64-bit values without floating-point fallback. The minimum
   value `-9223372036854775808` is valid in expression and literal-pattern
@@ -111,8 +113,11 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   released when its last owner drops.
 - **AC-RUN-007:** Parser and cross-engine tests reject direct and compound
   Array, Dict, and Struct writes rooted at constants with the canonical
-  constant diagnostic and hint, including grouped/nested targets, while the
-  corresponding mutable-binding programs still execute identically.
+  constant diagnostic and hint, including grouped/nested targets. Cross-engine
+  and native AOT tests reject built-in Array mutators on named constants after
+  receiver-aware dispatch, preserve pure user-defined name collisions and
+  ordinary non-Array method errors, and keep the corresponding mutable-binding
+  programs identical.
 - **AC-RUN-008:** Reserved-word binding diagnostics derive from the lexer's
   current keyword vocabulary, including `const`, while keyword-shaped text in
   strings and comments remains ordinary source content. The compatibility

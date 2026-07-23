@@ -2877,13 +2877,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
 
     fn call_method_in_place(
         &mut self,
-        target: crate::chunk::AssignBack,
+        target: crate::chunk::NamespaceRef,
         method_idx: NameIdx,
         argc: usize,
         line: u32,
     ) -> Result<Next, BopError> {
         let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
         let method = chunk.name(method_idx);
+        let receiver_idx = target.name_idx();
+        let receiver_name = chunk.name(receiver_idx);
         let args = self.pop_n_values(argc, line)?;
 
         // The compiler only emits this instruction for a bare identifier and
@@ -2891,8 +2893,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // evaluation, matching the walker/AOT order. Arrays take the direct
         // path; every other value is cloned once for ordinary dispatch so a
         // user type is still free to define a method named `push`, `pop`, etc.
-        let fallback = match target {
-            crate::chunk::AssignBack::Slot(slot) => {
+        let (fallback, assign_back) = match target.slot_idx() {
+            Some(slot) => {
                 let value = self
                     .frames
                     .last_mut()
@@ -2901,16 +2903,19 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .get_mut(slot.0 as usize)
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 if let Value::Array(array) = value {
+                    methods::reject_constant_array_mutation(receiver_name, method, line)?;
                     let result = methods::array_method_mut(array, method, args, line)?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
-                value.clone()
+                (
+                    value.clone(),
+                    crate::chunk::AssignBack::Slot(slot),
+                )
             }
-            crate::chunk::AssignBack::Name(name_idx) => {
-                let name = chunk.name(name_idx);
-                if self.lookup_var_mut_by_idx(name_idx).is_none() {
-                    if let Some(module) = self.module_alias(name).cloned() {
+            None => {
+                if self.lookup_var_mut_by_idx(receiver_idx).is_none() {
+                    if let Some(module) = self.module_alias(receiver_name).cloned() {
                         return self.dispatch_method(
                             Value::Module(module),
                             method,
@@ -2920,28 +2925,32 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             line,
                         );
                     }
-                    let hint = self.value_candidates_hint(name).unwrap_or_else(|| {
+                    let hint = self.value_candidates_hint(receiver_name).unwrap_or_else(|| {
                         "Did you forget to create it with `let`?".to_string()
                     });
                     return Err(error_with_hint(
                         line,
-                        bop::error_messages::variable_not_found(name),
+                        bop::error_messages::variable_not_found(receiver_name),
                         hint,
                     ));
                 }
                 let value = self
-                    .lookup_var_mut_by_idx(name_idx)
+                    .lookup_var_mut_by_idx(receiver_idx)
                     .expect("binding checked above");
                 if let Value::Array(array) = value {
+                    methods::reject_constant_array_mutation(receiver_name, method, line)?;
                     let result = methods::array_method_mut(array, method, args, line)?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
-                value.clone()
+                (
+                    value.clone(),
+                    crate::chunk::AssignBack::Name(receiver_idx),
+                )
             }
         };
 
-        self.dispatch_method(fallback, method, args, Some(target), false, line)
+        self.dispatch_method(fallback, method, args, Some(assign_back), false, line)
     }
 
     fn dispatch_method(
