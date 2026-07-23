@@ -27,6 +27,36 @@ fn run_source(source: &str, no_vm: bool) -> (String, i32) {
     )
 }
 
+/// Like [`run_source`], but writes a whole project directory
+/// (entry file plus importable modules) and runs the entry with the
+/// project as the working directory so `use` resolves the modules.
+fn run_project(files: &[(&str, &str)], entry: &str, no_vm: bool) -> (String, i32) {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bop-warning-parity-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temporary Bop project dir");
+    for (name, source) in files {
+        std::fs::write(dir.join(name), source).expect("write temporary Bop module");
+    }
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bop"));
+    command.arg("run").arg(entry).current_dir(&dir);
+    if no_vm {
+        command.arg("--novm");
+    }
+    let output = command.output().expect("run bop binary");
+    std::fs::remove_dir_all(&dir).expect("remove temporary Bop project dir");
+    (
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
 #[test]
 fn walker_and_vm_render_the_same_source_ordered_warning() {
     let source = r#"if true {
@@ -42,4 +72,51 @@ fn walker_and_vm_render_the_same_source_ordered_warning() {
     assert_eq!(walker_code, 0, "walker stderr: {walker_stderr}");
     assert_eq!(vm_stderr, walker_stderr);
     assert!(vm_stderr.contains("`Choice::Missing`"));
+}
+
+#[test]
+fn walker_and_vm_warn_for_glob_shadows_of_slot_locals_and_params() {
+    // Issue #117 gap 2: a fn-body glob import clashing with a
+    // slot-allocated local or parameter must warn in the VM exactly
+    // as it does in the walker — once per executed `use`, plus the
+    // module-top warning for the fn declared before its import.
+    let files = &[
+        (
+            "main.bop",
+            r#"fn shadowed() { return "root fn" }
+use shadow_exports
+fn local_case() {
+    let dup = "local"
+    use shadow_exports
+    return dup
+}
+fn param_case(dup) {
+    use shadow_exports
+    return dup
+}
+print(shadowed())
+print(local_case())
+print(param_case("param"))
+print(param_case("again"))"#,
+        ),
+        (
+            "shadow_exports.bop",
+            "fn dup() { return \"imported\" }\nlet shadowed = \"imported value\"",
+        ),
+    ];
+    let (vm_stderr, vm_code) = run_project(files, "main.bop", false);
+    let (walker_stderr, walker_code) = run_project(files, "main.bop", true);
+
+    assert_eq!(vm_code, 0, "VM stderr: {vm_stderr}");
+    assert_eq!(walker_code, 0, "walker stderr: {walker_stderr}");
+    assert_eq!(vm_stderr, walker_stderr);
+    let expected = [
+        "warning: `shadowed` from `shadow_exports` shadowed by an existing binding — the first definition wins",
+        "warning: `dup` from `shadow_exports` shadowed by an existing binding — the first definition wins",
+        "warning: `dup` from `shadow_exports` shadowed by an existing binding — the first definition wins",
+        "warning: `dup` from `shadow_exports` shadowed by an existing binding — the first definition wins",
+        "",
+    ]
+    .join("\n");
+    assert_eq!(vm_stderr, expected);
 }

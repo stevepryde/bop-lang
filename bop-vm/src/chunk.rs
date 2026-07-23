@@ -600,6 +600,13 @@ pub struct UseSpec {
     pub path: String,
     pub items: Option<Vec<String>>,
     pub alias: Option<String>,
+    /// Slot-allocated locals / parameters visible in the innermost
+    /// compile-time scope at the `use` site. These bindings live in
+    /// frame slots — not in the runtime scope maps the VM's import
+    /// clash check walks — so the compiler records them here to keep
+    /// the first-definition-wins shadow warning in parity with the
+    /// walker (which sees every binding in its dynamic scope).
+    pub shadowed_locals: Vec<String>,
 }
 
 // ─── Chunk ─────────────────────────────────────────────────────────

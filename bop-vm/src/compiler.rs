@@ -101,6 +101,24 @@ impl LocalResolver {
         None
     }
 
+    /// Names bound in the innermost scope, sorted and deduped.
+    /// Recorded into a [`crate::chunk::UseSpec`] at each `use` site
+    /// so the runtime import clash check can see slot-allocated
+    /// locals and parameters, which never appear in the VM's
+    /// dynamic scope maps. Innermost scope only: the walker's
+    /// clash check consults just its current scope map, and outer
+    /// blocks correspond to outer scopes there too.
+    fn innermost_scope_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .scopes
+            .last()
+            .map(|scope| scope.iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(Vec::new());
     }
@@ -792,10 +810,20 @@ impl Compiler {
             }
 
             StmtKind::Use { path, items, alias } => {
+                // Slot-resolved locals / params never reach the VM's
+                // runtime scope maps, so the import clash check can't
+                // discover them dynamically. Record the ones visible
+                // at this `use` site (statically known) so the shadow
+                // warning stays in parity with the walker.
+                let shadowed_locals = self
+                    .current_resolver()
+                    .map(LocalResolver::innermost_scope_names)
+                    .unwrap_or_default();
                 let spec = crate::chunk::UseSpec {
                     path: path.clone(),
                     items: items.clone(),
                     alias: alias.clone(),
+                    shadowed_locals,
                 };
                 let idx = crate::chunk::UseIdx(self.chunk.use_specs.len() as u32);
                 self.chunk.use_specs.push(spec);

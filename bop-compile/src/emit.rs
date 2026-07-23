@@ -2913,6 +2913,17 @@ impl Emitter {
                         if !self.opts.sandbox
                             && self.function_claimed_in_current_scope(name)
                         {
+                            // The claim statically guarantees the shadow, so
+                            // the glob warning is unconditional — mirroring
+                            // the walker/VM, which warn before skipping the
+                            // clashing export.
+                            if items.is_none() {
+                                self.line(&format!(
+                                    "__bop_warn_glob_shadow({}, {});",
+                                    rust_string_literal(name),
+                                    rust_string_literal(path),
+                                ));
+                            }
                             continue;
                         }
                         if self.opts.sandbox {
