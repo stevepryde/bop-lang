@@ -1,7 +1,7 @@
 //! Error type for the Bop interpreter.
 
 #[cfg(feature = "no_std")]
-use alloc::{format, string::String};
+use alloc::{boxed::Box, format, string::String};
 
 /// Identifies the non-root source that produced a diagnostic.
 ///
