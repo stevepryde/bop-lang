@@ -133,6 +133,27 @@ fn run_aot_with_opts(code: &str, test_name: &str, opts: &Options) -> AotRun {
     }
 }
 
+fn run_generated_source(test_name: &str, rust_src: String) -> AotRun {
+    let dir = write_scratch_project(test_name, &rust_src);
+    let output = Command::new("cargo")
+        .arg("run")
+        .arg("--quiet")
+        .arg("--release")
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run cargo");
+    AotRun {
+        status: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches('\n')
+            .to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        rust_src,
+    }
+}
+
 fn run_aot_with_modules_and_opts(
     code: &str,
     test_name: &str,
@@ -160,6 +181,144 @@ fn run_aot(code: &str, test_name: &str) -> String {
         );
     }
     run.stdout
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_function_sites_preserve_redeclaration_and_exact_self() {
+    let opts = Options {
+        sandbox: true,
+        ..Options::default()
+    };
+    let cases = [
+        (
+            "pub fn f() { return 1 } pub fn f() { return 2 }\nprint(f())",
+            "sandbox_same_line_function_sites",
+            "2",
+        ),
+        (
+            "fn outer() { fn f() { return 1 } fn f() { return 2 } return f() }\nprint(outer())",
+            "sandbox_nested_function_sites",
+            "2",
+        ),
+        (
+            "fn outer() { fn inner() { return 1 } return inner() }\npub fn later() { return 3 }\nprint(later())",
+            "sandbox_nested_before_later_persistent_site",
+            "3",
+        ),
+        (
+            "fn f(n) { if n == 0 { return 1 } return f(n - 1) }\nlet old = f\nfn f(n) { return 9 }\nprint(old(2))",
+            "sandbox_retained_self_recursion",
+            "1",
+        ),
+        (
+            "fn f() { return f }\nlet old = f\nfn f(x) { return x }\nlet again = old()\nprint(again())",
+            "sandbox_retained_self_value",
+            "<fn f>",
+        ),
+    ];
+    for (source, name, expected) in cases {
+        let run = run_aot_with_opts(source, name, &opts);
+        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert_eq!(run.stdout, expected);
+    }
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_unreached_nested_functions_are_not_statically_callable() {
+    let opts = Options {
+        sandbox: true,
+        ..Options::default()
+    };
+    for (source, name) in [
+        (
+            "let g = fn() { if true { f(); fn f() {} } }\nprint(try_call(g))",
+            "sandbox_nested_call_before_declaration",
+        ),
+        (
+            "let g = fn() { if false { fn f() {} } f() }\nprint(try_call(g))",
+            "sandbox_nested_call_outside_dead_branch",
+        ),
+    ] {
+        let expected = walker_output(source);
+        let run = run_aot_with_opts(source, name, &opts);
+        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert_eq!(run.stdout, expected);
+    }
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_abi_uses_final_reached_public_declaration_sites() {
+    let source = "pub fn first() { return 1 }\npub fn hidden() { return 2 }\nfn hidden() { return 3 }\npub fn first(x) { return x }\nreturn\npub fn skipped() { return 4 }";
+    let mut rust_src = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct Host;
+impl ::bop::BopHost for Host {
+    fn call(&mut self, _name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> { None }
+}
+fn main() {
+    let limits = ::bop::BopLimits::standard();
+    let mut host = Host;
+    let mut state = __bop_load_state(&mut host, &limits).unwrap();
+    let entries = __bop_instance_entry_points(&state);
+    println!("{}", entries.iter().map(|entry| format!("{}/{}", entry.name(), entry.arity())).collect::<Vec<_>>().join(","));
+    let site = state.abi_declarations.iter().copied().find(|site| __BOP_FUNCTION_SITES[*site].name == "first" && __BOP_FUNCTION_SITES[*site].is_public).unwrap();
+    let mut ctx = Ctx { host: &mut host, state: &mut state, steps: 0, max_steps: limits.max_steps };
+    println!("{}", __bop_call_function_site(&mut ctx, site, vec![::bop::value::Value::Int(7)], 0).unwrap());
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_exact_final_abi", rust_src);
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "first/1\n7");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_exact_self_bypasses_same_named_host_function() {
+    let source = "fn f(n) { if n == 0 { return 1 } return f(n - 1) }\nlet old = f\nfn f(n) { return 9 }\nprint(old(2))";
+    let mut rust_src = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct Host { calls: usize }
+impl ::bop::BopHost for Host {
+    fn call(&mut self, name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        if name == "f" { self.calls += 1; Some(Ok(::bop::value::Value::Int(99))) } else { None }
+    }
+    fn on_print(&mut self, message: &str) { println!("{}", message); }
+}
+fn main() {
+    let limits = ::bop::BopLimits::standard();
+    let mut host = Host { calls: 0 };
+    run(&mut host, &limits).unwrap();
+    println!("calls={}", host.calls);
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_exact_self_host_precedence", rust_src);
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "1\ncalls=0");
 }
 
 fn assert_aot_nested_mutation_error(code: &str, test_name: &str, expected_line: u32) {

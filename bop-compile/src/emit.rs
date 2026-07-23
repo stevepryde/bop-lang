@@ -48,8 +48,7 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
     let modules = build_module_graph(stmts, opts)?;
     let info = collect_fn_info(stmts);
     let types = collect_type_registry(stmts, &modules)?;
-    let functions = collect_function_registry(stmts, &modules);
-    let mut emitter = Emitter::new(opts.clone(), info, modules, types, functions);
+    let mut emitter = Emitter::new(opts.clone(), info, modules, types);
     emitter.emit_program(stmts)?;
     Ok(emitter.finish())
 }
@@ -67,50 +66,12 @@ struct FunctionSite {
     params: Vec<String>,
     visibility: Visibility,
     line: u32,
+    persistent: bool,
 }
 
 #[derive(Clone, Default)]
 struct FunctionRegistry {
     sites: Vec<FunctionSite>,
-}
-
-fn collect_function_registry(root: &[Stmt], modules: &ModuleGraph) -> FunctionRegistry {
-    fn collect_module_top_level(
-        stmts: &[Stmt],
-        module_path: &str,
-        sites: &mut Vec<FunctionSite>,
-    ) {
-        for stmt in stmts {
-            let StmtKind::FnDecl {
-                name,
-                params,
-                visibility,
-                ..
-            } = &stmt.kind
-            else {
-                continue;
-            };
-            sites.push(FunctionSite {
-                id: sites.len(),
-                module_path: module_path.to_string(),
-                name: name.clone(),
-                params: params.clone(),
-                visibility: *visibility,
-                line: stmt.line,
-            });
-        }
-    }
-
-    let mut sites = Vec::new();
-    collect_module_top_level(root, bop::value::ROOT_MODULE_PATH, &mut sites);
-    for module_path in &modules.order {
-        let module = modules
-            .modules
-            .get(module_path)
-            .expect("ordered module must exist");
-        collect_module_top_level(&module.ast, module_path, &mut sites);
-    }
-    FunctionRegistry { sites }
 }
 
 // ─── Type / method registry ────────────────────────────────────────
@@ -1140,6 +1101,7 @@ struct EmissionScope {
     module_alias_locals: HashSet<String>,
     mutated_locals: HashSet<String>,
     plain_glob_imports: HashSet<String>,
+    function_sites: HashMap<String, usize>,
 }
 
 #[derive(Clone)]
@@ -1157,6 +1119,9 @@ struct Emitter {
     /// Unique top-level declaration sites used by sandboxed persistent-state
     /// lowering. Kept separate from name-keyed call-resolution metadata.
     functions: FunctionRegistry,
+    /// Direct module/root declaration sites in source order. Runtime module
+    /// bodies replay this exact sequence to activate declarations as reached.
+    direct_function_sites: HashMap<String, Vec<usize>>,
     /// Counter for temporary locals (`__t0`, `__t1`, …). Reset at
     /// the start of each fn / top-level program so the names stay
     /// short.
@@ -1247,7 +1212,6 @@ impl Emitter {
         fn_info: FnInfo,
         modules: ModuleGraph,
         types: TypeRegistry,
-        functions: FunctionRegistry,
     ) -> Self {
         // Seed the outermost type_bindings frame with the
         // engine-wide builtins so bare `Result::Ok(...)` and
@@ -1274,7 +1238,8 @@ impl Emitter {
             fn_info,
             modules,
             types,
-            functions,
+            functions: FunctionRegistry::default(),
+            direct_function_sites: HashMap::new(),
             tmp_counter: 0,
             type_site_counter: 0,
             module_prefix: String::new(),
@@ -1701,6 +1666,35 @@ impl Emitter {
             Ok(format!("{}.clone()", rust_user_ident(name)))
         } else if let Some(alias) = self.declaration_alias_read_src(name, line) {
             Ok(alias)
+        } else if self.opts.sandbox {
+            if let Some(site) = self.local_function_site(name) {
+                if self.functions.sites[site].persistent {
+                    Ok(format!(
+                        "__bop_function_site_value(ctx, {}, {})?",
+                        site, line
+                    ))
+                } else {
+                    Ok(self.lexical_function_site_value_src(site, line))
+                }
+            } else if self.fn_info.top_level_fns.contains(name) {
+                Ok(format!(
+                    "{}(ctx, {})?",
+                    self.wrapper_fn_name(name), line
+                ))
+            } else if self.fn_info.all_fns.contains_key(name) {
+                Err(BopError::runtime(
+                    format!("bop-compile: function `{name}` isn't visible at this site"),
+                    line,
+                ))
+            } else if self.in_non_capturing_method {
+                Ok(format!(
+                    "::std::result::Result::<::bop::value::Value, ::bop::error::BopError>::Err(::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({}), {}))?",
+                    rust_string_literal(name),
+                    line,
+                ))
+            } else {
+                Ok(format!("{}.clone()", rust_user_ident(name)))
+            }
         } else if self.fn_info.top_level_fns.contains(name) {
             Ok(format!("{}({})?", self.wrapper_fn_name(name), line))
         } else if self.fn_info.all_fns.contains_key(name) {
@@ -1732,6 +1726,93 @@ impl Emitter {
 
     fn wrapper_fn_name(&self, name: &str) -> String {
         wrapper_fn_name_with(&self.module_prefix, name)
+    }
+
+    fn register_function_site(
+        &mut self,
+        name: &str,
+        params: &[String],
+        visibility: Visibility,
+        line: u32,
+        persistent: bool,
+    ) -> usize {
+        let id = self.functions.sites.len();
+        self.functions.sites.push(FunctionSite {
+            id,
+            module_path: self.current_module.clone(),
+            name: name.to_string(),
+            params: params.to_vec(),
+            visibility,
+            line,
+            persistent,
+        });
+        id
+    }
+
+    fn bind_function_site(&mut self, name: &str, site: usize) {
+        self.scope_stack
+            .last_mut()
+            .expect("function declarations are emitted inside a scope")
+            .function_sites
+            .insert(name.to_string(), site);
+    }
+
+    fn local_function_site(&self, name: &str) -> Option<usize> {
+        self.scope_stack
+            .iter()
+            .rev()
+            .find_map(|scope| scope.function_sites.get(name).copied())
+    }
+
+    fn exact_function_site_call_src(
+        &self,
+        site_id: usize,
+        arg_names: &[String],
+        line: u32,
+    ) -> String {
+        let site = &self.functions.sites[site_id];
+        if arg_names.len() != site.params.len() {
+            return format!(
+                "return Err(::bop::error::BopError::runtime(format!(\"`{}` expects {} argument{}, but got {}\"), {}))",
+                site.name,
+                site.params.len(),
+                if site.params.len() == 1 { "" } else { "s" },
+                arg_names.len(),
+                line,
+            );
+        }
+        let args = if arg_names.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", arg_names.join(", "))
+        };
+        format!("{}(ctx{})?", function_site_fn_name(site_id), args)
+    }
+
+    fn lexical_function_site_value_src(&self, site_id: usize, line: u32) -> String {
+        let site = &self.functions.sites[site_id];
+        let params = site
+            .params
+            .iter()
+            .map(|param| format!("{}.to_string()", rust_string_literal(param)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let arity = site.params.len();
+        let args = (0..arity)
+            .map(|_| "args.remove(0)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let call = if args.is_empty() {
+            format!("{}(ctx)", function_site_fn_name(site_id))
+        } else {
+            format!("{}(ctx, {})", function_site_fn_name(site_id), args)
+        };
+        format!(
+            "{{ let callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"`{name}` expects {arity} argument{plural}, but got {{}}\", args.len()), 0)); }} {call} }}); __bop_wrap_callable(vec![{params}], ::std::vec::Vec::new(), Some({name_lit}.to_string()), 0u16, {line}, callable)? }}",
+            name = site.name,
+            plural = if arity == 1 { "" } else { "s" },
+            name_lit = rust_string_literal(&site.name),
+        )
     }
 
     fn finish(self) -> String {
@@ -1907,6 +1988,10 @@ impl Emitter {
         self.emit_method_sites()?;
         self.emit_method_dispatcher();
         self.emit_run_program(stmts)?;
+        if self.opts.sandbox {
+            self.emit_function_site_dispatcher();
+            self.emit_function_site_catalogue();
+        }
         self.emit_fn_value_wrappers();
         self.emit_public_entry();
         if self.opts.emit_main && module_name.is_none() {
@@ -2327,6 +2412,16 @@ impl Emitter {
                     .join(", ")
             ));
         }
+        if self.opts.sandbox {
+            self.line(&format!(
+                "let __saved_function_sites: ::std::vec::Vec<_> = ctx.active_function_sites.iter().filter(|((module, _), _)| module == {}).map(|(key, site)| (key.clone(), *site)).collect();",
+                rust_string_literal(name),
+            ));
+            self.line(&format!(
+                "ctx.active_function_sites.retain(|(module, _), _| module != {});",
+                rust_string_literal(name),
+            ));
+        }
         self.line(&format!(
             r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__ModuleLoading));"#,
             key = name
@@ -2361,8 +2456,19 @@ impl Emitter {
         self.callable_mutations
             .push(callable_assignment_names(&entry.ast));
         self.push_scope();
+        let direct_function_sites = self
+            .direct_function_sites
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let mut direct_function_index = 0;
         for stmt in &entry.ast {
             if matches!(&stmt.kind, StmtKind::FnDecl { .. }) {
+                if self.opts.sandbox {
+                    let site = direct_function_sites[direct_function_index];
+                    direct_function_index += 1;
+                    self.line(&format!("__bop_activate_function(ctx, {site});"));
+                }
                 continue;
             }
             self.emit_stmt(stmt)?;
@@ -2385,11 +2491,13 @@ impl Emitter {
             if entry.own_fns.contains_key(export)
                 && !entry.effective_value_exports.contains(export)
             {
+                let wrapper_args = if self.opts.sandbox { "ctx, 0" } else { "0" };
                 writeln!(
                     self.out,
-                    "    {ident}: {wrapper}(0)?,",
+                    "    {ident}: {wrapper}({wrapper_args})?,",
                     ident = rust_user_ident(export),
-                    wrapper = self.wrapper_fn_name(export)
+                    wrapper = self.wrapper_fn_name(export),
+                    wrapper_args = wrapper_args,
                 )
                 .unwrap();
             } else {
@@ -2433,6 +2541,13 @@ impl Emitter {
                 "ctx.method_slots[{slot}] = __saved_method_slots[{saved}];"
             ));
         }
+        if self.opts.sandbox {
+            self.line(&format!(
+                "ctx.active_function_sites.retain(|(module, _), _| module != {});",
+                rust_string_literal(name),
+            ));
+            self.line("ctx.active_function_sites.extend(__saved_function_sites);");
+        }
         self.line(&format!(
             "ctx.module_cache.remove({});",
             rust_string_literal(name)
@@ -2467,8 +2582,35 @@ impl Emitter {
     /// emit twice.
     fn emit_top_level_fn_decls(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
         for stmt in stmts {
-            if let StmtKind::FnDecl { name, params, body, .. } = &stmt.kind {
-                self.emit_fn_decl(name, params, body, stmt.line)?;
+            if let StmtKind::FnDecl {
+                name,
+                params,
+                body,
+                visibility,
+            } = &stmt.kind
+            {
+                if self.opts.sandbox {
+                    let site = self.register_function_site(
+                        name,
+                        params,
+                        *visibility,
+                        stmt.line,
+                        true,
+                    );
+                    self.direct_function_sites
+                        .entry(self.current_module.clone())
+                        .or_default()
+                        .push(site);
+                    self.emit_fn_decl_as_site(
+                        &function_site_fn_name(site),
+                        params,
+                        body,
+                        stmt.line,
+                        Some((name, site)),
+                    )?;
+                } else {
+                    self.emit_fn_decl(name, params, body, stmt.line)?;
+                }
             }
         }
         Ok(())
@@ -2496,6 +2638,29 @@ impl Emitter {
                 .map(|p| format!("\"{}\".to_string()", p))
                 .collect::<Vec<_>>()
                 .join(", ");
+
+            if self.opts.sandbox {
+                writeln!(
+                    self.out,
+                    "fn {wrapper}(ctx: &mut Ctx<'_>, line: u32) -> Result<::bop::value::Value, ::bop::error::BopError> {{",
+                    wrapper = self.wrapper_fn_name(&name)
+                )
+                .unwrap();
+                writeln!(
+                    self.out,
+                    "    let site_id = __bop_active_function_site(ctx, {module}, {name}, line)?;",
+                    module = rust_string_literal(&self.current_module),
+                    name = rust_string_literal(&name),
+                )
+                .unwrap();
+                writeln!(
+                    self.out,
+                    "    __bop_function_site_value(ctx, site_id, line)",
+                )
+                .unwrap();
+                writeln!(self.out, "}}\n").unwrap();
+                continue;
+            }
 
             writeln!(
                 self.out,
@@ -2744,17 +2909,18 @@ impl Emitter {
             String::new()
         } else {
             self.out.push_str("type __BopMethodFn = for<'a> fn(&mut Ctx<'a>, &::bop::value::Value, &[::bop::value::Value], u32) -> Result<::bop::value::Value, ::bop::error::BopError>;\n\n");
+            let visibility = if self.opts.sandbox { "" } else { "pub " };
             format!(
-                "    pub method_slots: [::std::option::Option<__BopMethodFn>; {}],\n",
-                self.types.method_slots.len()
+                "    {visibility}method_slots: [::std::option::Option<__BopMethodFn>; {}],\n",
+                self.types.method_slots.len(),
             )
         };
         self.out
             .push_str(&ctx_template.replace("/*__BOP_METHOD_SLOTS__*/", &method_field));
-        if self.opts.sandbox {
-            self.emit_function_site_catalogue();
-        }
-        self.out.push_str(RUNTIME_SHARED);
+        let shared_visibility = if self.opts.sandbox { "" } else { "pub " };
+        self.out.push_str(
+            &RUNTIME_SHARED.replace("/*__BOP_RUNTIME_VIS__*/", shared_visibility),
+        );
         if self.opts.sandbox {
             self.out.push_str(TICK_HELPER);
         }
@@ -2782,6 +2948,125 @@ impl Emitter {
             .unwrap();
         }
         self.out.push_str("];\n\n");
+    }
+
+    fn emit_function_site_dispatcher(&mut self) {
+        self.out.push_str(
+            r#"fn __bop_activate_function(ctx: &mut Ctx<'_>, site_id: usize) {
+    let site = &__BOP_FUNCTION_SITES[site_id];
+    ctx.active_function_sites.insert(
+        (site.module_path.to_string(), site.name.to_string()),
+        site_id,
+    );
+    if site.module_path == "<root>" {
+        ctx.abi_declarations.retain(|existing| {
+            __BOP_FUNCTION_SITES[*existing].name != site.name
+        });
+        ctx.abi_declarations.push(site_id);
+    }
+}
+
+fn __bop_active_function_site(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<usize, ::bop::error::BopError> {
+    ctx.active_function_sites
+        .get(&(module_path.to_string(), name.to_string()))
+        .copied()
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::function_not_found(name),
+            line,
+        ))
+}
+
+fn __bop_call_active_function(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    args: ::std::vec::Vec<::bop::value::Value>,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    let site_id = __bop_active_function_site(ctx, module_path, name, line)?;
+    __bop_call_function_site(ctx, site_id, args, line)
+}
+
+fn __bop_function_site_value(
+    _ctx: &mut Ctx<'_>,
+    site_id: usize,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    let site = &__BOP_FUNCTION_SITES[site_id];
+    let params = site.params.iter().map(|param| (*param).to_string()).collect();
+    let callable: ::std::rc::Rc<
+        dyn for<'__a> Fn(
+            &mut Ctx<'__a>,
+            ::std::vec::Vec<::bop::value::Value>,
+        ) -> Result<::bop::value::Value, ::bop::error::BopError>,
+    > = ::std::rc::Rc::new(move |ctx, args| {
+        __bop_call_function_site(ctx, site_id, args, 0)
+    });
+    __bop_wrap_callable(
+        params,
+        ::std::vec::Vec::new(),
+        Some(site.name.to_string()),
+        0u16,
+        line,
+        callable,
+    )
+}
+
+fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::EntryPoint> {
+    state
+        .abi_declarations
+        .iter()
+        .filter_map(|site_id| {
+            let site = &__BOP_FUNCTION_SITES[*site_id];
+            site.is_public.then(|| ::bop::EntryPoint::__new(
+                site.name.to_string(),
+                site.params.len(),
+            ))
+        })
+        .collect()
+}
+
+"#,
+        );
+        self.out.push_str(
+            "fn __bop_call_function_site(\n    ctx: &mut Ctx<'_>,\n    site_id: usize,\n    mut args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<::bop::value::Value, ::bop::error::BopError> {\n",
+        );
+        self.out.push_str("    let site = &__BOP_FUNCTION_SITES[site_id];\n");
+        self.out.push_str("    if args.len() != site.params.len() {\n");
+        self.out.push_str("        return Err(::bop::error::BopError::runtime(format!(\"`{}` expects {} argument{}, but got {}\", site.name, site.params.len(), if site.params.len() == 1 { \"\" } else { \"s\" }, args.len()), line));\n");
+        self.out.push_str("    }\n    match site_id {\n");
+        for site in self.functions.sites.iter().filter(|site| site.persistent) {
+            let args = (0..site.params.len())
+                .map(|_| "args.remove(0)")
+                .collect::<Vec<_>>()
+                .join(", ");
+            if args.is_empty() {
+                writeln!(
+                    self.out,
+                    "        {} => {}(ctx),",
+                    site.id,
+                    function_site_fn_name(site.id),
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    self.out,
+                    "        {} => {}(ctx, {}),",
+                    site.id,
+                    function_site_fn_name(site.id),
+                    args,
+                )
+                .unwrap();
+            }
+        }
+        self.out.push_str(
+            "        _ => Err(::bop::error::BopError::runtime(\"Invalid compiled function site\", line)),\n    }\n}\n\n",
+        );
     }
 
     fn emit_public_entry(&mut self) {
@@ -2832,8 +3117,19 @@ impl Emitter {
         // skip them here. The scope_stack deliberately stays empty
         // for fn names — they're resolved through `fn_info`
         // (top_level_fns / all_fns), not via `is_local`.
+        let direct_function_sites = self
+            .direct_function_sites
+            .get(bop::value::ROOT_MODULE_PATH)
+            .cloned()
+            .unwrap_or_default();
+        let mut direct_function_index = 0;
         for stmt in stmts {
             if matches!(&stmt.kind, StmtKind::FnDecl { .. }) {
+                if self.opts.sandbox {
+                    let site = direct_function_sites[direct_function_index];
+                    direct_function_index += 1;
+                    self.line(&format!("__bop_activate_function(ctx, {site});"));
+                }
                 continue;
             }
             self.emit_stmt(stmt)?;
@@ -3004,11 +3300,36 @@ impl Emitter {
                 self.close_block();
             }
 
-            StmtKind::FnDecl { name, params, body, .. } => {
-                self.emit_fn_decl(name, params, body, line)?;
+            StmtKind::FnDecl {
+                name,
+                params,
+                body,
+                visibility,
+            } => {
+                if self.opts.sandbox {
+                    let site = self.register_function_site(name, params, *visibility, line, false);
+                    self.emit_fn_decl_as_site(
+                        &function_site_fn_name(site),
+                        params,
+                        body,
+                        line,
+                        Some((name, site)),
+                    )?;
+                    self.bind_function_site(name, site);
+                } else {
+                    self.emit_fn_decl(name, params, body, line)?;
+                }
             }
 
             StmtKind::Return { value } => {
+                if self.in_top_level && self.opts.sandbox {
+                    if let Some(value) = value {
+                        let src = self.expr_src(value)?;
+                        self.line(&format!("let _ = {};", src));
+                    }
+                    self.line("return Ok(());");
+                    return Ok(());
+                }
                 match value {
                     Some(v) => {
                         let src = self.expr_src(v)?;
@@ -3405,6 +3726,17 @@ impl Emitter {
         body: &[Stmt],
         line: u32,
     ) -> Result<(), BopError> {
+        self.emit_fn_decl_as_site(fn_name, params, body, line, None)
+    }
+
+    fn emit_fn_decl_as_site(
+        &mut self,
+        fn_name: &str,
+        params: &[String],
+        body: &[Stmt],
+        line: u32,
+        self_site: Option<(&str, usize)>,
+    ) -> Result<(), BopError> {
         let uses_runtime_type_bindings = self.statements_use_runtime_type_bindings(body);
         let param_list = params
             .iter()
@@ -3463,6 +3795,9 @@ impl Emitter {
         // isolates outer locals anyway, but scope tracking is the
         // source of truth for lambda-capture analysis.
         self.push_scope();
+        if let Some((name, site)) = self_site {
+            self.bind_function_site(name, site);
+        }
         for (index, p) in params.iter().enumerate() {
             self.bind_local(p);
             self.line(&format!(
@@ -3935,6 +4270,19 @@ impl Emitter {
             arg_names.push(tmp);
         }
 
+        // The invoked function's `self_name` is an exact lexical binding.
+        // It must recurse to the retained declaration site directly, without
+        // host interception or a later same-name redeclaration.
+        if self.opts.sandbox {
+            if let Some(site) = self.local_function_site(&name) {
+                let call = self.exact_function_site_call_src(site, &arg_names, line);
+                return Ok(format!(
+                    "{{ {}{} }}",
+                    arg_lets, call,
+                ));
+            }
+        }
+
         let body = match name.as_str() {
             "print" => {
                 let args_expr = build_arg_array(&arg_names);
@@ -3997,15 +4345,39 @@ impl Emitter {
                     )
                 };
                 if self.fn_info.all_fns.contains_key(&name) {
-                    let fn_name = self.rust_fn_name(&name);
-                    let fn_args = if arg_names.is_empty() {
-                        "ctx".to_string()
+                    let site_args = if arg_names.is_empty() {
+                        "::std::vec::Vec::new()".to_string()
                     } else {
-                        format!("ctx, {}", arg_names.join(", "))
+                        format!("vec![{}]", arg_names.join(", "))
+                    };
+                    let fallback = if self.opts.sandbox {
+                        if self.fn_info.top_level_fns.contains(&name) {
+                            format!(
+                                "__bop_call_active_function(ctx, {}, {}, {}, {})?",
+                                rust_string_literal(&self.current_module),
+                                rust_string_literal(&name),
+                                site_args,
+                                line,
+                            )
+                        } else {
+                            format!(
+                                "return Err(::bop::error::BopError::runtime(::bop::error_messages::function_not_found({}), {}))",
+                                rust_string_literal(&name),
+                                line,
+                            )
+                        }
+                    } else {
+                        let fn_name = self.rust_fn_name(&name);
+                        let fn_args = if arg_names.is_empty() {
+                            "ctx".to_string()
+                        } else {
+                            format!("ctx, {}", arg_names.join(", "))
+                        };
+                        format!("{}({})?", fn_name, fn_args)
                     };
                     format!(
-                        "match ctx.host.call({:?}, &{}, {}) {{ Some(r) => r?, None => {}({})?, }}",
-                        name, cloned_args, line, fn_name, fn_args
+                        "match ctx.host.call({:?}, &{}, {}) {{ Some(r) => r?, None => {}, }}",
+                        name, cloned_args, line, fallback
                     )
                 } else {
                     // No fn of that name in scope. Still try the
@@ -5450,6 +5822,10 @@ fn method_site_adapter_name(site: usize) -> String {
     format!("__bop_method_adapter_{site}")
 }
 
+fn function_site_fn_name(site: usize) -> String {
+    format!("__bop_function_site_{site}")
+}
+
 /// Turn a Bop module path into a collision-free Rust-safe slug.
 fn module_slug(path: &str) -> String {
     user_name_component(path)
@@ -5603,36 +5979,45 @@ struct __BopFunctionSite {
     line: u32,
 }
 
+/// Opaque generated program state. This type and its fields are implementation
+/// details; sandbox embedders should use `run` and the generated `BopInstance`.
 struct __BopState {
-    pub rand_state: u64,
+    rand_state: u64,
     /// Per-program module cache keyed by the Bop module path (the
     /// dot-joined string). `load` fns use this to memoise imports
     /// and to spot circular dependencies via the `__ModuleLoading`
     /// sentinel.
-    pub module_cache:
+    module_cache:
         ::std::collections::HashMap<::std::string::String, ::std::boxed::Box<dyn ::core::any::Any + 'static>>,
-    pub module_aliases: ::std::collections::HashMap<
+    module_aliases: ::std::collections::HashMap<
         (::std::string::String, ::std::string::String),
         ::bop::value::Value,
     >,
-    pub module_type_bindings: ::std::collections::HashMap<
+    module_type_bindings: ::std::collections::HashMap<
         ::std::string::String,
         ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
     >,
-    pub struct_defs: ::std::collections::HashMap<
+    struct_defs: ::std::collections::HashMap<
         ::std::string::String,
         ::std::collections::HashMap<::std::string::String, &'static [&'static str]>,
     >,
-    pub enum_defs: ::std::collections::HashMap<
+    enum_defs: ::std::collections::HashMap<
         ::std::string::String,
         ::std::collections::HashMap<
             ::std::string::String,
             &'static [(&'static str, __BopDynamicVariantShape)],
         >,
     >,
+    active_function_sites: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        usize,
+    >,
+    abi_declarations: ::std::vec::Vec<usize>,
 /*__BOP_METHOD_SLOTS__*/
 }
 
+/// Per-operation adapter borrowing a host and opaque program state. Its layout
+/// is not a supported embedding API.
 struct Ctx<'h> {
     host: &'h mut dyn ::bop::BopHost,
     state: &'h mut __BopState,
@@ -6094,8 +6479,8 @@ fn __bop_declaration_alias_mut<'v>(
 /// satisfy any lifetime of `Ctx`, which lets us store closures in
 /// `Value::Fn` (whose body is `Rc<dyn Any + 'static>`) regardless
 /// of where they're eventually called from.
-pub struct AotClosure {
-    pub callable: ::std::rc::Rc<
+/*__BOP_RUNTIME_VIS__*/struct AotClosure {
+    /*__BOP_RUNTIME_VIS__*/callable: ::std::rc::Rc<
         dyn for<'__a> Fn(
             &mut Ctx<'__a>,
             ::std::vec::Vec<::bop::value::Value>,
@@ -6793,10 +7178,10 @@ const PUBLIC_ENTRY_SANDBOX: &str = r#"// ─── Public entry points ───
 /// allocation tracker; `limits.max_steps` caps the number of
 /// tick-points (loop iterations + function entries) before the
 /// program halts with `Your code took too many steps`.
-pub fn run<H: ::bop::BopHost>(
-    host: &mut H,
+fn __bop_load_state(
+    host: &mut dyn ::bop::BopHost,
     limits: &::bop::BopLimits,
-) -> Result<(), ::bop::error::BopError> {
+) -> Result<__BopState, ::bop::error::BopError> {
     ::bop::memory::bop_memory_init(limits.max_memory);
     let mut state = __BopState {
         rand_state: 0,
@@ -6805,16 +7190,28 @@ pub fn run<H: ::bop::BopHost>(
         module_type_bindings: ::std::collections::HashMap::new(),
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),
+        active_function_sites: ::std::collections::HashMap::new(),
+        abi_declarations: ::std::vec::Vec::new(),
 /*__BOP_METHOD_SLOTS_INIT__*/
     };
-    let mut ctx = Ctx {
-        host: host as &mut dyn ::bop::BopHost,
-        state: &mut state,
-        steps: 0,
-        max_steps: limits.max_steps,
-    };
-    __bop_seed_builtin_type_defs(&mut ctx)?;
-    run_program(&mut ctx)
+    {
+        let mut ctx = Ctx {
+            host,
+            state: &mut state,
+            steps: 0,
+            max_steps: limits.max_steps,
+        };
+        __bop_seed_builtin_type_defs(&mut ctx)?;
+        run_program(&mut ctx)?;
+    }
+    Ok(state)
+}
+
+pub fn run<H: ::bop::BopHost>(
+    host: &mut H,
+    limits: &::bop::BopLimits,
+) -> Result<(), ::bop::error::BopError> {
+    __bop_load_state(host as &mut dyn ::bop::BopHost, limits).map(|_| ())
 }
 
 "#;

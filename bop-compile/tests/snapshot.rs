@@ -701,11 +701,32 @@ fn sandbox_state_is_persistent_while_operation_context_is_ephemeral() {
             "impl<'h> ::core::ops::Deref for Ctx<'h>",
             "let mut state = __BopState",
             "state: &mut state",
+            "sandbox embedders should use `run` and the generated `BopInstance`",
+            "layout\n/// is not a supported embedding API",
         ],
     );
+    for public_internal in [
+        "pub struct __BopState",
+        "pub struct Ctx<'h>",
+        "pub struct AotClosure",
+        "pub callable:",
+    ] {
+        assert!(
+            !sandbox.contains(public_internal),
+            "sandbox output exposed generated internal {public_internal:?}"
+        );
+    }
     let unsandboxed = compile("print(1)");
     assert!(!unsandboxed.contains("__BopState"));
     assert!(!unsandboxed.contains("__BOP_FUNCTION_SITES"));
+    contains_all(
+        &unsandboxed,
+        &[
+            "pub struct Ctx<'h>",
+            "pub struct AotClosure",
+            "pub callable:",
+        ],
+    );
 }
 
 #[test]
@@ -777,7 +798,7 @@ fn sandbox_emits_tick_at_fn_entry() {
     let out = norm(&compile_sandbox("fn foo() { return 1 }\nprint(foo())"));
     assert!(
         out.contains(
-            "fn __bop_user_fn_n666f6f(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_tick(ctx,"
+            "fn __bop_function_site_0(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_tick(ctx,"
         ),
         "expected tick at function entry:\n{}",
         out
