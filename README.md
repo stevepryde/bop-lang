@@ -2,7 +2,7 @@
 
 A small, dynamically-typed, **embeddable** programming language for Rust hosts — give your users or your agent a real scripting language at runtime, with the sandbox treated as a first-class invariant instead of a bolted-on afterthought.
 
-[Documentation](https://stevepryde.github.io/bop-lang/)
+[Website](https://bop-lang.com/) · [Documentation](https://bop-lang.com/docs/)
 
 > **Note:** Bop is experimental and not yet battle-tested. Good for tooling, scripting, embedding experiments, and sandbox-first workloads; use with care in production.
 
@@ -117,7 +117,7 @@ let value = instance.call("next", &[], &mut host)?;
 assert_eq!(value.inspect(), "1");
 ```
 
-See [Stateful instances](https://stevepryde.github.io/bop-lang/embedding/instances.html)
+See [Stateful instances](https://bop-lang.com/docs/embedding/instances/)
 for the walker, VM, and sandboxed AOT APIs.
 
 Custom sandboxed host — Bop can only reach the fns you expose:
@@ -167,6 +167,19 @@ bop-vm   = { version = "0.3", default-features = false, features = ["no_std"] }
 - [`bop-compile`](bop-compile/) — Bop → Rust AOT transpiler
 - [`bop-sys`](bop-sys/) — `StdHost`, the default OS-backed host
 - [`bop-cli`](bop-cli/) — the `bop` command-line tool
+
+## Website
+
+The Bop website and documentation are built with
+[Zola](https://www.getzola.org/) and published to Cloudflare Pages.
+
+```sh
+bun install
+bun run site:serve
+```
+
+Use `bun run site:check` to validate content and internal links, and
+`bun run site:build` to create the deployable site in `docs/public/`.
 
 ## License
 

@@ -68,7 +68,7 @@ calls and enforces instance affinity, re-entry, and resource limits.
 
 The persistent API is sandbox-only. Unsandboxed generated output retains its
 one-shot `run` API. See the [stateful embedding
-guide](https://stevepryde.github.io/bop-lang/embedding/instances.html) for the
+guide](https://bop-lang.com/docs/embedding/instances/) for the
 full lifecycle contract.
 
 ## Selling points

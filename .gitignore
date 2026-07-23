@@ -1,4 +1,11 @@
 /target
+/node_modules
+/.wrangler
+/.playwright-cli
+/output
+/docs/public
+/docs/static/fonts
+/docs/static/site.css
 .claude/
 *.swp
 *.swo

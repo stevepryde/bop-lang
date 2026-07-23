@@ -14,8 +14,9 @@
   target.
 - **AOT runtime mode:** `bop-compile` supports opt-in sandbox emission, while
   `bop-cli compile` currently emits unsandboxed binaries.
-- **Documentation:** Markdown and mdBook sources under `docs/src/`; generated
-  `docs/book/` output is derived rather than normative.
+- **Website and documentation:** Zola templates, Tailwind CSS v4, and Markdown
+  content live under `docs/`; generated `docs/public/` output is derived rather
+  than normative and is published through Cloudflare Pages.
 
 ## Constraints
 

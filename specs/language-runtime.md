@@ -160,7 +160,7 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
 
 ## Design notes
 
-The grammar reference and user documentation under `docs/src/` remain the
+The grammar reference and user documentation under `docs/content/docs/` remain the
 canonical teaching material. This file owns cross-engine guarantees rather
 than duplicating syntax documentation.
 
