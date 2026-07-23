@@ -186,12 +186,43 @@ print(unguarded, guarded)"#,
 }
 
 #[test]
-fn let_emits_mut_binding() {
+fn module_let_emits_authoritative_context_binding() {
     let out = compile("let x = 10");
     contains_all(
         &out,
         &[
-            "let mut __bop_user_value_78: ::bop::value::Value = ::bop::value::Value::Int(10",
+            "let __t0 = ::bop::value::Value::Int(10",
+            "__bop_define_binding(ctx, \"<root>\", \"x\", __t0)",
+        ],
+    );
+}
+
+#[test]
+fn non_sandbox_lifted_fn_reads_its_root_module_binding() {
+    let out = compile("let value = 10\nfn read() { return value }\nprint(read())");
+    contains_all(
+        &out,
+        &[
+            "fn __bop_user_fn_n72656164(ctx: &mut Ctx<'_>)",
+            "__bop_read_binding(ctx, \"<root>\", \"value\", 2)?",
+        ],
+    );
+    assert!(!out.contains("__bop_user_value_76616c7565.clone()"));
+}
+
+#[test]
+fn non_sandbox_lifted_fns_resolve_bare_imported_calls_from_context() {
+    let out = compile_with_modules(
+        "use inner\nfn call() { return increment(10) }\nprint(call())",
+        &[("inner", "fn increment(n) { return n + 1 }")],
+    )
+    .expect("transpile bare imported call from a lifted function");
+    contains_all(
+        &out,
+        &[
+            "__bop_import_binding(ctx, \"<root>\", \"increment\"",
+            "ctx.bindings.get(&(\"<root>\".to_string(), \"increment\".to_string())).cloned()",
+            "__bop_call_named_value(ctx, __callee",
         ],
     );
 }
@@ -201,7 +232,10 @@ fn compound_assign_routes_through_ops() {
     let out = compile("let x = 1\nx += 5");
     contains_all(
         &out,
-        &["__bop_user_value_78 = ::bop::ops::add(&__bop_user_value_78,"],
+        &[
+            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"x\".to_string()))",
+            "::bop::ops::add(&",
+        ],
     );
 }
 
@@ -408,7 +442,7 @@ fn lambda_captures_namespaced_constructors_for_depth_accounting() {
     )
     .expect("transpile namespaced constructors in lambda");
     assert_eq!(
-        out.matches("let __cap_0 = __bop_user_value_73.clone();").count(),
+        out.matches("let __cap_0 = __bop_read_binding(ctx, \"<root>\", \"s\", 2)?;").count(),
         1,
         "the module alias should be captured exactly once:\n{out}"
     );
@@ -444,7 +478,13 @@ fn nested_lambda_shadowing_does_not_capture_same_named_outer_scope_value() {
 #[test]
 fn rust_keyword_idents_are_mangled() {
     let out = compile("let type = 5\nprint(type)");
-    contains_all(&out, &["let mut __bop_user_value_74797065:"]);
+    contains_all(
+        &out,
+        &[
+            "__bop_define_binding(ctx, \"<root>\", \"type\"",
+            "__bop_read_binding(ctx, \"<root>\", \"type\", 2)?",
+        ],
+    );
     assert!(!out.contains("let mut r#type:"));
 }
 
@@ -472,9 +512,9 @@ print(yield(crate, super, ctx, bop_self), __t0, __l, __bop_user_value_5f5f7430)"
             "mut __bop_user_value_7375706572:",
             "mut __bop_user_value_637478:",
             "mut __bop_user_value_626f705f73656c66:",
-            "let mut __bop_user_value_5f5f7430:",
-            "let mut __bop_user_value_5f5f6c:",
-            "let mut __bop_user_value_5f5f626f705f757365725f76616c75655f3566356637343330:",
+            "__bop_define_binding(ctx, \"<root>\", \"__t0\"",
+            "__bop_define_binding(ctx, \"<root>\", \"__l\"",
+            "__bop_define_binding(ctx, \"<root>\", \"__bop_user_value_5f5f7430\"",
         ],
     );
     assert!(!out.contains("let mut __t0:"));
@@ -521,7 +561,8 @@ fn method_call_on_ident_emits_back_assign_for_mutating() {
             "__bop_call_method(ctx, &",
             "\"push\"",
             "if let Some(__new_obj) = __mutated",
-            "__bop_user_value_61 = __new_obj",
+            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"a\".to_string()))",
+            "= __new_obj",
         ],
     );
 }
@@ -566,7 +607,7 @@ print("hi {name}!")"#);
         &[
             "::std::string::String::new()",
             "__s.push_str(\"hi \")",
-            "__s.push_str(&format!(\"{}\", __bop_user_value_6e616d65.clone()))",
+            "__s.push_str(&format!(\"{}\", __bop_read_binding(ctx, \"<root>\", \"name\", 2)?))",
             "__s.push_str(\"!\")",
             "::bop::value::Value::new_str(__s)",
         ],
@@ -579,8 +620,8 @@ fn index_assign_routes_through_ops_index_set() {
     contains_all(
         &out,
         &[
-            "let __t6: &mut ::bop::value::Value = &mut __bop_user_value_61;",
-            "::bop::ops::index_set(__t6, &__t5, __t4, 2)?;",
+            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"a\".to_string()))",
+            "::bop::ops::index_set(",
         ],
     );
 }
@@ -591,10 +632,10 @@ fn compound_index_assign_reads_then_writes() {
     contains_all(
         &out,
         &[
-            "let __t5: &mut ::bop::value::Value = &mut __bop_user_value_61;",
-            "let __t6 = ::bop::ops::index_get(__t5, &__t4, 2)?;",
-            "let __t7 = ::bop::ops::add(&__t6, &__t3, 2)?;",
-            "::bop::ops::index_set(__t5, &__t4, __t7, 2)?;",
+            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"a\".to_string()))",
+            "::bop::ops::index_get(",
+            "::bop::ops::add(",
+            "::bop::ops::index_set(",
         ],
     );
 }
@@ -643,10 +684,10 @@ fn const_index_reads_in_mutable_targets_still_emit_aot() {
     contains_all(
         &out,
         &[
-            "__bop_user_value_494e444558.clone()",
-            "let __t5: &mut ::bop::value::Value = &mut __bop_user_value_76616c756573;",
-            "let __t6 = ::bop::ops::index_get(__t5, &__t4, 3)?;",
-            "::bop::ops::index_set(__t5, &__t4, __t7, 3)?;",
+            "__bop_read_binding(ctx, \"<root>\", \"INDEX\", 3)?",
+            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"values\".to_string()))",
+            "::bop::ops::index_get(",
+            "::bop::ops::index_set(",
         ],
     );
 }
@@ -1408,11 +1449,10 @@ fn from_api() { return api.Second { value: 2 } }"#,
     contains_all(
         &output,
         &[
-            "let __t4 = __bop_user_value_636f7079.clone();",
-            "matches!(&__t4, ::bop::value::Value::Module(_))",
+            "__bop_read_binding(ctx, \"<root>\", \"copy\", 0)?",
+            "matches!(&",
             "(\"<root>\".to_string(), \"copy\".to_string())",
-            "let __t5 = __bop_user_value_617069.clone();",
-            "matches!(&__t5, ::bop::value::Value::Module(_))",
+            "__bop_read_binding(ctx, \"<root>\", \"api\", 0)?",
             "ctx.module_aliases.remove(&(\"<root>\".to_string(), \"api\".to_string()))",
         ],
     );

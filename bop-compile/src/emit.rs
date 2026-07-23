@@ -1697,19 +1697,14 @@ impl Emitter {
         }
         let value = if self.is_local(name) {
             format!("{}.clone()", rust_user_ident(name))
-        } else if self.opts.sandbox {
-            self.binding_storage(name).map_or_else(
-                || {
-                    format!(
-                        "__bop_read_binding(ctx, {}, {}, 0)?",
-                        rust_string_literal(&self.current_module),
-                        rust_string_literal(name),
-                    )
-                },
-                |storage| self.storage_read_src(&storage, 0),
-            )
+        } else if let Some(storage) = self.binding_storage(name) {
+            self.storage_read_src(&storage, 0)
         } else {
-            format!("{}.clone()", rust_user_ident(name))
+            format!(
+                "__bop_read_binding(ctx, {}, {}, 0)?",
+                rust_string_literal(&self.current_module),
+                rust_string_literal(name),
+            )
         };
         let value_tmp = self.fresh_tmp();
         self.line(&format!("let {value_tmp} = {value};"));
@@ -2134,6 +2129,8 @@ impl Emitter {
             Ok(format!("{}.clone()", rust_user_ident(name)))
         } else if let Some(alias) = self.declaration_alias_read_src(name, line) {
             Ok(alias)
+        } else if let Some(storage) = self.binding_storage(name) {
+            Ok(self.storage_read_src(&storage, line))
         } else if self.opts.sandbox {
             if let Some(site) = self.local_function_site(name) {
                 Ok(format!(
@@ -2176,9 +2173,10 @@ impl Emitter {
                 ),
                 line,
             ))
-        } else if self.in_non_capturing_method {
+        } else if self.in_callable_body {
             Ok(format!(
-                "::std::result::Result::<::bop::value::Value, ::bop::error::BopError>::Err(::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({}), {}))?",
+                "__bop_read_binding(ctx, {}, {}, {})?",
+                rust_string_literal(&self.current_module),
                 rust_string_literal(name),
                 line,
             ))
@@ -2753,7 +2751,7 @@ impl Emitter {
                         alias = rust_user_ident(alias_name),
                     ));
                 }
-                if self.opts.sandbox && module_top_scope {
+                if module_top_scope {
                     self.line(&format!(
                         "__bop_define_binding(ctx, {}, {}, {});",
                         rust_string_literal(&self.current_module),
@@ -2784,14 +2782,24 @@ impl Emitter {
                 // construction + pattern sites can resolve
                 // the bare name to the right module path.
                 for name in &expose_bindings {
-                    if self.opts.sandbox && module_top_scope {
-                        self.line(&format!(
-                            "__bop_import_export(ctx, {}, {}, {tmp}.{ident}.clone(), {line})?;",
-                            rust_string_literal(&self.current_module),
-                            rust_string_literal(name),
-                            ident = rust_user_ident(name),
-                        ));
-                        self.bind_optional_import(name, OptionalImportBinding::Persistent);
+                    if module_top_scope {
+                        if self.opts.sandbox {
+                            self.line(&format!(
+                                "__bop_import_export(ctx, {}, {}, {tmp}.{ident}.clone(), {line})?;",
+                                rust_string_literal(&self.current_module),
+                                rust_string_literal(name),
+                                ident = rust_user_ident(name),
+                            ));
+                            self.bind_optional_import(name, OptionalImportBinding::Persistent);
+                        } else {
+                            self.line(&format!(
+                                "__bop_import_binding(ctx, {}, {}, {tmp}.{ident}.clone());",
+                                rust_string_literal(&self.current_module),
+                                rust_string_literal(name),
+                                ident = rust_user_ident(name),
+                            ));
+                            self.bind_persistent(name);
+                        }
                         if let Some(module_export) = entry.effective_module_exports.get(name) {
                             self.bind_module_export(name, module_export);
                             self.emit_module_alias_context_sync(name);
@@ -2954,10 +2962,6 @@ impl Emitter {
                 rust_string_literal(name),
             ));
             self.line(&format!(
-                "let __saved_value_bindings: ::std::vec::Vec<_> = ctx.bindings.iter().filter(|((module, _), _)| module == {}).map(|(key, value)| (key.clone(), value.clone())).collect();",
-                rust_string_literal(name),
-            ));
-            self.line(&format!(
                 "ctx.active_function_sites.retain(|(module, _), _| module != {});",
                 rust_string_literal(name),
             ));
@@ -2965,11 +2969,15 @@ impl Emitter {
                 "ctx.module_imported_function_sites.retain(|(module, _), _| module != {});",
                 rust_string_literal(name),
             ));
-            self.line(&format!(
-                "ctx.bindings.retain(|(module, _), _| module != {});",
-                rust_string_literal(name),
-            ));
         }
+        self.line(&format!(
+            "let __saved_value_bindings: ::std::vec::Vec<_> = ctx.bindings.iter().filter(|((module, _), _)| module == {}).map(|(key, value)| (key.clone(), value.clone())).collect();",
+            rust_string_literal(name),
+        ));
+        self.line(&format!(
+            "ctx.bindings.retain(|(module, _), _| module != {});",
+            rust_string_literal(name),
+        ));
         self.line(&format!(
             r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__ModuleLoading));"#,
             key = name
@@ -3071,8 +3079,10 @@ impl Emitter {
             } else {
                 writeln!(
                     self.out,
-                    "    {ident}: {ident}.clone(),",
-                    ident = rust_user_ident(export)
+                    "    {ident}: __bop_read_binding(ctx, {module}, {name}, 0)?,",
+                    ident = rust_user_ident(export),
+                    module = rust_string_literal(name),
+                    name = rust_string_literal(export),
                 )
                 .unwrap();
             }
@@ -3120,12 +3130,12 @@ impl Emitter {
                 rust_string_literal(name),
             ));
             self.line("ctx.module_imported_function_sites.extend(__saved_imported_function_sites);");
-            self.line(&format!(
-                "ctx.bindings.retain(|(module, _), _| module != {});",
-                rust_string_literal(name),
-            ));
-            self.line("ctx.bindings.extend(__saved_value_bindings);");
         }
+        self.line(&format!(
+            "ctx.bindings.retain(|(module, _), _| module != {});",
+            rust_string_literal(name),
+        ));
+        self.line("ctx.bindings.extend(__saved_value_bindings);");
         self.line(&format!(
             "ctx.module_cache.remove({});",
             rust_string_literal(name)
@@ -3965,31 +3975,7 @@ impl Emitter {
 
     fn emit_function_site_dispatcher(&mut self) {
         self.out.push_str(
-            r#"fn __bop_define_binding(
-    ctx: &mut Ctx<'_>,
-    module_path: &str,
-    name: &str,
-    value: ::bop::value::Value,
-) {
-    ctx.bindings.insert((module_path.to_string(), name.to_string()), value);
-}
-
-fn __bop_read_binding(
-    ctx: &Ctx<'_>,
-    module_path: &str,
-    name: &str,
-    line: u32,
-) -> Result<::bop::value::Value, ::bop::error::BopError> {
-    ctx.bindings
-        .get(&(module_path.to_string(), name.to_string()))
-        .cloned()
-        .ok_or_else(|| ::bop::error::BopError::runtime(
-            ::bop::error_messages::variable_not_found(name),
-            line,
-        ))
-}
-
-fn __bop_authoritative_alias_namespace(
+            r#"fn __bop_authoritative_alias_namespace(
     ctx: &Ctx<'_>,
     module_path: &str,
     alias: &str,
@@ -4002,37 +3988,6 @@ fn __bop_authoritative_alias_namespace(
             format!("`{}` isn't a module alias in scope", alias),
             line,
         ))
-}
-
-fn __bop_binding_mut<'a>(
-    ctx: &'a mut Ctx<'_>,
-    module_path: &str,
-    name: &str,
-    line: u32,
-) -> Result<&'a mut ::bop::value::Value, ::bop::error::BopError> {
-    ctx.bindings
-        .get_mut(&(module_path.to_string(), name.to_string()))
-        .ok_or_else(|| ::bop::error::BopError::runtime(
-            ::bop::error_messages::variable_not_found(name),
-            line,
-        ))
-}
-
-fn __bop_binding_is_array(
-    ctx: &Ctx<'_>,
-    module_path: &str,
-    name: &str,
-    line: u32,
-) -> Result<bool, ::bop::error::BopError> {
-    Ok(matches!(
-        ctx.bindings
-            .get(&(module_path.to_string(), name.to_string()))
-            .ok_or_else(|| ::bop::error::BopError::runtime(
-                ::bop::error_messages::variable_not_found(name),
-                line,
-            ))?,
-        ::bop::value::Value::Array(_)
-    ))
 }
 
 fn __bop_activate_function(ctx: &mut Ctx<'_>, site_id: usize) {
@@ -4429,7 +4384,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         match &stmt.kind {
             StmtKind::Let { name, value, is_const: _ } => {
                 let rhs = self.expr_src(value)?;
-                if self.opts.sandbox && self.is_module_top_scope() {
+                if self.is_module_top_scope() {
                     let value_tmp = self.fresh_tmp();
                     self.line(&format!("let {value_tmp} = {rhs};"));
                     self.line(&format!(
@@ -4791,11 +4746,12 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         return Ok(());
                     }
                 }
-                if self.opts.sandbox && !self.is_local(name) {
+                if !self.is_local(name) {
                     let rhs_tmp = self.fresh_tmp();
                     let target_tmp = self.fresh_tmp();
                     self.line(&format!("let {rhs_tmp} = {rhs_src};"));
-                    if matches!(op, AssignOp::Eq)
+                    if self.opts.sandbox
+                        && matches!(op, AssignOp::Eq)
                         && self.has_declaration_alias_overlay(name)
                     {
                         self.line(&format!(
@@ -4876,7 +4832,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         self.declaration_alias_mut_src(target_name, line)
                     {
                         target_src
-                    } else if self.opts.sandbox {
+                    } else {
                         let storage = self.binding_storage(target_name).unwrap_or_else(|| {
                             BindingStorage::Persistent {
                                 module: self.current_module.clone(),
@@ -4884,8 +4840,6 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                             }
                         });
                         self.storage_mut_src(&storage, target_name, line)
-                    } else {
-                        format!("&mut {}", rust_user_ident(target_name))
                     }
                 } else {
                     format!("&mut {}", rust_user_ident(target_name))
@@ -4939,17 +4893,13 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 } else {
                     self.declaration_alias_mut_src(target_name, line)
                         .unwrap_or_else(|| {
-                            if self.opts.sandbox {
-                                let storage = self.binding_storage(target_name).unwrap_or_else(|| {
-                                    BindingStorage::Persistent {
-                                        module: self.current_module.clone(),
-                                        name: target_name.to_string(),
-                                    }
-                                });
-                                self.storage_mut_src(&storage, target_name, line)
-                            } else {
-                                format!("&mut {}", rust_user_ident(target_name))
-                            }
+                            let storage = self.binding_storage(target_name).unwrap_or_else(|| {
+                                BindingStorage::Persistent {
+                                    module: self.current_module.clone(),
+                                    name: target_name.to_string(),
+                                }
+                            });
+                            self.storage_mut_src(&storage, target_name, line)
                         })
                 };
                 self.line(&format!(
@@ -5586,11 +5536,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             }
         }
 
-        let binding_storage = if self.opts.sandbox {
-            self.binding_storage(&name)
-        } else {
-            None
-        };
+        let binding_storage = self.binding_storage(&name);
         if let Some(storage @ (BindingStorage::RustLocal { .. } | BindingStorage::Persistent { .. })) =
             binding_storage.as_ref()
         {
@@ -5750,28 +5696,26 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             }
         };
 
-        if self.opts.sandbox {
-            let args_vec = if arg_names.is_empty() {
-                "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
-            } else {
-                format!("::std::vec![{}]", arg_names.join(", "))
-            };
+        let args_vec = if arg_names.is_empty() {
+            "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
+        } else {
+            format!("::std::vec![{}]", arg_names.join(", "))
+        };
+        body = format!(
+            "match ctx.bindings.get(&({module}.to_string(), {name}.to_string())).cloned() {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
+            module = rust_string_literal(&self.current_module),
+            name = rust_string_literal(&name),
+        );
+        if let Some(storage @ BindingStorage::OptionalImport { .. }) =
+            binding_storage.as_ref()
+        {
+            let optional = self
+                .storage_optional_value_src(storage, line)
+                .expect("optional import storage");
             body = format!(
-                "match ctx.bindings.get(&({module}.to_string(), {name}.to_string())).cloned() {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
-                module = rust_string_literal(&self.current_module),
+                "match {optional} {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
                 name = rust_string_literal(&name),
             );
-            if let Some(storage @ BindingStorage::OptionalImport { .. }) =
-                binding_storage.as_ref()
-            {
-                let optional = self
-                    .storage_optional_value_src(storage, line)
-                    .expect("optional import storage");
-                body = format!(
-                    "match {optional} {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
-                    name = rust_string_literal(&name),
-                );
-            }
         }
 
         if let Some(alias) = self.declaration_alias_optional_src(&name) {
@@ -6243,49 +6187,47 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     .unwrap();
                     return Ok(body);
                 }
-                if self.opts.sandbox {
-                    let storage = self.binding_storage(&target_name).unwrap_or_else(|| {
-                        BindingStorage::Persistent {
-                            module: self.current_module.clone(),
-                            name: target_name.clone(),
-                        }
-                    });
-                    let target_src = self.storage_mut_src(&storage, &target_name, line);
-                    let read_src = self.storage_read_src(&storage, line);
-                    let target_tmp = self.fresh_tmp();
-                    let mut body = String::new();
-                    write!(
-                        body,
-                        "{{ {}let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
-                            let {target_tmp}: &mut ::bop::value::Value = {target_src}; let ::bop::value::Value::Array(__bop_array) = &mut *{target_tmp} else {{ unreachable!() }}; ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
-                        }} else {{ \
-                            let {} = {read_src}; \
-                            match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
-                                Some(v) => v, \
-                                None => {{ \
-                                    let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
-                                    if let Some(__new_obj) = __mutated {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; *{target_tmp} = __new_obj; }} \
-                                    __r \
-                                }}, \
-                            }} \
-                        }}; __ret }}",
-                        arg_lets,
-                        method_lit,
-                        owned_args,
-                        line,
-                        obj_tmp,
-                        obj_tmp,
-                        method_lit,
-                        args_arr,
-                        line,
-                        obj_tmp,
-                        method_lit,
-                        args_arr,
-                        line,
-                    )
-                    .unwrap();
-                    return Ok(body);
-                }
+                let storage = self.binding_storage(&target_name).unwrap_or_else(|| {
+                    BindingStorage::Persistent {
+                        module: self.current_module.clone(),
+                        name: target_name.clone(),
+                    }
+                });
+                let target_src = self.storage_mut_src(&storage, &target_name, line);
+                let read_src = self.storage_read_src(&storage, line);
+                let target_tmp = self.fresh_tmp();
+                let mut body = String::new();
+                write!(
+                    body,
+                    "{{ {}let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
+                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; let ::bop::value::Value::Array(__bop_array) = &mut *{target_tmp} else {{ unreachable!() }}; ::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                    }} else {{ \
+                        let {} = {read_src}; \
+                        match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
+                            Some(v) => v, \
+                            None => {{ \
+                                let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
+                                if let Some(__new_obj) = __mutated {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; *{target_tmp} = __new_obj; }} \
+                                __r \
+                            }}, \
+                        }} \
+                    }}; __ret }}",
+                    arg_lets,
+                    method_lit,
+                    owned_args,
+                    line,
+                    obj_tmp,
+                    obj_tmp,
+                    method_lit,
+                    args_arr,
+                    line,
+                    obj_tmp,
+                    method_lit,
+                    args_arr,
+                    line,
+                )
+                .unwrap();
+                return Ok(body);
             }
             let target = rust_user_ident(&target_name);
             let mut body = String::new();
@@ -7399,9 +7341,9 @@ mod tests {
 
         assert!(
             output.contains(
-                "if let ::bop::value::Value::Array(__bop_array) = &mut __bop_user_value_61"
+                "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"a\".to_string()))"
             ),
-            "missing direct mutable Array binding:\n{output}"
+            "missing authoritative mutable Array binding:\n{output}"
         );
         assert!(
             output.contains("::bop::methods::array_method_mut(__bop_array, \"push\""),
@@ -7410,7 +7352,7 @@ mod tests {
         assert!(
             output.contains("} else { let ")
                 && output.contains(
-                    "= __bop_user_value_61.clone(); match __bop_try_user_method"
+                    "= __bop_read_binding(ctx, \"<root>\", \"a\", 2)?; match __bop_try_user_method"
                 ),
             "dynamic non-array fallback must retain user-method dispatch:\n{output}"
         );

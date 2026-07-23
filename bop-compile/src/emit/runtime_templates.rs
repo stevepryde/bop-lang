@@ -46,6 +46,10 @@ pub(super) const CTX_BASE: &str = r#"pub struct Ctx<'h> {
         (::std::string::String, ::std::string::String),
         ::bop::value::Value,
     >,
+    pub bindings: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        ::bop::value::Value,
+    >,
     pub module_type_bindings: ::std::collections::HashMap<
         ::std::string::String,
         ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
@@ -254,6 +258,72 @@ pub(super) const RUNTIME_SHARED: &str = r#"/// Sentinel type inserted into `modu
 /// state it means a circular import — the runtime returns a clear
 /// error and halts.
 pub struct __ModuleLoading;
+
+fn __bop_define_binding(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    value: ::bop::value::Value,
+) {
+    ctx.bindings.insert((module_path.to_string(), name.to_string()), value);
+}
+
+fn __bop_import_binding(
+    ctx: &mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    value: ::bop::value::Value,
+) {
+    ctx.bindings
+        .entry((module_path.to_string(), name.to_string()))
+        .or_insert(value);
+}
+
+fn __bop_read_binding(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    ctx.bindings
+        .get(&(module_path.to_string(), name.to_string()))
+        .cloned()
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(name),
+            line,
+        ))
+}
+
+fn __bop_binding_mut<'a>(
+    ctx: &'a mut Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<&'a mut ::bop::value::Value, ::bop::error::BopError> {
+    ctx.bindings
+        .get_mut(&(module_path.to_string(), name.to_string()))
+        .ok_or_else(|| ::bop::error::BopError::runtime(
+            ::bop::error_messages::variable_not_found(name),
+            line,
+        ))
+}
+
+fn __bop_binding_is_array(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    line: u32,
+) -> Result<bool, ::bop::error::BopError> {
+    Ok(matches!(
+        ctx.bindings
+            .get(&(module_path.to_string(), name.to_string()))
+            .ok_or_else(|| ::bop::error::BopError::runtime(
+                ::bop::error_messages::variable_not_found(name),
+                line,
+            ))?,
+        ::bop::value::Value::Array(_)
+    ))
+}
 
 type __BopTypeFrame =
     ::std::collections::BTreeMap<::std::string::String, ::std::string::String>;
@@ -1333,6 +1403,7 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         rand_state: 0,
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
+        bindings: ::std::collections::HashMap::new(),
         module_type_bindings: ::std::collections::HashMap::new(),
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),

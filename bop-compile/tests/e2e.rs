@@ -1986,6 +1986,64 @@ print(square(7))"#,
 
 #[test]
 #[ignore]
+fn e2e_non_sandbox_named_fn_reads_and_mutates_root_bindings() {
+    assert_aot_matches(
+        "non_sandbox_named_fn_root_bindings",
+        r#"let base = 5
+const STEP = 2
+let calls = 0
+fn calculate(n) {
+    calls += 1
+    return base + STEP + n + calls
+}
+print(calculate(3))
+print(calculate(3))
+print(calls)"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_non_sandbox_module_fn_reads_its_module_bindings() {
+    assert_aot_matches_with_modules(
+        "non_sandbox_named_fn_module_bindings",
+        r#"use counter
+print(next())
+print(next())"#,
+        &[(
+            "counter",
+            r#"const STEP = 3
+let value = 4
+fn next() {
+    value += STEP
+    return value
+}"#,
+        )],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_non_sandbox_named_fns_call_bare_and_transitive_imports() {
+    assert_aot_matches_with_modules(
+        "non_sandbox_named_fn_bare_imports",
+        r#"use outer
+fn root_call(n) { return increment(n) }
+print(root_call(10))
+print(transitive(10))"#,
+        &[
+            (
+                "outer",
+                r#"use inner
+fn transitive(n) { return increment(increment(n)) }"#,
+            ),
+            ("inner", "fn increment(n) { return n + 1 }"),
+        ],
+    );
+}
+
+#[test]
+#[ignore]
 fn e2e_import_dotted_path() {
     assert_aot_matches_with_modules(
         "import_dotted_path",
