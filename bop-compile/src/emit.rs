@@ -5369,7 +5369,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 let obj_src = self.expr_src(object)?;
                 let obj_tmp = self.fresh_tmp();
                 format!(
-                    "{{ let {tmp} = {obj}; __bop_field_get(&{tmp}, {field_lit}, {line})? }}",
+                    "{{ let {tmp} = {obj}; __bop_field_get_live(ctx, &{tmp}, {field_lit}, {line})? }}",
                     tmp = obj_tmp,
                     obj = obj_src,
                     field_lit = rust_string_literal(field),

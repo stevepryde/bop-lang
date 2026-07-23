@@ -3278,6 +3278,68 @@ let boom = 1 / 0"#,
             ),
         ],
     ),
+    (
+        "aliased_module_member_reads_are_live_after_module_fn_mutation",
+        r#"use counter as c
+print(c.value)
+c.next()
+print(c.value)
+print(c.next(), c.value)"#,
+        &[(
+            "counter",
+            "let value = 1\nfn next() {\n    value += 1\n    return value\n}",
+        )],
+    ),
+    (
+        "aliased_module_member_read_inside_fn_and_fn_member_value",
+        r#"use counter as c
+let bump = c.next
+print(bump())
+fn reader() {
+    return c.value
+}
+c.next()
+print(reader(), c.step)"#,
+        &[(
+            "counter",
+            "let step = 5\nlet value = 1\nfn next() {\n    value += 1\n    return value\n}",
+        )],
+    ),
+    (
+        "aliased_facade_member_reads_follow_reexport_origin",
+        r#"use facade as f
+print(f.value)
+f.next()
+print(f.value)"#,
+        &[
+            ("facade", "use counter"),
+            (
+                "counter",
+                "let value = 1\nfn next() {\n    value += 1\n    return value\n}",
+            ),
+        ],
+    ),
+    (
+        "aliased_selective_member_reads_resolve_live_bindings",
+        r#"use counter.{next} as c
+print(c.value)
+c.next()
+print(c.value)"#,
+        &[(
+            "counter",
+            "let value = 1\nfn next() {\n    value += 1\n    return value\n}",
+        )],
+    ),
+    (
+        "aliased_module_missing_member_error_is_canonical",
+        r#"use counter as c
+print(c.value)
+print(c.missing)"#,
+        &[(
+            "counter",
+            "let value = 1\nfn next() {\n    value += 1\n    return value\n}",
+        )],
+    ),
 ];
 
 // ─── The actual three-way test ────────────────────────────────────
