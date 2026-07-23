@@ -49,6 +49,13 @@ fn targeted_parser_diagnostics_are_preserved_at_the_aot_boundary() {
             11,
             "use `range(start, end)` instead, for example `range(0, 3)`.",
         ),
+        (
+            "const Y = 2\nmatch 3 { Y => 0 }",
+            "`match` pattern binding `Y` looks like a constant, but a value name is required here",
+            2,
+            11,
+            "names bound by `let` / `fn` / params start with a lowercase letter. Did you mean to declare a constant? (`const Y = ...`)",
+        ),
     ];
 
     for (source, message, line, column, hint) in cases {
