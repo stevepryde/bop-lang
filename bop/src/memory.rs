@@ -199,6 +199,10 @@ pub(crate) fn bop_memory_used() -> usize {
 mod tests {
     use super::*;
     use crate::Value;
+    #[cfg(feature = "no_std")]
+    use alloc::vec::Vec;
+    #[cfg(not(feature = "no_std"))]
+    use std::vec::Vec;
 
     #[test]
     fn value_layout_stays_compact_with_allocation_receipts() {

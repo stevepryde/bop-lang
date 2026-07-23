@@ -1560,8 +1560,23 @@ impl Emitter {
         }
         aliases.sort_by(|a, b| a.0.cmp(b.0));
         for (alias, _) in aliases {
-            let value = if self.is_local(alias) {
+            let optional_storage = self.binding_storage(alias).and_then(|storage| {
+                self.storage_optional_value_src(&storage, 0)
+            });
+            let value = if let Some(optional) = optional_storage {
+                let snapshot = declaration_alias_pattern_snapshot_ident(alias);
+                alias_prelude.push_str(&format!(
+                    "            let {snapshot} = {optional};\n",
+                ));
+                format!("{snapshot}.as_ref()")
+            } else if self.is_local(alias) {
                 format!("::std::option::Option::Some(&{})", rust_user_ident(alias))
+            } else if self.opts.sandbox && self.has_declaration_alias_overlay(alias) {
+                format!(
+                    "ctx.bindings.get(&({module}.to_string(), {alias}.to_string()))",
+                    module = rust_string_literal(&self.current_module),
+                    alias = rust_string_literal(alias),
+                )
             } else if let Some(overlay) = self.declaration_alias_overlay(alias) {
                 let snapshot = declaration_alias_pattern_snapshot_ident(alias);
                 alias_prelude.push_str(&format!(
@@ -1643,11 +1658,35 @@ impl Emitter {
     }
 
     fn emit_module_alias_context_sync(&mut self, name: &str) {
+        if self.opts.sandbox && !self.is_module_top_scope() {
+            // Sandboxed callables resolve declaration aliases from the
+            // authoritative state binding. Their Rust locals and
+            // presence-aware flat imports are lexical shadows, so none of
+            // them may rewrite loader-owned alias metadata.
+            return;
+        }
         let authoritative_alias = self.opts.sandbox
             && (self.has_declaration_alias_overlay(name)
                 || self.has_module_alias_candidate(name));
         if !self.is_module_top_scope() && !authoritative_alias {
             return;
+        }
+        if self.opts.sandbox {
+            if let Some(storage @ BindingStorage::OptionalImport { .. }) =
+                self.binding_storage(name)
+            {
+                let value = self
+                    .storage_optional_value_src(&storage, 0)
+                    .expect("optional import storage");
+                let value_tmp = self.fresh_tmp();
+                self.line(&format!("let {value_tmp} = {value};"));
+                self.line(&format!(
+                    "match {value_tmp} {{ ::std::option::Option::Some(__value @ ::bop::value::Value::Module(_)) => {{ ctx.module_aliases.insert(({module}.to_string(), {name}.to_string()), __value); }}, ::std::option::Option::Some(_) | ::std::option::Option::None => {{ ctx.module_aliases.remove(&({module}.to_string(), {name}.to_string())); }}, }}",
+                    module = rust_string_literal(&self.current_module),
+                    name = rust_string_literal(name),
+                ));
+                return;
+            }
         }
         let value = if self.is_local(name) {
             format!("{}.clone()", rust_user_ident(name))
@@ -1896,6 +1935,18 @@ impl Emitter {
                 )
             }
         }
+    }
+
+    fn optional_module_namespace_src(&self, name: &str, line: u32) -> Option<String> {
+        if !self.opts.sandbox || !self.has_module_alias_candidate(name) {
+            return None;
+        }
+        let storage = self.binding_storage(name)?;
+        let optional = self.storage_optional_value_src(&storage, line)?;
+        Some(format!(
+            "__bop_optional_alias_namespace({optional}, {}, {line})?",
+            rust_string_literal(name),
+        ))
     }
 
     fn storage_mut_option_sources(&self, storage: &BindingStorage) -> Vec<String> {
@@ -2778,6 +2829,9 @@ impl Emitter {
                                     function_site,
                                 },
                             );
+                        }
+                        if let Some(module_export) = entry.effective_module_exports.get(name) {
+                            self.bind_module_export(name, module_export);
                         }
                         continue;
                     }
@@ -5570,6 +5624,8 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         {
             let namespace_value = if self.is_local(namespace) {
                 rust_user_ident(namespace)
+            } else if let Some(value) = self.optional_module_namespace_src(namespace, line) {
+                value
             } else {
                 self.declaration_alias_namespace_src(namespace, line)
                     .unwrap_or(self.ident_value_src(namespace, line)?)
@@ -5679,6 +5735,8 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         {
             let namespace_value = if self.is_local(namespace) {
                 rust_user_ident(namespace)
+            } else if let Some(value) = self.optional_module_namespace_src(namespace, line) {
+                value
             } else {
                 self.declaration_alias_namespace_src(namespace, line)
                     .unwrap_or(self.ident_value_src(namespace, line)?)
@@ -8016,6 +8074,18 @@ fn __bop_validate_namespace_type(
             line,
         )),
     }
+}
+
+#[inline]
+fn __bop_optional_alias_namespace(
+    value: ::std::option::Option<::bop::value::Value>,
+    alias: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    value.ok_or_else(|| ::bop::error::BopError::runtime(
+        format!("`{}` isn't a module alias in scope", alias),
+        line,
+    ))
 }
 
 fn __bop_validate_named_fields(

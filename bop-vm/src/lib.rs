@@ -89,6 +89,11 @@
 #[cfg(feature = "no_std")]
 extern crate alloc;
 
+// The standard test harness remains available when `--all-features` selects
+// the library's `no_std` surface; make that test-only dependency explicit.
+#[cfg(all(test, feature = "no_std"))]
+extern crate std;
+
 pub mod chunk;
 pub mod compiler;
 pub mod disasm;

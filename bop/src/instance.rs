@@ -176,6 +176,8 @@ impl Drop for OperationGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "no_std")]
+    use alloc::string::ToString;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 

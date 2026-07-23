@@ -474,6 +474,24 @@ fn e2e_sandbox_dynamic_value_exports_follow_early_return_presence() {
     assert_eq!(present.status, Some(0), "generated program failed: {}", present.stderr);
     assert_eq!(present.stdout, "1");
 
+    let absent_alias = run_aot_with_modules_and_opts(
+        "use facade\nprint(1)",
+        "sandbox_early_return_module_alias_absent",
+        &[
+            ("dep", "struct Point { value }"),
+            ("wrapper", "return\nuse dep as api"),
+            ("facade", "use wrapper"),
+        ],
+        &opts,
+    );
+    assert_eq!(
+        absent_alias.status,
+        Some(0),
+        "generated program failed: {}",
+        absent_alias.stderr
+    );
+    assert_eq!(absent_alias.stdout, "1");
+
     for (source, name, modules) in [
         (
             "let load = fn() { use m.{after} }\nprint(try_call(load))",
@@ -500,6 +518,135 @@ fn e2e_sandbox_dynamic_value_exports_follow_early_return_presence() {
         assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
         assert!(run.stdout.contains("Err("), "unexpected output: {}", run.stdout);
     }
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_callable_shadows_preserve_module_alias_context() {
+    let source = r#"use types as t
+fn clobber() {
+    let t = 0
+    t = 1
+}
+fn clobber_import() {
+    use wrapper
+    t = 3
+}
+fn clobber_param(t) { t = 2 }
+fn probe(value) {
+    return match value {
+        t.Point { value: found } => found,
+        _ => 0,
+    }
+}
+let point = t.Point { value: 42 }
+clobber()
+clobber_import()
+clobber_param(0)
+print(probe(point))"#;
+    let run = run_aot_with_modules_and_opts(
+        source,
+        "sandbox_callable_shadow_preserves_module_alias_context",
+        &[
+            ("types", "struct Point { value }"),
+            ("wrapper", "use types as t"),
+        ],
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "42");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_reassigned_alias_patterns_read_authoritative_binding() {
+    let source = r#"use first as dep
+use second as other
+fn probe(value) {
+    return match value {
+        dep.Point { value: found } => found,
+        _ => 0,
+    }
+}
+fn select_second() { dep = other }
+let first_value = dep.Point { value: 1 }
+print(probe(first_value))
+select_second()
+let second_value = dep.Point { value: 2 }
+print(probe(second_value))"#;
+    let run = run_aot_with_modules_and_opts(
+        source,
+        "sandbox_reassigned_alias_patterns_read_authoritative_binding",
+        &[
+            ("first", "struct Point { value }"),
+            ("second", "struct Point { value }"),
+        ],
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "1\n2");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_local_flat_import_tracks_module_alias_presence() {
+    let opts = Options {
+        sandbox: true,
+        ..Options::default()
+    };
+    let dep = r#"struct Point { value }
+enum State { Item(value), Empty }
+fn make(value) { return Point { value: value } }"#;
+    let wrapper = "use dep as api";
+    let present = run_aot_with_modules_and_opts(
+        r#"fn build() {
+    use wrapper
+    let point = api.make(7)
+    let state = api.State::Item(point.value)
+    return match state {
+        api.State::Item(value) => value,
+        _ => 0,
+    }
+}
+fn maker() {
+    use wrapper
+    return fn() {
+        let point = api.Point { value: 11 }
+        return match point {
+            api.Point { value: found } => found,
+            _ => 0,
+        }
+    }
+}
+print(build())
+let saved = maker()
+print(saved())"#,
+        "sandbox_local_flat_import_module_alias_present",
+        &[("dep", dep), ("wrapper", wrapper)],
+        &opts,
+    );
+    assert_eq!(present.status, Some(0), "generated program failed: {}", present.stderr);
+    assert_eq!(present.stdout, "7\n11");
+
+    let absent = run_aot_with_modules_and_opts(
+        "fn build() { use wrapper\nreturn api.Point { value: 1 } }\nprint(try_call(build))",
+        "sandbox_local_flat_import_module_alias_absent",
+        &[("dep", dep), ("wrapper", "return\nuse dep as api")],
+        &opts,
+    );
+    assert_eq!(absent.status, Some(0), "generated program failed: {}", absent.stderr);
+    assert!(absent.stdout.contains("Err("), "unexpected output: {}", absent.stdout);
+    assert!(
+        absent.stdout.contains("isn't a module alias in scope"),
+        "unexpected output: {}",
+        absent.stdout
+    );
 }
 
 #[test]
