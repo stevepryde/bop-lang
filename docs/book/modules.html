@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-44072e71.js";
+            window.path_to_searchindex_js = "searchindex-06d3552d.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4a0c6a8e.js"></script>
+        <script src="toc-3658d16e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -273,7 +273,7 @@ print(label(o.Color::Red))   // "other-red"
 </code></pre>
 <p>This is Bop’s answer to the “same-named type, different shape, in different modules” problem. No renames required.</p>
 <h2 id="re-exports-are-transitive"><a class="header" href="#re-exports-are-transitive">Re-exports are transitive</a></h2>
-<p>A module’s effective exports include everything it <code>use</code>s from other modules (minus privacy filtering). If <code>a</code> does <code>use b</code> and <code>b</code> declares <code>fn foo()</code>, then <code>use a</code> in the top-level program makes <code>foo</code> visible too. The same applies to types — importing <code>a</code> brings <code>b</code>’s public types in scope.</p>
+<p>A module re-exports the bindings that its own <code>use</code> statements introduce. If <code>a</code> does <code>use b</code> and <code>b</code> declares <code>fn foo()</code>, then <code>use a</code> in the top-level program makes <code>foo</code> visible too. Selective imports re-export only their selected names, including a private name selected explicitly. Aliased imports re-export only the alias: if <code>a</code> does <code>use b as dep</code>, an importer of <code>a</code> can reach <code>dep</code>, but does not receive <code>b</code>’s exports as bare names. The same shape rules apply to types, and glob privacy filtering is applied at every module boundary.</p>
 <h2 id="builtin-types"><a class="header" href="#builtin-types">Builtin types</a></h2>
 <p><code>Result</code> and <code>RuntimeError</code> are engine built-ins. They’re always in scope — you don’t need any <code>use</code> to write <code>Result::Ok(v)</code> or to match on <code>RuntimeError { message, line }</code>. The combinators (<code>unwrap</code>, <code>map</code>, <code>and_then</code>, …) live as <a href="reference/methods.html#result-methods--result">methods on the <code>Result</code> type</a>, also always available. See <a href="errors.html">Error Handling</a>.</p>
 <h2 id="cycles"><a class="header" href="#cycles">Cycles</a></h2>
@@ -327,22 +327,6 @@ fn describe(c) {
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

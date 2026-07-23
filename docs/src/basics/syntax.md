@@ -86,7 +86,7 @@ Spaces and tabs are insignificant — use whatever indentation style you like. O
 These words are reserved and can't be used as identifiers:
 
 ```
-let const fn return
+let const pub fn return
 if else while for in repeat break continue
 use as struct enum match try
 true false none

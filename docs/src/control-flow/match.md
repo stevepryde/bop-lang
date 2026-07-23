@@ -172,3 +172,10 @@ let _ = match Color::Red {
 A wildcard or a bare-name catch-all (`_` or `other`) marks the match as exhaustive. Guards don't count toward coverage — a guarded arm covers only the guarded subset, so a partially-guarded match still needs a catch-all.
 
 The checker follows `use` statements when the embedder supplies a module resolver, so imported enums aren't opaque — missing-variant warnings fire on them too.
+
+Exhaustiveness analysis follows the same source-ordered lexical declaration
+model as execution. A type is not visible before its declaration, declarations
+inside one branch or callable do not leak into siblings, and shadowed or
+ambiguous type/module bindings suppress the advisory instead of risking a
+false warning. This check is a warning only; a `match` with no matching arm
+still raises a runtime error.

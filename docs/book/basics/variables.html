@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-44072e71.js";
+            window.path_to_searchindex_js = "../searchindex-06d3552d.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-4a0c6a8e.js"></script>
+        <script src="../toc-3658d16e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -200,6 +200,14 @@ const MAX_SIZE = 100
 <pre><code class="language-bop">const MAX_SIZE = 100
 MAX_SIZE = 200      // Error: can't reassign a constant
 </code></pre>
+<p>Index and field assignments respect the same rule. An assignment cannot reach
+through a constant array, dict, or struct binding to change part of its value:</p>
+<pre><code class="language-bop">const ORIGIN = [0, 0]
+ORIGIN[0] = 10      // Error: can't reassign `ORIGIN` — it's a constant
+
+const OPTIONS = {"retries": 3}
+OPTIONS["retries"] += 1   // Same error
+</code></pre>
 <p>Constants must be <strong>all-caps</strong> (with digits / underscores allowed). <code>const Pi = 3.14</code> is rejected: the parser will suggest <code>const PI = 3.14</code> instead.</p>
 <h2 id="reassignment"><a class="header" href="#reassignment">Reassignment</a></h2>
 <p>After declaration, reassign with just <code>=</code>:</p>
@@ -253,7 +261,8 @@ if true {
 print(x)         // 1 — outer x is unchanged
 </code></pre>
 <h2 id="copying-and-passing-values"><a class="header" href="#copying-and-passing-values">Copying and passing values</a></h2>
-<p>Every value in Bop is a <strong>copy</strong>. When you assign a variable, pass an argument to a function, or return a value, you get an independent copy — even for arrays, dicts, and structs. Changing the copy never affects the original.</p>
+<p>Arrays, dicts, structs, and enum variants have <strong>value semantics</strong>. When you assign one, pass it to a function, or return it, the destination behaves like an independent copy. Changing either value never affects the other.</p>
+<p>Bop implements these copies with copy-on-write storage: the operation itself is constant-time and shares the existing container safely. The backing storage is copied only if one of the values is later mutated. This is an implementation detail — programs observe the same independent values without paying for an eager deep copy.</p>
 <h3 id="assignment-copies"><a class="header" href="#assignment-copies">Assignment copies</a></h3>
 <pre><code class="language-bop">let a = [1, 2, 3]
 let b = a           // b is a separate copy
@@ -282,7 +291,7 @@ let original = [1, 2, 3]
 original = add_item(original, 99)
 print(original)      // [1, 2, 3, 99]
 </code></pre>
-<p>This applies to every value type — numbers, strings, bools, arrays, dicts, structs, enum variants. Closures (<code>Value::Fn</code>) and modules (<code>Value::Module</code>) are reference-counted, so passing one of those around is cheap and the shared state is visible from both handles.</p>
+<p>The same ordinary value behavior applies to numbers, strings, and bools. Closures and modules are shared handles, while iterators intentionally share their cursor: advancing one iterator handle advances its aliases too.</p>
 <h2 id="dynamic-typing"><a class="header" href="#dynamic-typing">Dynamic typing</a></h2>
 <p>Variables can hold any type. You can even change the type of a variable by reassigning it:</p>
 <pre><code class="language-bop">let val = 42
@@ -328,22 +337,6 @@ print(val.type())   // "string"
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

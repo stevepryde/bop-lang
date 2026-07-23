@@ -12,6 +12,9 @@ Hand your users or your AI a real programming language at runtime, without shipp
 
 - **Lexer + parser** producing a typed AST
 - **Tree-walking interpreter** (`bop::run`) — simplest runtime, works everywhere
+- **Persistent interpreter** (`bop::BopInstance`) — load once, then call
+  explicit `pub fn` entries while globals, modules, callbacks, and RNG state
+  remain live
 - **`BopHost` trait** — the only thing embedders need to implement to wire Bop into their Rust app
 - **`Value` type + builtin operators** — the shared runtime surface every Bop engine uses
 - **Resource limits** (`BopLimits`) — step count and memory caps for safe sandboxing
@@ -61,6 +64,25 @@ fn main() {
     run(r#"print(greet())"#, &mut host, &limits).unwrap();
 }
 ```
+
+For a stateful plugin rather than a one-shot script, declare root entry points
+with `pub fn`, then load and call an instance:
+
+```rust
+use bop::{BopInstance, BopLimits, Value};
+
+let mut instance = BopInstance::load(
+    "let total = 0\npub fn add(n) { total += n; return total }",
+    &mut host,
+    &BopLimits::standard(),
+)?;
+let value = instance.call("add", &[Value::Int(3)], &mut host)?;
+```
+
+`entry_points()` exposes each public entry's name and arity, while
+`call_value()` invokes a callback returned by that same instance. See the
+[stateful embedding guide](https://stevepryde.github.io/bop-lang/embedding/instances.html)
+for lifecycle, affinity, limits, and error-state behavior.
 
 Host arguments support borrowed or owned typed extraction through
 `Value::to_rust` (`&str`, integers, `Vec<T>`, `Option<T>`, `Result<T, E>`, and

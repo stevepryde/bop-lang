@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-44072e71.js";
+            window.path_to_searchindex_js = "searchindex-06d3552d.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4a0c6a8e.js"></script>
+        <script src="toc-3658d16e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -226,16 +226,20 @@ fn main() {
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Engine</th><th>Entry point</th><th>When it’s best</th></tr>
+<tr><th>Engine</th><th>One-shot entry point</th><th>Persistent entry point</th><th>When it’s best</th></tr>
 </thead>
 <tbody>
-<tr><td>Tree-walker</td><td><code>bop::run(src, host, limits)</code></td><td>Lowest start-up cost. Best for one-off scripts, REPL, small inputs, no_std / wasm.</td></tr>
-<tr><td>Bytecode VM</td><td><code>bop_vm::run(src, host, limits)</code></td><td>2–3× faster than the walker on hot loops. Same program, no compilation to disk.</td></tr>
-<tr><td>AOT transpiler</td><td><code>bop_compile::transpile(src, opts)</code> → <code>cargo build</code></td><td>Bop → Rust source, compiled to a native binary. Maximum throughput, at the cost of a <code>cargo build</code> step.</td></tr>
+<tr><td>Tree-walker</td><td><code>bop::run(src, host, limits)</code></td><td><code>bop::BopInstance</code></td><td>Lowest start-up cost. Best for one-off scripts, REPL, small inputs, no_std / wasm.</td></tr>
+<tr><td>Bytecode VM</td><td><code>bop_vm::run(src, host, limits)</code></td><td><code>bop_vm::BopInstance</code></td><td>2–3× faster than the walker on hot loops. Same program, no compilation to disk.</td></tr>
+<tr><td>AOT transpiler</td><td><code>bop_compile::transpile(src, opts)</code> → <code>cargo build</code></td><td>Generated <code>BopInstance</code> in sandbox mode</td><td>Bop → Rust source, compiled to a native binary. Maximum throughput, at the cost of a <code>cargo build</code> step.</td></tr>
 </tbody>
 </table>
 </div>
 <p>All three obey the same <code>BopLimits</code> and surface errors as <code>BopError</code> — the engine choice is an implementation detail from the host’s perspective.</p>
+<p>Use the one-shot functions when a program should start from scratch on every
+run. For plugin-style programs whose globals, imports, callbacks, types, and
+random-number state must survive host calls, see <a href="embedding/instances.html">Stateful
+instances</a>.</p>
 <h2 id="the-bophost-trait"><a class="header" href="#the-bophost-trait">The <code>BopHost</code> trait</a></h2>
 <p>The <code>BopHost</code> trait is the integration point between your application and Bop:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -301,6 +305,63 @@ impl BopHost for MyHost {
 }
 <span class="boring">}</span></code></pre>
 <p>Bop scripts now call <code>square(5)</code> as if it were built-in.</p>
+<h3 id="typed-value-conversions"><a class="header" href="#typed-value-conversions">Typed <code>Value</code> conversions</a></h3>
+<p>Use <code>IntoValue</code> and <code>Value::to_rust</code> at the host boundary instead of manually
+matching every nested array or dictionary. Extraction borrows the input, so
+targets such as <code>&amp;str</code> do not copy; owned targets such as <code>String</code>, <code>Vec&lt;T&gt;</code>,
+<code>Option&lt;T&gt;</code>, <code>Result&lt;T, E&gt;</code>, and <code>BTreeMap&lt;String, T&gt;</code> are supported too.</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop::{BopError, BopHost, IntoValue, Value};
+
+struct MathHost;
+
+impl BopHost for MathHost {
+    fn call(
+        &amp;mut self,
+        name: &amp;str,
+        args: &amp;[Value],
+        line: u32,
+    ) -&gt; Option&lt;Result&lt;Value, BopError&gt;&gt; {
+        if name != "sum_values" {
+            return None;
+        }
+        Some((|| {
+            let values: Vec&lt;i64&gt; = args
+                .first()
+                .ok_or_else(|| BopError::runtime("missing array", line))?
+                .to_rust()
+                .map_err(|error| BopError::runtime(error.to_string(), line))?;
+            values
+                .into_iter()
+                .sum::&lt;i64&gt;()
+                .into_value()
+                .map_err(|error| BopError::runtime(error.to_string(), line))
+        })())
+    }
+}
+<span class="boring">}</span></code></pre>
+<p>Infallible scalars also implement standard <code>From</code>. Recursive values use the
+fallible trait because Bop enforces a maximum safe value depth. Integer
+conversion is strict (<code>Int</code> is not silently accepted as <code>Number</code>, or vice
+versa), and nested errors include paths such as <code>$[0]["stats"]["hp"]</code>.</p>
+<p>For literals, <code>bop_value!</code> provides JSON-like array/dict syntax and returns a
+<code>Result</code> for the same reason:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bop::bop_value;
+
+let request = bop_value!({
+    "name": "Ada",
+    "scores": [10, 20, 30],
+    "nickname": none,
+})?;
+<span class="boring">Ok::&lt;(), bop::ValueConversionError&gt;(())
+</span><span class="boring">}</span></code></pre>
+<p><code>Result&lt;T, E&gt;</code> maps to the engine’s canonical built-in <code>Result::Ok(value)</code> or
+<code>Result::Err(error)</code>. Deterministic dictionary conversion deliberately uses
+<code>BTreeMap</code>; no <code>std::collections::HashMap</code> implementation is provided, keeping
+the API available under <code>no_std</code> and its output order stable.</p>
 <h3 id="on_print--capturing-output"><a class="header" href="#on_print--capturing-output"><code>on_print</code> — Capturing output</a></h3>
 <p>Override <code>on_print</code> to redirect <code>print()</code> output to a buffer, log, UI widget — anywhere that isn’t stdout:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -473,6 +534,9 @@ assert!(session.get("x").is_some());
 assert_eq!(session.binding_names(), vec!["x".to_string(), "y".to_string()]);
 <span class="boring">}</span></code></pre>
 <p>Each <code>eval</code> still respects the <code>BopLimits</code> you pass — useful if you want to allow a higher step budget per cell than for a batch-run program. The built-in <code>bop</code> CLI’s <code>repl</code> subcommand is the canonical consumer: it adds rustyline, multi-line input, <code>:help</code> / <code>:vars</code> / <code>:reset</code> / <code>:quit</code> meta-commands, tab completion, and a persistent history file. See <a href="repl.html">REPL</a> for the user-facing view.</p>
+<p><code>ReplSession</code> accepts and evaluates new source over time. If the source is
+loaded once and the host should call an explicit, stable set of functions,
+prefer <a href="embedding/instances.html"><code>BopInstance</code></a>.</p>
 <h2 id="error-rendering"><a class="header" href="#error-rendering">Error rendering</a></h2>
 <p><code>BopError::render(source)</code> produces a terminal-friendly error with a source snippet and a <code>^</code> carat under the offending column (when the error carries column info). Parse errors always have columns; runtime errors do when the failing expression was parsed from source.</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -598,6 +662,9 @@ fn main() {
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
+                            <a rel="next prefetch" href="embedding/instances.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
 
                         <div style="clear: both"></div>
                     </nav>
@@ -609,6 +676,9 @@ fn main() {
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
+                    <a rel="next prefetch" href="embedding/instances.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
             </nav>
 
         </div>
@@ -619,22 +689,6 @@ fn main() {
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

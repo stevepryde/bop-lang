@@ -11,17 +11,20 @@ A small, dynamically-typed, **embeddable** programming language for Rust hosts �
 - **Embedded-first.** One crate (`bop-lang`), one trait (`BopHost`), no runtime dependencies. You wire up the functions you want Bop to reach; Bop can't touch anything else.
 - **Sandboxed by default.** No filesystem, network, clock, or ambient I/O. `BopLimits` caps three things the language itself can't escape: steps executed, bytes allocated, and fn-call depth. A runaway script halts cleanly with a diagnostic, not a hung process.
 - **Three engines, one language.** Walker, bytecode VM, or AOT-to-Rust transpiler — same parser, same semantics, same error shapes. Switch engines with a one-line change.
+- **One-shot or persistent.** Run isolated scripts, or load a `BopInstance`
+  whose `pub fn` entries, globals, modules, callbacks, types, methods, and RNG
+  state remain live across host calls.
 - **`no_std` + WASM.** Core crate builds clean for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade.
 - **Small, stable grammar.** Functions, closures, arrays, dicts, structs, enums, pattern matching, string interpolation, modules, `Result` / `Iter` built-ins. Deliberately small — easy to teach, easy for tooling to target.
 - **Helpful errors.** Parse and runtime errors include the source snippet, a carat under the offending column, and `hint:` suggestions (`"I don't know what 'pritn' is — did you mean 'print'?"`).
 
 ## Three engines, one language
 
-| engine | crate | when to use it |
-|---|---|---|
-| Tree-walker | [`bop-lang`](https://crates.io/crates/bop-lang) | simplest embedding, smallest binary, best diagnostics |
-| Bytecode VM | [`bop-vm`](https://crates.io/crates/bop-vm) | **2–3× faster** than the walker, drop-in API, still zero deps |
-| AOT transpile | [`bop-compile`](https://crates.io/crates/bop-compile) | compile a script to a native binary at hand-written-Rust speed |
+| engine | crate | persistent API | when to use it |
+|---|---|---|---|
+| Tree-walker | [`bop-lang`](https://crates.io/crates/bop-lang) | `bop::BopInstance` | simplest embedding, smallest binary, best diagnostics |
+| Bytecode VM | [`bop-vm`](https://crates.io/crates/bop-vm) | `bop_vm::BopInstance` | **2–3× faster** than the walker, drop-in API, still zero deps |
+| AOT transpile | [`bop-compile`](https://crates.io/crates/bop-compile) | generated `BopInstance` in sandbox mode | compile a script to native Rust speed |
 
 All three share the same parser, `BopHost` trait, `Value` type, and semantics. A three-way differential test suite pins them to byte-for-byte output agreement.
 
@@ -99,6 +102,23 @@ fn main() {
     bop_vm::run("print(1 + 2)", &mut host, &BopLimits::standard()).unwrap();
 }
 ```
+
+Stateful plugin embedding uses explicit root `pub fn` entries:
+
+```rust
+use bop::{BopInstance, BopLimits, Value};
+
+let mut instance = BopInstance::load(
+    "let count = 0\npub fn next() { count += 1; return count }",
+    &mut host,
+    &BopLimits::standard(),
+)?;
+let value = instance.call("next", &[], &mut host)?;
+assert_eq!(value.inspect(), "1");
+```
+
+See [Stateful instances](https://stevepryde.github.io/bop-lang/embedding/instances.html)
+for the walker, VM, and sandboxed AOT APIs.
 
 Custom sandboxed host — Bop can only reach the fns you expose:
 

@@ -64,6 +64,32 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   range and Bop type distinctions, enforce tracked-constructor depth limits,
   recognize only the canonical built-in `Result` shape, and identify a nested
   failure with expected/actual descriptions plus a root-to-leaf path.
+- **RUN-015 — Stateful embedding.** Walker, VM, and sandboxed AOT embeddings
+  must provide equivalent persistent-instance APIs. Loading runs the top level
+  once; later host calls retain authoritative root/module bindings, imports,
+  functions, callbacks, types, methods, and RNG state. One-shot APIs remain
+  source-compatible and continue to start from fresh state.
+- **RUN-016 — Explicit instance ABI.** Only final executed direct-root `pub fn`
+  declarations are host-callable by name. Entry metadata must report final
+  declaration order and arity; later declarations replace earlier ABI sites,
+  and a later private declaration removes that name. Ordinary language lookup
+  must not redirect the dedicated host entry table.
+- **RUN-017 — Instance isolation and calls.** An instance borrows a host for one
+  operation and never retains it. Function values are callable only by the
+  instance that created them; same-instance re-entry is rejected, while a host
+  may nest a different instance without crossing state or accounting.
+- **RUN-018 — Persistent limits and failure state.** Step and call-depth state
+  reset for each instance operation, while tracked memory belongs to the
+  instance across calls. Errors unwind transient frames but do not roll back
+  completed mutations. Step/depth failures leave an instance reusable; memory
+  exhaustion remains fatal while retained charged storage is over budget.
+- **RUN-019 — Executed declarations.** Struct, enum, and method declarations
+  take effect when execution reaches their source site. Dead sites have no
+  runtime effect, nested type declarations obey lexical scope, and the last
+  executed method declaration determines dispatch body and arity. Advisory
+  match exhaustiveness follows source-ordered lexical type bindings and
+  suppresses diagnostics when identity or control-flow provenance is
+  ambiguous.
 
 ## Acceptance criteria
 
@@ -101,6 +127,21 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   canonical built-in `Result` identity, nested error paths, macro hygiene,
   depth-limit failure, and a real `BopHost` call. Standard, `no_std`, and WASM
   checks compile the same conversion surface.
+- **AC-RUN-011:** Walker, VM, and sandboxed native AOT tests load the same
+  public-entry program, report identical entry names/arities, preserve state
+  across named and callback calls, and reject wrong-instance functions and
+  same-instance re-entry with equivalent diagnostics.
+- **AC-RUN-012:** Instance tests prove that hosts are borrowed per operation,
+  different instances can nest safely, step/call-depth budgets restart,
+  memory accounts remain independent and persistent, transient frames unwind,
+  and mutations before ordinary or fatal failures remain visible.
+- **AC-RUN-013:** Parser and cross-engine tests cover root-only `pub fn`, final
+  public/private redeclaration rules, top-level early return, and immunity of
+  the public entry table to ordinary-name reassignment.
+- **AC-RUN-014:** Cross-engine declaration tests cover direct, branch, loop,
+  function, lambda, and dead-code type/method sites, while checker tests cover
+  source order, lexical frames, imported identities, shadowing, and ambiguous
+  control flow without false-positive exhaustiveness warnings.
 
 ## Design notes
 
