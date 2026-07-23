@@ -220,9 +220,53 @@ fn non_sandbox_lifted_fns_resolve_bare_imported_calls_from_context() {
     contains_all(
         &out,
         &[
-            "__bop_import_binding(ctx, \"<root>\", \"increment\"",
-            "ctx.bindings.get(&(\"<root>\".to_string(), \"increment\".to_string())).cloned()",
+            "__bop_import_binding_value(ctx, \"<root>\", \"increment\"",
+            "__bop_binding_value(ctx, \"<root>\", \"increment\")",
             "__bop_call_named_value(ctx, __callee",
+        ],
+    );
+}
+
+#[test]
+fn non_sandbox_named_functions_claim_first_win_before_flat_imports() {
+    let out = compile_with_modules(
+        "fn pick() { return 11 }\nuse b\nfn read() { return pick() }\nprint(read())",
+        &[("b", "fn pick() { return 22 }")],
+    )
+    .expect("transpile first-win named function");
+    let claim = out
+        .find("__bop_claim_binding(ctx, \"<root>\", \"pick\")")
+        .expect("root function claim");
+    let import = out
+        .find("__bop_import_binding_value(ctx, \"<root>\", \"pick\"")
+        .expect("conflicting flat import");
+    assert!(claim < import, "function claim must precede the import:\n{out}");
+    contains_all(
+        &out,
+        &[
+            "__bop_has_binding(ctx, module_path, name)",
+            "__bop_binding_value(ctx, \"<root>\", \"pick\")",
+        ],
+    );
+}
+
+#[test]
+fn flat_value_imports_emit_origin_aliases_through_facades() {
+    let out = compile_with_modules(
+        "use facade\nfn read() { return count }\nprint(read())",
+        &[
+            ("facade", "use leaf"),
+            ("leaf", "let count = 0\nfn bump() { count += 1; return count }"),
+        ],
+    )
+    .expect("transpile live facade value");
+    contains_all(
+        &out,
+        &[
+            "__bop_import_binding_alias(ctx, \"facade\", \"count\", \"leaf\", \"count\")",
+            "__bop_import_binding_alias(ctx, \"<root>\", \"count\", \"facade\", \"count\")",
+            "__bop_resolve_binding_key(ctx, module_path, name)",
+            "__bop_binding_mut_option(ctx, \"leaf\", \"count\")",
         ],
     );
 }
@@ -233,7 +277,7 @@ fn compound_assign_routes_through_ops() {
     contains_all(
         &out,
         &[
-            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"x\".to_string()))",
+            "__bop_binding_mut_option(ctx, \"<root>\", \"x\")",
             "::bop::ops::add(&",
         ],
     );
@@ -561,7 +605,7 @@ fn method_call_on_ident_emits_back_assign_for_mutating() {
             "__bop_call_method(ctx, &",
             "\"push\"",
             "if let Some(__new_obj) = __mutated",
-            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"a\".to_string()))",
+            "__bop_binding_mut_option(ctx, \"<root>\", \"a\")",
             "= __new_obj",
         ],
     );
@@ -620,7 +664,7 @@ fn index_assign_routes_through_ops_index_set() {
     contains_all(
         &out,
         &[
-            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"a\".to_string()))",
+            "__bop_binding_mut_option(ctx, \"<root>\", \"a\")",
             "::bop::ops::index_set(",
         ],
     );
@@ -632,7 +676,7 @@ fn compound_index_assign_reads_then_writes() {
     contains_all(
         &out,
         &[
-            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"a\".to_string()))",
+            "__bop_binding_mut_option(ctx, \"<root>\", \"a\")",
             "::bop::ops::index_get(",
             "::bop::ops::add(",
             "::bop::ops::index_set(",
@@ -685,7 +729,7 @@ fn const_index_reads_in_mutable_targets_still_emit_aot() {
         &out,
         &[
             "__bop_read_binding(ctx, \"<root>\", \"INDEX\", 3)?",
-            "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"values\".to_string()))",
+            "__bop_binding_mut_option(ctx, \"<root>\", \"values\")",
             "::bop::ops::index_get(",
             "::bop::ops::index_set(",
         ],

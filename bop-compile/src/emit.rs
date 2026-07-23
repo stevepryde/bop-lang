@@ -1579,10 +1579,14 @@ impl Emitter {
             } else if self.is_local(alias) {
                 format!("::std::option::Option::Some(&{})", rust_user_ident(alias))
             } else if self.opts.sandbox {
-                format!(
-                    "ctx.bindings.get(&({module}.to_string(), {alias}.to_string()))",
+                let snapshot = declaration_alias_pattern_snapshot_ident(alias);
+                alias_prelude.push_str(&format!(
+                    "            let {snapshot} = __bop_binding_value(ctx, {module}, {alias});\n",
                     module = rust_string_literal(&self.current_module),
                     alias = rust_string_literal(alias),
+                ));
+                format!(
+                    "{snapshot}.as_ref()",
                 )
             } else if let Some(overlay) = self.declaration_alias_overlay(alias) {
                 let snapshot = declaration_alias_pattern_snapshot_ident(alias);
@@ -1889,7 +1893,7 @@ impl Emitter {
         match binding {
             OptionalImportBinding::Local { value, .. } => format!("{value}.clone()"),
             OptionalImportBinding::Persistent => format!(
-                "ctx.bindings.get(&({}.to_string(), {}.to_string())).cloned()",
+                "__bop_binding_value(ctx, {}, {})",
                 rust_string_literal(&self.current_module),
                 rust_string_literal(name),
             ),
@@ -1957,7 +1961,7 @@ impl Emitter {
                 vec![format!("::std::option::Option::Some(&mut {ident})")]
             }
             BindingStorage::Persistent { module, name } => vec![format!(
-                "ctx.bindings.get_mut(&({}.to_string(), {}.to_string()))",
+                "__bop_binding_mut_option(ctx, {}, {})",
                 rust_string_literal(module),
                 rust_string_literal(name),
             )],
@@ -1974,7 +1978,7 @@ impl Emitter {
                             format!("{value}.as_mut()")
                         }
                         OptionalImportBinding::Persistent => format!(
-                            "ctx.bindings.get_mut(&({}.to_string(), {}.to_string()))",
+                            "__bop_binding_mut_option(ctx, {}, {})",
                             rust_string_literal(module),
                             rust_string_literal(name),
                         ),
@@ -2785,15 +2789,26 @@ impl Emitter {
                     if module_top_scope {
                         if self.opts.sandbox {
                             self.line(&format!(
-                                "__bop_import_export(ctx, {}, {}, {tmp}.{ident}.clone(), {line})?;",
+                                "__bop_import_export(ctx, {}, {}, {}, {}, {tmp}.{ident}.clone(), {line})?;",
                                 rust_string_literal(&self.current_module),
+                                rust_string_literal(name),
+                                rust_string_literal(path),
                                 rust_string_literal(name),
                                 ident = rust_user_ident(name),
                             ));
                             self.bind_optional_import(name, OptionalImportBinding::Persistent);
+                        } else if entry.effective_value_exports.contains(name) {
+                            self.line(&format!(
+                                "__bop_import_binding_alias(ctx, {}, {}, {}, {});",
+                                rust_string_literal(&self.current_module),
+                                rust_string_literal(name),
+                                rust_string_literal(path),
+                                rust_string_literal(name),
+                            ));
+                            self.bind_persistent(name);
                         } else {
                             self.line(&format!(
-                                "__bop_import_binding(ctx, {}, {}, {tmp}.{ident}.clone());",
+                                "__bop_import_binding_value(ctx, {}, {}, {tmp}.{ident}.clone());",
                                 rust_string_literal(&self.current_module),
                                 rust_string_literal(name),
                                 ident = rust_user_ident(name),
@@ -2975,7 +2990,23 @@ impl Emitter {
             rust_string_literal(name),
         ));
         self.line(&format!(
+            "let __saved_binding_origins: ::std::vec::Vec<_> = ctx.binding_origins.iter().filter(|((module, _), _)| module == {}).map(|(key, origin)| (key.clone(), origin.clone())).collect();",
+            rust_string_literal(name),
+        ));
+        self.line(&format!(
+            "let __saved_binding_claims: ::std::vec::Vec<_> = ctx.binding_claims.iter().filter(|(module, _)| module == {}).cloned().collect();",
+            rust_string_literal(name),
+        ));
+        self.line(&format!(
             "ctx.bindings.retain(|(module, _), _| module != {});",
+            rust_string_literal(name),
+        ));
+        self.line(&format!(
+            "ctx.binding_origins.retain(|(module, _), _| module != {});",
+            rust_string_literal(name),
+        ));
+        self.line(&format!(
+            "ctx.binding_claims.retain(|(module, _)| module != {});",
             rust_string_literal(name),
         ));
         self.line(&format!(
@@ -3030,6 +3061,12 @@ impl Emitter {
                     let site = direct_function_sites[direct_function_index];
                     direct_function_index += 1;
                     self.line(&format!("__bop_activate_function(ctx, {site});"));
+                } else if let StmtKind::FnDecl { name, .. } = &stmt.kind {
+                    self.line(&format!(
+                        "__bop_claim_binding(ctx, {}, {});",
+                        rust_string_literal(&self.current_module),
+                        rust_string_literal(name),
+                    ));
                 }
                 continue;
             }
@@ -3060,7 +3097,7 @@ impl Emitter {
             if self.opts.sandbox {
                 writeln!(
                     self.out,
-                    "    {ident}: match ctx.bindings.get(&({module}.to_string(), {name}.to_string())).cloned() {{ ::std::option::Option::Some(__value) => ::std::option::Option::Some(__BopExport::Value(__value)), ::std::option::Option::None => ctx.active_function_sites.get(&({module}.to_string(), {name}.to_string())).or_else(|| ctx.module_imported_function_sites.get(&({module}.to_string(), {name}.to_string()))).copied().map(__BopExport::Function) }},",
+                    "    {ident}: match __bop_binding_value(ctx, {module}, {name}) {{ ::std::option::Option::Some(__value) => ::std::option::Option::Some(__BopExport::Value(__value)), ::std::option::Option::None => ctx.active_function_sites.get(&({module}.to_string(), {name}.to_string())).or_else(|| ctx.module_imported_function_sites.get(&({module}.to_string(), {name}.to_string()))).copied().map(__BopExport::Function) }},",
                     ident = rust_user_ident(export),
                     module = rust_string_literal(name),
                     name = rust_string_literal(export),
@@ -3071,8 +3108,10 @@ impl Emitter {
             {
                 writeln!(
                     self.out,
-                    "    {ident}: {wrapper}(0)?,",
+                    "    {ident}: match __bop_binding_value(ctx, {module}, {name}) {{ ::std::option::Option::Some(__value) => __value, ::std::option::Option::None => {wrapper}(0)?, }},",
                     ident = rust_user_ident(export),
+                    module = rust_string_literal(name),
+                    name = rust_string_literal(export),
                     wrapper = self.wrapper_fn_name(export),
                 )
                 .unwrap();
@@ -3136,6 +3175,16 @@ impl Emitter {
             rust_string_literal(name),
         ));
         self.line("ctx.bindings.extend(__saved_value_bindings);");
+        self.line(&format!(
+            "ctx.binding_origins.retain(|(module, _), _| module != {});",
+            rust_string_literal(name),
+        ));
+        self.line("ctx.binding_origins.extend(__saved_binding_origins);");
+        self.line(&format!(
+            "ctx.binding_claims.retain(|(module, _)| module != {});",
+            rust_string_literal(name),
+        ));
+        self.line("ctx.binding_claims.extend(__saved_binding_claims);");
         self.line(&format!(
             "ctx.module_cache.remove({});",
             rust_string_literal(name)
@@ -3981,9 +4030,7 @@ impl Emitter {
     alias: &str,
     line: u32,
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
-    ctx.bindings
-        .get(&(module_path.to_string(), alias.to_string()))
-        .cloned()
+    __bop_binding_value(ctx, module_path, alias)
         .ok_or_else(|| ::bop::error::BopError::runtime(
             format!("`{}` isn't a module alias in scope", alias),
             line,
@@ -4029,12 +4076,12 @@ fn __bop_import_function_site(
 ) -> Result<(), ::bop::error::BopError> {
     if let ::std::option::Option::Some(site_id) = site_id {
         let key = (module_path.to_string(), name.to_string());
-        if !ctx.bindings.contains_key(&key)
+        if !__bop_has_binding(ctx, module_path, name)
             && !ctx.active_function_sites.contains_key(&key)
             && !ctx.module_imported_function_sites.contains_key(&key)
         {
             let value = __bop_function_site_value(ctx, site_id, line)?;
-            ctx.bindings.insert(key.clone(), value);
+            __bop_import_binding_value(ctx, module_path, name, value);
             ctx.module_imported_function_sites.insert(key, site_id);
         }
     }
@@ -4045,23 +4092,31 @@ fn __bop_import_export(
     ctx: &mut Ctx<'_>,
     module_path: &str,
     name: &str,
+    origin_module_path: &str,
+    origin_name: &str,
     export: ::std::option::Option<__BopExport>,
     line: u32,
 ) -> Result<(), ::bop::error::BopError> {
     let key = (module_path.to_string(), name.to_string());
-    if ctx.bindings.contains_key(&key)
+    if __bop_has_binding(ctx, module_path, name)
         || ctx.active_function_sites.contains_key(&key)
         || ctx.module_imported_function_sites.contains_key(&key)
     {
         return Ok(());
     }
     match export {
-        ::std::option::Option::Some(__BopExport::Value(value)) => {
-            ctx.bindings.insert(key, value);
+        ::std::option::Option::Some(__BopExport::Value(_)) => {
+            __bop_import_binding_alias(
+                ctx,
+                module_path,
+                name,
+                origin_module_path,
+                origin_name,
+            );
         }
         ::std::option::Option::Some(__BopExport::Function(site_id)) => {
             let value = __bop_function_site_value(ctx, site_id, line)?;
-            ctx.bindings.insert(key.clone(), value);
+            __bop_import_binding_value(ctx, module_path, name, value);
             ctx.module_imported_function_sites.insert(key, site_id);
         }
         ::std::option::Option::None => {}
@@ -4099,9 +4154,8 @@ fn __bop_call_active_function(
     args: ::std::vec::Vec<::bop::value::Value>,
     line: u32,
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
-    if let ::std::option::Option::Some(value) = ctx.bindings
-        .get(&(module_path.to_string(), name.to_string()))
-        .cloned()
+    if let ::std::option::Option::Some(value) =
+        __bop_binding_value(ctx, module_path, name)
     {
         return __bop_call_named_value(ctx, value, args, name, line);
     }
@@ -4115,10 +4169,10 @@ fn __bop_active_function_value(
     name: &str,
     line: u32,
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
-    if let ::std::option::Option::Some(value) = ctx.bindings
-        .get(&(module_path.to_string(), name.to_string()))
+    if let ::std::option::Option::Some(value) =
+        __bop_binding_value(ctx, module_path, name)
     {
-        return Ok(value.clone());
+        return Ok(value);
     }
     let site_id = ctx.active_function_sites
         .get(&(module_path.to_string(), name.to_string()))
@@ -4321,6 +4375,12 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     let site = direct_function_sites[direct_function_index];
                     direct_function_index += 1;
                     self.line(&format!("__bop_activate_function(ctx, {site});"));
+                } else if let StmtKind::FnDecl { name, .. } = &stmt.kind {
+                    self.line(&format!(
+                        "__bop_claim_binding(ctx, {}, {});",
+                        rust_string_literal(&self.current_module),
+                        rust_string_literal(name),
+                    ));
                 }
                 continue;
             }
@@ -4755,7 +4815,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         && self.has_declaration_alias_overlay(name)
                     {
                         self.line(&format!(
-                            "if !ctx.bindings.contains_key(&({}.to_string(), {}.to_string())) {{ return Err(::bop::error::BopError::runtime({}, {line})); }}",
+                            "if !__bop_has_binding(ctx, {}, {}) {{ return Err(::bop::error::BopError::runtime({}, {line})); }}",
                             rust_string_literal(&self.current_module),
                             rust_string_literal(name),
                             rust_string_literal(&format!("Variable `{name}` doesn't exist yet")),
@@ -5702,7 +5762,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             format!("::std::vec![{}]", arg_names.join(", "))
         };
         body = format!(
-            "match ctx.bindings.get(&({module}.to_string(), {name}.to_string())).cloned() {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
+            "match __bop_binding_value(ctx, {module}, {name}) {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
             module = rust_string_literal(&self.current_module),
             name = rust_string_literal(&name),
         );
@@ -7341,7 +7401,7 @@ mod tests {
 
         assert!(
             output.contains(
-                "ctx.bindings.get_mut(&(\"<root>\".to_string(), \"a\".to_string()))"
+                "__bop_binding_mut_option(ctx, \"<root>\", \"a\")"
             ),
             "missing authoritative mutable Array binding:\n{output}"
         );

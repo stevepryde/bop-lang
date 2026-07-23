@@ -697,7 +697,11 @@ fn e2e_sandbox_failed_module_load_rolls_back_reached_nested_function_sites() {
         ..Options::default()
     };
     opts.module_resolver = Some(modules_from_map([
-        ("bad", "let value = 1\nif true { fn leaked() { return 1 } }\nmissing()"),
+        (
+            "bad",
+            "use leaf\nlet own = value\nif true { fn leaked() { return 1 } }\nmissing()",
+        ),
+        ("leaf", "let value = 1"),
     ]));
     let mut rust_src = transpile(
         "let attempt = fn() { use bad }\ntry_call(attempt)",
@@ -716,6 +720,8 @@ fn main() {
     let state = __bop_load_state(&mut host, &limits).unwrap();
     assert!(!state.active_function_sites.keys().any(|(module, _)| module == "bad"));
     assert!(!state.bindings.keys().any(|(module, _)| module == "bad"));
+    assert!(!state.binding_origins.keys().any(|(module, _)| module == "bad"));
+    assert!(!state.binding_claims.iter().any(|(module, _)| module == "bad"));
     println!("clean");
 }
 "#,
@@ -1791,12 +1797,7 @@ print(outer(none)())"#,
 /// from the same in-memory table. Used by the use tests —
 /// lets the same map drive both engines so we can assert they
 /// produce identical output.
-fn assert_aot_matches_with_modules(
-    test_name: &str,
-    code: &str,
-    modules: &[(&str, &str)],
-) {
-    // Walker reference — run against a host backed by the map.
+fn walker_output_with_modules(code: &str, modules: &[(&str, &str)]) -> String {
     struct MapHost<'a> {
         prints: std::cell::RefCell<Vec<String>>,
         modules: std::collections::HashMap<String, String>,
@@ -1828,7 +1829,15 @@ fn assert_aot_matches_with_modules(
     };
     bop::run(code, &mut walker_host, &BopLimits::standard())
         .expect("walker failed");
-    let expected = walker_host.prints.borrow().join("\n");
+    walker_host.prints.borrow().join("\n")
+}
+
+fn assert_aot_matches_with_modules(
+    test_name: &str,
+    code: &str,
+    modules: &[(&str, &str)],
+) {
+    let expected = walker_output_with_modules(code, modules);
 
     let resolver = modules_from_map(modules.iter().map(|(k, v)| (*k, *v)));
     let rust_src = transpile(
@@ -1865,6 +1874,35 @@ fn assert_aot_matches_with_modules(
         "AOT output diverged from walker for {}:\n--- walker ---\n{}\n--- aot ---\n{}",
         test_name, expected, actual,
     );
+}
+
+fn assert_aot_modes_match_with_modules(
+    test_name: &str,
+    code: &str,
+    modules: &[(&str, &str)],
+) {
+    let expected = walker_output_with_modules(code, modules);
+    for sandbox in [false, true] {
+        let run = run_aot_with_modules_and_opts(
+            code,
+            &format!("{test_name}_{}", if sandbox { "sandbox" } else { "native" }),
+            modules,
+            &Options {
+                sandbox,
+                ..Options::default()
+            },
+        );
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated {test_name} program failed (sandbox={sandbox}):\n{}",
+            run.stderr,
+        );
+        assert_eq!(
+            run.stdout, expected,
+            "AOT output diverged from walker for {test_name} (sandbox={sandbox})",
+        );
+    }
 }
 
 fn assert_aot_compiles_without_warnings_with_modules(
@@ -2040,6 +2078,138 @@ fn transitive(n) { return increment(increment(n)) }"#,
             ("inner", "fn increment(n) { return n + 1 }"),
         ],
     );
+}
+
+#[test]
+#[ignore]
+fn e2e_aot_modes_preserve_root_and_module_function_first_win() {
+    assert_aot_modes_match_with_modules(
+        "function_first_win_root",
+        r#"fn pick() { return 11 }
+use b
+fn read() { return pick() }
+print(read())"#,
+        &[("b", "fn pick() { return 22 }")],
+    );
+    assert_aot_modes_match_with_modules(
+        "function_first_win_root_import_first",
+        r#"use b
+fn pick() { return 11 }
+fn read() { return pick() }
+print(read())"#,
+        &[("b", "fn pick() { return 22 }")],
+    );
+    assert_aot_modes_match_with_modules(
+        "function_first_win_module",
+        "use a\nprint(read())",
+        &[
+            (
+                "a",
+                r#"fn pick() { return 11 }
+use b
+fn read() { return pick() }"#,
+            ),
+            ("b", "fn pick() { return 22 }"),
+        ],
+    );
+    assert_aot_modes_match_with_modules(
+        "function_first_win_module_import_first",
+        "use a\nprint(read())",
+        &[
+            (
+                "a",
+                r#"use b
+fn pick() { return 11 }
+fn read() { return pick() }"#,
+            ),
+            ("b", "fn pick() { return 22 }"),
+        ],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_aot_modes_keep_direct_and_facade_imported_values_live() {
+    let root = r#"use imported
+fn next_and_read() {
+    bump()
+    return count
+}
+print(next_and_read())
+print(count)
+count += 4
+print(count)
+print(bump())"#;
+    let leaf = r#"let count = 0
+fn bump() {
+    count += 1
+    return count
+}"#;
+    assert_aot_modes_match_with_modules(
+        "live_imported_value_direct",
+        &root.replace("imported", "leaf"),
+        &[("leaf", leaf)],
+    );
+    assert_aot_modes_match_with_modules(
+        "live_imported_value_facade",
+        &root.replace("imported", "facade"),
+        &[("facade", "use leaf"), ("leaf", leaf)],
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_instance_retains_facade_import_origins() {
+    let mut rust_src = transpile(
+        r#"use facade
+pub fn next_and_read() {
+    bump()
+    return count
+}
+pub fn read() { return count }"#,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            module_resolver: Some(modules_from_map([
+                ("facade", "use leaf"),
+                (
+                    "leaf",
+                    r#"let count = 0
+fn bump() {
+    count += 1
+    return count
+}"#,
+                ),
+            ])),
+            ..Options::default()
+        },
+    )
+    .expect("transpile persistent facade imports");
+    rust_src.push_str(
+        r#"
+struct Host;
+impl ::bop::BopHost for Host {
+    fn call(&mut self, _name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> { None }
+}
+fn expect_int(value: ::bop::value::Value, expected: i64) {
+    assert!(matches!(value, ::bop::value::Value::Int(actual) if actual == expected));
+}
+fn main() {
+    let mut host = Host;
+    let limits = ::bop::BopLimits::standard();
+    let mut instance = BopInstance::load(&mut host, &limits).unwrap();
+    expect_int(instance.call("next_and_read", &[], &mut host).unwrap(), 1);
+    expect_int(instance.call("read", &[], &mut host).unwrap(), 1);
+    expect_int(instance.call("next_and_read", &[], &mut host).unwrap(), 2);
+    expect_int(instance.call("read", &[], &mut host).unwrap(), 2);
+    println!("ok");
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_persistent_facade_origins", rust_src);
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "ok");
 }
 
 #[test]
