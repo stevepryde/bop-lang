@@ -47,15 +47,19 @@ pub(super) const CTX_BASE: &str = r#"pub struct Ctx<'h> {
         ::bop::value::Value,
     >,
     pub bindings: ::std::collections::HashMap<
-        (::std::string::String, ::std::string::String),
-        ::bop::value::Value,
+        ::std::string::String,
+        ::std::collections::HashMap<::std::string::String, ::bop::value::Value>,
     >,
     pub binding_origins: ::std::collections::HashMap<
-        (::std::string::String, ::std::string::String),
-        (::std::string::String, ::std::string::String),
+        ::std::string::String,
+        ::std::collections::HashMap<
+            ::std::string::String,
+            (::std::string::String, ::std::string::String),
+        >,
     >,
-    pub binding_claims: ::std::collections::HashSet<
-        (::std::string::String, ::std::string::String),
+    pub binding_claims: ::std::collections::HashMap<
+        ::std::string::String,
+        ::std::collections::HashSet<::std::string::String>,
     >,
     pub module_type_bindings: ::std::collections::HashMap<
         ::std::string::String,
@@ -133,15 +137,19 @@ struct __BopState {
         usize,
     >,
     bindings: ::std::collections::HashMap<
-        (::std::string::String, ::std::string::String),
-        ::bop::value::Value,
+        ::std::string::String,
+        ::std::collections::HashMap<::std::string::String, ::bop::value::Value>,
     >,
     binding_origins: ::std::collections::HashMap<
-        (::std::string::String, ::std::string::String),
-        (::std::string::String, ::std::string::String),
+        ::std::string::String,
+        ::std::collections::HashMap<
+            ::std::string::String,
+            (::std::string::String, ::std::string::String),
+        >,
     >,
-    binding_claims: ::std::collections::HashSet<
-        (::std::string::String, ::std::string::String),
+    binding_claims: ::std::collections::HashMap<
+        ::std::string::String,
+        ::std::collections::HashSet<::std::string::String>,
     >,
     abi_declarations: ::std::vec::Vec<usize>,
 /*__BOP_METHOD_SLOTS__*/
@@ -273,28 +281,71 @@ pub(super) const RUNTIME_SHARED: &str = r#"/// Sentinel type inserted into `modu
 /// error and halts.
 pub struct __ModuleLoading;
 
-type __BopBindingKey = (::std::string::String, ::std::string::String);
-
-fn __bop_binding_key(module_path: &str, name: &str) -> __BopBindingKey {
-    (module_path.to_string(), name.to_string())
-}
-
-fn __bop_resolve_binding_key(
-    ctx: &Ctx<'_>,
+/// Borrowed, allocation-free binding resolution: chase
+/// `binding_origins` from `(module_path, name)` to the deepest live
+/// binding, borrowing each hop's key straight from the origin table.
+/// The `remaining` guard bounds the walk the same way the key-based
+/// resolver always has, so origin cycles can't spin.
+fn __bop_binding_entry<'a>(
+    ctx: &'a Ctx<'_>,
     module_path: &str,
     name: &str,
-) -> ::std::option::Option<__BopBindingKey> {
-    let mut key = __bop_binding_key(module_path, name);
-    let mut remaining = ctx.binding_origins.len() + 1;
+) -> ::std::option::Option<&'a ::bop::value::Value> {
+    let mut module_path: &str = module_path;
+    let mut name: &str = name;
+    let mut remaining = ctx
+        .binding_origins
+        .values()
+        .map(::std::collections::HashMap::len)
+        .sum::<usize>()
+        + 1;
     loop {
-        if ctx.bindings.contains_key(&key) {
-            return ::std::option::Option::Some(key);
+        if let ::std::option::Option::Some(value) = ctx
+            .bindings
+            .get(module_path)
+            .and_then(|bindings| bindings.get(name))
+        {
+            return ::std::option::Option::Some(value);
         }
         if remaining == 0 {
             return ::std::option::Option::None;
         }
-        let next = ctx.binding_origins.get(&key)?.clone();
-        key = next;
+        let (next_module, next_name) = ctx.binding_origins.get(module_path)?.get(name)?;
+        module_path = next_module;
+        name = next_name;
+        remaining -= 1;
+    }
+}
+
+/// Owned-key twin of `__bop_binding_entry` for the mutation paths,
+/// which need the resolved key after releasing the shared borrow.
+fn __bop_resolve_binding_key(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+) -> ::std::option::Option<(::std::string::String, ::std::string::String)> {
+    let mut module_path: &str = module_path;
+    let mut name: &str = name;
+    let mut remaining = ctx
+        .binding_origins
+        .values()
+        .map(::std::collections::HashMap::len)
+        .sum::<usize>()
+        + 1;
+    loop {
+        if ctx
+            .bindings
+            .get(module_path)
+            .is_some_and(|bindings| bindings.contains_key(name))
+        {
+            return ::std::option::Option::Some((module_path.to_string(), name.to_string()));
+        }
+        if remaining == 0 {
+            return ::std::option::Option::None;
+        }
+        let (next_module, next_name) = ctx.binding_origins.get(module_path)?.get(name)?;
+        module_path = next_module;
+        name = next_name;
         remaining -= 1;
     }
 }
@@ -304,15 +355,21 @@ fn __bop_binding_value(
     module_path: &str,
     name: &str,
 ) -> ::std::option::Option<::bop::value::Value> {
-    let key = __bop_resolve_binding_key(ctx, module_path, name)?;
-    ctx.bindings.get(&key).cloned()
+    __bop_binding_entry(ctx, module_path, name).cloned()
 }
 
 fn __bop_has_binding(ctx: &Ctx<'_>, module_path: &str, name: &str) -> bool {
-    let key = __bop_binding_key(module_path, name);
-    ctx.bindings.contains_key(&key)
-        || ctx.binding_origins.contains_key(&key)
-        || ctx.binding_claims.contains(&key)
+    ctx.bindings
+        .get(module_path)
+        .is_some_and(|bindings| bindings.contains_key(name))
+        || ctx
+            .binding_origins
+            .get(module_path)
+            .is_some_and(|origins| origins.contains_key(name))
+        || ctx
+            .binding_claims
+            .get(module_path)
+            .is_some_and(|claims| claims.contains(name))
 }
 
 fn __bop_warn_glob_shadow(name: &str, path: &str) {
@@ -328,16 +385,25 @@ fn __bop_define_binding(
     name: &str,
     value: ::bop::value::Value,
 ) {
-    let key = __bop_binding_key(module_path, name);
-    ctx.binding_origins.remove(&key);
-    ctx.binding_claims.insert(key.clone());
-    ctx.bindings.insert(key, value);
+    if let ::std::option::Option::Some(origins) = ctx.binding_origins.get_mut(module_path) {
+        origins.remove(name);
+    }
+    ctx.binding_claims
+        .entry(module_path.to_string())
+        .or_default()
+        .insert(name.to_string());
+    ctx.bindings
+        .entry(module_path.to_string())
+        .or_default()
+        .insert(name.to_string(), value);
 }
 
 fn __bop_claim_binding(ctx: &mut Ctx<'_>, module_path: &str, name: &str) {
-    let key = __bop_binding_key(module_path, name);
     if !__bop_has_binding(ctx, module_path, name) {
-        ctx.binding_claims.insert(key);
+        ctx.binding_claims
+            .entry(module_path.to_string())
+            .or_default()
+            .insert(name.to_string());
     }
 }
 
@@ -351,10 +417,17 @@ fn __bop_import_binding_alias(
     if __bop_has_binding(ctx, module_path, name) {
         return;
     }
-    let key = __bop_binding_key(module_path, name);
-    let origin = __bop_binding_key(origin_module_path, origin_name);
-    ctx.binding_origins.insert(key.clone(), origin);
-    ctx.binding_claims.insert(key);
+    ctx.binding_origins
+        .entry(module_path.to_string())
+        .or_default()
+        .insert(
+            name.to_string(),
+            (origin_module_path.to_string(), origin_name.to_string()),
+        );
+    ctx.binding_claims
+        .entry(module_path.to_string())
+        .or_default()
+        .insert(name.to_string());
 }
 
 fn __bop_import_binding_value(
@@ -366,9 +439,14 @@ fn __bop_import_binding_value(
     if __bop_has_binding(ctx, module_path, name) {
         return;
     }
-    let key = __bop_binding_key(module_path, name);
-    ctx.binding_claims.insert(key.clone());
-    ctx.bindings.insert(key, value);
+    ctx.binding_claims
+        .entry(module_path.to_string())
+        .or_default()
+        .insert(name.to_string());
+    ctx.bindings
+        .entry(module_path.to_string())
+        .or_default()
+        .insert(name.to_string(), value);
 }
 
 /// Current value of a module-alias member. The live binding wins when
@@ -405,11 +483,15 @@ fn __bop_binding_mut<'a>(
     line: u32,
 ) -> Result<&'a mut ::bop::value::Value, ::bop::error::BopError> {
     let key = __bop_resolve_binding_key(ctx, module_path, name);
-    key.and_then(|key| ctx.bindings.get_mut(&key))
-        .ok_or_else(|| ::bop::error::BopError::runtime(
-            ::bop::error_messages::variable_not_found(name),
-            line,
-        ))
+    key.and_then(|(module, name)| {
+        ctx.bindings
+            .get_mut(&module)
+            .and_then(|bindings| bindings.get_mut(&name))
+    })
+    .ok_or_else(|| ::bop::error::BopError::runtime(
+        ::bop::error_messages::variable_not_found(name),
+        line,
+    ))
 }
 
 fn __bop_binding_mut_option<'a>(
@@ -417,8 +499,10 @@ fn __bop_binding_mut_option<'a>(
     module_path: &str,
     name: &str,
 ) -> ::std::option::Option<&'a mut ::bop::value::Value> {
-    let key = __bop_resolve_binding_key(ctx, module_path, name)?;
-    ctx.bindings.get_mut(&key)
+    let (module, name) = __bop_resolve_binding_key(ctx, module_path, name)?;
+    ctx.bindings
+        .get_mut(&module)
+        .and_then(|bindings| bindings.get_mut(&name))
 }
 
 fn __bop_binding_is_array(
@@ -428,8 +512,7 @@ fn __bop_binding_is_array(
     line: u32,
 ) -> Result<bool, ::bop::error::BopError> {
     Ok(matches!(
-        __bop_resolve_binding_key(ctx, module_path, name)
-            .and_then(|key| ctx.bindings.get(&key))
+        __bop_binding_entry(ctx, module_path, name)
             .ok_or_else(|| ::bop::error::BopError::runtime(
                 ::bop::error_messages::variable_not_found(name),
                 line,
@@ -1535,7 +1618,7 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         module_aliases: ::std::collections::HashMap::new(),
         bindings: ::std::collections::HashMap::new(),
         binding_origins: ::std::collections::HashMap::new(),
-        binding_claims: ::std::collections::HashSet::new(),
+        binding_claims: ::std::collections::HashMap::new(),
         module_type_bindings: ::std::collections::HashMap::new(),
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),
@@ -1587,7 +1670,7 @@ fn __bop_load_state(
         module_imported_function_sites: ::std::collections::HashMap::new(),
         bindings: ::std::collections::HashMap::new(),
         binding_origins: ::std::collections::HashMap::new(),
-        binding_claims: ::std::collections::HashSet::new(),
+        binding_claims: ::std::collections::HashMap::new(),
         abi_declarations: ::std::vec::Vec::new(),
 /*__BOP_METHOD_SLOTS_INIT__*/
     };

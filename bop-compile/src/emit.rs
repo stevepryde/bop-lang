@@ -803,6 +803,42 @@ fn effective_module_value_exports(
     (module_exports, candidates, value_bindings)
 }
 
+/// Names in a module's top-level statement list that can ever exist as
+/// a rebindable `(module, name)` runtime binding. Only module-top-scope
+/// `let`s and imports create those entries (fn declarations only claim
+/// their name), and a glob import's surface is statically known from
+/// the resolved module graph. A named call outside this set can never
+/// resolve through `__bop_binding_value`, so its dynamic pre-dispatch
+/// probe can be elided. Returns `None` when an import's surface can't
+/// be resolved — callers must then keep the probe on every call.
+fn rebindable_binding_surface(
+    stmts: &[Stmt],
+    modules: &HashMap<String, ModuleEntry>,
+) -> Option<HashSet<String>> {
+    let mut names = HashSet::new();
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Let { name, .. } => {
+                names.insert(name.clone());
+            }
+            StmtKind::Use { path, items, alias } => {
+                if let Some(alias_name) = alias {
+                    names.insert(alias_name.clone());
+                    continue;
+                }
+                if let Some(items) = items {
+                    names.extend(items.iter().cloned());
+                    continue;
+                }
+                let entry = modules.get(path)?;
+                names.extend(entry.effective_exports.iter().cloned());
+            }
+            _ => {}
+        }
+    }
+    Some(names)
+}
+
 fn module_imports_from_exports(
     exports: &BTreeMap<String, ModuleValueExport>,
 ) -> Vec<ModuleImport> {
@@ -1410,6 +1446,13 @@ struct Emitter {
     /// sites that appear textually before the assignment (for example, on a
     /// later loop iteration).
     callable_mutations: Vec<HashSet<String>>,
+    /// Per-module set of names that can ever appear as a rebindable
+    /// `(module, name)` binding at runtime — top-level `let`s plus every
+    /// import surface (glob surfaces come from the resolved graph). Named
+    /// calls outside this set skip the dynamic `__bop_binding_value`
+    /// pre-dispatch probe entirely. `None` marks a module whose import
+    /// surface couldn't be resolved: probe every call there.
+    rebindable_call_surfaces: HashMap<String, Option<HashSet<String>>>,
     /// Root copy restored after temporarily emitting imported modules/methods.
     root_declaration_aliases: Vec<ModuleImport>,
 }
@@ -1463,6 +1506,7 @@ impl Emitter {
             declaration_alias_overlays: Vec::new(),
             declaration_alias_write_through: Vec::new(),
             callable_mutations: Vec::new(),
+            rebindable_call_surfaces: HashMap::new(),
             root_declaration_aliases: Vec::new(),
         }
     }
@@ -2290,6 +2334,17 @@ impl Emitter {
         !self.in_callable_body && self.scope_stack.len() == 1
     }
 
+    /// Whether a named-call site emitted for the current module still
+    /// needs the dynamic `__bop_binding_value` pre-dispatch probe.
+    /// Conservative: unknown modules and unresolved import surfaces
+    /// keep the probe so #95 / #114 rebinding semantics can't regress.
+    fn call_may_be_rebound(&self, name: &str) -> bool {
+        match self.rebindable_call_surfaces.get(&self.current_module) {
+            Some(Some(surface)) => surface.contains(name),
+            Some(None) | None => true,
+        }
+    }
+
     fn rust_fn_name(&self, name: &str) -> String {
         rust_fn_name_with(&self.module_prefix, name)
     }
@@ -2527,6 +2582,16 @@ impl Emitter {
         self.emit_runtime_preamble();
         let (_, root_alias_candidates, _) =
             effective_module_value_exports(stmts, &self.modules.modules);
+        self.rebindable_call_surfaces.insert(
+            String::from(bop::value::ROOT_MODULE_PATH),
+            rebindable_binding_surface(stmts, &self.modules.modules),
+        );
+        for (path, entry) in &self.modules.modules {
+            self.rebindable_call_surfaces.insert(
+                path.clone(),
+                rebindable_binding_surface(&entry.ast, &self.modules.modules),
+            );
+        }
         self.root_declaration_aliases = module_imports_from_exports(&root_alias_candidates);
         self.declaration_aliases = self.root_declaration_aliases.clone();
         // Seed the outermost type_bindings frame with the
@@ -3160,27 +3225,15 @@ impl Emitter {
             ));
         }
         self.line(&format!(
-            "let __saved_value_bindings: ::std::vec::Vec<_> = ctx.bindings.iter().filter(|((module, _), _)| module == {}).map(|(key, value)| (key.clone(), value.clone())).collect();",
+            "let __saved_value_bindings = ctx.bindings.remove({});",
             rust_string_literal(name),
         ));
         self.line(&format!(
-            "let __saved_binding_origins: ::std::vec::Vec<_> = ctx.binding_origins.iter().filter(|((module, _), _)| module == {}).map(|(key, origin)| (key.clone(), origin.clone())).collect();",
+            "let __saved_binding_origins = ctx.binding_origins.remove({});",
             rust_string_literal(name),
         ));
         self.line(&format!(
-            "let __saved_binding_claims: ::std::vec::Vec<_> = ctx.binding_claims.iter().filter(|(module, _)| module == {}).cloned().collect();",
-            rust_string_literal(name),
-        ));
-        self.line(&format!(
-            "ctx.bindings.retain(|(module, _), _| module != {});",
-            rust_string_literal(name),
-        ));
-        self.line(&format!(
-            "ctx.binding_origins.retain(|(module, _), _| module != {});",
-            rust_string_literal(name),
-        ));
-        self.line(&format!(
-            "ctx.binding_claims.retain(|(module, _)| module != {});",
+            "let __saved_binding_claims = ctx.binding_claims.remove({});",
             rust_string_literal(name),
         ));
         self.line(&format!(
@@ -3346,20 +3399,29 @@ impl Emitter {
             self.line("ctx.module_imported_function_sites.extend(__saved_imported_function_sites);");
         }
         self.line(&format!(
-            "ctx.bindings.retain(|(module, _), _| module != {});",
+            "ctx.bindings.remove({});",
             rust_string_literal(name),
         ));
-        self.line("ctx.bindings.extend(__saved_value_bindings);");
         self.line(&format!(
-            "ctx.binding_origins.retain(|(module, _), _| module != {});",
+            "if let ::std::option::Option::Some(__saved) = __saved_value_bindings {{ ctx.bindings.insert({}.to_string(), __saved); }}",
             rust_string_literal(name),
         ));
-        self.line("ctx.binding_origins.extend(__saved_binding_origins);");
         self.line(&format!(
-            "ctx.binding_claims.retain(|(module, _)| module != {});",
+            "ctx.binding_origins.remove({});",
             rust_string_literal(name),
         ));
-        self.line("ctx.binding_claims.extend(__saved_binding_claims);");
+        self.line(&format!(
+            "if let ::std::option::Option::Some(__saved) = __saved_binding_origins {{ ctx.binding_origins.insert({}.to_string(), __saved); }}",
+            rust_string_literal(name),
+        ));
+        self.line(&format!(
+            "ctx.binding_claims.remove({});",
+            rust_string_literal(name),
+        ));
+        self.line(&format!(
+            "if let ::std::option::Option::Some(__saved) = __saved_binding_claims {{ ctx.binding_claims.insert({}.to_string(), __saved); }}",
+            rust_string_literal(name),
+        ));
         self.line(&format!(
             "ctx.module_cache.remove({});",
             rust_string_literal(name)
@@ -5952,11 +6014,17 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         } else {
             format!("::std::vec![{}]", arg_names.join(", "))
         };
-        body = format!(
-            "match __bop_binding_value(ctx, {module}, {name}) {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
-            module = rust_string_literal(&self.current_module),
-            name = rust_string_literal(&name),
-        );
+        // The rebinding probe is only semantically meaningful for names some
+        // top-level `let` or import in this module could ever shadow. Every
+        // other call — builtins in import-free programs, user fns nothing
+        // overlaps — dispatches directly.
+        if self.call_may_be_rebound(&name) {
+            body = format!(
+                "match __bop_binding_value(ctx, {module}, {name}) {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
+                module = rust_string_literal(&self.current_module),
+                name = rust_string_literal(&name),
+            );
+        }
         if let Some(storage @ BindingStorage::OptionalImport { .. }) =
             binding_storage.as_ref()
         {

@@ -722,9 +722,9 @@ fn main() {
     let mut host = Host;
     let state = __bop_load_state(&mut host, &limits).unwrap();
     assert!(!state.active_function_sites.keys().any(|(module, _)| module == "bad"));
-    assert!(!state.bindings.keys().any(|(module, _)| module == "bad"));
-    assert!(!state.binding_origins.keys().any(|(module, _)| module == "bad"));
-    assert!(!state.binding_claims.iter().any(|(module, _)| module == "bad"));
+    assert!(!state.bindings.contains_key("bad"));
+    assert!(!state.binding_origins.contains_key("bad"));
+    assert!(!state.binding_claims.contains_key("bad"));
     println!("clean");
 }
 "#,
