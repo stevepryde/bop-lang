@@ -378,6 +378,7 @@ impl<'source> Lexer<'source> {
             column: Some(self.column),
             message: message.into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }
@@ -389,6 +390,7 @@ impl<'source> Lexer<'source> {
             column: Some(column),
             message: message.into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }
@@ -404,6 +406,7 @@ impl<'source> Lexer<'source> {
             column: Some(self.column),
             message: message.into(),
             friendly_hint: Some(hint.into()),
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }

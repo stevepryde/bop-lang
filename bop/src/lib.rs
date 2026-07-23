@@ -1846,6 +1846,7 @@ let x = 1"#,
                             column: None,
                             message: "greet() needs 1 argument".into(),
                             friendly_hint: None,
+                            source_context: None,
                             is_fatal: false,
                             is_try_return: false,
                         }));
@@ -2876,6 +2877,41 @@ print(doubled_pi)"#,
         )
         .unwrap();
         assert_eq!(host.prints(), vec!["6"]);
+    }
+
+    #[test]
+    fn imported_module_parse_error_renders_against_module_source() {
+        let module_source = "let okay = 1\nlet broken =";
+        let root_source = "use bad";
+        let mut host = ModuleHost::new(&[("bad", module_source)]);
+
+        let error = run(root_source, &mut host, &BopLimits::standard()).unwrap_err();
+        let rendered = error.render(root_source);
+
+        assert_eq!(
+            error.source_context.as_ref().map(|context| context.module_path.as_str()),
+            Some("bad")
+        );
+        assert!(rendered.contains("in module `bad` at line 2"));
+        assert!(rendered.contains("let broken ="));
+        assert!(!rendered.contains("1 | use bad"));
+    }
+
+    #[test]
+    fn transitive_module_parse_error_preserves_leaf_identity() {
+        let root_source = "use outer";
+        let inner_source = "let okay = 1\nlet broken =";
+        let mut host = ModuleHost::new(&[
+            ("outer", "use inner\nlet outer = 1"),
+            ("inner", inner_source),
+        ]);
+
+        let error = run(root_source, &mut host, &BopLimits::standard()).unwrap_err();
+        let context = error.source_context.as_ref().expect("module context");
+
+        assert_eq!(context.module_path, "inner");
+        assert_eq!(context.source.as_deref(), Some(inner_source));
+        assert!(error.render(root_source).contains("in module `inner` at line 2"));
     }
 
     #[test]

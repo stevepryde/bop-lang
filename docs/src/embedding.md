@@ -390,6 +390,14 @@ prefer [`BopInstance`](embedding/instances.md).
 
 `BopError::render(source)` produces a terminal-friendly error with a source snippet and a `^` carat under the offending column (when the error carries column info). Parse errors always have columns; runtime errors do when the failing expression was parsed from source.
 
+Errors raised while loading an imported module carry a `source_context`.
+`render` automatically uses that module's source and labels the location as
+`in module \`path\``, so callers should continue passing the root source exactly
+as shown below. If an embedder attaches only a module identity with
+`BopError::with_module`, rendering deliberately omits the snippet rather than
+showing an unrelated root line. `BopError::with_module_source` attaches both
+identity and source; nested loaders preserve the deepest existing context.
+
 ```rust
 match bop::run(src, &mut host, &BopLimits::standard()) {
     Ok(()) => {}

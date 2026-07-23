@@ -1895,7 +1895,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             .borrow_mut()
             .insert(path.to_string(), ImportSlot::Loading);
 
-        let result = self.evaluate_module(path, &source, line);
+        let result = self
+            .evaluate_module(path, &source, line)
+            .map_err(|error| error.with_module_source(path, source.as_str()));
 
         match result {
             Ok(bindings) => {

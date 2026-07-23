@@ -5765,6 +5765,7 @@ impl BopHost for CustomHost {
                         column: None,
                         message: "greet() needs 1 argument".into(),
                         friendly_hint: None,
+                        source_context: None,
                         is_fatal: false,
                         is_try_return: false,
                     }));

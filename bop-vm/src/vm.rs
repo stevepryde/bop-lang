@@ -4547,7 +4547,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             .borrow_mut()
             .insert(path.to_string(), ImportSlot::Loading);
 
-        let result = self.evaluate_module(path, &source);
+        let result = self
+            .evaluate_module(path, &source)
+            .map_err(|error| error.with_module_source(path, source.as_str()));
 
         match result {
             Ok(bindings) => {
@@ -5840,6 +5842,29 @@ let read = fn() { return [missing, present] }"#,
         fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
             self.modules.get(name).cloned().map(Ok)
         }
+    }
+
+    #[test]
+    fn vm_module_compilation_error_retains_transitive_source_context() {
+        let root_source = "use outer";
+        let inner_source = "let okay = 1\nlet broken =";
+        let mut host = MapModuleHost {
+            modules: BTreeMap::from([
+                ("outer".to_string(), "use inner\nlet outer = 1".to_string()),
+                ("inner".to_string(), inner_source.to_string()),
+            ]),
+        };
+
+        let error =
+            crate::run(root_source, &mut host, &BopLimits::standard()).unwrap_err();
+        let context = error.source_context.as_ref().expect("module context");
+
+        assert_eq!(context.module_path, "inner");
+        assert_eq!(context.source.as_deref(), Some(inner_source));
+        let rendered = error.render(root_source);
+        assert!(rendered.contains("in module `inner` at line 2"));
+        assert!(rendered.contains("let broken ="));
+        assert!(!rendered.contains("1 | use outer"));
     }
 
     #[test]
