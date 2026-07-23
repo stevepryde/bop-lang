@@ -234,13 +234,14 @@ fn non_sandbox_named_functions_claim_first_win_before_flat_imports() {
         &[("b", "fn pick() { return 22 }")],
     )
     .expect("transpile first-win named function");
-    let claim = out
-        .find("__bop_claim_binding(ctx, \"<root>\", \"pick\")")
-        .expect("root function claim");
-    let import = out
-        .find("__bop_import_binding_value(ctx, \"<root>\", \"pick\"")
-        .expect("conflicting flat import");
-    assert!(claim < import, "function claim must precede the import:\n{out}");
+    assert!(
+        out.contains("__bop_claim_binding(ctx, \"<root>\", \"pick\")"),
+        "root function claim missing:\n{out}"
+    );
+    assert!(
+        !out.contains("__bop_import_binding_value(ctx, \"<root>\", \"pick\""),
+        "a statically losing flat import should not become binding storage:\n{out}"
+    );
     contains_all(
         &out,
         &[
@@ -1525,8 +1526,8 @@ let value = build()"#,
         &[
             "ctx.module_aliases.insert((\"wrapper\".to_string(), \"api\".to_string())",
             "ctx.module_aliases.insert((\"<root>\".to_string(), \"api\".to_string())",
-            "__bop_declaration_alias_namespace(ctx, &mut __bop_declaration_alias_",
-            "\"<root>\", \"api\"",
+            "__bop_binding_value(ctx, \"<root>\", \"api\").ok_or_else",
+            "isn't a module alias in scope",
         ],
     );
 }

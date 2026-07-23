@@ -1271,6 +1271,7 @@ struct EmissionScope {
     mutated_locals: HashSet<String>,
     plain_glob_imports: HashSet<String>,
     function_sites: HashMap<String, usize>,
+    claimed_functions: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -1393,9 +1394,17 @@ struct Emitter {
     declaration_aliases: Vec<ModuleImport>,
     /// Per-callable declaration-alias binding names. Each required alias gets
     /// separate call-local overlay and read-cache slots. Reads consult an
-    /// assigned overlay first, then the cache and live declaration context;
-    /// assignment populates only the overlay for the rest of the invocation.
+    /// assigned overlay first, then the cache and live declaration context.
+    /// Named callables additionally write through to their declaration scope;
+    /// lambdas keep ordinary value-capture semantics.
     declaration_alias_overlays: Vec<HashSet<String>>,
+    /// Whether the current declaration-alias overlay belongs to a lifted
+    /// named callable. Named functions and methods execute against their
+    /// declaration scope, so writes must update the authoritative persistent
+    /// binding as well as the call-local snapshot used by descendant
+    /// closures. Lambda overlays remain value captures and never write
+    /// through to the declaration scope.
+    declaration_alias_write_through: Vec<bool>,
     /// Whole-callable assignment pre-analysis. Namespace aliases assigned on
     /// any control-flow path use runtime type identity even at construction
     /// sites that appear textually before the assignment (for example, on a
@@ -1452,6 +1461,7 @@ impl Emitter {
             in_non_capturing_method: false,
             declaration_aliases: Vec::new(),
             declaration_alias_overlays: Vec::new(),
+            declaration_alias_write_through: Vec::new(),
             callable_mutations: Vec::new(),
             root_declaration_aliases: Vec::new(),
         }
@@ -1696,9 +1706,10 @@ impl Emitter {
             // them may rewrite loader-owned alias metadata.
             return;
         }
-        let authoritative_alias = self.opts.sandbox
+        let authoritative_alias = (self.opts.sandbox
             && (self.has_declaration_alias_overlay(name)
-                || self.has_module_alias_candidate(name));
+                || self.has_module_alias_candidate(name)))
+            || self.declaration_alias_writes_through(name);
         if !self.is_module_top_scope() && !authoritative_alias {
             return;
         }
@@ -2043,9 +2054,13 @@ impl Emitter {
             }
         }
         self.has_declaration_alias_overlay(name)
-            || (self.opts.sandbox
-                && self.has_module_alias_candidate(name)
-                && self.binding_storage(name).is_some())
+            || (self.has_module_alias_candidate(name)
+                && self.binding_storage(name).is_some()
+                && (self.opts.sandbox
+                    || self
+                        .callable_mutations
+                        .last()
+                        .is_some_and(|names| names.contains(name))))
     }
 
     fn mark_local_mutated(&mut self, name: &str) {
@@ -2067,6 +2082,15 @@ impl Emitter {
             .map(|_| declaration_alias_overlay_ident(name))
     }
 
+    fn declaration_alias_writes_through(&self, name: &str) -> bool {
+        self.has_declaration_alias_overlay(name)
+            && self
+                .declaration_alias_write_through
+                .last()
+                .copied()
+                .unwrap_or(false)
+    }
+
     fn has_declaration_alias_overlay(&self, name: &str) -> bool {
         self.declaration_alias_overlays
             .last()
@@ -2076,6 +2100,13 @@ impl Emitter {
     fn declaration_alias_read_src(&self, name: &str, line: u32) -> Option<String> {
         if self.opts.sandbox {
             return None;
+        }
+        if self.declaration_alias_writes_through(name) {
+            return Some(format!(
+                "__bop_read_binding(ctx, {}, {}, {line})?",
+                rust_string_literal(&self.current_module),
+                rust_string_literal(name),
+            ));
         }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
@@ -2096,6 +2127,13 @@ impl Emitter {
                 )
             });
         }
+        if self.declaration_alias_writes_through(name) {
+            return Some(format!(
+                "__bop_binding_value(ctx, {module}, {alias}).ok_or_else(|| ::bop::error::BopError::runtime(format!(\"`{{}}` isn't a module alias in scope\", {alias}), {line}))?",
+                module = rust_string_literal(&self.current_module),
+                alias = rust_string_literal(name),
+            ));
+        }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
                 "__bop_declaration_alias_namespace(ctx, &mut {overlay}, {module}, {alias}, {line})?",
@@ -2109,6 +2147,13 @@ impl Emitter {
         if self.opts.sandbox {
             return None;
         }
+        if self.declaration_alias_writes_through(name) {
+            return Some(format!(
+                "__bop_binding_value(ctx, {}, {})",
+                rust_string_literal(&self.current_module),
+                rust_string_literal(name),
+            ));
+        }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
                 "__bop_declaration_alias_optional(ctx, &mut {overlay}, {module}, {alias})",
@@ -2121,6 +2166,13 @@ impl Emitter {
     fn declaration_alias_mut_src(&self, name: &str, line: u32) -> Option<String> {
         if self.opts.sandbox {
             return None;
+        }
+        if self.declaration_alias_writes_through(name) {
+            return Some(format!(
+                "__bop_binding_mut(ctx, {}, {}, {line})?",
+                rust_string_literal(&self.current_module),
+                rust_string_literal(name),
+            ));
         }
         self.declaration_alias_overlay(name).map(|overlay| {
             format!(
@@ -2140,12 +2192,37 @@ impl Emitter {
             return None;
         }
         self.declaration_alias_overlay(name).map(|overlay| {
+            if self.declaration_alias_writes_through(name) {
+                return format!(
+                    "if !__bop_has_binding(ctx, {module}, {alias}) {{ return Err(::bop::error::BopError::runtime({missing}, {line})); }} \
+                     let __bop_alias_value = {value}; \
+                     *__bop_binding_mut(ctx, {module}, {alias}, {line})? = __bop_alias_value.clone(); \
+                     {overlay}.overlay = ::std::option::Option::Some(__bop_alias_value);",
+                    module = rust_string_literal(&self.current_module),
+                    alias = rust_string_literal(name),
+                    missing = rust_string_literal(&format!(
+                        "Variable `{name}` doesn't exist yet"
+                    )),
+                );
+            }
             format!(
                 "__bop_declaration_alias_assign(ctx, &mut {overlay}, {value}, {module}, {alias}, {line})?;",
                 module = rust_string_literal(&self.current_module),
                 alias = rust_string_literal(name),
             )
         })
+    }
+
+    fn refresh_write_through_alias_overlay(&mut self, name: &str) {
+        if !self.declaration_alias_writes_through(name) {
+            return;
+        }
+        let overlay = declaration_alias_overlay_ident(name);
+        self.line(&format!(
+            "{overlay}.overlay = __bop_binding_value(ctx, {module}, {name});",
+            module = rust_string_literal(&self.current_module),
+            name = rust_string_literal(name),
+        ));
     }
 
     fn ident_value_src(&self, name: &str, line: u32) -> Result<String, BopError> {
@@ -2259,6 +2336,20 @@ impl Emitter {
             .iter()
             .rev()
             .find_map(|scope| scope.function_sites.get(name).copied())
+    }
+
+    fn claim_function_in_current_scope(&mut self, name: &str) {
+        self.scope_stack
+            .last_mut()
+            .expect("function claims are emitted inside a scope")
+            .claimed_functions
+            .insert(name.to_string());
+    }
+
+    fn function_claimed_in_current_scope(&self, name: &str) -> bool {
+        self.scope_stack
+            .last()
+            .is_some_and(|scope| scope.claimed_functions.contains(name))
     }
 
     fn exact_function_site_call_src(
@@ -2808,6 +2899,16 @@ impl Emitter {
                 // the bare name to the right module path.
                 for name in &expose_bindings {
                     if module_top_scope {
+                        // Native named functions claim their binding at the
+                        // declaration's source position. If that claim already
+                        // won, the runtime rejects this flat import; mirror the
+                        // same source-ordered decision in static storage
+                        // resolution so later calls reach the named function.
+                        if !self.opts.sandbox
+                            && self.function_claimed_in_current_scope(name)
+                        {
+                            continue;
+                        }
                         if self.opts.sandbox {
                             self.line(&format!(
                                 "__bop_import_export(ctx, {}, {}, {}, {}, {tmp}.{ident}.clone(), {line})?;",
@@ -3088,6 +3189,7 @@ impl Emitter {
                         rust_string_literal(&self.current_module),
                         rust_string_literal(name),
                     ));
+                    self.claim_function_in_current_scope(name);
                 }
                 continue;
             }
@@ -4402,6 +4504,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         rust_string_literal(&self.current_module),
                         rust_string_literal(name),
                     ));
+                    self.claim_function_in_current_scope(name);
                 }
                 continue;
             }
@@ -4794,38 +4897,45 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             AssignTarget::Variable(name) => {
                 let ident = rust_user_ident(name);
                 let rhs_src = self.expr_src(value)?;
-                if !self.opts.sandbox && !self.is_local(name) {
-                    if let Some(overlay) = self.declaration_alias_overlay(name) {
-                        let rhs_tmp = self.fresh_tmp();
-                        self.line(&format!("let {} = {};", rhs_tmp, rhs_src));
-                        match op {
-                            AssignOp::Eq => {
-                                let assign = self
-                                    .declaration_alias_assign_src(name, &rhs_tmp, line)
-                                    .expect("overlay checked above");
-                                self.line(&assign);
-                            }
-                            compound => {
-                                let current_tmp = self.fresh_tmp();
-                                let current = self
-                                    .declaration_alias_read_src(name, line)
-                                    .expect("overlay checked above");
-                                self.line(&format!(
-                                    "let {} = {};",
-                                    current_tmp, current
-                                ));
-                                self.line(&format!(
-                                    "{}.overlay = ::std::option::Option::Some({}(&{}, &{}, {})?);",
-                                    overlay,
-                                    compound_op_path(*compound),
-                                    current_tmp,
-                                    rhs_tmp,
-                                    line
-                                ));
-                            }
+                if !self.opts.sandbox
+                    && !self.is_local(name)
+                    && self.declaration_alias_overlay(name).is_some()
+                {
+                    let rhs_tmp = self.fresh_tmp();
+                    self.line(&format!("let {} = {};", rhs_tmp, rhs_src));
+                    match op {
+                        AssignOp::Eq => {
+                            let assign = self
+                                .declaration_alias_assign_src(name, &rhs_tmp, line)
+                                .expect("overlay checked above");
+                            self.line(&assign);
                         }
-                        return Ok(());
+                        compound => {
+                            let current_tmp = self.fresh_tmp();
+                            let next_tmp = self.fresh_tmp();
+                            let current = self
+                                .declaration_alias_read_src(name, line)
+                                .expect("overlay checked above");
+                            self.line(&format!(
+                                "let {} = {};",
+                                current_tmp, current
+                            ));
+                            self.line(&format!(
+                                "let {} = {}(&{}, &{}, {})?;",
+                                next_tmp,
+                                compound_op_path(*compound),
+                                current_tmp,
+                                rhs_tmp,
+                                line
+                            ));
+                            let assign = self
+                                .declaration_alias_assign_src(name, &next_tmp, line)
+                                .expect("overlay checked above");
+                            self.line(&assign);
+                        }
                     }
+                    self.emit_module_alias_context_sync(name);
+                    return Ok(());
                 }
                 if !self.is_local(name) {
                     let rhs_tmp = self.fresh_tmp();
@@ -4953,6 +5063,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         ));
                     }
                 }
+                self.refresh_write_through_alias_overlay(target_name);
                 Ok(())
             }
             AssignTarget::Field { object, field } => {
@@ -5037,6 +5148,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         self.line(&format!("*{} = {};", target_tmp, replaced_tmp));
                     }
                 }
+                self.refresh_write_through_alias_overlay(target_name);
                 Ok(())
             }
         }
@@ -5123,6 +5235,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             self.emit_declaration_alias_overlays(&declaration_aliases, &HashMap::new());
         self.declaration_alias_overlays
             .push(declaration_alias_overlays);
+        self.declaration_alias_write_through.push(true);
         self.callable_mutations
             .push(callable_assignment_names(body));
         // Fresh scope with the params bound; Rust-level fn scope
@@ -5145,6 +5258,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         self.pop_scope();
         self.pop_scope();
         self.callable_mutations.pop();
+        self.declaration_alias_write_through.pop();
         self.declaration_alias_overlays.pop();
         self.scope_stack = saved_scope_stack;
         // Implicit `return none` if control falls off the end. The
@@ -6234,7 +6348,10 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 line,
             );
             if !self.is_local(&target_name) {
-                if let Some(overlay) = self.declaration_alias_overlay(&target_name) {
+                if let Some(overlay) = self
+                    .declaration_alias_overlay(&target_name)
+                    .filter(|_| !self.declaration_alias_writes_through(&target_name))
+                {
                     let read = self
                         .declaration_alias_read_src(&target_name, line)
                         .expect("overlay checked above");
@@ -6283,6 +6400,16 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 let target_src = self.storage_mut_src(&storage, &target_name, line);
                 let read_src = self.storage_read_src(&storage, line);
                 let target_tmp = self.fresh_tmp();
+                let overlay_sync = if self.declaration_alias_writes_through(&target_name) {
+                    format!(
+                        "{overlay}.overlay = __bop_binding_value(ctx, {module}, {name});",
+                        overlay = declaration_alias_overlay_ident(&target_name),
+                        module = rust_string_literal(&self.current_module),
+                        name = rust_string_literal(&target_name),
+                    )
+                } else {
+                    String::new()
+                };
                 let mut body = String::new();
                 write!(
                     body,
@@ -6298,7 +6425,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                                 __r \
                             }}, \
                         }} \
-                    }}; __ret }}",
+                    }}; {overlay_sync} __ret }}",
                     arg_lets,
                     method_lit,
                     owned_args,
@@ -6312,6 +6439,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     method_lit,
                     args_arr,
                     line,
+                    overlay_sync = overlay_sync,
                 )
                 .unwrap();
                 return Ok(body);
@@ -6482,12 +6610,14 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             self.emit_declaration_alias_overlays(&declaration_aliases, &alias_initializers);
         self.declaration_alias_overlays
             .push(declaration_alias_overlays);
+        self.declaration_alias_write_through.push(false);
         self.callable_mutations
             .push(callable_assignment_names(body));
         for s in body {
             self.emit_stmt(s)?;
         }
         self.callable_mutations.pop();
+        self.declaration_alias_write_through.pop();
         self.declaration_alias_overlays.pop();
         let body_src = core::mem::replace(&mut self.out, saved_out);
         self.indent = saved_indent;
