@@ -1519,6 +1519,92 @@ print(r)"#),
 }
 
 #[test]
+fn match_bindings_shadow_same_named_parameters_and_locals_diff() {
+    let out = run_both(
+        r#"fn from_parameter(value) {
+    return match 7 {
+        value if value == 99 => "outer parameter",
+        value if value == 7 => value,
+    }
+}
+
+fn from_local() {
+    let value = 99
+    return match 8 {
+        value if value == 99 => "outer local",
+        value if value == 8 => value,
+    }
+}
+
+print(from_parameter(99))
+print(from_local())"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "unexpected error: {:?}", out.error);
+    assert_eq!(out.prints, ["7", "8"]);
+}
+
+#[test]
+fn match_bindings_shadow_same_named_interpolation_and_callee_slots_diff() {
+    let out = run_both(
+        r#"fn render(label) {
+    return match 7 {
+        label => "matched {label}",
+    }
+}
+
+fn invoke(run) {
+    return match fn() { return "matched callable" } {
+        run => run(),
+    }
+}
+
+print(render("outer label"))
+print(invoke(fn() { return "outer callable" }))"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "unexpected error: {:?}", out.error);
+    assert_eq!(out.prints, ["matched 7", "matched callable"]);
+}
+
+#[test]
+fn match_bindings_shadow_same_named_parent_slots_in_lambda_captures_diff() {
+    let out = run_both(
+        r#"fn update(value) {
+    return match 7 {
+        value => fn() {
+            let previous = value
+            value += 1
+            return [previous, value]
+        }(),
+    }
+}
+
+print(update(99))"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "unexpected error: {:?}", out.error);
+    assert_eq!(out.prints, ["[7, 8]"]);
+}
+
+#[test]
+fn match_binding_mutating_method_does_not_update_same_named_parameter_diff() {
+    let out = run_both(
+        r#"fn mutate(items) {
+    let ignored = match [1] {
+        items => items.push(2),
+    }
+    print(items)
+}
+
+mutate([9])"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "unexpected error: {:?}", out.error);
+    assert_eq!(out.prints, ["[9]"]);
+}
+
+#[test]
 fn match_or_pattern_diff() {
     assert_eq!(
         say(r#"let x = 3
