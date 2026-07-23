@@ -660,11 +660,12 @@ fn compile_sandbox(code: &str) -> String {
 #[test]
 fn sandbox_off_by_default_emits_no_tick_helper() {
     let out = compile("while true { }");
-    assert!(
-        !out.contains("__bop_tick"),
-        "non-sandbox build shouldn't emit __bop_tick:\n{}",
-        out
-    );
+    for sandbox_only in ["__bop_tick", "BopInstance", "BopFnOrigin", "call_depth"] {
+        assert!(
+            !out.contains(sandbox_only),
+            "non-sandbox build shouldn't emit {sandbox_only}:\n{out}",
+        );
+    }
     assert!(
         out.contains("bop_memory_init(usize::MAX)"),
         "non-sandbox init should disable the memory ceiling:\n{}",
@@ -679,7 +680,10 @@ fn sandbox_on_emits_tick_helper_and_limits_param() {
     for needle in [
         "fn __bop_tick(ctx: &mut Ctx<'_>, line: u32)",
         "ctx.max_steps",
-        "bop_memory_init(limits.max_memory)",
+        "pub struct BopInstance",
+        "let memory = ::bop::memory::MemoryAccount::__new(limits.max_memory);",
+        "let _active = ::bop::memory::ActiveMemoryGuard::__activate(&memory);",
+        "call_depth: 0",
         "pub fn run<H: ::bop::BopHost>( host: &mut H, limits: &::bop::BopLimits, )",
         "let limits = ::bop::BopLimits::standard();",
     ] {
@@ -690,6 +694,7 @@ fn sandbox_on_emits_tick_helper_and_limits_param() {
             out
         );
     }
+    assert!(!out.contains("bop_memory_init(limits.max_memory)"));
 }
 
 #[test]

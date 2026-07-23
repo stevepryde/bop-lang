@@ -2254,7 +2254,10 @@ impl Emitter {
         } else {
             format!(", {}", arg_names.join(", "))
         };
-        format!("{}(ctx{})?", function_site_fn_name(site_id), args)
+        format!(
+            "{}(ctx{args}, {line})?",
+            guarded_function_site_fn_name(site_id),
+        )
     }
 
     fn finish(self) -> String {
@@ -3719,6 +3722,11 @@ impl Emitter {
             self.out.push_str("    let _ = (ctx, obj, method, args, line);\n    Ok(None)\n}\n\n");
             return;
         }
+        if self.opts.sandbox {
+            self.out.push_str(
+                "    fn invoke(\n        ctx: &mut Ctx<'_>,\n        adapter: __BopMethodFn,\n        obj: &::bop::value::Value,\n        args: &[::bop::value::Value],\n        line: u32,\n    ) -> Result<::bop::value::Value, ::bop::error::BopError> {\n        __bop_enter_aot_call(ctx, line)?;\n        let result = adapter(ctx, obj, args, line);\n        __bop_leave_aot_call(ctx);\n        result\n    }\n",
+            );
+        }
         self.out.push_str("    let type_key: ::std::option::Option<(&str, &str)> = match obj {\n");
         self.out.push_str(
             "        ::bop::value::Value::Struct(s) => Some((s.module_path(), s.type_name())),\n",
@@ -3735,9 +3743,14 @@ impl Emitter {
         for (slot, (module_path, type_name, method_name)) in
             self.types.method_slots.iter().enumerate()
         {
+            let invoke = if self.opts.sandbox {
+                "invoke(ctx, adapter, obj, args, line)?"
+            } else {
+                "adapter(ctx, obj, args, line)?"
+            };
             writeln!(
                 self.out,
-                "        ({mp_lit}, {type_lit}, {method_lit}) => match ctx.method_slots[{slot}] {{ Some(adapter) => Ok(Some(adapter(ctx, obj, args, line)?)), None => Ok(None) }},",
+                "        ({mp_lit}, {type_lit}, {method_lit}) => match ctx.method_slots[{slot}] {{ Some(adapter) => Ok(Some({invoke})), None => Ok(None) }},",
                 mp_lit = rust_string_literal(module_path),
                 type_lit = rust_string_literal(type_name),
                 method_lit = rust_string_literal(method_name),
@@ -3781,9 +3794,138 @@ impl Emitter {
         self.out
             .push_str(&ctx_template.replace("/*__BOP_METHOD_SLOTS__*/", &method_field));
         let shared_visibility = if self.opts.sandbox { "" } else { "pub " };
-        self.out.push_str(
-            &RUNTIME_SHARED.replace("/*__BOP_RUNTIME_VIS__*/", shared_visibility),
-        );
+        let shared = RUNTIME_SHARED
+            .replace("/*__BOP_RUNTIME_VIS__*/", shared_visibility)
+            .replace(
+                "/*__BOP_INVOKE_HELPER__*/",
+                if self.opts.sandbox {
+                    r#"fn __bop_invoke_aot_callable(
+    ctx: &mut Ctx<'_>,
+    callable: ::std::rc::Rc<
+        dyn for<'__a> Fn(
+            &mut Ctx<'__a>,
+            ::std::vec::Vec<::bop::value::Value>,
+        ) -> Result<::bop::value::Value, ::bop::error::BopError>,
+    >,
+    args: ::std::vec::Vec<::bop::value::Value>,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    __bop_enter_aot_call(ctx, line)?;
+    let result = callable(ctx, args);
+    __bop_leave_aot_call(ctx);
+    result
+}
+
+"#
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_WRAP_CTX_PARAM__*/",
+                if self.opts.sandbox { "    ctx: &Ctx<'_>,\n" } else { "" },
+            )
+            .replace(
+                "/*__BOP_WRAP_CONSTRUCTOR__*/",
+                if self.opts.sandbox {
+                    "::bop::value::BopFn::try_new_compiled_in_module_with_origin(\n        params,\n        captures,\n        body,\n        self_name,\n        ::std::option::Option::None,\n        ctx.function_origin.clone(),\n        opaque_body_depth,\n        line,\n    ).map(::bop::value::Value::Fn)"
+                } else {
+                    "::bop::value::Value::try_new_compiled_fn(\n        params,\n        captures,\n        body,\n        self_name,\n        opaque_body_depth,\n        line,\n    )"
+                },
+            )
+            .replace(
+                "/*__BOP_VALIDATE_AOT_ORIGIN__*/",
+                if self.opts.sandbox {
+                    "                __bop_validate_aot_function(ctx, f, line)?;\n"
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_VALIDATE_AOT_ARITY__*/",
+                if self.opts.sandbox {
+                    r#"            if args.len() != f.params.len() {
+                let callable = f
+                    .self_name
+                    .as_ref()
+                    .map_or_else(|| "lambda".to_string(), |name| format!("`{}`", name));
+                return Err(::bop::error::BopError::runtime(
+                    format!(
+                        "{} expects {} argument{}, but got {}",
+                        callable,
+                        f.params.len(),
+                        if f.params.len() == 1 { "" } else { "s" },
+                        args.len(),
+                    ),
+                    line,
+                ));
+            }
+"#
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_VALIDATE_AOT_FUNC_ORIGIN__*/",
+                if self.opts.sandbox {
+                    "    __bop_validate_aot_function(ctx, &func, line)?;\n"
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_CALL_DEPTH_ENTER__*/",
+                if self.opts.sandbox {
+                    "    __bop_enter_aot_call(ctx, line)?;\n"
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_CALL_DEPTH_LEAVE__*/",
+                if self.opts.sandbox {
+                    "    __bop_leave_aot_call(ctx);\n"
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_CALL_VALUE_INVOKE__*/",
+                if self.opts.sandbox {
+                    "__bop_invoke_aot_callable(ctx, callable, args, line)"
+                } else {
+                    "callable(ctx, args)"
+                },
+            )
+            .replace(
+                "/*__BOP_TRY_ATTEMPT_START__*/",
+                if self.opts.sandbox {
+                    "    let attempted = (|| -> Result<\n        ::bop::value::Value,\n        ::bop::error::BopError,\n    > {\n"
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_TRY_ATTEMPT_INVOKE__*/",
+                if self.opts.sandbox {
+                    "        __bop_invoke_aot_callable(ctx, callable_fn, ::std::vec::Vec::new(), line)\n"
+                } else {
+                    "    let attempted = callable_fn(ctx, ::std::vec::Vec::new());\n"
+                },
+            )
+            .replace(
+                "/*__BOP_TRY_ATTEMPT_END__*/",
+                if self.opts.sandbox { "    })();\n" } else { "" },
+            )
+            .replace(
+                "/*__BOP_RESULT_INVOKE__*/",
+                if self.opts.sandbox {
+                    "    let result = __bop_invoke_aot_callable(ctx, callable_fn, ::std::vec![payload], line)?;\n"
+                } else {
+                    "    let result = callable_fn(ctx, ::std::vec![payload])?;\n"
+                },
+            );
+        self.out.push_str(&shared);
         if self.opts.sandbox {
             self.out.push_str(TICK_HELPER);
         }
@@ -4028,7 +4170,7 @@ fn __bop_active_function_value(
 }
 
 fn __bop_function_site_value(
-    _ctx: &mut Ctx<'_>,
+    ctx: &mut Ctx<'_>,
     site_id: usize,
     line: u32,
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
@@ -4040,9 +4182,10 @@ fn __bop_function_site_value(
             ::std::vec::Vec<::bop::value::Value>,
         ) -> Result<::bop::value::Value, ::bop::error::BopError>,
     > = ::std::rc::Rc::new(move |ctx, args| {
-        __bop_call_function_site(ctx, site_id, args, 0)
+        __bop_call_function_site_inner(ctx, site_id, args, 0)
     });
     __bop_wrap_callable(
+        ctx,
         params,
         ::std::vec::Vec::new(),
         Some(site.name.to_string()),
@@ -4068,8 +4211,32 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
 
 "#,
         );
+        for site in &self.functions.sites {
+            let params = (0..site.params.len())
+                .map(|index| {
+                    format!(
+                        "__bop_param_{index}: ::bop::value::Value"
+                    )
+                })
+                .collect::<Vec<_>>();
+            let signature_args = if params.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", params.join(", "))
+            };
+            let call_args = (0..site.params.len())
+                .map(|index| format!(", __bop_param_{index}"))
+                .collect::<String>();
+            writeln!(
+                self.out,
+                "fn {guarded}(ctx: &mut Ctx<'_>{signature_args}, line: u32) -> Result<::bop::value::Value, ::bop::error::BopError> {{\n    __bop_enter_aot_call(ctx, line)?;\n    let result = {body}(ctx{call_args});\n    __bop_leave_aot_call(ctx);\n    result\n}}\n",
+                guarded = guarded_function_site_fn_name(site.id),
+                body = function_site_fn_name(site.id),
+            )
+            .unwrap();
+        }
         self.out.push_str(
-            "fn __bop_call_function_site(\n    ctx: &mut Ctx<'_>,\n    site_id: usize,\n    mut args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<::bop::value::Value, ::bop::error::BopError> {\n",
+            "fn __bop_call_function_site_inner(\n    ctx: &mut Ctx<'_>,\n    site_id: usize,\n    mut args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<::bop::value::Value, ::bop::error::BopError> {\n",
         );
         self.out.push_str("    let site = &__BOP_FUNCTION_SITES[site_id];\n");
         self.out.push_str("    if args.len() != site.params.len() {\n");
@@ -4100,7 +4267,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             }
         }
         self.out.push_str(
-            "        _ => Err(::bop::error::BopError::runtime(\"Invalid compiled function site\", line)),\n    }\n}\n\n",
+            "        _ => Err(::bop::error::BopError::runtime(\"Invalid compiled function site\", line)),\n    }\n}\n\nfn __bop_call_function_site(\n    ctx: &mut Ctx<'_>,\n    site_id: usize,\n    args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<::bop::value::Value, ::bop::error::BopError> {\n    __bop_enter_aot_call(ctx, line)?;\n    let result = __bop_call_function_site_inner(ctx, site_id, args, line);\n    __bop_leave_aot_call(ctx);\n    result\n}\n\n",
         );
     }
 
@@ -4120,6 +4287,34 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         };
         self.out
             .push_str(&entry.replace("/*__BOP_METHOD_SLOTS_INIT__*/", &method_slots));
+        if self.opts.sandbox {
+            self.emit_public_entry_wrappers();
+        }
+    }
+
+    fn emit_public_entry_wrappers(&mut self) {
+        self.out.push_str(
+            "/// Hygienic convenience wrappers for potential direct-root public entries.\n/// Each wrapper delegates to `BopInstance::call`, so runtime reachability,\n/// final visibility, and arity checks remain authoritative.\npub mod bop_entry_points {\n",
+        );
+        let names = self
+            .functions
+            .sites
+            .iter()
+            .filter(|site| {
+                site.abi_eligible && site.visibility == Visibility::Public
+            })
+            .map(|site| site.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in names {
+            writeln!(
+                self.out,
+                "    pub fn __bop_entry_{symbol}(\n        instance: &mut super::BopInstance,\n        args: &[::bop::value::Value],\n        host: &mut dyn ::bop::BopHost,\n    ) -> Result<::bop::value::Value, ::bop::error::BopError> {{\n        instance.call({name}, args, host)\n    }}",
+                symbol = user_name_component(&name),
+                name = rust_string_literal(&name),
+            )
+            .unwrap();
+        }
+        self.out.push_str("}\n\n");
     }
 
     fn emit_main(&mut self) {
@@ -5407,10 +5602,17 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let mut body = match name.as_str() {
             "print" => {
                 let args_expr = build_arg_array(&arg_names);
-                format!(
-                    "ctx.host.on_print(&__bop_format_print(&{})); ::bop::value::Value::None",
-                    args_expr
-                )
+                if self.opts.sandbox {
+                    format!(
+                        "__bop_host_print(ctx, &__bop_format_print(&{})); ::bop::value::Value::None",
+                        args_expr
+                    )
+                } else {
+                    format!(
+                        "ctx.host.on_print(&__bop_format_print(&{})); ::bop::value::Value::None",
+                        args_expr
+                    )
+                }
             }
             "range" => format!(
                 "::bop::builtins::builtin_range(&{}, {}, &mut ctx.rand_state)?",
@@ -5488,10 +5690,17 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         };
                         format!("{}({})?", fn_name, fn_args)
                     };
-                    format!(
-                        "match ctx.host.call({:?}, &{}, {}) {{ Some(r) => r?, None => {}, }}",
-                        name, cloned_args, line, fallback
-                    )
+                    if self.opts.sandbox {
+                        format!(
+                            "match __bop_host_call(ctx, {:?}, &{}, {}) {{ Some(r) => r?, None => {}, }}",
+                            name, cloned_args, line, fallback
+                        )
+                    } else {
+                        format!(
+                            "match ctx.host.call({:?}, &{}, {}) {{ Some(r) => r?, None => {}, }}",
+                            name, cloned_args, line, fallback
+                        )
+                    }
                 } else {
                     // No fn of that name in scope. Still try the
                     // host first so embedders (e.g. bop-sys's
@@ -5500,13 +5709,20 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     // `bop::error_messages::function_not_found` so
                     // the text stays in lockstep with walker / VM
                     // without any per-engine string duplication.
-                    let hint_fallback = format!(
-                        "{{ let hint = ctx.host.function_hint(); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}); e.friendly_hint = Some(hint.to_string()); e }} }}",
-                        name, line, name, line
-                    );
+                    let hint_fallback = if self.opts.sandbox {
+                        format!(
+                            "{{ let hint = __bop_host_function_hint(ctx); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}); e.friendly_hint = Some(hint); e }} }}",
+                            name, line, name, line
+                        )
+                    } else {
+                        format!(
+                            "{{ let hint = ctx.host.function_hint(); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}); e.friendly_hint = Some(hint.to_string()); e }} }}",
+                            name, line, name, line
+                        )
+                    };
                     if self.opts.sandbox {
                         format!(
-                            "match ctx.host.call({name:?}, &{cloned_args}, {line}) {{ Some(r) => r?, None => match __bop_call_active_function(ctx, {module}, {name_lit}, {args}, {line}) {{ Ok(value) => value, Err(error) if error.message == ::bop::error_messages::function_not_found({name_lit}) => return Err({hint}), Err(error) => return Err(error), }}, }}",
+                            "match __bop_host_call(ctx, {name:?}, &{cloned_args}, {line}) {{ Some(r) => r?, None => match __bop_call_active_function(ctx, {module}, {name_lit}, {args}, {line}) {{ Ok(value) => value, Err(error) if error.message == ::bop::error_messages::function_not_found({name_lit}) => return Err({hint}), Err(error) => return Err(error), }}, }}",
                             name = name,
                             module = rust_string_literal(&self.current_module),
                             name_lit = rust_string_literal(&name),
@@ -6353,9 +6569,10 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         } else {
             String::new()
         };
+        let wrap_ctx = if self.opts.sandbox { "ctx, " } else { "" };
 
         Ok(format!(
-            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{moves}{param_binds}{body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }}); __bop_wrap_callable({params_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
+            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{moves}{param_binds}{body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }}); __bop_wrap_callable({wrap_ctx}{params_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
             prelude = capture_prelude,
             opaque_body_depth = opaque_body_depth,
             arity = arity,
@@ -6366,6 +6583,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             param_binds = param_binds,
             body = body_src,
             params_array = params_array,
+            wrap_ctx = wrap_ctx,
         ))
     }
 }
@@ -7074,6 +7292,10 @@ fn function_site_fn_name(site: usize) -> String {
     format!("__bop_function_site_{site}")
 }
 
+fn guarded_function_site_fn_name(site: usize) -> String {
+    format!("__bop_guarded_function_site_{site}")
+}
+
 /// Turn a Bop module path into a collision-free Rust-safe slug.
 fn module_slug(path: &str) -> String {
     user_name_component(path)
@@ -7237,6 +7459,7 @@ enum __BopExport {
 /// Opaque generated program state. This type and its fields are implementation
 /// details; sandbox embedders should use `run` and the generated `BopInstance`.
 struct __BopState {
+    function_origin: ::bop::value::BopFnOrigin,
     rand_state: u64,
     /// Per-program module cache keyed by the Bop module path (the
     /// dot-joined string). `load` fns use this to memoise imports
@@ -7288,6 +7511,8 @@ struct Ctx<'h> {
     /// backedge and fn entry so runaway programs hit the step
     /// budget before they exhaust the host.
     steps: u64,
+    /// User-call depth is reset for every public operation.
+    call_depth: usize,
     /// Upper bound on `steps`, populated from
     /// `BopLimits::max_steps` at operation entry.
     max_steps: u64,
@@ -7329,8 +7554,70 @@ fn __bop_tick(ctx: &mut Ctx<'_>, line: u32) -> Result<(), ::bop::error::BopError
             "Your code is using too much memory. Check for large strings or arrays growing in loops.",
         ));
     }
-    ctx.host.on_tick()?;
+    {
+        let _suspended = ::bop::memory::ActiveMemoryGuard::__suspend();
+        ctx.host.on_tick()?;
+    }
     Ok(())
+}
+
+fn __bop_validate_aot_function(
+    ctx: &Ctx<'_>,
+    function: &::std::rc::Rc<::bop::value::BopFn>,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    if function.__is_allowed_by(&ctx.function_origin, "aot") {
+        Ok(())
+    } else {
+        Err(::bop::error::BopError::runtime(
+            "This function belongs to a different Bop engine instance",
+            line,
+        ))
+    }
+}
+
+fn __bop_enter_aot_call(
+    ctx: &mut Ctx<'_>,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    const MAX_CALL_DEPTH: usize = 64;
+    if ctx.call_depth >= MAX_CALL_DEPTH {
+        let mut error = ::bop::error::BopError::runtime(
+            "Too many nested function calls (possible infinite recursion)",
+            line,
+        );
+        error.friendly_hint = ::std::option::Option::Some(
+            "Check that your recursive function has a base case that stops calling itself."
+                .to_string(),
+        );
+        return Err(error);
+    }
+    ctx.call_depth += 1;
+    Ok(())
+}
+
+fn __bop_leave_aot_call(ctx: &mut Ctx<'_>) {
+    ctx.call_depth = ctx.call_depth.saturating_sub(1);
+}
+
+fn __bop_host_print(ctx: &mut Ctx<'_>, message: &str) {
+    let _suspended = ::bop::memory::ActiveMemoryGuard::__suspend();
+    ctx.host.on_print(message);
+}
+
+fn __bop_host_call(
+    ctx: &mut Ctx<'_>,
+    name: &str,
+    args: &[::bop::value::Value],
+    line: u32,
+) -> ::std::option::Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+    let _suspended = ::bop::memory::ActiveMemoryGuard::__suspend();
+    ctx.host.call(name, args, line)
+}
+
+fn __bop_host_function_hint(ctx: &mut Ctx<'_>) -> String {
+    let _suspended = ::bop::memory::ActiveMemoryGuard::__suspend();
+    ctx.host.function_hint().to_string()
 }
 
 "#;
@@ -7751,9 +8038,12 @@ fn __bop_declaration_alias_mut<'v>(
     >,
 }
 
+/*__BOP_INVOKE_HELPER__*/
+
 /// Build a `Value::Fn` around an `AotClosure`. Used by the emitted
 /// `__bop_user_fn_value_*` wrappers and by `MakeLambda` emission.
 fn __bop_wrap_callable(
+/*__BOP_WRAP_CTX_PARAM__*/
     params: ::std::vec::Vec<String>,
     captures: ::std::vec::Vec<(String, ::bop::value::Value)>,
     self_name: ::std::option::Option<String>,
@@ -7768,14 +8058,7 @@ fn __bop_wrap_callable(
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
     let closure = ::std::rc::Rc::new(AotClosure { callable });
     let body: ::std::rc::Rc<dyn ::core::any::Any + 'static> = closure;
-    ::bop::value::Value::try_new_compiled_fn(
-        params,
-        captures,
-        body,
-        self_name,
-        opaque_body_depth,
-        line,
-    )
+    /*__BOP_WRAP_CONSTRUCTOR__*/
 }
 
 /// Runtime dispatch for a value-based call: the callee is a
@@ -7789,24 +8072,28 @@ fn __bop_call_value(
     line: u32,
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
     match &callee {
-        ::bop::value::Value::Fn(f) => match &f.body {
-            ::bop::value::FnBody::Compiled(body) => {
-                if let Some(aot) = body.downcast_ref::<AotClosure>() {
-                    let callable = ::std::rc::Rc::clone(&aot.callable);
-                    drop(callee);
-                    callable(ctx, args)
-                } else {
-                    Err(::bop::error::BopError::runtime(
-                        "Closure body wasn't compiled by the AOT transpiler",
-                        line,
-                    ))
+        ::bop::value::Value::Fn(f) => {
+/*__BOP_VALIDATE_AOT_ORIGIN__*/
+/*__BOP_VALIDATE_AOT_ARITY__*/
+            match &f.body {
+                ::bop::value::FnBody::Compiled(body) => {
+                    if let Some(aot) = body.downcast_ref::<AotClosure>() {
+                        let callable = ::std::rc::Rc::clone(&aot.callable);
+                        drop(callee);
+                        /*__BOP_CALL_VALUE_INVOKE__*/
+                    } else {
+                        Err(::bop::error::BopError::runtime(
+                            "Closure body wasn't compiled by the AOT transpiler",
+                            line,
+                        ))
+                    }
                 }
+                ::bop::value::FnBody::Ast(_) => Err(::bop::error::BopError::runtime(
+                    "Closure wasn't compiled for the AOT — use `bop::run` for tree-walker closures",
+                    line,
+                )),
             }
-            ::bop::value::FnBody::Ast(_) => Err(::bop::error::BopError::runtime(
-                "Closure wasn't compiled for the AOT — use `bop::run` for tree-walker closures",
-                line,
-            )),
-        },
+        }
         other => Err(::bop::error::BopError::runtime(
             ::bop::error_messages::cant_call_a(other.type_name()),
             line,
@@ -7856,25 +8143,29 @@ fn __bop_try_call(
         }
     };
     drop(callable);
-    let callable_fn = match &func.body {
-        ::bop::value::FnBody::Compiled(body) => match body.downcast_ref::<AotClosure>() {
-            Some(aot) => ::std::rc::Rc::clone(&aot.callable),
-            None => {
+/*__BOP_TRY_ATTEMPT_START__*/
+/*__BOP_VALIDATE_AOT_FUNC_ORIGIN__*/
+        let callable_fn = match &func.body {
+            ::bop::value::FnBody::Compiled(body) => match body.downcast_ref::<AotClosure>() {
+                Some(aot) => ::std::rc::Rc::clone(&aot.callable),
+                None => {
+                    return Err(::bop::error::BopError::runtime(
+                        "try_call: callee wasn't compiled by the AOT transpiler",
+                        line,
+                    ));
+                }
+            },
+            ::bop::value::FnBody::Ast(_) => {
                 return Err(::bop::error::BopError::runtime(
-                    "try_call: callee wasn't compiled by the AOT transpiler",
+                    "try_call: callee was compiled for the walker, not AOT",
                     line,
                 ));
             }
-        },
-        ::bop::value::FnBody::Ast(_) => {
-            return Err(::bop::error::BopError::runtime(
-                "try_call: callee was compiled for the walker, not AOT",
-                line,
-            ));
-        }
-    };
+        };
+/*__BOP_TRY_ATTEMPT_INVOKE__*/
+/*__BOP_TRY_ATTEMPT_END__*/
     drop(func);
-    match callable_fn(ctx, ::std::vec::Vec::new()) {
+    match attempted {
         Ok(value) => ::bop::builtins::make_try_call_ok(value, line),
         Err(err) => {
             if err.is_fatal {
@@ -7949,6 +8240,7 @@ fn __bop_result_callable_method(
         }
     };
     drop(callable);
+/*__BOP_VALIDATE_AOT_FUNC_ORIGIN__*/
     let callable_fn = match &func.body {
         ::bop::value::FnBody::Compiled(body) => match body.downcast_ref::<AotClosure>() {
             Some(aot) => ::std::rc::Rc::clone(&aot.callable),
@@ -7967,7 +8259,7 @@ fn __bop_result_callable_method(
         }
     };
     drop(func);
-    let result = callable_fn(ctx, ::std::vec![payload])?;
+/*__BOP_RESULT_INVOKE__*/
     match kind {
         ResultCallableKind::Map => make_result_ok(result, line),
         ResultCallableKind::MapErr => make_result_err(result, line),
@@ -8448,17 +8740,13 @@ const MAIN_FN: &str = r#"fn main() {
 
 const PUBLIC_ENTRY_SANDBOX: &str = r#"// ─── Public entry points ────────────────────────────────────────
 
-/// Run the compiled program with the supplied host and resource
-/// limits. `limits.max_memory` wires into `bop::memory`'s
-/// allocation tracker; `limits.max_steps` caps the number of
-/// tick-points (loop iterations + function entries) before the
-/// program halts with `Your code took too many steps`.
 fn __bop_load_state(
     host: &mut dyn ::bop::BopHost,
     limits: &::bop::BopLimits,
 ) -> Result<__BopState, ::bop::error::BopError> {
-    ::bop::memory::bop_memory_init(limits.max_memory);
+    let _memory = ::bop::memory::ActiveMemoryGuard::__activate_new_if_none(limits.max_memory);
     let mut state = __BopState {
+        function_origin: ::bop::value::BopFnOrigin::__instance("aot"),
         rand_state: 0,
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
@@ -8476,6 +8764,7 @@ fn __bop_load_state(
             host,
             state: &mut state,
             steps: 0,
+            call_depth: 0,
             max_steps: limits.max_steps,
         };
         __bop_seed_builtin_type_defs(&mut ctx)?;
@@ -8484,11 +8773,191 @@ fn __bop_load_state(
     Ok(state)
 }
 
+/// A loaded sandboxed AOT program. Top-level code runs once in [`Self::load`]
+/// and all root/module/type/method state remains live for later host calls.
+/// Hosts are borrowed only for one operation and are never retained.
+pub struct BopInstance {
+    state: __BopState,
+    entries: ::std::vec::Vec<::bop::EntryPoint>,
+    limits: ::bop::BopLimits,
+    in_operation: ::core::cell::Cell<bool>,
+    memory: ::std::rc::Rc<::bop::memory::MemoryAccount>,
+}
+
+impl BopInstance {
+    /// Run the compiled top level once and retain its resulting state.
+    pub fn load(
+        host: &mut dyn ::bop::BopHost,
+        limits: &::bop::BopLimits,
+    ) -> Result<Self, ::bop::error::BopError> {
+        let memory = ::bop::memory::MemoryAccount::__new(limits.max_memory);
+        let state = {
+            let _active = ::bop::memory::ActiveMemoryGuard::__activate(&memory);
+            let state = __bop_load_state(host, limits)?;
+            if memory.__exceeded() {
+                return Err(__bop_instance_memory_error());
+            }
+            state
+        };
+        let entries = __bop_instance_entry_points(&state);
+        Ok(Self {
+            state,
+            entries,
+            limits: limits.clone(),
+            in_operation: ::core::cell::Cell::new(false),
+            memory,
+        })
+    }
+
+    /// Final executed direct-root public functions, in final-site order.
+    pub fn entry_points(&self) -> &[::bop::EntryPoint] {
+        &self.entries
+    }
+
+    /// Invoke a declared public root entry point. This bypasses host, builtin,
+    /// import, and mutable ordinary-name dispatch.
+    pub fn call(
+        &mut self,
+        name: &str,
+        args: &[::bop::value::Value],
+        host: &mut dyn ::bop::BopHost,
+    ) -> Result<::bop::value::Value, ::bop::error::BopError> {
+        let _operation = __BopOperationGuard::begin(&self.in_operation)?;
+        let site_id = self
+            .state
+            .abi_declarations
+            .iter()
+            .copied()
+            .find(|site_id| {
+                let site = &__BOP_FUNCTION_SITES[*site_id];
+                site.is_public && site.name == name
+            })
+            .ok_or_else(|| ::bop::error::BopError::runtime(
+                format!("Public entry point `{}` was not found", name),
+                0,
+            ))?;
+        let site = &__BOP_FUNCTION_SITES[site_id];
+        if args.len() != site.params.len() {
+            return Err(::bop::error::BopError::runtime(
+                format!(
+                    "`{}` expects {} argument{}, but got {}",
+                    name,
+                    site.params.len(),
+                    if site.params.len() == 1 { "" } else { "s" },
+                    args.len(),
+                ),
+                0,
+            ));
+        }
+        if self.memory.__exceeded() {
+            return Err(__bop_instance_memory_error());
+        }
+        let result = {
+            let _active = ::bop::memory::ActiveMemoryGuard::__activate(&self.memory);
+            let mut ctx = Ctx {
+                host,
+                state: &mut self.state,
+                steps: 0,
+                call_depth: 0,
+                max_steps: self.limits.max_steps,
+            };
+            __bop_call_function_site(&mut ctx, site_id, args.to_vec(), 0)
+        };
+        if self.memory.__exceeded() {
+            Err(__bop_instance_memory_error())
+        } else {
+            result
+        }
+    }
+
+    /// Invoke a function value created by this exact generated instance.
+    pub fn call_value(
+        &mut self,
+        callable: &::bop::value::Value,
+        args: &[::bop::value::Value],
+        host: &mut dyn ::bop::BopHost,
+    ) -> Result<::bop::value::Value, ::bop::error::BopError> {
+        let _operation = __BopOperationGuard::begin(&self.in_operation)?;
+        let function = match callable {
+            ::bop::value::Value::Fn(function) => ::std::rc::Rc::clone(function),
+            other => {
+                return Err(::bop::error::BopError::runtime(
+                    format!("expected function, got {}", other.type_name()),
+                    0,
+                ));
+            }
+        };
+        if !function.__is_allowed_by(&self.state.function_origin, "aot") {
+            return Err(::bop::error::BopError::runtime(
+                "This function belongs to a different Bop engine instance",
+                0,
+            ));
+        }
+        if args.len() != function.params.len() {
+            return Err(::bop::error::BopError::runtime(
+                format!(
+                    "Function expects {} argument{}, but got {}",
+                    function.params.len(),
+                    if function.params.len() == 1 { "" } else { "s" },
+                    args.len(),
+                ),
+                0,
+            ));
+        }
+        if self.memory.__exceeded() {
+            return Err(__bop_instance_memory_error());
+        }
+        let result = {
+            let _active = ::bop::memory::ActiveMemoryGuard::__activate(&self.memory);
+            let mut ctx = Ctx {
+                host,
+                state: &mut self.state,
+                steps: 0,
+                call_depth: 0,
+                max_steps: self.limits.max_steps,
+            };
+            __bop_call_value(&mut ctx, callable.clone(), args.to_vec(), 0)
+        };
+        if self.memory.__exceeded() {
+            Err(__bop_instance_memory_error())
+        } else {
+            result
+        }
+    }
+}
+
+fn __bop_instance_memory_error() -> ::bop::error::BopError {
+    ::bop::error::BopError::fatal("Memory limit exceeded", 0)
+}
+
+struct __BopOperationGuard<'a>(&'a ::core::cell::Cell<bool>);
+
+impl<'a> __BopOperationGuard<'a> {
+    fn begin(
+        active: &'a ::core::cell::Cell<bool>,
+    ) -> Result<Self, ::bop::error::BopError> {
+        if active.replace(true) {
+            return Err(::bop::error::BopError::runtime(
+                "A Bop instance cannot be re-entered",
+                0,
+            ));
+        }
+        Ok(Self(active))
+    }
+}
+
+impl Drop for __BopOperationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+/// One-shot compatibility adapter: load the generated instance, then drop it.
 pub fn run<H: ::bop::BopHost>(
     host: &mut H,
     limits: &::bop::BopLimits,
 ) -> Result<(), ::bop::error::BopError> {
-    __bop_load_state(host as &mut dyn ::bop::BopHost, limits).map(|_| ())
+    BopInstance::load(host as &mut dyn ::bop::BopHost, limits).map(|_| ())
 }
 
 "#;

@@ -315,7 +315,7 @@ fn main() {
     let entries = __bop_instance_entry_points(&state);
     println!("{}", entries.iter().map(|entry| format!("{}/{}", entry.name(), entry.arity())).collect::<Vec<_>>().join(","));
     let site = state.abi_declarations.iter().copied().find(|site| __BOP_FUNCTION_SITES[*site].name == "first" && __BOP_FUNCTION_SITES[*site].is_public).unwrap();
-    let mut ctx = Ctx { host: &mut host, state: &mut state, steps: 0, max_steps: limits.max_steps };
+    let mut ctx = Ctx { host: &mut host, state: &mut state, steps: 0, call_depth: 0, max_steps: limits.max_steps };
     println!("{}", __bop_call_function_site(&mut ctx, site, vec![::bop::value::Value::Int(7)], 0).unwrap());
     println!("{}", __bop_call_active_function(&mut ctx, "<root>", "first", vec![::bop::value::Value::Int(7)], 0).unwrap());
 }
@@ -324,6 +324,367 @@ fn main() {
     let run = run_generated_source("sandbox_exact_final_abi", rust_src);
     assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
     assert_eq!(run.stdout, "first/1\n7\n99");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_generated_instance_retains_state_and_callbacks() {
+    let source = r#"init()
+let count = 0
+pub fn next(delta) { count += delta; return count }
+fn private() { return 99 }
+pub fn callback() {
+    return fn(delta) { count += delta; return count }
+}
+pub fn recurse(n) {
+    if n == 0 { return 0 }
+    return recurse(n - 1)
+}
+pub fn recurse_value() { return recurse }
+pub fn attempt(f) { return try_call(f) }
+pub fn invoke(f) { return f() }
+pub fn map_callback(f) { return Result::Ok(1).map(f) }
+pub fn reenter() { return host_reenter() }"#;
+    let mut rust_src = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct HostA { init_calls: usize }
+impl ::bop::BopHost for HostA {
+    fn call(&mut self, name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        if name == "init" {
+            self.init_calls += 1;
+            Some(Ok(::bop::value::Value::None))
+        } else {
+            None
+        }
+    }
+}
+struct HostB;
+impl ::bop::BopHost for HostB {
+    fn call(&mut self, name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        (name == "init").then_some(Ok(::bop::value::Value::None))
+    }
+}
+fn expect_int(value: ::bop::value::Value, expected: i64) {
+    assert!(matches!(value, ::bop::value::Value::Int(actual) if actual == expected));
+}
+fn main() {
+    let limits = ::bop::BopLimits::standard();
+    let mut host_a = HostA { init_calls: 0 };
+    let mut instance = BopInstance::load(&mut host_a as &mut dyn ::bop::BopHost, &limits).unwrap();
+    assert_eq!(host_a.init_calls, 1);
+    drop(host_a);
+
+    let entries = instance.entry_points().iter().map(|entry| format!("{}/{}", entry.name(), entry.arity())).collect::<Vec<_>>();
+    assert_eq!(entries, ["next/1", "callback/0", "recurse/1", "recurse_value/0", "attempt/1", "invoke/1", "map_callback/1", "reenter/0"]);
+    let mut host_b = HostB;
+    expect_int(instance.call("next", &[::bop::value::Value::Int(1)], &mut host_b).unwrap(), 1);
+    expect_int(instance.call("next", &[::bop::value::Value::Int(2)], &mut host_b).unwrap(), 3);
+    assert!(instance.call("private", &[], &mut host_b).unwrap_err().message.contains("Public entry point"));
+    assert!(instance.call("next", &[], &mut host_b).unwrap_err().message.contains("expects 1 argument"));
+
+    let callback = instance.call("callback", &[], &mut host_b).unwrap();
+    expect_int(instance.call_value(&callback, &[::bop::value::Value::Int(4)], &mut host_b).unwrap(), 7);
+    expect_int(instance.call_value(&callback, &[::bop::value::Value::Int(5)], &mut host_b).unwrap(), 12);
+    expect_int(bop_entry_points::__bop_entry_6e657874(&mut instance, &[::bop::value::Value::Int(1)], &mut host_b).unwrap(), 13);
+
+    expect_int(instance.call("recurse", &[::bop::value::Value::Int(63)], &mut host_b).unwrap(), 0);
+    let boundary = instance.call("recurse", &[::bop::value::Value::Int(64)], &mut host_b).unwrap_err();
+    assert!(boundary.message.contains("nested function calls"), "{}", boundary.message);
+    let deep = instance.call("recurse", &[::bop::value::Value::Int(100)], &mut host_b).unwrap_err();
+    assert!(deep.message.contains("nested function calls"), "{}", deep.message);
+    expect_int(instance.call("recurse", &[::bop::value::Value::Int(1)], &mut host_b).unwrap(), 0);
+
+    let recurse_value = instance.call("recurse_value", &[], &mut host_b).unwrap();
+    expect_int(instance.call_value(&recurse_value, &[::bop::value::Value::Int(63)], &mut host_b).unwrap(), 0);
+    assert!(instance.call_value(&recurse_value, &[::bop::value::Value::Int(64)], &mut host_b).unwrap_err().message.contains("nested function calls"));
+    expect_int(instance.call_value(&recurse_value, &[::bop::value::Value::Int(1)], &mut host_b).unwrap(), 0);
+
+    let mut second = BopInstance::load(&mut host_b, &limits).unwrap();
+    assert!(second.call_value(&callback, &[], &mut host_b).unwrap_err().message.contains("different Bop engine instance"));
+    let second_callback = second.call("callback", &[], &mut host_b).unwrap();
+    let foreign_attempt = instance.call("attempt", &[second_callback.clone()], &mut host_b).unwrap();
+    assert!(matches!(foreign_attempt, ::bop::value::Value::EnumVariant(value) if value.variant() == "Err"));
+    assert!(instance.call("invoke", &[second_callback.clone()], &mut host_b).unwrap_err().message.contains("different Bop engine instance"));
+    assert!(instance.call("map_callback", &[second_callback], &mut host_b).unwrap_err().message.contains("different Bop engine instance"));
+    let arity_attempt = instance.call("attempt", &[recurse_value.clone()], &mut host_b).unwrap();
+    assert!(matches!(arity_attempt, ::bop::value::Value::EnumVariant(value) if value.variant() == "Err"));
+    expect_int(instance.call("next", &[::bop::value::Value::Int(1)], &mut host_b).unwrap(), 14);
+
+    let mut walker = ::bop::BopInstance::load(
+        "pub fn callback() { return fn() { return 1 } }",
+        &mut host_b,
+        &limits,
+    ).unwrap();
+    let foreign = walker.call("callback", &[], &mut host_b).unwrap();
+    assert!(instance.call_value(&foreign, &[], &mut host_b).unwrap_err().message.contains("different Bop engine instance"));
+    assert!(instance.call_value(&::bop::value::Value::Int(1), &[], &mut host_b).unwrap_err().message.contains("expected function"));
+    let external_ast = ::bop::value::Value::new_fn(Vec::new(), Vec::new(), Vec::new(), None);
+    assert!(instance.call_value(&external_ast, &[], &mut host_b).unwrap_err().message.contains("wasn't compiled for the AOT"));
+    let external_body: ::std::rc::Rc<dyn ::core::any::Any + 'static> = ::std::rc::Rc::new(1usize);
+    let external_compiled = ::bop::value::Value::new_compiled_fn(Vec::new(), Vec::new(), external_body, None);
+    assert!(instance.call_value(&external_compiled, &[], &mut host_b).unwrap_err().message.contains("wasn't compiled by the AOT"));
+
+    instance.in_operation.set(true);
+    assert!(instance.call("missing", &[::bop::value::Value::None], &mut host_b).unwrap_err().message.contains("cannot be re-entered"));
+    instance.in_operation.set(false);
+    expect_int(instance.call("next", &[::bop::value::Value::Int(1)], &mut host_b).unwrap(), 15);
+    println!("ok");
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_generated_instance_state_callbacks", rust_src);
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "ok");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_generated_instance_scopes_limits_and_host_memory() {
+    let source = r#"boot()
+let kept = none
+let mutation = 0
+pub fn external_value() { return host_value() }
+pub fn detach_value() {
+    let value = host_value()
+    value.push("script-owned-abcdefghijklmnopqrstuvwxyz0123456789")
+    return value
+}
+pub fn print_it() { print("hello") }
+pub fn hint_it() { return missing_host_function() }
+pub fn spin(n) { repeat n { } return n }
+pub fn call_other() { return nested_other() }
+pub fn make_result() {
+    let value = []
+    repeat 8 {
+        value.push("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+    }
+    return value
+}
+pub fn mutate_then_fail() { mutation += 1; panic("boom") }
+pub fn mutate_then_spin() { mutation += 1; repeat 200 { } }
+pub fn read_mutation() { return mutation }
+pub fn poison() {
+    kept = host_value()
+    repeat 16 {
+        kept.push("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+    }
+}"#;
+    let mut rust_src = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct InnerHost;
+impl ::bop::BopHost for InnerHost {
+    fn call(&mut self, name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        (name == "boot").then_some(Ok(::bop::value::Value::None))
+    }
+}
+struct Host {
+    retained: ::std::cell::RefCell<Vec<::bop::value::Value>>,
+    other: Option<(BopInstance, InnerHost)>,
+}
+impl Host {
+    fn retain_external(&self) -> ::bop::value::Value {
+        let value = ::bop::value::Value::new_array(vec![
+            ::bop::value::Value::new_str("host-owned-abcdefghijklmnopqrstuvwxyz0123456789".to_string()),
+        ]);
+        self.retained.borrow_mut().push(value.clone());
+        value
+    }
+}
+impl ::bop::BopHost for Host {
+    fn call(&mut self, name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        if name == "boot" {
+            self.retain_external();
+            return Some(Ok(::bop::value::Value::None));
+        }
+        if name == "host_value" {
+            return Some(Ok(self.retain_external()));
+        }
+        if name == "nested_other" {
+            let (mut other, mut inner_host) = self.other.take().expect("nested instance installed");
+            let result = other.call("make_result", &[], &mut inner_host);
+            self.other = Some((other, inner_host));
+            return Some(result);
+        }
+        None
+    }
+    fn on_print(&mut self, _message: &str) {
+        self.retain_external();
+    }
+    fn on_tick(&mut self) -> Result<(), ::bop::error::BopError> {
+        self.retain_external();
+        Ok(())
+    }
+    fn function_hint(&self) -> &str {
+        self.retain_external();
+        "host hint"
+    }
+}
+fn main() {
+    let limits = ::bop::BopLimits { max_steps: 100, max_memory: 1_600 };
+    let mut host = Host { retained: ::std::cell::RefCell::new(Vec::new()), other: None };
+    let mut instance = BopInstance::load(&mut host, &limits).unwrap();
+    let baseline = instance.memory.__used();
+    assert_eq!(baseline, 0, "top-level host allocations must not enter the instance account");
+    let mut inner_host = InnerHost;
+    let other = BopInstance::load(&mut inner_host, &limits).unwrap();
+    let other_baseline = other.memory.__used();
+    assert_eq!(other_baseline, 0);
+    host.other = Some((other, inner_host));
+
+    let external = instance.call("external_value", &[], &mut host).unwrap();
+    assert_eq!(instance.memory.__used(), baseline);
+    let nested = instance.call("call_other", &[], &mut host).unwrap();
+    assert_eq!(instance.memory.__used(), baseline);
+    assert!(host.other.as_ref().unwrap().0.memory.__used() > other_baseline);
+    drop(nested);
+    assert_eq!(host.other.as_ref().unwrap().0.memory.__used(), other_baseline);
+    instance.call("print_it", &[], &mut host).unwrap();
+    let hint = instance.call("hint_it", &[], &mut host).unwrap_err();
+    assert_eq!(hint.friendly_hint.as_deref(), Some("host hint"));
+    assert_eq!(instance.memory.__used(), baseline);
+    drop(external);
+
+    let detached = instance.call("detach_value", &[], &mut host).unwrap();
+    assert!(instance.memory.__used() > baseline);
+    drop(detached);
+    assert_eq!(instance.memory.__used(), baseline);
+
+    let steps = instance.call("spin", &[::bop::value::Value::Int(200)], &mut host).unwrap_err();
+    assert!(steps.is_fatal && steps.message.contains("too many steps"));
+    assert!(matches!(instance.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap(), ::bop::value::Value::Int(1)));
+    assert_eq!(instance.memory.__used(), baseline);
+
+    let ordinary = instance.call("mutate_then_fail", &[], &mut host).unwrap_err();
+    assert!(!ordinary.is_fatal && ordinary.message.contains("boom"));
+    assert!(matches!(instance.call("read_mutation", &[], &mut host).unwrap(), ::bop::value::Value::Int(1)));
+    let fatal = instance.call("mutate_then_spin", &[], &mut host).unwrap_err();
+    assert!(fatal.is_fatal && fatal.message.contains("too many steps"));
+    assert!(matches!(instance.call("read_mutation", &[], &mut host).unwrap(), ::bop::value::Value::Int(2)));
+
+    let held = instance.call("make_result", &[], &mut host).unwrap();
+    let held_memory = instance.memory.__used();
+    assert!(held_memory > baseline);
+    let nested_while_held = instance.call("call_other", &[], &mut host).unwrap();
+    assert_eq!(instance.memory.__used(), held_memory);
+    assert!(host.other.as_ref().unwrap().0.memory.__used() > other_baseline);
+    drop(nested_while_held);
+    assert_eq!(instance.memory.__used(), held_memory);
+    assert_eq!(host.other.as_ref().unwrap().0.memory.__used(), other_baseline);
+    let memory = instance.call("make_result", &[], &mut host).unwrap_err();
+    assert!(memory.is_fatal && memory.message.contains("Memory limit exceeded"));
+    drop(held);
+    assert_eq!(instance.memory.__used(), baseline);
+    let released = instance.call("make_result", &[], &mut host).unwrap();
+    drop(released);
+    assert_eq!(instance.memory.__used(), baseline);
+
+    instance.in_operation.set(true);
+    let reentry = instance.call("missing", &[::bop::value::Value::None], &mut host).unwrap_err();
+    instance.in_operation.set(false);
+    assert!(reentry.message.contains("cannot be re-entered"));
+    assert!(matches!(instance.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap(), ::bop::value::Value::Int(1)));
+
+    let mut poisoned = BopInstance::load(&mut host, &limits).unwrap();
+    let poison = poisoned.call("poison", &[], &mut host).unwrap_err();
+    assert!(poison.is_fatal && poison.message.contains("Memory limit exceeded"));
+    let poisoned_again = poisoned.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap_err();
+    assert!(poisoned_again.is_fatal && poisoned_again.message.contains("Memory limit exceeded"));
+    assert!(matches!(instance.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap(), ::bop::value::Value::Int(1)));
+    println!("ok");
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_generated_instance_limits_memory", rust_src);
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "ok");
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_generated_instance_retains_modules_types_methods_and_rng() {
+    let root = r#"use wrapper as api
+pub fn next() { return api.next() }
+pub fn make(value) {
+    let point = api.Point { value: value }
+    return point.bump()
+}
+pub fn random() { return rand(1000000000) }"#;
+    let modules = [
+        (
+            "dep",
+            r#"let count = 0
+struct Point { value }
+fn Point.bump(self) { return self.value + 1 }
+fn next() { count += 1; return count }"#,
+        ),
+        ("wrapper", "use dep"),
+    ];
+    let mut rust_src = transpile(
+        root,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            module_resolver: Some(modules_from_map(modules)),
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct Host;
+impl ::bop::BopHost for Host {
+    fn call(&mut self, _name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> { None }
+}
+fn expect_int(value: ::bop::value::Value, expected: i64) {
+    assert!(matches!(value, ::bop::value::Value::Int(actual) if actual == expected));
+}
+fn int(value: ::bop::value::Value) -> i64 {
+    match value { ::bop::value::Value::Int(value) => value, other => panic!("expected int, got {}", other.type_name()) }
+}
+fn main() {
+    let limits = ::bop::BopLimits::standard();
+    let mut host = Host;
+    let mut first = BopInstance::load(&mut host, &limits).unwrap();
+    expect_int(first.call("next", &[], &mut host).unwrap(), 1);
+    expect_int(first.call("next", &[], &mut host).unwrap(), 2);
+    expect_int(first.call("make", &[::bop::value::Value::Int(41)], &mut host).unwrap(), 42);
+    let first_random = int(first.call("random", &[], &mut host).unwrap());
+    let second_random = int(first.call("random", &[], &mut host).unwrap());
+    assert_ne!(first_random, second_random, "successive calls must advance retained RNG state");
+    expect_int(first.call("next", &[], &mut host).unwrap(), 3);
+
+    let mut second = BopInstance::load(&mut host, &limits).unwrap();
+    assert_eq!(int(second.call("random", &[], &mut host).unwrap()), first_random);
+    expect_int(second.call("next", &[], &mut host).unwrap(), 1);
+    expect_int(first.call("next", &[], &mut host).unwrap(), 4);
+    println!("ok");
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_generated_instance_modules_types_rng", rust_src);
+    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(run.stdout, "ok");
 }
 
 #[test]
@@ -1330,10 +1691,9 @@ print(s.len())"#,
 #[test]
 #[ignore]
 fn e2e_sandbox_recursion_halts() {
-    // The tree-walker caps recursion at MAX_CALL_DEPTH = 64. The
-    // AOT has no such cap (Rust's call stack limit kicks in much
-    // later), but the step counter still halts the program long
-    // before blowing the stack.
+    // Generated AOT now shares the walker/VM MAX_CALL_DEPTH = 64
+    // boundary and reports the canonical recoverable depth error
+    // before the native Rust stack is at risk.
     let run = run_aot_with_opts(
         "fn f() { f() }\nf()",
         "sandbox_recursion",
@@ -1344,8 +1704,8 @@ fn e2e_sandbox_recursion_halts() {
     );
     assert_ne!(run.status, Some(0), "expected non-zero exit; stderr:\n{}", run.stderr);
     assert!(
-        run.stderr.contains("too many steps"),
-        "expected 'too many steps' in stderr; got:\n{}",
+        run.stderr.contains("nested function calls"),
+        "expected the call-depth diagnostic in stderr; got:\n{}",
         run.stderr
     );
 }
