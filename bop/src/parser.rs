@@ -173,6 +173,38 @@ impl Expr {
     }
 }
 
+/// The passing mode declared by a function parameter or written at a call
+/// site. `Ref` is explicit on both sides; engines use this metadata during
+/// call preflight before evaluating argument expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamMode {
+    Value,
+    Ref,
+}
+
+/// One declared function parameter, including its call-site passing mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parameter {
+    pub name: String,
+    pub mode: ParamMode,
+}
+
+/// One positional call argument. Keeping the marker beside the expression
+/// makes mode information survive aliases and dynamic callable dispatch.
+#[derive(Debug, Clone)]
+pub struct CallArg {
+    pub value: Expr,
+    pub mode: ParamMode,
+}
+
+impl core::ops::Deref for CallArg {
+    type Target = Expr;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     /// Integer literal (phase 6). Produced by integer tokens
@@ -196,12 +228,12 @@ pub enum ExprKind {
     },
     Call {
         callee: Box<Expr>,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
     },
     MethodCall {
         object: Box<Expr>,
         method: String,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
     },
     /// Bare field read: `obj.field` (no parens after the field
     /// name). Distinct from `MethodCall`, which always has `(…)`.
@@ -252,7 +284,7 @@ pub enum ExprKind {
     /// Captures the referenced free variables from the enclosing
     /// scope when evaluated; see the evaluator for capture rules.
     Lambda {
-        params: Vec<String>,
+        params: Vec<Parameter>,
         body: Vec<Stmt>,
     },
     /// `match scrutinee { pat => body, ... }` — checks each arm
@@ -552,7 +584,7 @@ pub enum StmtKind {
     },
     FnDecl {
         name: String,
-        params: Vec<String>,
+        params: Vec<Parameter>,
         body: Vec<Stmt>,
         visibility: Visibility,
     },
@@ -564,7 +596,7 @@ pub enum StmtKind {
     MethodDecl {
         type_name: String,
         method_name: String,
-        params: Vec<String>,
+        params: Vec<Parameter>,
         body: Vec<Stmt>,
     },
     Return {
@@ -853,16 +885,22 @@ impl Parser {
     /// contract at every declaration form that owns one. Keeping this in one
     /// place prevents anonymous functions from drifting away from named
     /// functions and methods again.
-    fn parse_parameters(&mut self, site: &str) -> Result<Vec<String>, BopError> {
+    fn parse_parameters(&mut self, site: &str) -> Result<Vec<Parameter>, BopError> {
         self.expect(&Token::LParen)?;
 
         let mut params = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
             loop {
+                let mode = if matches!(self.peek(), Token::Ref) {
+                    self.advance();
+                    ParamMode::Ref
+                } else {
+                    ParamMode::Value
+                };
                 let (_, column) = self.peek_pos();
                 let (param, line) = self.expect_ident()?;
                 ensure_value_name_at(&param, site, line, column)?;
-                params.push(param);
+                params.push(Parameter { name: param, mode });
 
                 if !matches!(self.peek(), Token::Comma) {
                     break;
@@ -1301,6 +1339,17 @@ impl Parser {
             let (method_name, method_line) = self.expect_ident()?;
             ensure_value_name(&method_name, "method name", method_line)?;
             let params = self.parse_parameters("method parameter")?;
+            if params.first().is_some_and(|param| param.mode == ParamMode::Ref) {
+                let mut error = BopError::runtime(
+                    "a method receiver can't be declared with `ref`",
+                    line,
+                );
+                error.friendly_hint = Some(
+                    "Remove `ref` from the receiver; only non-receiver parameters can use it."
+                        .to_string(),
+                );
+                return Err(error);
+            }
             let body = self.parse_block()?;
             return Ok(Stmt {
                 kind: StmtKind::MethodDecl {
@@ -1698,16 +1747,27 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_args(&mut self) -> Result<Vec<Expr>, BopError> {
+    fn parse_args(&mut self) -> Result<Vec<CallArg>, BopError> {
         let mut args = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
-            args.push(self.with_struct_literal(true, |p| p.parse_expr())?);
+            args.push(self.parse_call_arg()?);
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
-                args.push(self.with_struct_literal(true, |p| p.parse_expr())?);
+                args.push(self.parse_call_arg()?);
             }
         }
         Ok(args)
+    }
+
+    fn parse_call_arg(&mut self) -> Result<CallArg, BopError> {
+        let mode = if matches!(self.peek(), Token::Ref) {
+            self.advance();
+            ParamMode::Ref
+        } else {
+            ParamMode::Value
+        };
+        let value = self.with_struct_literal(true, |p| p.parse_expr())?;
+        Ok(CallArg { value, mode })
     }
 
     fn parse_primary(&mut self) -> Result<Expr, BopError> {
@@ -2706,6 +2766,7 @@ pub fn fmt_token(token: &Token) -> &'static str {
         | Token::Enum
         | Token::Match
         | Token::Try
+        | Token::Ref
         | Token::True
         | Token::False
         | Token::Pub

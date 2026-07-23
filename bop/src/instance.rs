@@ -227,6 +227,36 @@ mod tests {
     }
 
     #[test]
+    fn host_calls_reject_ref_bearing_entries_and_callbacks_before_execution() {
+        let mut host = Host;
+        let mut instance = BopInstance::load(
+            "let calls = 0\npub fn update(ref value) { calls += 1; value = 9 }\npub fn make() { return fn(ref value) { calls += 1; value = 8 } }\npub fn read() { return calls }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+
+        let entry_error = instance
+            .call("update", &[Value::Int(1)], &mut host)
+            .unwrap_err();
+        assert_eq!(
+            entry_error.message,
+            "argument 1 to `update` must be passed with `ref`"
+        );
+        assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "0");
+
+        let callback = instance.call("make", &[], &mut host).unwrap();
+        let callback_error = instance
+            .call_value(&callback, &[Value::Int(1)], &mut host)
+            .unwrap_err();
+        assert_eq!(
+            callback_error.message,
+            "argument 1 to `fn` must be passed with `ref`"
+        );
+        assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "0");
+    }
+
+    #[test]
     fn executed_entries_are_dedicated_and_early_return_is_final() {
         let mut host = Host;
         let mut instance = BopInstance::load(

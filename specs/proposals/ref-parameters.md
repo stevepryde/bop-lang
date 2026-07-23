@@ -1,9 +1,10 @@
-# Proposal: second-class `ref` parameters
+# Design record: second-class `ref` parameters
 
-> **Status: proposed; not implemented.** This document does not describe syntax
-> accepted by current Bop releases. The canonical grammar and user documentation
-> must not advertise `ref` parameters until the feature ships with walker, VM,
-> and AOT parity.
+> **Status: implemented.** This record preserves the accepted design and
+> implementation criteria. The normative runtime contract is
+> `RUN-020`/`AC-RUN-016` in `specs/language-runtime.md`; the grammar and user
+> documentation under `docs/content/docs/` own the public syntax and teaching
+> material.
 
 Tracking issue: [#40](https://github.com/stevepryde/bop-lang/issues/40).
 
@@ -25,11 +26,11 @@ grow(ref xs, 3)
 // xs is [0, 0, 0]
 ```
 
-The requirements below are the proposed acceptance contract. They become
-normative only when this proposal is promoted into the canonical language and
-runtime specifications.
+The requirements below are the design contract used to implement the feature.
+The canonical specifications and teaching documentation summarize the shipped
+behaviour.
 
-## Proposed contract
+## Design contract
 
 - **REF-001 — Explicit modes.** A `ref` parameter must be marked with `ref` in
   both the function parameter list and its positional argument. Omitting a
@@ -117,7 +118,7 @@ runtime specifications.
   marker supplied to any of them must fail mode preflight before invocation or
   argument-expression evaluation.
 
-## Acceptance criteria for implementation
+## Implementation acceptance criteria
 
 - **AC-REF-001 — Syntax:** Declaration and call parsing represents `ref`
   positions in `fn f(ref x) { ... }` and `f(ref value)`. It accepts transparent
@@ -190,9 +191,9 @@ Const-target enforcement also depends on the mutation correctness work in #7.
 Closure-target and no-capture enforcement must account for #18 and #22 rather
 than encoding current capture defects as language behavior.
 
-## Promotion plan
+## Promotion checklist
 
-Implementation is complete only when one change set:
+Implementation was considered complete only when one change set:
 
 1. adds parser/checker representation for declaration and call-site modes;
 2. carries mode metadata through every callable representation;
@@ -204,5 +205,4 @@ Implementation is complete only when one change set:
 6. removes the **not implemented** status from this proposal or replaces it
    with links to the new canonical owners.
 
-Until all six steps land, this proposal remains non-normative and current Bop
-programs must not be documented as accepting `ref` syntax.
+All six items are required release evidence; later changes must preserve them.

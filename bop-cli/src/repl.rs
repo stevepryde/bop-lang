@@ -59,7 +59,7 @@ use rustyline::{Context, Editor, Helper};
 /// Bop language keywords — offered as completion candidates
 /// when the user hits tab on a bare prefix.
 const KEYWORDS: &[&str] = &[
-    "let", "const", "fn", "if", "else", "while", "repeat", "for", "in",
+    "let", "const", "pub", "ref", "fn", "if", "else", "while", "repeat", "for", "in",
     "return", "break", "continue", "match", "struct", "enum", "use",
     "as", "true", "false", "none", "try",
 ];
@@ -620,6 +620,16 @@ mod tests {
             .unwrap();
         let disp: Vec<String> = cands.iter().map(|p| p.display.clone()).collect();
         assert!(disp.contains(&"let".to_string()));
+
+        let (_start, cands) = h
+            .complete(
+                "re",
+                2,
+                &rustyline::Context::new(&rustyline::history::FileHistory::new()),
+            )
+            .unwrap();
+        let disp: Vec<String> = cands.iter().map(|p| p.display.clone()).collect();
+        assert!(disp.contains(&"ref".to_string()));
     }
 
     #[test]

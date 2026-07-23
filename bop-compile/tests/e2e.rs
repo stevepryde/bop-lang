@@ -55,8 +55,7 @@ fn walker_output(code: &str) -> String {
         prints: RefCell::new(Vec::new()),
     };
     let mut host = host;
-    bop::run(code, &mut host, &BopLimits::standard())
-        .expect("tree-walker failed on e2e program");
+    bop::run(code, &mut host, &BopLimits::standard()).expect("tree-walker failed on e2e program");
     host.prints.borrow().join("\n")
 }
 
@@ -188,6 +187,400 @@ fn run_aot(code: &str, test_name: &str) -> String {
 
 #[test]
 #[ignore]
+fn e2e_ref_parameters_commit_rollback_and_dynamic_dispatch() {
+    let source = r#"
+fn update(ref left, ref right, delta) {
+  left = left + delta
+  right = right + left
+}
+let a = 1
+let b = 10
+let f = update
+f(ref a, ref b, 2)
+print(a, b)
+
+fn fail(ref value) {
+  value = 99
+  panic("rollback")
+}
+fn attempted() { fail(ref a) }
+print(try_call(attempted), a)
+
+fn inner(ref value) { value = value + 5 }
+fn outer(ref value) {
+  inner(ref value)
+  value = value * 2
+}
+outer(ref a)
+print(a)
+"#;
+    let expected = "3 13\nResult::Err(RuntimeError { message: \"rollback\", line: 14 }) 3\n16";
+    assert_eq!(run_aot(source, "ref_parameters_native"), expected);
+    let sandbox = run_aot_with_opts(
+        source,
+        "ref_parameters_sandbox",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        sandbox.status,
+        Some(0),
+        "sandbox stderr:\n{}",
+        sandbox.stderr
+    );
+    assert_eq!(sandbox.stdout, expected);
+}
+
+#[test]
+#[ignore]
+fn e2e_ref_preflight_and_snapshot_order() {
+    let source = r#"
+fn side() { print("arg"); return 7 }
+fn target(ref value, ordinary) { print(value); value = ordinary }
+fn make() { print("callee"); return target }
+fn invalid_target() { make()(ref [1], side()) }
+print(try_call(invalid_target))
+fn missing_marker() { make()(side(), side()) }
+print(try_call(missing_marker))
+
+let value = 1
+fn ordinary() { value = 2; return 9 }
+target(ref value, ordinary())
+print(value)
+"#;
+    let output = run_aot(source, "ref_preflight_order_native");
+    assert_eq!(
+        output,
+        concat!(
+            "callee\n",
+            "Result::Err(RuntimeError { message: \"`ref` argument 1 must name a mutable variable\", line: 5 })\n",
+            "callee\n",
+            "Result::Err(RuntimeError { message: \"argument 1 to `target` must be passed with `ref`\", line: 7 })\n",
+            "2\n",
+            "9",
+        )
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_ref_memory_limit_rolls_back_all_targets() {
+    let source = r#"
+let left = 0
+let right = ""
+fn allocate(ref a, ref b) {
+  a = 7
+  b = "x" * 4000
+}
+pub fn trigger() { allocate(ref left, ref right) }
+pub fn read_left() { return left }
+pub fn read_right() { return right }
+"#;
+    let mut rust_src = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct Host;
+impl ::bop::BopHost for Host {
+    fn call(&mut self, _name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        None
+    }
+}
+fn main() {
+    let limits = ::bop::BopLimits { max_steps: 100, max_memory: 1_024 };
+    let mut host = Host;
+    let mut instance = BopInstance::load(&mut host, &limits).unwrap();
+    let error = instance.call("trigger", &[], &mut host).unwrap_err();
+    assert!(error.is_fatal && error.message.contains("Memory limit exceeded"));
+    assert!(matches!(instance.call("read_left", &[], &mut host).unwrap(), ::bop::value::Value::Int(0)));
+    match instance.call("read_right", &[], &mut host).unwrap() {
+        ::bop::value::Value::Str(value) => assert!(value.is_empty()),
+        other => panic!("expected string, got {}", other.type_name()),
+    }
+    println!("ok");
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_ref_memory_rollback", rust_src);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed:\n{}",
+        run.stderr
+    );
+    assert_eq!(run.stdout, "ok");
+}
+
+#[test]
+#[ignore]
+fn e2e_user_method_explicit_ref_parameters() {
+    let source = r#"
+struct Counter { amount }
+fn Counter.add_to(self, ref destination, delta) {
+  destination = destination + self.amount + delta
+  return destination
+}
+let counter = Counter { amount: 3 }
+let value = 4
+print(counter.add_to(ref value, 2))
+print(value)
+"#;
+    assert_eq!(run_aot(source, "method_ref_native"), "9\n9");
+    let sandbox = run_aot_with_opts(
+        source,
+        "method_ref_sandbox",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        sandbox.status,
+        Some(0),
+        "sandbox stderr:\n{}",
+        sandbox.stderr
+    );
+    assert_eq!(sandbox.stdout, "9\n9");
+}
+
+#[test]
+#[ignore]
+fn e2e_module_export_ref_parameters_preflight_commit_and_rollback() {
+    let source = r#"
+use dep as api
+let value = 1
+api.bump(ref value)
+print(value)
+fn attempted() { api.fail(ref value) }
+print(try_call(attempted), value)
+fn side_effect() { print("ARG-RAN"); return 0 }
+fn missing_marker() { api.bump(side_effect()) }
+print(try_call(missing_marker), value)
+"#;
+    let modules = [(
+        "dep",
+        r#"
+fn bump(ref value) { value = value + 1 }
+fn fail(ref value) { value = 99; panic("rollback") }
+"#,
+    )];
+    let expected = concat!(
+        "2\n",
+        "Result::Err(RuntimeError { message: \"rollback\", line: 3 }) 2\n",
+        "Result::Err(RuntimeError { message: \"argument 1 to `bump` must be passed with `ref`\", line: 9 }) 2",
+    );
+    let native = run_aot_with_modules_and_opts(
+        source,
+        "module_export_ref_native",
+        &modules,
+        &Options::default(),
+    );
+    assert_eq!(native.status, Some(0), "native stderr:\n{}", native.stderr);
+    assert_eq!(native.stdout, expected);
+    assert!(!native.stdout.contains("ARG-RAN"));
+
+    let sandbox = run_aot_with_modules_and_opts(
+        source,
+        "module_export_ref_sandbox",
+        &modules,
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        sandbox.status,
+        Some(0),
+        "sandbox stderr:\n{}",
+        sandbox.stderr
+    );
+    assert_eq!(sandbox.stdout, expected);
+    assert!(!sandbox.stdout.contains("ARG-RAN"));
+}
+
+#[test]
+#[ignore]
+fn e2e_method_redeclaration_preflight_uses_live_site_modes() {
+    let source = r#"
+struct Box { amount }
+if true {
+  fn Box.apply(self, ref output) { output = self.amount }
+} else {
+  fn Box.apply(self, output) { panic("unreached") }
+}
+let box = Box { amount: 7 }
+let value = 1
+box.apply(ref value)
+print(value)
+"#;
+    assert_eq!(run_aot(source, "method_ref_redeclaration_native"), "7");
+    let sandbox = run_aot_with_opts(
+        source,
+        "method_ref_redeclaration_sandbox",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        sandbox.status,
+        Some(0),
+        "sandbox stderr:\n{}",
+        sandbox.stderr
+    );
+    assert_eq!(sandbox.stdout, "7");
+}
+
+#[test]
+#[ignore]
+fn e2e_method_preflight_retains_exact_adapter_across_argument_redeclaration() {
+    let source = r#"
+struct Box { value }
+fn Box.apply(self, ref output, trigger) { output = self.value }
+fn Box.read(self, trigger) { return self.value }
+fn replace_apply() {
+  fn Box.apply(self, ref output, trigger) { output = 99 }
+  return 0
+}
+fn replace_read() {
+  fn Box.read(self, trigger) { return 99 }
+  return 0
+}
+let box = Box { value: 7 }
+let output = 0
+print(box.read(replace_read()))
+box.apply(ref output, replace_apply())
+print(output)
+"#;
+    assert_eq!(run_aot(source, "method_stable_adapter_native"), "7\n7");
+    let sandbox = run_aot_with_opts(
+        source,
+        "method_stable_adapter_sandbox",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(sandbox.status, Some(0), "sandbox stderr:\n{}", sandbox.stderr);
+    assert_eq!(sandbox.stdout, "7\n7");
+}
+
+#[test]
+#[ignore]
+fn e2e_captured_implicit_and_optional_import_ref_targets_are_fenced() {
+    let source = r#"
+use dep
+fn side() { print("ARG-RAN"); return 1 }
+fn take(ref value) { value = 9 }
+fn local_capture() {
+  let values = []
+  let action = fn() { values.push(side()) }
+  return try_call(action)
+}
+fn optional_implicit() {
+  use optional
+  let action = fn() { values.push(side()) }
+  return try_call(action)
+}
+fn optional_explicit() {
+  use optional
+  let action = fn() { take(ref values) }
+  return try_call(action)
+}
+print(local_capture())
+print(optional_implicit())
+print(optional_explicit())
+"#;
+    let modules = [
+        ("dep", "let ready = true"),
+        ("optional", "let values = []"),
+    ];
+    for (name, opts) in [
+        ("captured_ref_fences_native", Options::default()),
+        (
+            "captured_ref_fences_sandbox",
+            Options {
+                sandbox: true,
+                ..Options::default()
+            },
+        ),
+    ] {
+        let run = run_aot_with_modules_and_opts(source, name, &modules, &opts);
+        assert_eq!(run.status, Some(0), "{name} stderr:\n{}", run.stderr);
+        assert!(!run.stdout.contains("ARG-RAN"), "{name}: {}", run.stdout);
+        assert_eq!(
+            run.stdout
+                .matches("can't target a closure-captured binding")
+                .count(),
+            3,
+            "{name}: {}",
+            run.stdout
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_host_value_abi_rejects_ref_parameters_before_execution() {
+    let source = r#"
+let executions = 0
+pub fn target(ref value) { executions += 1; value = 99 }
+pub fn callback() { return target }
+pub fn execution_count() { return executions }
+"#;
+    let mut rust_src = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct Host;
+impl ::bop::BopHost for Host {
+    fn call(&mut self, _name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> { None }
+}
+fn main() {
+    let mut host = Host;
+    let mut instance = BopInstance::load(&mut host, &::bop::BopLimits::standard()).unwrap();
+    let wrong_arity = instance.call("target", &[], &mut host).unwrap_err();
+    assert!(wrong_arity.message.contains("expects 1 argument, but got 0"), "{}", wrong_arity.message);
+    let direct = instance.call("target", &[::bop::value::Value::Int(1)], &mut host).unwrap_err();
+    assert!(direct.message.contains("must be passed with `ref`"), "{}", direct.message);
+    let callback = instance.call("callback", &[], &mut host).unwrap();
+    let indirect = instance.call_value(&callback, &[::bop::value::Value::Int(1)], &mut host).unwrap_err();
+    assert!(indirect.message.contains("must be passed with `ref`"), "{}", indirect.message);
+    assert!(matches!(instance.call("execution_count", &[], &mut host).unwrap(), ::bop::value::Value::Int(0)));
+    println!("ok");
+}
+"#,
+    );
+    let run = run_generated_source("sandbox_ref_host_value_abi", rust_src);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed:\n{}",
+        run.stderr
+    );
+    assert_eq!(run.stdout, "ok");
+}
+
+#[test]
+#[ignore]
 fn e2e_sandbox_function_sites_preserve_redeclaration_and_exact_self() {
     let opts = Options {
         sandbox: true,
@@ -262,7 +655,12 @@ fn e2e_sandbox_function_sites_preserve_redeclaration_and_exact_self() {
     ];
     for (source, name, expected) in cases {
         let run = run_aot_with_opts(source, name, &opts);
-        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated program failed: {}",
+            run.stderr
+        );
         assert_eq!(run.stdout, expected);
     }
 }
@@ -286,7 +684,12 @@ fn e2e_sandbox_unreached_nested_functions_are_not_statically_callable() {
     ] {
         let expected = walker_output(source);
         let run = run_aot_with_opts(source, name, &opts);
-        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated program failed: {}",
+            run.stderr
+        );
         assert_eq!(run.stdout, expected);
     }
 }
@@ -325,7 +728,12 @@ fn main() {
 "#,
     );
     let run = run_generated_source("sandbox_exact_final_abi", rust_src);
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "first/1\n7\n99");
 }
 
@@ -446,7 +854,12 @@ fn main() {
 "#,
     );
     let run = run_generated_source("sandbox_generated_instance_state_callbacks", rust_src);
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "ok");
 }
 
@@ -618,7 +1031,12 @@ fn main() {
 "#,
     );
     let run = run_generated_source("sandbox_generated_instance_limits_memory", rust_src);
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "ok");
 }
 
@@ -686,7 +1104,12 @@ fn main() {
 "#,
     );
     let run = run_generated_source("sandbox_generated_instance_modules_types_rng", rust_src);
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "ok");
 }
 
@@ -706,11 +1129,8 @@ fn e2e_sandbox_failed_module_load_rolls_back_reached_nested_function_sites() {
         ),
         ("leaf", "let value = 1"),
     ]));
-    let mut rust_src = transpile(
-        "let attempt = fn() { use bad }\ntry_call(attempt)",
-        &opts,
-    )
-    .unwrap();
+    let mut rust_src =
+        transpile("let attempt = fn() { use bad }\ntry_call(attempt)", &opts).unwrap();
     rust_src.push_str(
         r#"
 struct Host;
@@ -730,7 +1150,12 @@ fn main() {
 "#,
     );
     let run = run_generated_source("sandbox_failed_module_nested_site_rollback", rust_src);
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "clean");
 }
 
@@ -748,7 +1173,12 @@ fn e2e_sandbox_dynamic_module_function_exports_follow_runtime_presence() {
         ("use m as x\nprint(x.h())", "sandbox_dynamic_export_alias"),
     ] {
         let run = run_aot_with_modules_and_opts(source, name, &[("m", reached)], &opts);
-        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated program failed: {}",
+            run.stderr
+        );
         assert_eq!(run.stdout, "12");
     }
 
@@ -758,7 +1188,12 @@ fn e2e_sandbox_dynamic_module_function_exports_follow_runtime_presence() {
         &[("m", reached), ("facade", "use m")],
         &opts,
     );
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "12");
 
     let dead = "if false { fn h() { return 13 } }";
@@ -777,8 +1212,17 @@ fn e2e_sandbox_dynamic_module_function_exports_follow_runtime_presence() {
         ),
     ] {
         let run = run_aot_with_modules_and_opts(source, name, &[("m", dead)], &opts);
-        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
-        assert!(run.stdout.contains("Err("), "unexpected output: {}", run.stdout);
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated program failed: {}",
+            run.stderr
+        );
+        assert!(
+            run.stdout.contains("Err("),
+            "unexpected output: {}",
+            run.stdout
+        );
     }
 }
 
@@ -813,7 +1257,12 @@ fn e2e_sandbox_optional_imports_preserve_presence_and_lambda_snapshots() {
         ),
     ] {
         let run = run_aot_with_modules_and_opts(source, name, &[("m", module)], &opts);
-        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated program failed: {}",
+            run.stderr
+        );
         assert_eq!(run.stdout, expected);
     }
 
@@ -823,8 +1272,17 @@ fn e2e_sandbox_optional_imports_preserve_presence_and_lambda_snapshots() {
         &[("m", "if false { fn h() { return 13 } }")],
         &opts,
     );
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
-    assert!(run.stdout.contains("Err("), "unexpected output: {}", run.stdout);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("Err("),
+        "unexpected output: {}",
+        run.stdout
+    );
 }
 
 #[test]
@@ -841,7 +1299,12 @@ fn e2e_sandbox_dynamic_value_exports_follow_early_return_presence() {
         &[("m", module)],
         &opts,
     );
-    assert_eq!(present.status, Some(0), "generated program failed: {}", present.stderr);
+    assert_eq!(
+        present.status,
+        Some(0),
+        "generated program failed: {}",
+        present.stderr
+    );
     assert_eq!(present.stdout, "1");
 
     let absent_alias = run_aot_with_modules_and_opts(
@@ -885,8 +1348,17 @@ fn e2e_sandbox_dynamic_value_exports_follow_early_return_presence() {
         ),
     ] {
         let run = run_aot_with_modules_and_opts(source, name, &modules, &opts);
-        assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
-        assert!(run.stdout.contains("Err("), "unexpected output: {}", run.stdout);
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated program failed: {}",
+            run.stderr
+        );
+        assert!(
+            run.stdout.contains("Err("),
+            "unexpected output: {}",
+            run.stdout
+        );
     }
 }
 
@@ -926,7 +1398,12 @@ print(probe(point))"#;
             ..Options::default()
         },
     );
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "42");
 }
 
@@ -963,7 +1440,12 @@ print(match second_value {
             ..Options::default()
         },
     );
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "1\n2\n2");
 
     let module_body = run_aot_with_modules_and_opts(
@@ -1037,7 +1519,12 @@ print(saved())"#,
         &[("dep", dep), ("wrapper", wrapper)],
         &opts,
     );
-    assert_eq!(present.status, Some(0), "generated program failed: {}", present.stderr);
+    assert_eq!(
+        present.status,
+        Some(0),
+        "generated program failed: {}",
+        present.stderr
+    );
     assert_eq!(present.stdout, "7\n11");
 
     let absent = run_aot_with_modules_and_opts(
@@ -1046,8 +1533,17 @@ print(saved())"#,
         &[("dep", dep), ("wrapper", "return\nuse dep as api")],
         &opts,
     );
-    assert_eq!(absent.status, Some(0), "generated program failed: {}", absent.stderr);
-    assert!(absent.stdout.contains("Err("), "unexpected output: {}", absent.stdout);
+    assert_eq!(
+        absent.status,
+        Some(0),
+        "generated program failed: {}",
+        absent.stderr
+    );
+    assert!(
+        absent.stdout.contains("Err("),
+        "unexpected output: {}",
+        absent.stdout
+    );
     assert!(
         absent.stdout.contains("isn't a module alias in scope"),
         "unexpected output: {}",
@@ -1088,7 +1584,12 @@ fn main() {
 "#,
     );
     let run = run_generated_source("sandbox_local_import_host_precedence", rust_src);
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "12\ncalls=0");
 }
 
@@ -1113,10 +1614,20 @@ print(try_call(nested))"#;
             ..Options::default()
         },
     );
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout.lines().next(), Some("[1, 2, 3, 4]"));
     assert_eq!(run.stdout.lines().nth(1), Some("[1, 2, 3]"));
-    assert!(run.stdout.lines().nth(2).is_some_and(|line| line.contains("Err(")));
+    assert!(
+        run.stdout
+            .lines()
+            .nth(2)
+            .is_some_and(|line| line.contains("Err("))
+    );
 }
 
 #[test]
@@ -1151,7 +1662,12 @@ fn main() {
 "#,
     );
     let run = run_generated_source("sandbox_exact_self_host_precedence", rust_src);
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "1\ncalls=0");
 }
 
@@ -1216,8 +1732,7 @@ fn assert_aot_matches(test_name: &str, code: &str) {
     let expected = walker_output(code);
     let actual = run_aot(code, test_name);
     assert_eq!(
-        actual,
-        expected,
+        actual, expected,
         "aot output diverged from tree-walker on {}:\n--- tree-walker ---\n{}\n--- aot ---\n{}",
         test_name, expected, actual,
     );
@@ -1665,7 +2180,12 @@ fn e2e_sandbox_halts_infinite_loop() {
             ..Options::default()
         },
     );
-    assert_ne!(run.status, Some(0), "expected non-zero exit; stderr:\n{}", run.stderr);
+    assert_ne!(
+        run.status,
+        Some(0),
+        "expected non-zero exit; stderr:\n{}",
+        run.stderr
+    );
     assert!(
         run.stderr.contains("too many steps"),
         "expected 'too many steps' in stderr; got:\n{}",
@@ -1689,7 +2209,12 @@ print(s.len())"#,
             ..Options::default()
         },
     );
-    assert_ne!(run.status, Some(0), "expected non-zero exit; stderr:\n{}", run.stderr);
+    assert_ne!(
+        run.status,
+        Some(0),
+        "expected non-zero exit; stderr:\n{}",
+        run.stderr
+    );
     assert!(
         run.stderr.contains("Memory limit"),
         "expected 'Memory limit' in stderr; got:\n{}",
@@ -1711,7 +2236,12 @@ fn e2e_sandbox_recursion_halts() {
             ..Options::default()
         },
     );
-    assert_ne!(run.status, Some(0), "expected non-zero exit; stderr:\n{}", run.stderr);
+    assert_ne!(
+        run.status,
+        Some(0),
+        "expected non-zero exit; stderr:\n{}",
+        run.stderr
+    );
     assert!(
         run.stderr.contains("nested function calls"),
         "expected the call-depth diagnostic in stderr; got:\n{}",
@@ -1830,16 +2360,11 @@ fn walker_output_with_modules(code: &str, modules: &[(&str, &str)]) -> String {
             .collect(),
         _marker: std::marker::PhantomData,
     };
-    bop::run(code, &mut walker_host, &BopLimits::standard())
-        .expect("walker failed");
+    bop::run(code, &mut walker_host, &BopLimits::standard()).expect("walker failed");
     walker_host.prints.borrow().join("\n")
 }
 
-fn assert_aot_matches_with_modules(
-    test_name: &str,
-    code: &str,
-    modules: &[(&str, &str)],
-) {
+fn assert_aot_matches_with_modules(test_name: &str, code: &str, modules: &[(&str, &str)]) {
     let expected = walker_output_with_modules(code, modules);
 
     let resolver = modules_from_map(modules.iter().map(|(k, v)| (*k, *v)));
@@ -1879,11 +2404,7 @@ fn assert_aot_matches_with_modules(
     );
 }
 
-fn assert_aot_modes_match_with_modules(
-    test_name: &str,
-    code: &str,
-    modules: &[(&str, &str)],
-) {
+fn assert_aot_modes_match_with_modules(test_name: &str, code: &str, modules: &[(&str, &str)]) {
     let expected = walker_output_with_modules(code, modules);
     for sandbox in [false, true] {
         let run = run_aot_with_modules_and_opts(
@@ -2116,11 +2637,7 @@ print(caller(50))"#;
         ("top_module", "fn dup() { return 10 }\nlet dupval = 20"),
         ("fn_module", "let local = 30\nfn dup() { return 40 }"),
     ];
-    let runs = cross_engine_warning_runs(
-        "glob_warning_claimed_fns_and_slot_locals",
-        code,
-        modules,
-    );
+    let runs = cross_engine_warning_runs("glob_warning_claimed_fns_and_slot_locals", code, modules);
     let expected = [
         expected_glob_warnings("top_module", &["dup", "dupval"]),
         expected_glob_warnings("fn_module", &["dup", "local"]),
@@ -2276,7 +2793,12 @@ print(Item { value: 4 }.read())"#;
             ..Options::default()
         },
     );
-    assert_eq!(run.status, Some(0), "sandbox method program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "sandbox method program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, walker_output(code));
 }
 
@@ -2488,7 +3010,12 @@ fn main() {
 "#,
     );
     let run = run_generated_source("sandbox_persistent_facade_origins", rust_src);
-    assert_eq!(run.status, Some(0), "generated program failed: {}", run.stderr);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed: {}",
+        run.stderr
+    );
     assert_eq!(run.stdout, "ok");
 }
 
@@ -2510,10 +3037,7 @@ fn e2e_import_transitive() {
         "import_transitive",
         r#"use a
 print(doubled)"#,
-        &[
-            ("a", "use b\nlet doubled = pi + pi"),
-            ("b", "let pi = 3"),
-        ],
+        &[("a", "use b\nlet doubled = pi + pi"), ("b", "let pi = 3")],
     );
 }
 
@@ -2824,10 +3348,7 @@ print(apply(fn(n) { return n + 1 }, 4))"#,
 #[test]
 #[ignore]
 fn e2e_iife() {
-    assert_aot_matches(
-        "iife",
-        "print((fn(x) { return x * 3 })(4))",
-    );
+    assert_aot_matches("iife", "print((fn(x) { return x * 3 })(4))");
 }
 
 #[test]
@@ -2910,10 +3431,7 @@ print(match min {
 fn e2e_i64_min_literal_keeps_native_overflow_checks() {
     for (source, name) in [
         ("print(--9223372036854775808)", "i64_min_neg_overflow"),
-        (
-            "print(-9223372036854775808 - 1)",
-            "i64_min_sub_overflow",
-        ),
+        ("print(-9223372036854775808 - 1)", "i64_min_sub_overflow"),
     ] {
         let run = run_aot_with_opts(source, name, &Options::default());
         assert_eq!(run.status, Some(1), "stderr:\n{}", run.stderr);

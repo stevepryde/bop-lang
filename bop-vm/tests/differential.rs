@@ -3087,19 +3087,19 @@ dep.Maybe::Named { value: panic("payload"), wrong: 2 }"#,
 }
 
 #[test]
-fn call_arguments_precede_receiver_and_callee_dispatch_diff() {
+fn callee_preflight_precedes_call_argument_evaluation_diff() {
     set_modules(&[("types", "fn exported(value) { return value }")]);
-    for source in [
-        r#"fn invalid() { return dep.nope(panic("payload")) }
+    for (source, expected) in [
+        (r#"fn invalid() { return dep.nope(panic("payload")) }
 invalid()
-use types as dep"#,
-        r#"fn invalid() { return "receiver".nope(panic("payload")) }
-invalid()"#,
-        r#"fn invalid() { return dep["exported"](panic("payload")) }
+use types as dep"#, "Variable `dep` not found"),
+        (r#"fn invalid() { return "receiver".nope(panic("payload")) }
+invalid()"#, "payload"),
+        (r#"fn invalid() { return dep["exported"](panic("payload")) }
 invalid()
-use types as dep"#,
+use types as dep"#, "Variable `dep` not found"),
     ] {
-        assert_eq!(run_err(source), "payload", "{source}");
+        assert_eq!(run_err(source), expected, "{source}");
     }
 }
 
@@ -4362,13 +4362,13 @@ print(read_module().is_none() && read_local().is_none() && read_nested().is_none
 #[test]
 fn closure_captures_array_used_only_by_in_place_method_diff() {
     assert_eq!(
-        say(r#"fn make_mutator() {
+        run_err(r#"fn make_mutator() {
     let values = []
     return fn() { values.push(1) }
 }
 let mutate = make_mutator()
 print(mutate())"#),
-        "none"
+        "`ref` argument 1 can't target a closure-captured binding"
     );
 }
 
@@ -4743,6 +4743,44 @@ print(values.slice(99, -99))"#,
             "[10, 20, 25, 30]",
             "[]"
         ]
+    );
+}
+
+#[test]
+fn mutating_method_bad_arity_preflight_suppresses_argument_side_effects_diff() {
+    let outcome = run_both(
+        r#"
+let calls = 0
+let values = [1]
+fn side() {
+    calls += 1
+    return 2
+}
+fn bad_arity() { values.push(side(), 3) }
+print(try_call(bad_arity).is_err())
+print(calls)
+"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["true", "0"]);
+    assert_eq!(
+        run_err("let values = [1]\nvalues.push(1, 2)"),
+        "`.push()` needs 1 argument"
+    );
+}
+
+#[test]
+fn zero_parameter_user_method_reports_the_missing_receiver_arity_diff() {
+    assert_eq!(
+        run_err(
+            r#"
+struct Empty {}
+fn Empty.zero() { return none }
+Empty {}.zero()
+"#,
+        ),
+        "`Empty.zero` expects 0 arguments (including `self`), but got 1"
     );
 }
 

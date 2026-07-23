@@ -82,6 +82,63 @@ fn callbacks_have_instance_affinity_and_preflight_is_line_zero() {
 }
 
 #[test]
+fn embedding_calls_reject_ref_parameters_as_value_only() {
+    let mut host = Host;
+    let mut instance = BopInstance::load(
+        r#"
+let calls = 0
+pub fn mutate(ref value) {
+    calls = calls + 1
+    value = 99
+}
+pub fn read_calls() { return calls }
+pub fn make_ref_callback() {
+    return fn(ref value) { panic("callback body ran") }
+}
+"#,
+        &mut host,
+        &BopLimits::standard(),
+    )
+    .unwrap();
+
+    let entry_error = instance
+        .call("mutate", &[Value::Int(1)], &mut host)
+        .unwrap_err();
+    assert_eq!(entry_error.line, Some(0));
+    assert_eq!(
+        entry_error.message,
+        "argument 1 to `mutate` must be passed with `ref`"
+    );
+    assert_eq!(
+        entry_error.friendly_hint.as_deref(),
+        Some("Write `ref` before argument 1.")
+    );
+    assert_eq!(
+        instance
+            .call("read_calls", &[], &mut host)
+            .unwrap()
+            .inspect(),
+        "0"
+    );
+
+    let callback = instance
+        .call("make_ref_callback", &[], &mut host)
+        .unwrap();
+    let callback_error = instance
+        .call_value(&callback, &[Value::Int(1)], &mut host)
+        .unwrap_err();
+    assert_eq!(callback_error.line, Some(0));
+    assert_eq!(
+        callback_error.message,
+        "argument 1 to `fn` must be passed with `ref`"
+    );
+    assert_eq!(
+        callback_error.friendly_hint.as_deref(),
+        Some("Write `ref` before argument 1.")
+    );
+}
+
+#[test]
 fn try_call_wraps_foreign_affinity_and_callback_arity_preflight_errors() {
     let mut host = Host;
     let mut first = BopInstance::load(

@@ -9,8 +9,9 @@ use bop::error::BopError;
 
 use crate::chunk::{
     AssignBack, CaptureSource, Chunk, CodeOffset, Instr, InterpPart, NamespaceIdx, NamespaceRef,
-    SlotIdx,
+    RefArgTarget, SlotIdx,
 };
+use bop::parser::ParamMode;
 
 /// Validate a bytecode chunk before executing it.
 ///
@@ -138,6 +139,16 @@ impl<'a> Validator<'a> {
                     ),
                 ));
             }
+            if function.param_modes.len() != function.params.len() {
+                return Err(self.invalid(
+                    0,
+                    format!(
+                        "{detail} has {} parameters but {} parameter modes",
+                        function.params.len(),
+                        function.param_modes.len()
+                    ),
+                ));
+            }
             if function.chunk.slot_count != function.slot_count {
                 return Err(self.invalid(
                     0,
@@ -163,6 +174,63 @@ impl<'a> Validator<'a> {
         for (index, recipe) in self.chunk.patterns.iter().enumerate() {
             for (_, namespace) in &recipe.namespaces {
                 self.namespace_ref(*namespace, 0, &format!("pattern {index}"))?;
+            }
+        }
+
+        for (index, site) in self.chunk.call_sites.iter().enumerate() {
+            let detail = format!("call site {index}");
+            if site.arg_modes.len() != site.ref_targets.len() {
+                return Err(self.invalid(
+                    0,
+                    format!(
+                        "{detail} has {} argument modes but {} ref-target entries",
+                        site.arg_modes.len(),
+                        site.ref_targets.len()
+                    ),
+                ));
+            }
+            let mut ref_slots = BTreeSet::new();
+            for target in site.ref_targets.iter().flatten() {
+                if let RefArgTarget::Binding(namespace) = target {
+                    if let Some(slot) = namespace.slot_idx() {
+                        if !ref_slots.insert(slot.0) {
+                            return Err(self.invalid(
+                                0,
+                                format!(
+                                    "{detail} uses local slot {} for more than one ref target",
+                                    slot.0
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            for (position, (mode, target)) in site
+                .arg_modes
+                .iter()
+                .zip(site.ref_targets.iter())
+                .enumerate()
+            {
+                match (mode, target) {
+                    (ParamMode::Value, None) => {}
+                    (ParamMode::Ref, Some(RefArgTarget::Invalid)) => {}
+                    (ParamMode::Ref, Some(RefArgTarget::Binding(namespace))) => {
+                        self.namespace_ref(
+                            *namespace,
+                            0,
+                            &format!("{detail} argument {}", position + 1),
+                        )?;
+                    }
+                    _ => {
+                        return Err(self.invalid(
+                            0,
+                            format!(
+                                "{detail} argument {} has inconsistent mode and ref target",
+                                position + 1
+                            ),
+                        ));
+                    }
+                }
             }
         }
 
@@ -203,6 +271,50 @@ impl<'a> Validator<'a> {
             Instr::MakeDict(count) => self.pair_count(count, line, &at)?,
             Instr::Call { name, .. } => {
                 self.pool(name.0, self.chunk.names.len(), line, "name", &at)?
+            }
+            Instr::PrepareCall { name, site } => {
+                self.pool(name.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(
+                    site.0,
+                    self.chunk.call_sites.len(),
+                    line,
+                    "call site",
+                    &at,
+                )?;
+            }
+            Instr::PrepareCallValue { site } | Instr::CallPrepared { site } => {
+                self.pool(
+                    site.0,
+                    self.chunk.call_sites.len(),
+                    line,
+                    "call site",
+                    &at,
+                )?;
+            }
+            Instr::PrepareMethodValue { method, site, .. } => {
+                self.pool(method.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(
+                    site.0,
+                    self.chunk.call_sites.len(),
+                    line,
+                    "call site",
+                    &at,
+                )?;
+            }
+            Instr::PrepareMethodNamed {
+                target,
+                method,
+                site,
+            } => {
+                self.namespace_ref(target, line, &at)?;
+                self.pool(method.0, self.chunk.names.len(), line, "name", &at)?;
+                self.pool(
+                    site.0,
+                    self.chunk.call_sites.len(),
+                    line,
+                    "call site",
+                    &at,
+                )?;
             }
             Instr::CallMethod {
                 method,

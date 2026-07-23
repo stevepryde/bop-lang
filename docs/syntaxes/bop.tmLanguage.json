@@ -77,7 +77,7 @@
         },
         {
           "name": "storage.modifier.bop",
-          "match": "\\b(?:let|pub)\\b"
+          "match": "\\b(?:let|const|pub|ref)\\b"
         },
         {
           "name": "keyword.declaration.bop",

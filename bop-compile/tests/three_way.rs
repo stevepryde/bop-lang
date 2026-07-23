@@ -161,19 +161,19 @@ struct CorpusEntry {
 /// the stdlib. Entries with no imports at all still receive a
 /// resolver — it's never called for them, so the extra
 /// allocation is cheap.
-fn build_resolver(
-    overrides: &[(&str, &str)],
-) -> Option<bop_compile::ModuleResolver> {
+fn build_resolver(overrides: &[(&str, &str)]) -> Option<bop_compile::ModuleResolver> {
     let map: std::collections::HashMap<String, String> = overrides
         .iter()
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect();
-    Some(std::rc::Rc::new(std::cell::RefCell::new(move |name: &str| {
+    Some(std::rc::Rc::new(std::cell::RefCell::new(
+        move |name: &str| {
         if let Some(src) = map.get(name) {
             return Some(Ok(src.clone()));
         }
         bop::stdlib::resolve(name).map(|s| Ok(s.to_string()))
-    })))
+        },
+    )))
 }
 
 /// Build the single-file AOT driver that runs every program in the
@@ -409,6 +409,91 @@ fn parse_envelope(stdout: &str) -> Vec<(String, Outcome)> {
 
 const CORPUS: &[(&str, &str)] = &[
     (
+        "ref_commit_forward_returned_err_and_runtime_rollback",
+        r#"fn inner(ref value) { value += 2 }
+fn outer(ref value) { inner(ref value); value *= 3 }
+let value = 1
+outer(ref value)
+print(value)
+fn returned_err(ref target) {
+    target = 20
+    return Result::Err(RuntimeError { message: "ordinary value", line: 8 })
+}
+print(returned_err(ref value), value)
+fn panics(ref target) { target = 99; panic("rollback") }
+fn attempt() { panics(ref value) }
+print(try_call(attempt), value)"#,
+    ),
+    (
+        "ref_preflight_order_and_target_fences",
+        r#"fn take(ref first, ref second, ordinary) {
+    first = ordinary
+    second = ordinary + 1
+}
+fn callee() { print("callee"); return take }
+fn side() { print("arg"); return 4 }
+let other = 0
+fn invalid() { callee()(ref [1], ref other, side()) }
+print(try_call(invalid))
+let first = 1
+let second = 2
+fn duplicate() { callee()(ref first, ref first, side()) }
+print(try_call(duplicate))
+fn missing() { callee()(first, ref second, side()) }
+print(try_call(missing))
+fn capture_case() {
+    let captured = 3
+    let action = fn() { take(ref captured, ref second, side()) }
+    return try_call(action)
+}
+print(capture_case())
+const FIXED = 5
+fn constant_case() { take(ref FIXED, ref second, side()) }
+print(try_call(constant_case))"#,
+    ),
+    (
+        "mutating_method_receiver_preflight_and_snapshot_order",
+        r#"let values = [1]
+fn side() { print("arg"); return 2 }
+values.push(side())
+print(values)
+fn bad_arity() { values.push(side(), 3) }
+print(try_call(bad_arity))
+fn nested_place() { [values][0].push(side()) }
+print(try_call(nested_place))
+print([10].push(side()))"#,
+    ),
+    (
+        "method_preflight_retains_exact_adapter_across_argument_redeclaration",
+        r#"struct Box { value }
+fn Box.apply(self, ref output, trigger) { output = self.value }
+fn Box.read(self, trigger) { return self.value }
+fn replace_apply() {
+    fn Box.apply(self, ref output, trigger) { output = 99 }
+    return 0
+}
+fn replace_read() {
+    fn Box.read(self, trigger) { return 99 }
+    return 0
+}
+let box = Box { value: 7 }
+let output = 0
+print(box.read(replace_read()))
+box.apply(ref output, replace_apply())
+print(output)
+"#,
+    ),
+    (
+        "captured_implicit_ref_receiver_fences_before_arguments",
+        r#"fn side() { print("arg"); return 1 }
+fn run() {
+    let values = []
+    let action = fn() { values.push(side()) }
+    return try_call(action)
+}
+print(run())"#,
+    ),
+    (
         "branch_local_enum_site_then",
         r#"if true {
     enum Choice { Left }
@@ -630,7 +715,10 @@ print(counter.n)"#,
         r#"let x = 2
 if x == 1 { print("one") } else if x == 2 { print("two") } else { print("other") }"#,
     ),
-    ("if_expression", "let x = if true { 1 } else { 2 }\nprint(x)"),
+    (
+        "if_expression",
+        "let x = if true { 1 } else { 2 }\nprint(x)",
+    ),
     (
         "if_expression_multiline_layout",
         r#"let first = if true {
@@ -848,10 +936,7 @@ print(match Item::Value(6) { Item::Value(value) => value, _ => 0 })"#,
         r#"enum Ordered { First, Second }
 enum Ordered { Second, First }"#,
     ),
-    (
-        "while_loop",
-        "let i = 0\nwhile i < 5 { i += 1 }\nprint(i)",
-    ),
+    ("while_loop", "let i = 0\nwhile i < 5 { i += 1 }\nprint(i)"),
     (
         "while_break",
         "let i = 0\nwhile true { i += 1\nif i == 3 { break } }\nprint(i)",
@@ -1021,9 +1106,18 @@ for i in range(1, 16) {
 }
 print(result.join(", "))"#,
     ),
-    ("builtin_str_int_type", "print(42.to_str())\nprint(3.7.to_int())\nprint([].type())"),
-    ("builtin_abs_min_max", "print((-5).abs())\nprint(3.min(7))\nprint(3.max(7))"),
-    ("builtin_range", "print(range(5))\nprint(range(2, 5))\nprint(range(0, 10, 3))"),
+    (
+        "builtin_str_int_type",
+        "print(42.to_str())\nprint(3.7.to_int())\nprint([].type())",
+    ),
+    (
+        "builtin_abs_min_max",
+        "print((-5).abs())\nprint(3.min(7))\nprint(3.max(7))",
+    ),
+    (
+        "builtin_range",
+        "print(range(5))\nprint(range(2, 5))\nprint(range(0, 10, 3))",
+    ),
     (
         "range_limit_boundary",
         "let values = range(10000)\nprint(values.len())\nprint(values[9999])",
@@ -1035,9 +1129,12 @@ print(result.join(", "))"#,
 })
 print("unreachable")"#,
     ),
-    ("builtin_len_inspect", r#"print("hello".len())
+    (
+        "builtin_len_inspect",
+        r#"print("hello".len())
 print([1, 2, 3].len())
-print("hi".inspect())"#),
+print("hi".inspect())"#,
+    ),
     (
         "signed_index_methods",
         r#"let values = [10, 20, 30, 40]
@@ -1111,7 +1208,10 @@ print(values)"#,
     ),
     ("signed_index_bounds_error", "[1, 2].remove(-3)"),
     ("signed_index_type_error", r#"[1].remove("0")"#),
-    ("nested_array_access", "let m = [[1, 2], [3, 4]]\nprint(m[1][0])"),
+    (
+        "nested_array_access",
+        "let m = [[1, 2], [3, 4]]\nprint(m[1][0])",
+    ),
     ("method_chain", r#"print("  HELLO  ".trim().lower())"#),
     (
         "truthiness",
@@ -1120,15 +1220,12 @@ print(if "" { "t" } else { "f" })
 print(if [1] { "t" } else { "f" })
 print(if [] { "t" } else { "f" })"#,
     ),
-    ("number_display", "print(5.0)\nprint(3.14)\nprint(0.1 + 0.2)"),
     (
-        "error_division_by_zero",
-        "print(1 / 0)",
+        "number_display",
+        "print(5.0)\nprint(3.14)\nprint(0.1 + 0.2)",
     ),
-    (
-        "error_type_mismatch",
-        r#"print("a" - 1)"#,
-    ),
+    ("error_division_by_zero", "print(1 / 0)"),
+    ("error_type_mismatch", r#"print("a" - 1)"#),
     ("error_unknown_fn", "nope()"),
     (
         // `panic` is a builtin; in walker / VM / AOT it has to
@@ -1656,14 +1753,8 @@ print(3 * 0.5)"#,
         r#"print(1 == 1.0)
 print(2 > 1.5)"#,
     ),
-    (
-        "division_by_zero_errors",
-        "print(10 / 0)",
-    ),
-    (
-        "int_overflow_add_errors",
-        "print(9223372036854775807 + 1)",
-    ),
+    ("division_by_zero_errors", "print(10 / 0)"),
+    ("int_overflow_add_errors", "print(9223372036854775807 + 1)"),
     (
         "int_builtin_and_float_builtin",
         r#"print(3.7.to_int())
@@ -1736,14 +1827,8 @@ print(match r {
     Result::Err(e) => e.message,
 })"#,
     ),
-    (
-        "try_call_wrong_arg_count_errors",
-        "try_call()",
-    ),
-    (
-        "try_call_non_function_errors",
-        "try_call(42)",
-    ),
+    ("try_call_wrong_arg_count_errors", "try_call()"),
+    ("try_call_non_function_errors", "try_call(42)"),
     (
         "try_call_nested_outer_catches_inner_err_as_ok",
         r#"let r = try_call(fn() {
@@ -1762,9 +1847,47 @@ print(match r {
 /// pairs source with a module map the walker, VM, and AOT all
 /// resolve against. AOT's compile-time resolver is seeded from
 /// this same map via `modules_from_map`.
-type ImportCase = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
+type ImportCase = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
 
 const IMPORTS_CORPUS: &[ImportCase] = &[
+    (
+        "optional_import_capture_explicit_and_implicit_ref_fences",
+        r#"fn side() { print("arg"); return 1 }
+fn take(ref value) { value = 9 }
+fn implicit() {
+    use dep
+    let action = fn() { values.push(side()) }
+    return try_call(action)
+}
+fn explicit() {
+    use dep
+    let action = fn() { take(ref values) }
+    return try_call(action)
+}
+print(implicit())
+print(explicit())"#,
+        &[("dep", "let values = []")],
+    ),
+    (
+        "module_export_ref_commit_preflight_and_rollback",
+        r#"use dep as api
+let value = 1
+api.bump(ref value)
+print(value)
+fn failed() { api.fail(ref value) }
+print(try_call(failed), value)
+fn side() { print("arg"); return 0 }
+fn missing() { api.bump(side()) }
+print(try_call(missing), value)"#,
+        &[(
+            "dep",
+            "fn bump(ref value) { value += 1 }\nfn fail(ref value) { value = 99; panic(\"rollback\") }",
+        )],
+    ),
     (
         "module_methods_keep_full_receiver_identity",
         r#"use left as left
@@ -1989,10 +2112,22 @@ print(try_call(fn() { return api.hidden() }).is_err())"#,
         "reexported_module_aliases_same_name_isolation",
         "use wa.{make_a}\nuse wb.{make_b}\nprint(make_a(2).a, make_b(3).b)",
         &[
-            ("a", "struct Point { a }\nfn make(value) { return Point { a: value } }"),
-            ("b", "struct Point { b }\nfn make(value) { return Point { b: value } }"),
-            ("wa", "use a as api\nfn make_a(value) { return api.make(value) }"),
-            ("wb", "use b as api\nfn make_b(value) { return api.make(value) }"),
+            (
+                "a",
+                "struct Point { a }\nfn make(value) { return Point { a: value } }",
+            ),
+            (
+                "b",
+                "struct Point { b }\nfn make(value) { return Point { b: value } }",
+            ),
+            (
+                "wa",
+                "use a as api\nfn make_a(value) { return api.make(value) }",
+            ),
+            (
+                "wb",
+                "use b as api\nfn make_b(value) { return api.make(value) }",
+            ),
         ],
     ),
     (
@@ -2604,10 +2739,7 @@ print(dotted.helper(), dotted.ctx, underscored.helper(), underscored.yield)"#,
         "import_transitive",
         r#"use a
 print(doubled)"#,
-        &[
-            ("a", "use b\nlet doubled = pi + pi"),
-            ("b", "let pi = 3"),
-        ],
+        &[("a", "use b\nlet doubled = pi + pi"), ("b", "let pi = 3")],
     ),
     (
         "import_shared_dependency_diamond",
@@ -2876,10 +3008,7 @@ print(lambda_use(), match_lambda_use())"#,
         r#"use wrapper as wrapper_module
 print(wrapper_module.run())"#,
         &[
-            (
-                "wrapper",
-                "fn run() { use leaf.{value}; return value }",
-            ),
+            ("wrapper", "fn run() { use leaf.{value}; return value }"),
             ("leaf", "let value = 42"),
         ],
     ),
@@ -2965,10 +3094,7 @@ print(match value {
     narrowed.B { value } => "matched",
     _ => "missed",
 })"#,
-        &[(
-            "alias_types",
-            "struct A { value }\nstruct B { value }",
-        )],
+        &[("alias_types", "struct A { value }\nstruct B { value }")],
     ),
     (
         "import_lazy_edge_is_not_eager_cycle",
@@ -3170,10 +3296,7 @@ fn quadruple(x) { return double(double(x)) }"#,
         r#"use shapes
 let p = Point { x: 3, y: 4 }
 print(p.x + p.y)"#,
-        &[(
-            "shapes",
-            r#"struct Point { x, y }"#,
-        )],
+        &[("shapes", r#"struct Point { x, y }"#)],
     ),
     (
         "imported_enum_type_in_caller",
@@ -3183,10 +3306,7 @@ print(match s {
     Shape::Circle(r) => r,
     Shape::Rect { w, h } => w * h,
 })"#,
-        &[(
-            "shapes",
-            r#"enum Shape { Circle(r), Rect { w, h } }"#,
-        )],
+        &[("shapes", r#"enum Shape { Circle(r), Rect { w, h } }"#)],
     ),
     (
         "type_bindings_selective_and_glob_source_order",

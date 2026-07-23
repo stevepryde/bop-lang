@@ -223,9 +223,22 @@ enum Signal {
 
 #[derive(Clone)]
 struct FnDef {
-    params: Vec<String>,
+    params: Vec<Parameter>,
     body: Vec<Stmt>,
     module_path: String,
+}
+
+fn parameter_metadata(params: &[Parameter]) -> (Vec<String>, Vec<ParamMode>) {
+    (
+        params.iter().map(|param| param.name.clone()).collect(),
+        params.iter().map(|param| param.mode).collect(),
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BindingIdentity {
+    scope: usize,
+    name: String,
 }
 
 /// Lexical free-variable analysis for walker-created lambdas.
@@ -240,9 +253,9 @@ struct FreeVariableCollector {
 }
 
 impl FreeVariableCollector {
-    fn for_lambda(params: &[String]) -> Self {
+    fn for_lambda(params: &[Parameter]) -> Self {
         Self {
-            scopes: vec![params.iter().cloned().collect()],
+            scopes: vec![params.iter().map(|param| param.name.clone()).collect()],
             free: alloc_import::collections::BTreeSet::new(),
         }
     }
@@ -588,6 +601,13 @@ pub struct Evaluator<'h, H: BopHost + ?Sized> {
     /// `Signal::Return`. Always `None` outside the narrow
     /// unwinding window.
     pending_try_return: Option<Value>,
+    /// Binding identities that are staged `ref` parameters in the active
+    /// function frame. They may be forwarded, but a nested closure may not
+    /// capture them.
+    active_ref_bindings: alloc_import::collections::BTreeSet<BindingIdentity>,
+    /// Captures seeded into the active closure frame. Explicit `ref`
+    /// arguments may not target these second-class bindings.
+    active_capture_bindings: alloc_import::collections::BTreeSet<BindingIdentity>,
     /// Non-fatal runtime warnings accumulated during execution —
     /// currently only `use`-time name-shadowing events (glob
     /// imports bringing in a name that's already bound). Nested
@@ -642,6 +662,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             imports: Rc::new(RefCell::new(alloc_import::collections::BTreeMap::new())),
             imported_here: vec![alloc_import::collections::BTreeSet::new()],
             pending_try_return: None,
+            active_ref_bindings: alloc_import::collections::BTreeSet::new(),
+            active_capture_bindings: alloc_import::collections::BTreeSet::new(),
             runtime_warnings: Vec::new(),
         }
     }
@@ -697,6 +719,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             imports,
             imported_here: vec![alloc_import::collections::BTreeSet::new()],
             pending_try_return: None,
+            active_ref_bindings: alloc_import::collections::BTreeSet::new(),
+            active_capture_bindings: alloc_import::collections::BTreeSet::new(),
             runtime_warnings: Vec::new(),
         }
     }
@@ -878,6 +902,90 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
         }
         None
+    }
+
+    fn resolve_binding_identity(&self, name: &str) -> Option<BindingIdentity> {
+        self.scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, scope)| scope.contains_key(name))
+            .map(|(scope, _)| BindingIdentity {
+                scope,
+                name: name.to_string(),
+            })
+    }
+
+    fn binding_value(&self, target: &BindingIdentity) -> Option<Value> {
+        self.scopes
+            .get(target.scope)
+            .and_then(|scope| scope.get(&target.name))
+            .cloned()
+    }
+
+    fn pending_memory_error(&self, line: u32) -> Option<BopError> {
+        crate::memory::bop_memory_exceeded().then(|| {
+            error_fatal_with_hint(
+                line,
+                "Memory limit exceeded",
+                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+            )
+        })
+    }
+
+    fn preflight_ref_targets(
+        &self,
+        args: &[CallArg],
+        line: u32,
+    ) -> Result<Vec<BindingIdentity>, BopError> {
+        let mut targets = Vec::new();
+        let mut unique = alloc_import::collections::BTreeSet::new();
+        for (index, arg) in args.iter().enumerate() {
+            if arg.mode != ParamMode::Ref {
+                continue;
+            }
+            let ExprKind::Ident(name) = &arg.value.kind else {
+                return Err(crate::ref_params::invalid_ref_target(index + 1, line));
+            };
+            if crate::naming::is_constant_name(name) {
+                return Err(crate::error_messages::constant_mutation_error(name, line));
+            }
+            let target = self
+                .resolve_binding_identity(name)
+                .ok_or_else(|| crate::ref_params::invalid_ref_target(index + 1, line))?;
+            if self.active_capture_bindings.contains(&target) {
+                return Err(crate::ref_params::captured_ref_target(index + 1, line));
+            }
+            if !unique.insert(target.clone()) {
+                return Err(crate::ref_params::duplicate_ref_target(line));
+            }
+            targets.push(target);
+        }
+        Ok(targets)
+    }
+
+    fn commit_ref_targets(
+        &mut self,
+        targets: &[BindingIdentity],
+        values: Vec<Value>,
+        line: u32,
+    ) -> Result<(), BopError> {
+        if targets.len() != values.len()
+            || targets.iter().any(|target| {
+                self.scopes
+                    .get(target.scope)
+                    .is_none_or(|scope| !scope.contains_key(&target.name))
+            })
+        {
+            return Err(error(
+                line,
+                "a `ref` target stopped being available before commit",
+            ));
+        }
+        for (target, value) in targets.iter().zip(values) {
+            self.scopes[target.scope].insert(target.name.clone(), value);
+        }
+        Ok(())
     }
 
     fn get_var_value(&self, name: &str) -> Option<Value> {
@@ -1349,8 +1457,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     definition.clone(),
                 );
                 if is_direct_root {
-                    let entry_target = BopFn::try_new_ast_in_module_with_origin(
-                        definition.params.clone(),
+                    let (param_names, param_modes) = parameter_metadata(&definition.params);
+                    let entry_target = BopFn::try_new_ast_in_module_with_origin_and_modes(
+                        param_names,
+                        param_modes,
                         Vec::new(),
                         definition.body.clone(),
                         Some(name.clone()),
@@ -1641,8 +1751,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             if bindings.bindings.iter().any(|(binding, _)| binding == name) {
                 continue;
             }
-            let value = BopFn::try_new_ast_in_module_with_origin(
-                fn_def.params.clone(),
+            let (param_names, param_modes) = parameter_metadata(&fn_def.params);
+            let value = BopFn::try_new_ast_in_module_with_origin_and_modes(
+                param_names,
+                param_modes,
                 Vec::new(),
                 fn_def.body.clone(),
                 Some(name.clone()),
@@ -2547,8 +2659,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 // recursive lookups inside the body still resolve
                 // through `self.functions` (see `call_bop_fn`).
                 if let Some(f) = self.lookup_function(name) {
-                    return BopFn::try_new_ast_in_module_with_origin(
-                        f.params.clone(),
+                    let (param_names, param_modes) = parameter_metadata(&f.params);
+                    return BopFn::try_new_ast_in_module_with_origin_and_modes(
+                        param_names,
+                        param_modes,
                         Vec::new(),
                         f.body.clone(),
                         Some(name.to_string()),
@@ -2606,10 +2720,6 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
 
             ExprKind::Call { callee, args } => {
-                let mut eval_args = Vec::new();
-                for arg in args {
-                    eval_args.push(self.eval_expr(arg)?);
-                }
                 if let ExprKind::Ident(name) = &callee.kind {
                     // Lexical callable first: if the name is bound
                     // to a `Value::Fn` in the current scope, call
@@ -2618,7 +2728,15 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     // then calling it" should fail loudly, not
                     // silently dispatch to the builtin.
                     if let Some(v) = self.get_var(name).cloned() {
-                        return self.call_value(v, eval_args, expr.line, Some(name));
+                        return match v {
+                            Value::Fn(func) => {
+                                self.eval_bop_call(func, args, expr.line, name)
+                            }
+                            other => Err(error(
+                                expr.line,
+                                format!("`{}` is a {}, not a function", name, other.type_name()),
+                            )),
+                        };
                     }
                     let declaration_alias = self.active_lexical_contexts.last().and_then(|context| {
                         if context.module_aliases.is_empty() {
@@ -2627,36 +2745,99 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             context.module_aliases.get(name).cloned()
                         }
                     });
-                    if let Some(module) = declaration_alias {
-                        return self.call_value(
-                            Value::Module(module),
-                            eval_args,
+                    if declaration_alias.is_some() {
+                        return Err(error(
                             expr.line,
-                            Some(name),
-                        );
+                            format!("`{}` is a module, not a function", name),
+                        ));
                     }
-                    // Otherwise fall through to the original
-                    // name-based dispatch (builtins → host → named
-                    // fns). This is what keeps `print(x)` /
-                    // `range(n)` / `my_user_fn(x)` working.
+                    if let Some(function) = self.lookup_function(name) {
+                        let (param_names, param_modes) = parameter_metadata(&function.params);
+                        let func = BopFn::try_new_ast_in_module_with_origin_and_modes(
+                            param_names,
+                            param_modes,
+                            Vec::new(),
+                            function.body,
+                            Some(name.clone()),
+                            Some(function.module_path),
+                            self.function_origin.clone(),
+                            expr.line,
+                        )?;
+                        // Preserve the established host-before-named-function
+                        // dispatch for legacy value-only calls. Ref-aware
+                        // calls must use the retained Bop callable metadata so
+                        // their staged targets can be committed transactionally.
+                        if func
+                            .param_modes
+                            .iter()
+                            .all(|mode| *mode == ParamMode::Value)
+                            && args.iter().all(|arg| arg.mode == ParamMode::Value)
+                        {
+                            if args.len() != func.params.len() {
+                                return Err(error(
+                                    expr.line,
+                                    format!(
+                                        "`{}` expects {} argument{}, but got {}",
+                                        name,
+                                        func.params.len(),
+                                        if func.params.len() == 1 { "" } else { "s" },
+                                        args.len()
+                                    ),
+                                ));
+                            }
+                            let mut eval_args = Vec::with_capacity(args.len());
+                            for arg in args {
+                                eval_args.push(self.eval_expr(&arg.value)?);
+                            }
+                            return self.call_function(name, eval_args, expr.line);
+                        }
+                        return self.eval_bop_call(func, args, expr.line, name);
+                    }
+
+                    let actual_modes: Vec<ParamMode> =
+                        args.iter().map(|arg| arg.mode).collect();
+                    crate::validate_value_only_call_modes(name, &actual_modes, expr.line)?;
+                    self.validate_builtin_arity(name, args.len(), expr.line)?;
+                    let mut eval_args = Vec::with_capacity(args.len());
+                    for arg in args {
+                        eval_args.push(self.eval_expr(&arg.value)?);
+                    }
                     return self.call_function(name, eval_args, expr.line);
                 }
-                // Non-Ident callee: evaluate the expression; it
-                // must produce a `Value::Fn`.
+
+                // The callee expression is always resolved exactly once before
+                // preflight and before any argument expression.
                 let callee_val = self.eval_expr(callee)?;
-                self.call_value(callee_val, eval_args, expr.line, None)
+                match callee_val {
+                    Value::Fn(func) => {
+                        let label = func.self_name.as_deref().unwrap_or("fn").to_string();
+                        self.eval_bop_call(func, args, expr.line, &label)
+                    }
+                    other => Err(error(
+                        expr.line,
+                        crate::error_messages::cant_call_a(other.type_name()),
+                    )),
+                }
             }
 
             ExprKind::Lambda { params, body } => {
                 let free_variables = FreeVariableCollector::for_lambda(params).finish(body);
+                if free_variables.iter().any(|name| {
+                    self.resolve_binding_identity(name)
+                        .is_some_and(|identity| self.active_ref_bindings.contains(&identity))
+                }) {
+                    return Err(crate::ref_params::ref_capture_error(expr.line));
+                }
                 let captures = self.snapshot_captures(&free_variables);
                 let module_path = self
                     .function_modules
                     .last()
                     .cloned()
                     .unwrap_or_else(|| self.current_module.clone());
-                BopFn::try_new_ast_in_module_with_origin(
-                    params.clone(),
+                let (param_names, param_modes) = parameter_metadata(params);
+                BopFn::try_new_ast_in_module_with_origin_and_modes(
+                    param_names,
+                    param_modes,
                     captures,
                     body.clone(),
                     None,
@@ -2671,28 +2852,60 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 method,
                 args,
             } => {
-                let mut eval_args = Vec::new();
-                for arg in args {
-                    eval_args.push(self.eval_expr(arg)?);
-                }
+                let actual_modes: Vec<ParamMode> =
+                    args.iter().map(|arg| arg.mode).collect();
 
-                // Bare array bindings have unique, by-value ownership. Mutate
-                // that storage directly after evaluating every argument so
-                // calls such as `a.push(a.pop())` observe the inner mutation
-                // and append loops do not clone the receiver twice per turn.
-                // Runtime non-arrays continue through user/common dispatch.
+                // A named built-in mutating receiver is a staged implicit-ref
+                // place. Classify it without cloning its value; ordinary
+                // arguments run first, then copy-in observes their side
+                // effects, and only a successful method result writes back.
                 if methods::is_mutating_method(method) {
                     if let ExprKind::Ident(name) = &object.kind {
                         if matches!(self.get_var(name), Some(Value::Array(_))) {
-                            methods::reject_constant_array_mutation(
-                                name,
+                            crate::validate_value_only_call_modes(
                                 method,
+                                &actual_modes,
                                 expr.line,
                             )?;
-                        }
-                        if let Some(Value::Array(arr)) = self.get_var_mut(name) {
-                            return methods::array_method_mut(
-                                arr,
+                            let expected = methods::builtin_method_arity(method)
+                                .expect("mutating built-in has arity metadata");
+                            if args.len() != expected {
+                                return Err(error(
+                                    expr.line,
+                                    format!(
+                                        "`.{}()` needs {} argument{}",
+                                        method,
+                                        expected,
+                                        if expected == 1 { "" } else { "s" }
+                                    ),
+                                ));
+                            }
+                            methods::reject_constant_array_mutation(name, method, expr.line)?;
+                            let target = self.resolve_binding_identity(name).ok_or_else(|| {
+                                crate::ref_params::invalid_ref_target(1, expr.line)
+                            })?;
+                            if self.active_capture_bindings.contains(&target) {
+                                return Err(crate::ref_params::captured_ref_target(
+                                    1,
+                                    expr.line,
+                                ));
+                            }
+                            let mut eval_args = Vec::with_capacity(args.len());
+                            for arg in args {
+                                eval_args.push(self.eval_expr(&arg.value)?);
+                            }
+                            if let Some(error) = self.pending_memory_error(expr.line) {
+                                return Err(error);
+                            }
+                            let binding = self
+                                .scopes
+                                .get_mut(target.scope)
+                                .and_then(|scope| scope.get_mut(&target.name))
+                                .ok_or_else(|| {
+                                    crate::ref_params::invalid_ref_target(1, expr.line)
+                                })?;
+                            return methods::transactional_array_method(
+                                binding,
                                 method,
                                 eval_args,
                                 expr.line,
@@ -2700,45 +2913,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         }
                     }
                 }
+
+                // Every other receiver expression is the callee expression:
+                // evaluate it once before mode/arity preflight and arguments.
                 let obj_val = self.eval_expr(object)?;
-
-                // `m.foo(args)` on a module alias: this parsed as
-                // a `MethodCall`, but there's no struct/enum
-                // receiver — `m` is a `Value::Module` whose
-                // `foo` export is a callable value. Look it up,
-                // then treat the result as a regular value call.
-                //
-                // The common methods (`type`, `to_str`,
-                // `inspect`) still win over export lookup, so
-                // `m.type()` returns `"module"` instead of
-                // complaining that `type` isn't exported.
-                if let Value::Module(m) = &obj_val {
-                    if let Some(result) =
-                        methods::common_method(&obj_val, method, &eval_args, expr.line)?
-                    {
-                        return Ok(result.0);
-                    }
-                    if let Some(callee) = self.module_binding(m, method) {
-                        return self.call_value(callee, eval_args, expr.line, Some(method));
-                    }
-                    return Err(error(
-                        expr.line,
-                        format!(
-                            "`{}` isn't exported from `{}`",
-                            method, m.path
-                        ),
-                    ));
-                }
-
-                // User-defined method dispatch comes first — any
-                // user method registered against the receiver's
-                // *full* type identity `(module_path, type_name)`
-                // wins over built-in methods of the same name.
-                // Enums dispatch on the enum's type, not the
-                // variant's, so all variants of `paint.Shape`
-                // share `fn Shape.area(self)` from the paint
-                // module. A method declared for `paint.Shape`
-                // deliberately does not fire on `other.Shape`.
                 let type_key: Option<(String, String)> = match &obj_val {
                     Value::Struct(s) => Some((
                         s.module_path().to_string(),
@@ -2757,34 +2935,38 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         .and_then(|ms| ms.get(method))
                         .cloned();
                     if let Some(m) = user {
-                        if m.params.len() != eval_args.len() + 1 {
-                            return Err(error(
+                        return self.eval_user_method_call(
+                            obj_val, &key.1, method, m, args, expr.line,
+                        );
+                    }
+                }
+
+                // Module export calls retain callable metadata too. Common
+                // value methods still win over an export with the same name.
+                if let Value::Module(module) = &obj_val {
+                    if !matches!(method.as_str(), "type" | "to_str" | "inspect") {
+                        let callee = self.module_binding(module, method).ok_or_else(|| {
+                            error(
                                 expr.line,
                                 format!(
-                                    "`{}.{}` expects {} argument{} (including `self`), but got {}",
-                                    key.1,
-                                    method,
-                                    m.params.len(),
-                                    if m.params.len() == 1 { "" } else { "s" },
-                                    eval_args.len() + 1
+                                    "`{}` isn't exported from `{}`",
+                                    method, module.path
                                 ),
-                            ));
-                        }
-                        // Prepend receiver as the first parameter
-                        // (`self` by convention).
-                        let mut full_args = Vec::with_capacity(eval_args.len() + 1);
-                        full_args.push(obj_val);
-                        full_args.extend(eval_args);
-                        let bop_fn = BopFn::try_new_ast_in_module_with_origin(
-                            m.params,
-                            Vec::new(),
-                            m.body,
-                            None,
-                            Some(m.module_path),
-                            self.function_origin.clone(),
-                            expr.line,
-                        )?;
-                        return self.call_bop_fn(&bop_fn, full_args, expr.line);
+                            )
+                        })?;
+                        return match callee {
+                            Value::Fn(func) => {
+                                self.eval_bop_call(func, args, expr.line, method)
+                            }
+                            other => Err(error(
+                                expr.line,
+                                format!(
+                                    "`{}` is a {}, not a function",
+                                    method,
+                                    other.type_name()
+                                ),
+                            )),
+                        };
                     }
                 }
 
@@ -2800,6 +2982,25 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
                 ) {
                     methods::reject_nested_array_mutation(&obj_val, method, expr.line)?;
+                }
+
+                crate::validate_value_only_call_modes(method, &actual_modes, expr.line)?;
+                if let Some(expected) = methods::builtin_method_arity(method) {
+                    if args.len() != expected {
+                        return Err(error(
+                            expr.line,
+                            format!(
+                                "`.{}()` needs {} argument{}",
+                                method,
+                                expected,
+                                if expected == 1 { "" } else { "s" }
+                            ),
+                        ));
+                    }
+                }
+                let mut eval_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    eval_args.push(self.eval_expr(&arg.value)?);
                 }
 
                 // Callable-taking Result methods — `r.map(f)`,
@@ -2822,14 +3023,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 }
 
                 let (ret, mutated) = self.call_method(&obj_val, method, &eval_args, expr.line)?;
-
-                if methods::is_mutating_method(method) {
-                    if let ExprKind::Ident(name) = &object.kind {
-                        if let Some(new_obj) = mutated {
-                            self.set_var(name, new_obj);
-                        }
-                    }
-                }
+                // A true temporary mutates its staged owned value and discards
+                // the update. Named array receivers returned through the
+                // transactional path above.
+                let _ = mutated;
                 Ok(ret)
             }
 
@@ -3208,6 +3405,187 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             .collect()
     }
 
+    fn eval_bop_call(
+        &mut self,
+        func: Rc<BopFn>,
+        args: &[CallArg],
+        line: u32,
+        callable: &str,
+    ) -> Result<Value, BopError> {
+        if !func.__is_allowed_by(&self.function_origin, "walker") {
+            return Err(error(
+                line,
+                "This function belongs to a different Bop engine instance",
+            ));
+        }
+        if !matches!(func.body, FnBody::Ast(_)) {
+            return Err(error(
+                line,
+                "This function was compiled for another engine and can't be run in the tree-walker",
+            ));
+        }
+        if args.len() != func.params.len() {
+            return Err(error(
+                line,
+                format!(
+                    "`{}` expects {} argument{}, but got {}",
+                    callable,
+                    func.params.len(),
+                    if func.params.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+            ));
+        }
+        let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
+        crate::validate_call_modes(callable, &func.param_modes, &actual_modes, line)?;
+        let targets = self.preflight_ref_targets(args, line)?;
+
+        // Ordinary argument expressions run left-to-right. Ref places are
+        // intentionally not read yet: side effects here must be visible in
+        // the subsequent copy-in snapshot.
+        let mut evaluated: Vec<Option<Value>> = Vec::with_capacity(args.len());
+        for arg in args {
+            evaluated.push(match arg.mode {
+                ParamMode::Value => Some(self.eval_expr(&arg.value)?),
+                ParamMode::Ref => None,
+            });
+        }
+
+        let mut target_iter = targets.iter();
+        let mut ref_positions = Vec::new();
+        let mut call_args = Vec::with_capacity(args.len());
+        for (index, (arg, value)) in args.iter().zip(evaluated).enumerate() {
+            match arg.mode {
+                ParamMode::Value => {
+                    call_args.push(value.expect("value argument was evaluated"));
+                }
+                ParamMode::Ref => {
+                    let target = target_iter.next().expect("target preflight matched modes");
+                    let snapshot = self.binding_value(target).ok_or_else(|| {
+                        crate::ref_params::invalid_ref_target(index + 1, line)
+                    })?;
+                    call_args.push(snapshot);
+                    ref_positions.push(index);
+                }
+            }
+        }
+
+        let (value, staged) =
+            self.call_bop_fn_with_refs(&func, call_args, &ref_positions, line)?;
+        self.commit_ref_targets(&targets, staged, line)?;
+        Ok(value)
+    }
+
+    fn eval_user_method_call(
+        &mut self,
+        receiver: Value,
+        receiver_type: &str,
+        method: &str,
+        definition: FnDef,
+        args: &[CallArg],
+        line: u32,
+    ) -> Result<Value, BopError> {
+        let actual_arity = args.len() + 1;
+        if definition.params.len() != actual_arity {
+            return Err(error(
+                line,
+                format!(
+                    "`{}.{}` expects {} argument{} (including `self`), but got {}",
+                    receiver_type,
+                    method,
+                    definition.params.len(),
+                    if definition.params.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    actual_arity
+                ),
+            ));
+        }
+        // The exact total-arity check above guarantees the implicit receiver
+        // has a corresponding first parameter before we inspect ordinary
+        // argument modes or evaluate any ordinary argument expressions.
+        let non_receiver = &definition.params[1..];
+        let expected_modes: Vec<ParamMode> =
+            non_receiver.iter().map(|param| param.mode).collect();
+        let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
+        crate::validate_call_modes(method, &expected_modes, &actual_modes, line)?;
+        let targets = self.preflight_ref_targets(args, line)?;
+
+        let mut evaluated = Vec::with_capacity(args.len());
+        for arg in args {
+            evaluated.push(match arg.mode {
+                ParamMode::Value => Some(self.eval_expr(&arg.value)?),
+                ParamMode::Ref => None,
+            });
+        }
+        let mut target_iter = targets.iter();
+        let mut full_args = Vec::with_capacity(args.len() + 1);
+        full_args.push(receiver);
+        let mut ref_positions = Vec::new();
+        for (index, (arg, value)) in args.iter().zip(evaluated).enumerate() {
+            match arg.mode {
+                ParamMode::Value => {
+                    full_args.push(value.expect("ordinary method argument was evaluated"));
+                }
+                ParamMode::Ref => {
+                    let target = target_iter.next().expect("target count matched ref modes");
+                    full_args.push(self.binding_value(target).ok_or_else(|| {
+                        crate::ref_params::invalid_ref_target(index + 1, line)
+                    })?);
+                    ref_positions.push(index + 1);
+                }
+            }
+        }
+        let (param_names, param_modes) = parameter_metadata(&definition.params);
+        let func = BopFn::try_new_ast_in_module_with_origin_and_modes(
+            param_names,
+            param_modes,
+            Vec::new(),
+            definition.body,
+            None,
+            Some(definition.module_path),
+            self.function_origin.clone(),
+            line,
+        )?;
+        let (value, staged) =
+            self.call_bop_fn_with_refs(&func, full_args, &ref_positions, line)?;
+        self.commit_ref_targets(&targets, staged, line)?;
+        Ok(value)
+    }
+
+    fn validate_builtin_arity(
+        &self,
+        name: &str,
+        count: usize,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let expected = match name {
+            "rand" | "try_call" | "panic" => Some((1, 1)),
+            "range" => Some((1, 3)),
+            "print" => None,
+            _ => return Ok(()),
+        };
+        if let Some((min, max)) = expected {
+            if count < min || count > max {
+                let expectation = if min == max {
+                    format!("{} argument{}", min, if min == 1 { "" } else { "s" })
+                } else {
+                    format!("{} to {} arguments", min, max)
+                };
+                return Err(error(
+                    line,
+                    format!(
+                        "`{}` expects {}, but got {}",
+                        name, expectation, count
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Call a value directly. Non-`Value::Fn` payloads are an
     /// explicit "not callable" error — this is the safety net for
     /// `let x = 5; x(1)` and friends.
@@ -3254,6 +3632,26 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         args: Vec<Value>,
         line: u32,
     ) -> Result<Value, BopError> {
+        if args.len() == func.params.len() {
+            let actual_modes = vec![ParamMode::Value; args.len()];
+            crate::validate_call_modes(
+                func.self_name.as_deref().unwrap_or("fn"),
+                &func.param_modes,
+                &actual_modes,
+                line,
+            )?;
+        }
+        self.call_bop_fn_with_refs(func, args, &[], line)
+            .map(|(value, _)| value)
+    }
+
+    fn call_bop_fn_with_refs(
+        &mut self,
+        func: &Rc<BopFn>,
+        args: Vec<Value>,
+        ref_positions: &[usize],
+        line: u32,
+    ) -> Result<(Value, Vec<Value>), BopError> {
         if !func.__is_allowed_by(&self.function_origin, "walker") {
             return Err(error(
                 line,
@@ -3303,6 +3701,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // type decl inside the fn body still ends up scoped to
         // that fn and vanishes on return.
         self.call_depth += 1;
+        let saved_ref_bindings = core::mem::take(&mut self.active_ref_bindings);
+        let saved_capture_bindings = core::mem::take(&mut self.active_capture_bindings);
         let function_module = func
             .module_path
             .clone()
@@ -3360,6 +3760,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // collision (matches the lexical snapshot semantics).
         for (name, value) in &func.captures {
             self.define(name.clone(), value.clone());
+            if let Some(identity) = self.resolve_binding_identity(name) {
+                self.active_capture_bindings.insert(identity);
+            }
         }
         if let Some(self_name) = &func.self_name {
             // Make the reified `fn name` value visible inside its
@@ -3367,11 +3770,65 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             // works without a special "named fn" path.
             self.define(self_name.clone(), Value::Fn(Rc::clone(func)));
         }
-        for (param, arg) in func.params.iter().zip(args) {
+        for (index, (param, arg)) in func.params.iter().zip(args).enumerate() {
             self.define(param.clone(), arg);
+            if let Some(identity) = self.resolve_binding_identity(param) {
+                self.active_capture_bindings.remove(&identity);
+                if func.param_modes.get(index) == Some(&ParamMode::Ref) {
+                    self.active_ref_bindings.insert(identity);
+                }
+            }
         }
 
-        let result = self.exec_block(body);
+        let raw_result = self.exec_block(body);
+        // Convert every normal language return shape before looking at staged
+        // outputs. A `try Err(...)` sentinel is a normal return and commits;
+        // every other error rolls back.
+        let mut result = match raw_result {
+            Ok(Signal::Return(value)) => Ok(value),
+            Ok(Signal::None) => Ok(Value::None),
+            Ok(Signal::Break) => Err(error(line, "break used outside of a loop")),
+            Ok(Signal::Continue) => Err(error(line, "continue used outside of a loop")),
+            Err(err) if err.is_try_return => {
+                self.pending_try_return.take().ok_or(err)
+            }
+            Err(err) => Err(err),
+        };
+        // Allocation accounting can become exceeded during the final
+        // expression/statement even when that operation returns a nominal
+        // value. Convert it to a fatal error before reading staged outputs or
+        // restoring the caller, so no ref target can commit across the limit.
+        if result.is_ok() {
+            if let Some(error) = self.pending_memory_error(line) {
+                result = Err(error);
+            }
+        }
+        let staged_result = if result.is_ok() {
+            ref_positions
+                .iter()
+                .map(|position| {
+                    let name = func.params.get(*position).ok_or_else(|| {
+                        error(line, "Function parameter mode metadata is invalid")
+                    })?;
+                    self.scopes
+                        .get(1)
+                        .and_then(|scope| scope.get(name))
+                        .cloned()
+                        .ok_or_else(|| {
+                            error(line, format!("`ref` parameter `{}` is unavailable", name))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            Ok(Vec::new())
+        };
+        let staged_outputs = match staged_result {
+            Ok(values) => values,
+            Err(err) => {
+                result = Err(err);
+                Vec::new()
+            }
+        };
         let updated_defining_environment = self.scopes
             .first_mut()
             .map(core::mem::take)
@@ -3407,31 +3864,12 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         self.active_lexical_contexts.pop();
         self.function_modules.pop();
         self.call_depth -= 1;
+        self.active_ref_bindings = saved_ref_bindings;
+        self.active_capture_bindings = saved_capture_bindings;
 
-        // `try` unwinds as a sentinel `BopError`; the call
-        // boundary trades that error for the stashed value and
-        // treats it as a normal return. Any other error
-        // propagates as usual. Always clears
-        // `pending_try_return` so a leftover can't contaminate
-        // a later call.
         match result {
-            Ok(sig) => match sig {
-                Signal::Return(val) => Ok(val),
-                Signal::Break => Err(error(line, "break used outside of a loop")),
-                Signal::Continue => Err(error(line, "continue used outside of a loop")),
-                Signal::None => Ok(Value::None),
-            },
+            Ok(value) => Ok((value, staged_outputs)),
             Err(err) => {
-                // Check the dedicated `is_try_return` flag
-                // instead of inspecting the message — a flag
-                // can't collide with a user-authored error
-                // that happens to spell the same bytes.
-                if err.is_try_return {
-                    if let Some(val) = self.pending_try_return.take() {
-                        return Ok(val);
-                    }
-                    return Err(err);
-                }
                 // A runtime error escaping the fn body carries line
                 // numbers from the fn's *defining* module, not the
                 // caller's source. Attach the owning module so
@@ -3576,8 +4014,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
         })?;
 
-        let bop_fn = BopFn::try_new_ast_in_module_with_origin(
-            func.params,
+        let (param_names, param_modes) = parameter_metadata(&func.params);
+        let bop_fn = BopFn::try_new_ast_in_module_with_origin_and_modes(
+            param_names,
+            param_modes,
             Vec::new(),
             func.body,
             Some(name.to_string()),
@@ -3639,8 +4079,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 let mut full_args = Vec::with_capacity(args.len() + 1);
                 full_args.push(obj.clone());
                 full_args.extend(args);
-                let bop_fn = BopFn::try_new_ast_in_module_with_origin(
-                    m.params,
+                let (param_names, param_modes) = parameter_metadata(&m.params);
+                let bop_fn = BopFn::try_new_ast_in_module_with_origin_and_modes(
+                    param_names,
+                    param_modes,
                     Vec::new(),
                     m.body,
                     None,
@@ -4566,6 +5008,8 @@ impl ReplSession {
             alias_scope_floors: Vec::new(),
             limits,
             pending_try_return: None,
+            active_ref_bindings: alloc_import::collections::BTreeSet::new(),
+            active_capture_bindings: alloc_import::collections::BTreeSet::new(),
             runtime_warnings: Vec::new(),
         }
     }

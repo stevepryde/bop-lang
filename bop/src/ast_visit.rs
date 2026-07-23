@@ -5,7 +5,7 @@
 //! can occur. This visitor owns that structural invariant and nothing else.
 
 use crate::parser::{
-    AssignTarget, Expr, ExprKind, Stmt, StmtKind, VariantDecl, VariantPayload,
+    AssignTarget, Expr, ExprKind, Parameter, Stmt, StmtKind, VariantDecl, VariantPayload,
 };
 
 #[cfg(feature = "no_std")]
@@ -23,7 +23,7 @@ pub trait DeclarationSiteVisitor {
         &mut self,
         type_name: &str,
         method_name: &str,
-        params: &[String],
+        params: &[Parameter],
         body: &[Stmt],
         stmt: &Stmt,
     );

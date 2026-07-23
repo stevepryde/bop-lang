@@ -57,6 +57,7 @@ pub enum Token {
     Enum,
     Match,
     Try,
+    Ref,
 
     // Operators
     Plus,
@@ -149,6 +150,7 @@ define_keywords! {
     "enum" => Enum,
     "match" => Match,
     "try" => Try,
+    "ref" => Ref,
     "true" => True,
     "false" => False,
     "none" => None,

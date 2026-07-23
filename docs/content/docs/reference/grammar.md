@@ -19,7 +19,7 @@ An informal grammar for the Bop language, plus the complete list of reserved wor
 ## Reserved words
 
 ```
-let const pub fn return
+let const pub ref fn return
 if else while for in repeat break continue
 use as struct enum match try
 true false none
@@ -128,8 +128,10 @@ arrayPattern   = "[" patternList? arrayRest? "]"
 patternList    = pattern ("," pattern)*
 arrayRest      = ".." | ".." IDENT
 
-params      = IDENT ("," IDENT)*
-args        = expr ("," expr)*
+params      = param ("," param)*
+param       = "ref"? IDENT
+args        = arg ("," arg)*
+arg         = "ref"? expr
 ```
 
 `INT` is an exact signed 64-bit integer after unary parsing. Decimal magnitudes through `9223372036854775807` are ordinary primary expressions; the boundary spelling `-9223372036854775808` is accepted when unary `-` directly owns that magnitude, including in literal patterns. A bare `9223372036854775808`, `0 - 9223372036854775808`, or any larger magnitude is out of range rather than being converted to a floating-point `number`.
@@ -137,6 +139,12 @@ args        = expr ("," expr)*
 Note: `pub` is accepted only on a named `fn` at the direct program root; it
 marks an entry for the stateful embedding ABI. It is not valid on methods,
 function expressions, or declarations nested in a block or callable.
+
+`ref` marks copy-in/copy-out parameters and must appear at the same positional
+argument at the call site. Although the grammar accepts an expression after an
+argument marker so parsing stays independent of the dynamic callee, semantic
+validation requires a mutable, uncaptured plain variable. See
+[Reference parameters](/docs/functions/defining-functions/#reference-parameters).
 
 `methodDecl`, enum variant `IDENT`s, and `struct` names must start with an
 uppercase letter. `IDENT` bound by `let`, `fn`, parameters, `for`, etc. must

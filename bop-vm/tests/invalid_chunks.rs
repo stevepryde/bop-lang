@@ -1,10 +1,11 @@
 use std::rc::Rc;
 
 use bop::{BopHost, BopLimits, Value};
+use bop::parser::ParamMode;
 use bop_vm::chunk::{
-    Chunk, CodeOffset, ConstIdx, ConstructFieldsIdx, EnumConstructShape, EnumIdx, FnDef, FnIdx,
-    Instr, InterpIdx, InterpPart, InterpRecipe, NameIdx, NamespaceIdx, NamespaceRef, PatternIdx,
-    PatternRecipe, SlotIdx, StructIdx, UseIdx,
+    CallSite, CallSiteIdx, Chunk, CodeOffset, ConstIdx, ConstructFieldsIdx, EnumConstructShape,
+    EnumIdx, FnDef, FnIdx, Instr, InterpIdx, InterpPart, InterpRecipe, NameIdx, NamespaceIdx,
+    NamespaceRef, PatternIdx, PatternRecipe, RefArgTarget, SlotIdx, StructIdx, UseIdx,
 };
 use bop_vm::{Vm, execute};
 
@@ -20,6 +21,56 @@ impl BopHost for SilentHost {
     ) -> Option<Result<Value, bop::BopError>> {
         None
     }
+}
+
+#[test]
+fn execute_rejects_invalid_call_site_metadata_and_indexes() {
+    let missing_site = execution_error(chunk_with(Instr::PrepareCallValue {
+        site: CallSiteIdx(0),
+    }));
+    assert!(missing_site.message.contains("call site 0"));
+
+    let mut mismatched = chunk_with(Instr::Halt);
+    mismatched.call_sites.push(CallSite {
+        arg_modes: vec![ParamMode::Ref],
+        ref_targets: vec![],
+    });
+    let mismatch = execution_error(mismatched);
+    assert!(mismatch.message.contains("1 argument modes but 0 ref-target entries"));
+
+    let mut invalid_target = chunk_with(Instr::Halt);
+    invalid_target.names.push("value".into());
+    invalid_target.call_sites.push(CallSite {
+        arg_modes: vec![ParamMode::Ref],
+        ref_targets: vec![Some(RefArgTarget::Binding(NamespaceRef::from_slot(
+            NameIdx(0),
+            SlotIdx(0),
+        )))],
+    });
+    let target = execution_error(invalid_target);
+    assert!(target.message.contains("local slot 0"));
+
+    let mut duplicate_slot = chunk_with(Instr::Halt);
+    duplicate_slot.names = vec!["left".into(), "right".into()];
+    duplicate_slot.call_sites.push(CallSite {
+        arg_modes: vec![ParamMode::Ref, ParamMode::Ref],
+        ref_targets: vec![
+            Some(RefArgTarget::Binding(NamespaceRef::from_slot(
+                NameIdx(0),
+                SlotIdx(0),
+            ))),
+            Some(RefArgTarget::Binding(NamespaceRef::from_slot(
+                NameIdx(1),
+                SlotIdx(0),
+            ))),
+        ],
+    });
+    let duplicate = execution_error(duplicate_slot);
+    assert!(
+        duplicate
+            .message
+            .contains("uses local slot 0 for more than one ref target")
+    );
 }
 
 fn chunk_with(instr: Instr) -> Chunk {
@@ -194,6 +245,7 @@ fn execute_recursively_validates_function_chunks_and_capture_metadata() {
     let function = FnDef {
         name: "broken".into(),
         params: vec!["x".into()],
+        param_modes: vec![ParamMode::Value],
         chunk: Rc::new(child),
         slot_count: 1,
         capture_names: vec![],
@@ -220,6 +272,7 @@ fn shared_function_chunk_dags_are_validated_once_without_recursive_traversal() {
         let function = |name: &str| FnDef {
             name: format!("{name}_{depth}"),
             params: vec![],
+            param_modes: vec![],
             chunk: Rc::clone(&shared),
             slot_count: 0,
             capture_names: vec![],
@@ -239,6 +292,7 @@ fn shared_function_chunk_dags_are_validated_once_without_recursive_traversal() {
         functions: vec![FnDef {
             name: "root".into(),
             params: vec![],
+            param_modes: vec![],
             chunk: shared,
             slot_count: 0,
             capture_names: vec![],
@@ -261,6 +315,7 @@ fn execute_rejects_sparse_or_absurd_function_slot_metadata() {
     let function = FnDef {
         name: "oversized".into(),
         params: vec![],
+        param_modes: vec![],
         chunk: Rc::new(child),
         slot_count: u32::MAX,
         capture_names: vec![],
@@ -281,13 +336,17 @@ fn shared_chunks_are_validated_for_each_distinct_parameter_layout() {
         slot_count: 1,
         ..Chunk::new()
     });
-    let function = |name: &str, params: Vec<String>| FnDef {
-        name: name.into(),
-        params,
-        chunk: Rc::clone(&child),
-        slot_count: 1,
-        capture_names: vec![],
-        capture_sources: vec![],
+    let function = |name: &str, params: Vec<String>| {
+        let param_modes = vec![ParamMode::Value; params.len()];
+        FnDef {
+            name: name.into(),
+            params,
+            param_modes,
+            chunk: Rc::clone(&child),
+            slot_count: 1,
+            capture_names: vec![],
+            capture_sources: vec![],
+        }
     };
     let mut outer = chunk_with(Instr::Halt);
     // LIFO traversal sees `valid` first. Pointer-only memoization would then

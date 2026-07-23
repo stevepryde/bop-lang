@@ -66,6 +66,11 @@ depend on `bop-sys`.
   produce engine-specific descriptors or lifted adapters. Publication to type
   and method registries occurs in source execution order, preserving dead-code
   and nested-scope semantics across engines.
+- **ARCH-011:** Ref calls carry positional mode metadata in syntax, callable
+  values, bytecode, and generated AOT descriptors. Each engine owns staged
+  callee locals plus stable caller-binding targets and exposes write-back only
+  from its normal-return path after fallible work is complete. Error unwinds
+  discard staging without turning the broader instance call into a transaction.
 
 ## Failure modes
 
@@ -73,5 +78,6 @@ Parse errors, resource exhaustion, missing bindings/modules/entries, invalid or
 foreign callback values, same-instance re-entry, invalid bytecode passed to
 public VM APIs, generated-code failures, and host I/O failures must be reported
 at their owning boundary without panics or misleading substitution. Instance
-calls are not transactions: transient frames unwind, but completed language
-mutations remain authoritative.
+calls are not whole-call transactions: transient frames unwind and completed
+language mutations remain authoritative. Only a still-active ref call's staged
+targets roll back when that call exits abnormally.

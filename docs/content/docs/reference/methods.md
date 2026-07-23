@@ -16,6 +16,39 @@ path = "/docs/reference/grammar/"
 
 Bop dispatches methods with `.name(args...)`. Every built-in method on primitives, arrays, strings, and dicts is listed here. User-defined methods on structs use the same syntax — see [Structs & Enums](/docs/data/structs-and-enums/) for the `fn Type.method(self, ...)` form.
 
+## Mutating receivers
+
+Array methods such as `push`, `pop`, `insert`, `remove`, `reverse`, and `sort`
+mutate a mutable plain-variable receiver using the same transactional
+copy-in/copy-out model as a [`ref`
+parameter](/docs/functions/defining-functions/#reference-parameters). Method
+arguments run first, then Bop snapshots the receiver, and a normal return writes
+the updated value back.
+
+A genuine temporary is allowed and its ordinary result is preserved, but its
+mutation has nowhere to be stored: `([1, 2]).pop()` returns `2`, while
+`[1, 2].push(3)` returns `none`. An index or field receiver is not treated as a
+temporary because silently discarding that mutation is error-prone. Until those
+places become referenceable, `groups[0].push(x)` and
+`record.items.push(x)` raise a catchable error with an assign-mutate-reassign
+hint.
+
+User-defined methods always receive `self` by value, even if their name matches
+a built-in mutator. They may declare explicit ref parameters after the receiver:
+
+```bop
+struct Counter { amount }
+
+fn Counter.add_to(self, ref total) {
+  total += self.amount
+}
+
+let counter = Counter { amount: 3 }
+let total = 4
+counter.add_to(ref total)
+print(total)    // 7
+```
+
 ## Methods on every value
 
 Three methods work on any value — introspection + stringification. They're dispatched before the type-specific tables, so they're always available:

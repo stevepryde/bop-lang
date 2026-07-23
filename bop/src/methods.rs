@@ -183,6 +183,61 @@ pub fn array_method_mut(
     }
 }
 
+/// Run a mutating built-in array method transactionally against a named
+/// binding without introducing a second `Rc` handle.
+///
+/// Engines call this only after resolving a supported mutable plain-variable
+/// receiver and evaluating ordinary arguments. The binding is temporarily
+/// moved into an unobservable staged slot, restored on every error, and
+/// replaced only after the method and pending memory accounting succeed.
+pub fn transactional_array_method(
+    binding: &mut Value,
+    method: &str,
+    args: Vec<Value>,
+    line: u32,
+) -> Result<Value, BopError> {
+    let mut staged = core::mem::replace(binding, Value::None);
+    let Value::Array(array) = &mut staged else {
+        *binding = staged;
+        return Err(error(line, "mutating array receiver is no longer an array"));
+    };
+    let growth_index = match method {
+        "push" => Some(array.len()),
+        "insert" => args
+            .first()
+            .and_then(numeric_index)
+            .and_then(|index| normalize_insert_index(index, array.len())),
+        _ => None,
+    };
+
+    let result = array_method_mut(array, method, args, line);
+    let value = match result {
+        Ok(value) => value,
+        Err(error) => {
+            *binding = staged;
+            return Err(error);
+        }
+    };
+    if crate::memory::bop_memory_exceeded() {
+        if let Some(index) = growth_index {
+            let Value::Array(array) = &mut staged else {
+                unreachable!("staged receiver stayed an array")
+            };
+            if index < array.len() {
+                array.remove(index);
+            }
+        }
+        *binding = staged;
+        return Err(crate::builtins::error_fatal_with_hint(
+            line,
+            "Memory limit exceeded",
+            "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+        ));
+    }
+    *binding = staged;
+    Ok(value)
+}
+
 fn compare_array_values(a: &Value, b: &Value) -> core::cmp::Ordering {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
@@ -777,6 +832,25 @@ pub fn is_mutating_method(method: &str) -> bool {
         method,
         "push" | "pop" | "insert" | "remove" | "reverse" | "sort"
     )
+}
+
+/// Positional arity for every built-in method name. Engines use this during
+/// call preflight so a bad arity prevents argument-expression side effects.
+/// User-defined methods must be resolved first because they may deliberately
+/// reuse one of these names with a different signature.
+pub fn builtin_method_arity(method: &str) -> Option<usize> {
+    match method {
+        "len" | "pop" | "reverse" | "sort" | "iter" | "keys" | "values"
+        | "upper" | "lower" | "trim" | "to_int" | "to_float" | "type"
+        | "to_str" | "inspect" | "is_none" | "is_some" | "abs" | "sqrt"
+        | "sin" | "cos" | "tan" | "exp" | "log" | "floor" | "ceil"
+        | "round" | "is_ok" | "is_err" | "unwrap" | "next" => Some(0),
+        "push" | "has" | "index_of" | "remove" | "join" | "contains"
+        | "starts_with" | "ends_with" | "split" | "pow" | "min" | "max"
+        | "expect" | "unwrap_or" | "map" | "map_err" | "and_then" => Some(1),
+        "insert" | "slice" | "replace" => Some(2),
+        _ => None,
+    }
 }
 
 /// Reject a built-in array mutation after dispatch has proven that the named
