@@ -47,6 +47,12 @@ function expressions. Only declarations that execute during instance loading
 are exposed; see [Stateful instances](/docs/embedding/instances/#declaring-host-entry-points)
 for redeclaration and entry-order rules.
 
+The host API passes owned values, not Bop variable bindings. A public function
+with a `ref` parameter can still be called normally from Bop source, but
+`BopInstance::call` rejects it because the host cannot supply a referenceable
+target. The same value-only rule applies when the host invokes a returned
+function through `call_value`.
+
 ## Parameters
 
 Functions can take parameters — values you pass in when calling:
@@ -64,6 +70,55 @@ print(repeat_string("ha", 3))    // "hahaha"
 ```
 
 Parameters are positional. There are no default values or type annotations.
+
+### Reference parameters
+
+Use a `ref` parameter when a function should replace one of the caller's
+variables. The marker is required in both the declaration and the call, so the
+mutation is visible at each site:
+
+```bop
+fn grow(ref items, count) {
+  repeat count {
+    items.push(0)
+  }
+}
+
+let values = []
+grow(ref values, 3)
+print(values)    // [0, 0, 0]
+```
+
+A ref argument must be a mutable plain variable. Constants, expressions,
+collection indexes, fields, and variables captured by a closure cannot be
+passed by ref. The same variable cannot occupy two ref positions in one call.
+Grouping is transparent, so `grow(ref (values), 1)` is equivalent to
+`grow(ref values, 1)`.
+
+Refs use copy-in/copy-out rather than observable aliases. The function works on
+a staged local value and writes all ref parameters back together only when it
+returns normally. If it raises a runtime or sandbox error, none of that call's
+ref targets change—even when `try_call` catches the error. A returned
+`Result::Err` is an ordinary return and therefore does write back.
+
+```bop
+fn update_then_fail(ref items) {
+  items.push(2)
+  panic("not committed")
+}
+
+let items = [1]
+fn attempt() {
+  update_then_fail(ref items)
+}
+let result = try_call(attempt)
+print(result.is_err(), items)    // true [1]
+```
+
+A ref parameter can be forwarded with `inner(ref value)`. It cannot be
+captured by a nested function or lambda. Built-in and host functions accept
+value arguments only; user-defined methods may declare ref parameters after
+their ordinary value receiver.
 
 ## Return values
 

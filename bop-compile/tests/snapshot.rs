@@ -59,12 +59,16 @@ fn targeted_parser_diagnostics_are_preserved_at_the_aot_boundary() {
     ];
 
     for (source, message, line, column, hint) in cases {
-        let error = transpile(source, &Options::default())
-            .expect_err("parse error must stop AOT emission");
+        let error =
+            transpile(source, &Options::default()).expect_err("parse error must stop AOT emission");
         assert_eq!(error.message, message, "source: {source}");
         assert_eq!(error.line, Some(line), "source: {source}");
         assert_eq!(error.column, Some(column), "source: {source}");
-        assert_eq!(error.friendly_hint.as_deref(), Some(hint), "source: {source}");
+        assert_eq!(
+            error.friendly_hint.as_deref(),
+            Some(hint),
+            "source: {source}"
+        );
     }
 }
 
@@ -180,7 +184,8 @@ print(unguarded, guarded)"#,
         "guarded and unguarded block-expression arms must parenthesize the break value:\n{out}"
     );
     assert!(
-        !out.lines().any(|line| line.contains("break 'match_arms_") && line.contains(" { let ")),
+        !out.lines()
+            .any(|line| line.contains("break 'match_arms_") && line.contains(" { let ")),
         "a bare block after a labelled break triggers rustc's break_with_label_and_loop lint:\n{out}"
     );
 }
@@ -257,7 +262,10 @@ fn flat_value_imports_emit_origin_aliases_through_facades() {
         "use facade\nfn read() { return count }\nprint(read())",
         &[
             ("facade", "use leaf"),
-            ("leaf", "let count = 0\nfn bump() { count += 1; return count }"),
+            (
+                "leaf",
+                "let count = 0\nfn bump() { count += 1; return count }",
+            ),
         ],
     )
     .expect("transpile live facade value");
@@ -316,13 +324,7 @@ fn short_circuit_and_uses_is_truthy() {
     let out = compile("print(true && false)");
     // Short-circuit `&&` should branch on the left's truthiness
     // without running the full `ops::and` path (there isn't one).
-    contains_all(
-        &out,
-        &[
-            "if __l.is_truthy()",
-            "::bop::value::Value::Bool(",
-        ],
-    );
+    contains_all(&out, &["if __l.is_truthy()", "::bop::value::Value::Bool("]);
 }
 
 #[test]
@@ -340,7 +342,10 @@ fn while_loop_tests_is_truthy_each_iteration() {
 #[test]
 fn repeat_parses_count_and_iterates() {
     let out = compile("repeat 4 { let x = 1 }");
-    contains_all(&out, &["::bop::value::Value::Number(n) => n as i64", "for _ in 0.."]);
+    contains_all(
+        &out,
+        &["::bop::value::Value::Number(n) => n as i64", "for _ in 0.."],
+    );
 }
 
 #[test]
@@ -350,10 +355,7 @@ fn for_in_uses_iter_protocol_helpers() {
     // Array/Str/Dict (fast path), Value::Iter, and user types
     // with an `.iter()` method through one uniform loop body.
     let out = compile("for x in [1, 2, 3] { print(x) }");
-    contains_all(
-        &out,
-        &["__bop_iter_start(", "__bop_iter_step(", "loop"],
-    );
+    contains_all(&out, &["__bop_iter_start(", "__bop_iter_step(", "loop"]);
 }
 
 #[test]
@@ -469,7 +471,8 @@ fn lambda_records_opaque_capture_depth_before_move() {
         &[
             "__bop_wrap_callable(",
             "__opaque_body_depth, 2, __callable)?",
-            "Value::try_new_compiled_fn(",
+            "BopFn::try_new_compiled_in_module_with_origin_and_modes(",
+            "param_modes,",
             "opaque_body_depth,",
             "line,",
         ],
@@ -487,7 +490,8 @@ fn lambda_captures_namespaced_constructors_for_depth_accounting() {
     )
     .expect("transpile namespaced constructors in lambda");
     assert_eq!(
-        out.matches("let __cap_0 = __bop_read_binding(ctx, \"<root>\", \"s\", 2)?;").count(),
+        out.matches("let __cap_0 = __bop_read_binding(ctx, \"<root>\", \"s\", 2)?;")
+            .count(),
         1,
         "the module alias should be captured exactly once:\n{out}"
     );
@@ -503,11 +507,10 @@ fn lambda_captures_namespaced_constructors_for_depth_accounting() {
 
 #[test]
 fn nested_lambda_shadowing_does_not_capture_same_named_outer_scope_value() {
-    let out = compile(
-        "let x = [1]\nlet outer = fn(x) { return fn() { return x } }",
-    );
+    let out = compile("let x = [1]\nlet outer = fn(x) { return fn() { return x } }");
     assert_eq!(
-        out.matches("let __cap_0 = __bop_user_value_78.clone();").count(),
+        out.matches("let __cap_0 = __bop_user_value_78.clone();")
+            .count(),
         1,
         "only the inner lambda should capture the outer lambda parameter:\n{out}"
     );
@@ -645,8 +648,10 @@ fn method_call_on_literal_has_no_back_assign() {
 
 #[test]
 fn string_interp_builds_string_via_format() {
-    let out = compile(r#"let name = "bop"
-print("hi {name}!")"#);
+    let out = compile(
+        r#"let name = "bop"
+print("hi {name}!")"#,
+    );
     contains_all(
         &out,
         &[
@@ -736,9 +741,7 @@ fn const_array_mutation_emits_the_shared_runtime_guard() {
         let source = format!("const VALUES = [3, 1, 2]\n{method_call}");
         let output = compile(&source);
         assert!(
-            output.contains(
-                "::bop::methods::reject_constant_array_mutation(\"VALUES\","
-            ),
+            output.contains("::bop::methods::reject_constant_array_mutation(\"VALUES\","),
             "source: {source}\noutput: {output}"
         );
     }
@@ -751,9 +754,7 @@ fn const_array_mutation_emits_the_shared_runtime_guard() {
 mutate()"#,
     );
     assert!(
-        output.contains(
-            "::bop::methods::reject_constant_array_mutation(\"VALUES\", \"sort\", 3)"
-        ),
+        output.contains("::bop::methods::reject_constant_array_mutation(\"VALUES\", \"sort\", 3)"),
         "output: {output}"
     );
 }
@@ -810,7 +811,7 @@ fn compile_sandbox(code: &str) -> String {
 #[test]
 fn sandbox_off_by_default_emits_no_tick_helper() {
     let out = compile("while true { }");
-    for sandbox_only in ["__bop_tick", "BopInstance", "BopFnOrigin", "call_depth"] {
+    for sandbox_only in ["__bop_tick", "BopInstance", "call_depth"] {
         assert!(
             !out.contains(sandbox_only),
             "non-sandbox build shouldn't emit {sandbox_only}:\n{out}",
@@ -889,14 +890,12 @@ fn sandbox_state_is_persistent_while_operation_context_is_ephemeral() {
 
 #[test]
 fn sandbox_catalogues_repeated_function_declarations_by_unique_site() {
-    let out = compile_sandbox(
-        "pub fn entry(x) { return x }\npub fn entry(x, y) { return y }",
-    );
+    let out = compile_sandbox("pub fn entry(x) { return x }\npub fn entry(x, y) { return y }");
     contains_all(
         &out,
         &[
-            "__BopFunctionSite { id: 0, module_path: \"<root>\", name: \"entry\", params: &[\"x\"], is_public: true, abi_eligible: true, line: 1 }",
-            "__BopFunctionSite { id: 1, module_path: \"<root>\", name: \"entry\", params: &[\"x\", \"y\"], is_public: true, abi_eligible: true, line: 2 }",
+            "__BopFunctionSite { id: 0, module_path: \"<root>\", name: \"entry\", params: &[\"x\"], param_modes: &[::bop::parser::ParamMode::Value], is_public: true, abi_eligible: true, line: 1 }",
+            "__BopFunctionSite { id: 1, module_path: \"<root>\", name: \"entry\", params: &[\"x\", \"y\"], param_modes: &[::bop::parser::ParamMode::Value, ::bop::parser::ParamMode::Value], is_public: true, abi_eligible: true, line: 2 }",
         ],
     );
 }
@@ -1150,16 +1149,15 @@ let from_match = match 1 {
 fn repeated_nested_imports_resolve_once_but_emit_per_runtime_scope() {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(0_u32));
     let resolver_calls = std::rc::Rc::clone(&calls);
-    let resolver: bop_compile::ModuleResolver = std::rc::Rc::new(std::cell::RefCell::new(
-        move |name: &str| {
+    let resolver: bop_compile::ModuleResolver =
+        std::rc::Rc::new(std::cell::RefCell::new(move |name: &str| {
             if name == "shared" {
                 *resolver_calls.borrow_mut() += 1;
                 Some(Ok("fn helper(n) { return n + 10 }".to_string()))
             } else {
                 None
             }
-        },
-    ));
+        }));
     let source = r#"fn one() { use shared; return helper(1) }
 fn two() { use shared; return helper(2) }"#;
     let out = transpile(
@@ -1253,7 +1251,10 @@ fn build(t) { return t.Point { value: 42 } }"#,
     let parameter_binding = function
         .find("let mut __bop_user_value_74: ::bop::value::Value = __bop_param_0;")
         .expect("Bop parameter binding");
-    assert_eq!(parameter_binding, function.find("let mut __bop_user_value_74").unwrap());
+    assert_eq!(
+        parameter_binding,
+        function.find("let mut __bop_user_value_74").unwrap()
+    );
     assert!(
         !function[..function.find("fn __bop_try_user_method").unwrap()]
             .contains("ctx.module_aliases.get"),
@@ -1265,10 +1266,10 @@ fn build(t) { return t.Point { value: 42 } }"#,
 fn module_loader_clears_declaration_alias_context_after_failure() {
     let output = compile_with_modules(
         "use holder",
-        &[(
-            "holder",
-            "use types as dep\nlet broken = 1 / 0",
-        ), ("types", "let value = 42")],
+        &[
+            ("holder", "use types as dep\nlet broken = 1 / 0"),
+            ("types", "let value = 42"),
+        ],
     )
     .expect("transpile failing module body");
     let loader = output
@@ -1281,12 +1282,12 @@ fn module_loader_clears_declaration_alias_context_after_failure() {
     assert!(loader.contains("let __load_result = (||"));
     assert!(loader.contains("if __load_result.is_err()"));
     assert!(loader.contains("ctx.module_cache.remove(\"holder\")"));
-    assert!(loader.contains(
-        "ctx.module_aliases.retain(|(module, _), _| module != \"holder\")"
-    ));
-    assert!(loader.contains(
+    assert!(loader.contains("ctx.module_aliases.retain(|(module, _), _| module != \"holder\")"));
+    assert!(
+        loader.contains(
         "let __saved_type_bindings = ctx.module_type_bindings.get(\"holder\").cloned()"
-    ));
+        )
+    );
     assert!(loader.contains("ctx.module_type_bindings.remove(\"holder\")"));
 }
 
@@ -1319,10 +1320,7 @@ fn bare_type_imports_publish_declaration_origins_at_the_use_site() {
 let before = try_call(build)
 use facade.{Point}
 let after = build()"#,
-        &[
-            ("types", "struct Point { value }"),
-            ("facade", "use types"),
-        ],
+        &[("types", "struct Point { value }"), ("facade", "use types")],
     )
     .expect("transpile source-ordered type import");
 
@@ -1351,26 +1349,23 @@ let closure = fn(n) {
 print(hot(3), closure(2))"#,
     );
 
-    assert!(!output.contains(
-        "let mut __bop_type_bindings = __bop_callable_type_bindings"
-    ));
-    assert!(!output.contains(
-        "let mut __bop_type_bindings = __bop_type_bindings.clone()"
-    ));
+    assert!(!output.contains("let mut __bop_type_bindings = __bop_callable_type_bindings"));
+    assert!(!output.contains("let mut __bop_type_bindings = __bop_type_bindings.clone()"));
 }
 
 #[test]
 fn method_free_program_omits_slot_table_and_registration_machinery() {
     let output = compile("let values = [1, 2]\nprint(values.len())");
 
-    assert!(!output.contains("__BopMethodFn"));
     assert!(!output.contains("method_slots:"));
     assert!(!output.contains("__bop_method_adapter_"));
     contains_all(
         &output,
         &[
+            "type __BopMethodFn =",
             "let _ = (ctx, obj, method, args, line);",
             "fn __bop_try_user_method(",
+            "fn __bop_preflight_user_method(",
             "Ok(None)",
         ],
     );
@@ -1426,9 +1421,9 @@ fn failed_module_with_methods_snapshots_only_its_dense_slots() {
             "ctx.method_slots[1] = ::std::option::Option::Some",
         ],
     );
-    assert!(!output.contains(
-        "let __saved_method_slots = [ctx.method_slots[0], ctx.method_slots[1]];"
-    ));
+    assert!(
+        !output.contains("let __saved_method_slots = [ctx.method_slots[0], ctx.method_slots[1]];")
+    );
 }
 
 #[test]
@@ -1651,10 +1646,7 @@ if true {
 fn selective_alias_type_shape_limits_construction_and_pattern_resolution() {
     let construction_error = compile_with_modules(
         "use types.{A} as narrowed\nlet bad = narrowed.B { value: 1 }",
-        &[(
-            "types",
-            "struct A { value }\nstruct B { value }",
-        )],
+        &[("types", "struct A { value }\nstruct B { value }")],
     )
     .expect_err("an unselected type must not resolve through a selective alias");
     assert_eq!(construction_error.message, "Struct `B` is not declared");
@@ -1668,10 +1660,7 @@ let result = match value {
     narrowed.B { value } => "matched",
     _ => "missed",
 }"#,
-        &[(
-            "types",
-            "struct A { value }\nstruct B { value }",
-        )],
+        &[("types", "struct A { value }\nstruct B { value }")],
     )
     .expect("an unselected pattern type remains a legal non-matching pattern");
 
@@ -1699,10 +1688,7 @@ fn lazy_import_edges_do_not_create_false_cycles() {
 
 #[test]
 fn nested_import_missing_and_eager_cycle_diagnostics_keep_source_lines() {
-    let missing = compile_with_modules(
-        "fn run() {\n    let before = 1\n    use absent\n}",
-        &[],
-    )
+    let missing = compile_with_modules("fn run() {\n    let before = 1\n    use absent\n}", &[])
     .expect_err("nested missing module must fail during graph discovery");
     assert_eq!(missing.message, "Module `absent` not found");
     assert_eq!(missing.line, Some(3));
@@ -1738,10 +1724,7 @@ fn aliased_use_constructs_a_depth_checked_module_value() {
 fn aliased_facade_emits_the_declaration_module_for_reexported_types() {
     let out = compile_with_modules(
         "use facade as api\nlet value = api.Point { x: 1 }",
-        &[
-            ("leaf", "struct Point { x }"),
-            ("facade", "use leaf"),
-        ],
+        &[("leaf", "struct Point { x }"), ("facade", "use leaf")],
     )
     .expect("transpile an aliased facade type");
 
@@ -1782,9 +1765,7 @@ fn import_idempotency_is_local_to_the_generated_binding_scope() {
     )
     .expect("transpile repeated plain import");
     assert_eq!(
-        repeated
-            .matches("= __mod_736861726564_load(ctx)?;")
-            .count(),
+        repeated.matches("= __mod_736861726564_load(ctx)?;").count(),
         1,
         "a repeated plain glob in one scope should remain a no-op:\n{repeated}"
     );
@@ -1825,9 +1806,7 @@ let two = fn() { use shared; return helper(2) }"#,
     )
     .expect("transpile repeated aliases");
     assert_eq!(
-        aliases
-            .matches("= __mod_736861726564_load(ctx)?;")
-            .count(),
+        aliases.matches("= __mod_736861726564_load(ctx)?;").count(),
         2,
         "aliases are shaped bindings and must never enter the plain-glob idempotency cache:\n{aliases}"
     );
@@ -1865,10 +1844,7 @@ struct Thing { value }"#,
 
     assert_eq!(
         module_export_fields(&out, "aliased"),
-        [
-            "__bop_user_value_646570",
-            "__bop_user_value_76616c7565",
-        ]
+        ["__bop_user_value_646570", "__bop_user_value_76616c7565",]
     );
     assert_eq!(
         module_export_fields(&out, "selected"),

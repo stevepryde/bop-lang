@@ -20,6 +20,7 @@ pub mod value;
 pub mod value_conversion;
 pub mod lexer;
 pub mod parser;
+pub mod ref_params;
 pub mod math;
 pub mod memory;
 pub mod naming;
@@ -47,7 +48,8 @@ mod evaluator;
 
 pub use error::BopError;
 pub use error::BopWarning;
-pub use parser::{Stmt, count_instructions};
+pub use parser::{ParamMode, Stmt, count_instructions};
+pub use ref_params::{validate_call_modes, validate_value_only_call_modes};
 pub use instance::{BopInstance, EntryPoint};
 pub use value::Value;
 pub use value_conversion::{FromValue, IntoValue, ValueConversionError, ValuePathSegment};
@@ -741,6 +743,335 @@ caller()"#
     #[test]
     fn fn_wrong_arg_count() {
         assert!(run_err("fn f(a, b) { return a }\nf(1)").contains("expects 2"));
+    }
+
+    #[test]
+    fn ref_parameters_commit_on_normal_returns_and_survive_aliases() {
+        assert_eq!(
+            say(
+                r#"fn swap(ref left, ref right) {
+    let old = left
+    left = right
+    right = old
+}
+let alias = swap
+let a = 1
+let b = 2
+alias(ref a, ref b)
+print([a, b])"#,
+            ),
+            "[2, 1]"
+        );
+        assert_eq!(
+            say(
+                r#"fn set_and_return_err(ref value) {
+    value = 7
+    return Err("ordinary value")
+}
+let value = 1
+let result = set_and_return_err(ref value)
+print([value, result.is_err()])"#,
+            ),
+            "[7, true]"
+        );
+        assert_eq!(
+            say(
+                r#"fn set_and_try(ref value) {
+    value = 8
+    try Err("ordinary early return")
+}
+let value = 1
+let result = set_and_try(ref value)
+print([value, result.is_err()])"#,
+            ),
+            "[8, true]"
+        );
+    }
+
+    #[test]
+    fn ref_preflight_blocks_argument_side_effects_and_reports_modes() {
+        assert_eq!(
+            say(
+                r#"let hits = []
+fn side() { hits.push(1); return 1 }
+fn needs_ref(ref value) { value = 2 }
+fn missing_marker() { needs_ref(side()) }
+let result = try_call(missing_marker)
+print([hits, result.is_err()])"#,
+            ),
+            "[[], true]"
+        );
+
+        assert_eq!(
+            say(
+                r#"let hits = []
+fn target(ref value) { }
+fn choose() { hits.push("callee"); return target }
+fn side() { hits.push("argument"); return 1 }
+fn invoke() { choose()(side()) }
+let result = try_call(invoke)
+print([hits, result.is_err()])"#,
+            ),
+            "[[\"callee\"], true]"
+        );
+
+        let invalid = run_err_full("fn target(ref value) { }\ntarget(ref [1])");
+        assert_eq!(
+            invalid.message,
+            "`ref` argument 1 must name a mutable variable"
+        );
+        assert!(invalid
+            .friendly_hint
+            .as_deref()
+            .unwrap()
+            .contains("`let` variable"));
+        let missing = run_err_full(
+            "fn needs_ref(ref value) { }\nlet value = 1\nneeds_ref(value)",
+        );
+        assert_eq!(
+            missing.message,
+            "argument 1 to `needs_ref` must be passed with `ref`"
+        );
+        assert!(missing.friendly_hint.as_deref().unwrap().contains("Write `ref`"));
+
+        assert_eq!(
+            say(
+                r#"let hits = []
+fn side() { hits.push(1); return 1 }
+fn invalid_target(ref value, ordinary) { }
+fn invoke() { invalid_target(ref [1], side()) }
+let result = try_call(invoke)
+print([hits, result.is_err()])"#,
+            ),
+            "[[], true]"
+        );
+    }
+
+    #[test]
+    fn ref_snapshots_after_ordinary_arguments_and_commits_all_targets() {
+        assert_eq!(
+            say(
+                r#"let value = 1
+fn ordinary() { value += 1; return 10 }
+fn update(ref target, amount) { target += amount }
+update(ref value, ordinary())
+print(value)"#,
+            ),
+            "12"
+        );
+        assert_eq!(
+            say(
+                r#"fn assign_pair(ref left, ref right) {
+    left = 10
+    right = 20
+}
+let left = 1
+let right = 2
+assign_pair(ref left, ref right)
+print([left, right])"#,
+            ),
+            "[10, 20]"
+        );
+    }
+
+    #[test]
+    fn ref_errors_roll_back_every_target_including_forwarded_stages() {
+        assert_eq!(
+            say(
+                r#"let left = 1
+let right = 2
+fn fail(ref a, ref b) {
+    a = 10
+    b = 20
+    panic("stop")
+}
+fn invoke() { fail(ref left, ref right) }
+let result = try_call(invoke)
+print([left, right, result.is_err()])"#,
+            ),
+            "[1, 2, true]"
+        );
+        assert_eq!(
+            say(
+                r#"let value = 1
+fn inner(ref staged) { staged = 9 }
+fn outer(ref staged) {
+    inner(ref staged)
+    panic("after inner commit")
+}
+fn invoke() { outer(ref value) }
+let result = try_call(invoke)
+print([value, result.is_err()])"#,
+            ),
+            "[1, true]"
+        );
+    }
+
+    #[test]
+    fn ref_target_fences_reject_duplicates_captures_and_ref_capture() {
+        let duplicate = run_err(
+            "fn pair(ref a, ref b) { }\nlet value = 1\npair(ref value, ref value)",
+        );
+        assert!(duplicate.contains("same variable"));
+
+        assert_eq!(
+            say(
+                r#"fn touch(ref value) { value = 2 }
+fn make() {
+    let captured = 1
+    return fn() { touch(ref captured) }
+}
+let closure = make()
+let result = try_call(closure)
+print(result.is_err())"#,
+            ),
+            "true"
+        );
+
+        assert_eq!(
+            say(
+                r#"let value = 1
+fn outer(ref staged) {
+    let closure = fn() { return staged }
+}
+fn invoke() { outer(ref value) }
+let result = try_call(invoke)
+print([value, result.is_err()])"#,
+            ),
+            "[1, true]"
+        );
+    }
+
+    #[test]
+    fn ref_method_receivers_stage_after_args_and_user_methods_allow_ref_args() {
+        assert_eq!(
+            say(
+                r#"let items = [1]
+fn argument() { items.push(2); return 3 }
+(items).push(argument())
+print(items)"#,
+            ),
+            "[1, 2, 3]"
+        );
+        assert_eq!(say("print(([1, 2]).pop())"), "2");
+        assert_eq!(say("print(([1, 2]).push(3))"), "none");
+        assert_eq!(
+            say(
+                r#"struct Amount { n }
+fn Amount.add_to(self, ref target) { target += self.n }
+let amount = Amount { n: 4 }
+let value = 3
+amount.add_to(ref value)
+print(value)"#,
+            ),
+            "7"
+        );
+
+        assert_eq!(
+            say(
+                r#"let items = []
+let hits = []
+fn side() { hits.push(1); return 1 }
+fn invoke() { items.push(ref side()) }
+let result = try_call(invoke)
+print([items, hits, result.is_err()])"#,
+            ),
+            "[[], [], true]"
+        );
+        assert!(parse_err("struct Box { value }\nfn Box.set(ref self) { }")
+            .contains("receiver can't be declared with `ref`"));
+    }
+
+    #[test]
+    fn zero_parameter_method_reports_total_arity_before_evaluating_arguments() {
+        let error = run_err_full(
+            "struct Empty { }\nfn Empty.zero() { return none }\nEmpty { }.zero()",
+        );
+        assert_eq!(
+            error.message,
+            "`Empty.zero` expects 0 arguments (including `self`), but got 1"
+        );
+        assert_eq!(error.line, Some(3));
+        assert!(!error.is_fatal);
+
+        assert_eq!(
+            say(
+                r#"struct Empty { }
+let events = []
+fn Empty.zero() { return none }
+fn make() { events.push("receiver"); return Empty { } }
+fn side() { events.push("argument"); return 1 }
+fn invoke() { make().zero(side()) }
+let result = try_call(invoke)
+print([events, result.is_err()])"#,
+            ),
+            r#"[["receiver"], true]"#
+        );
+    }
+
+    #[test]
+    fn fatal_ref_failure_rolls_back_staged_values() {
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        session
+            .eval(
+                r#"let value = 1
+fn exhaust(ref staged) {
+    staged = 99
+    while true { staged += 1 }
+}
+fn invoke() { exhaust(ref value) }"#,
+                &mut host,
+                &BopLimits::standard(),
+            )
+            .unwrap();
+        let error = session
+            .eval(
+                "invoke()",
+                &mut host,
+                &BopLimits {
+                    max_steps: 8,
+                    max_memory: 1024 * 1024,
+                },
+            )
+            .unwrap_err();
+        assert!(error.is_fatal);
+        assert_eq!(session.get("value").unwrap().inspect(), "1");
+    }
+
+    #[test]
+    fn final_memory_limit_failure_rolls_back_all_ref_targets() {
+        let mut session = ReplSession::new();
+        let mut host = TestHost::new();
+        session
+            .eval(
+                r#"let first = 1
+let second = "safe"
+let payload = "this payload is retained outside the call"
+fn grow(ref staged_first, ref staged_second, value) {
+    staged_first = 99
+    staged_second = value + value
+}
+fn invoke() { grow(ref first, ref second, payload) }"#,
+                &mut host,
+                &BopLimits::standard(),
+            )
+            .unwrap();
+
+        let error = session
+            .eval(
+                "invoke()",
+                &mut host,
+                &BopLimits {
+                    max_steps: 1_000,
+                    max_memory: 1,
+                },
+            )
+            .unwrap_err();
+        assert!(error.is_fatal);
+        assert!(error.message.contains("Memory limit exceeded"));
+        assert_eq!(session.get("first").unwrap().inspect(), "1");
+        assert_eq!(session.get("second").unwrap().inspect(), "\"safe\"");
     }
 
     #[test]

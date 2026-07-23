@@ -95,6 +95,27 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   match exhaustiveness follows source-ordered lexical type bindings and
   suppresses diagnostics when identity or control-flow provenance is
   ambiguous.
+- **RUN-020 — Transactional `ref` parameters.** A user function may declare a
+  second-class `ref` parameter and callers must mark the corresponding argument
+  with `ref`. The target is one mutable, uncaptured plain-variable binding;
+  constants, expressions, index/field places, and duplicate binding identities
+  are rejected before the callee runs. Ordinary arguments evaluate
+  left-to-right before ref targets are snapshotted in parameter order. Each ref
+  value is staged in the callee and all targets commit only after a normal
+  return and pending resource checks; a runtime or fatal error rolls every
+  target back. Forwarding updates the outer staged local, while a ref parameter
+  cannot be captured. A normally returned language `Result::Err` is still a
+  successful return and commits. Host-to-script `BopInstance::call` and
+  `call_value` remain value-only and reject ref-bearing callables before
+  execution because host values do not identify Bop bindings.
+- **RUN-021 — Unified mutating receivers.** A built-in mutating method on a
+  mutable plain-variable receiver uses the same snapshot/commit model
+  implicitly, with method arguments evaluated before the receiver snapshot.
+  True temporary receivers mutate and discard their owned value while
+  preserving the method's ordinary result. Index and field receivers raise the
+  canonical catchable unsupported-place diagnostic instead of silently losing
+  mutation. User-defined method receivers remain value parameters, though
+  their non-receiver parameters may be explicit refs.
 
 ## Acceptance criteria
 
@@ -157,6 +178,20 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   wins and emit the same runtime warning on stderr in the walker, VM, and both
   native AOT modes. Selective and aliased imports, private names, absent
   conditional exports, stdout, and binding/source order are unaffected.
+- **AC-RUN-016:** Parser, checker, walker/VM differential, and native AOT tests
+  cover explicit marker agreement through direct and first-class callables,
+  deterministic preflight/evaluation order, mutable/grouped target acceptance,
+  const/index/field/captured/duplicate target rejection, forwarding and
+  no-capture rules, multi-target commit, and rollback on ordinary/fatal
+  `BopError` paths including errors caught by `try_call`. The engines also
+  agree that a normally returned `Result::Err` commits and that pending
+  resource-limit failures happen before commit. Walker, VM, and sandboxed AOT
+  instance APIs reject ref-bearing entries and callback values consistently
+  before executing them.
+- **AC-RUN-017:** Cross-engine tests cover named and grouped implicit-ref
+  mutating receivers, argument-before-snapshot order, true-temporary method
+  results, the line-aware unsupported index/field receiver diagnostic, and
+  value-receiver behaviour for user-defined methods.
 
 ## Design notes
 

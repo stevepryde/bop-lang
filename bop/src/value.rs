@@ -499,6 +499,10 @@ impl core::fmt::Debug for BopFnOrigin {
 
 pub struct BopFn {
     pub params: Vec<String>,
+    /// Positional passing modes retained by the callable value so aliases,
+    /// closures, and module exports perform the same call-site preflight as
+    /// direct calls.
+    pub param_modes: Vec<crate::parser::ParamMode>,
     /// Values captured from the enclosing scope at construction
     /// time, cloned by value. Free variables in the body that
     /// aren't parameters and aren't in this list fall through to
@@ -540,6 +544,7 @@ impl core::fmt::Debug for BopFn {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("BopFn")
             .field("params", &self.params)
+            .field("param_modes", &self.param_modes)
             .field("captures", &self.captures.len())
             .field("body", &self.body)
             .field("self_name", &self.self_name)
@@ -595,6 +600,27 @@ impl BopFn {
         )
     }
 
+    pub fn try_new_ast_in_module_with_modes(
+        params: Vec<String>,
+        param_modes: Vec<crate::parser::ParamMode>,
+        captures: Vec<(String, Value)>,
+        body: Vec<Stmt>,
+        self_name: Option<String>,
+        module_path: Option<String>,
+        line: u32,
+    ) -> Result<Rc<Self>, BopError> {
+        Self::try_new_ast_in_module_with_origin_and_modes(
+            params,
+            param_modes,
+            captures,
+            body,
+            self_name,
+            module_path,
+            BopFnOrigin::external(),
+            line,
+        )
+    }
+
     #[doc(hidden)]
     pub fn try_new_ast_in_module_with_origin(
         params: Vec<String>,
@@ -605,10 +631,42 @@ impl BopFn {
         origin: BopFnOrigin,
         line: u32,
     ) -> Result<Rc<Self>, BopError> {
+        let param_modes = vec![crate::parser::ParamMode::Value; params.len()];
+        Self::try_new_ast_in_module_with_origin_and_modes(
+            params,
+            param_modes,
+            captures,
+            body,
+            self_name,
+            module_path,
+            origin,
+            line,
+        )
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_ast_in_module_with_origin_and_modes(
+        params: Vec<String>,
+        param_modes: Vec<crate::parser::ParamMode>,
+        captures: Vec<(String, Value)>,
+        body: Vec<Stmt>,
+        self_name: Option<String>,
+        module_path: Option<String>,
+        origin: BopFnOrigin,
+        line: u32,
+    ) -> Result<Rc<Self>, BopError> {
+        if params.len() != param_modes.len() {
+            return Err(BopError::runtime(
+                "Function parameter mode metadata is invalid",
+                line,
+            ));
+        }
         let depth = checked_owner_depth(captures.iter().map(|(_, value)| value), 1, line)?;
         let body = FnBody::Ast(body);
         Ok(Rc::new(Self {
             params,
+            param_modes,
             captures,
             body,
             self_name,
@@ -658,6 +716,30 @@ impl BopFn {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_compiled_in_module_with_modes(
+        params: Vec<String>,
+        param_modes: Vec<crate::parser::ParamMode>,
+        captures: Vec<(String, Value)>,
+        body: Rc<dyn core::any::Any + 'static>,
+        self_name: Option<String>,
+        module_path: Option<String>,
+        opaque_body_depth: u16,
+        line: u32,
+    ) -> Result<Rc<Self>, BopError> {
+        Self::try_new_compiled_in_module_with_origin_and_modes(
+            params,
+            param_modes,
+            captures,
+            body,
+            self_name,
+            module_path,
+            BopFnOrigin::external(),
+            opaque_body_depth,
+            line,
+        )
+    }
+
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn try_new_compiled_in_module_with_origin(
@@ -670,6 +752,39 @@ impl BopFn {
         opaque_body_depth: u16,
         line: u32,
     ) -> Result<Rc<Self>, BopError> {
+        let param_modes = vec![crate::parser::ParamMode::Value; params.len()];
+        Self::try_new_compiled_in_module_with_origin_and_modes(
+            params,
+            param_modes,
+            captures,
+            body,
+            self_name,
+            module_path,
+            origin,
+            opaque_body_depth,
+            line,
+        )
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_compiled_in_module_with_origin_and_modes(
+        params: Vec<String>,
+        param_modes: Vec<crate::parser::ParamMode>,
+        captures: Vec<(String, Value)>,
+        body: Rc<dyn core::any::Any + 'static>,
+        self_name: Option<String>,
+        module_path: Option<String>,
+        origin: BopFnOrigin,
+        opaque_body_depth: u16,
+        line: u32,
+    ) -> Result<Rc<Self>, BopError> {
+        if params.len() != param_modes.len() {
+            return Err(BopError::runtime(
+                "Function parameter mode metadata is invalid",
+                line,
+            ));
+        }
         let capture_depth = captures
             .iter()
             .map(|(_, value)| value.ownership_depth())
@@ -682,6 +797,7 @@ impl BopFn {
         let body = FnBody::Compiled(body);
         Ok(Rc::new(Self {
             params,
+            param_modes,
             captures,
             body,
             self_name,
@@ -1298,6 +1414,26 @@ impl Value {
         BopFn::try_new_ast(params, captures, body, self_name, line).map(Value::Fn)
     }
 
+    pub fn try_new_fn_with_modes(
+        params: Vec<String>,
+        param_modes: Vec<crate::parser::ParamMode>,
+        captures: Vec<(String, Value)>,
+        body: Vec<Stmt>,
+        self_name: Option<String>,
+        line: u32,
+    ) -> Result<Self, BopError> {
+        BopFn::try_new_ast_in_module_with_modes(
+            params,
+            param_modes,
+            captures,
+            body,
+            self_name,
+            None,
+            line,
+        )
+        .map(Value::Fn)
+    }
+
     pub fn try_new_module_fn(
         params: Vec<String>,
         captures: Vec<(String, Value)>,
@@ -1353,6 +1489,29 @@ impl Value {
     ) -> Result<Self, BopError> {
         BopFn::try_new_compiled(params, captures, body, self_name, opaque_body_depth, line)
             .map(Value::Fn)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_compiled_fn_with_modes(
+        params: Vec<String>,
+        param_modes: Vec<crate::parser::ParamMode>,
+        captures: Vec<(String, Value)>,
+        body: Rc<dyn core::any::Any + 'static>,
+        self_name: Option<String>,
+        opaque_body_depth: u16,
+        line: u32,
+    ) -> Result<Self, BopError> {
+        BopFn::try_new_compiled_in_module_with_modes(
+            params,
+            param_modes,
+            captures,
+            body,
+            self_name,
+            None,
+            opaque_body_depth,
+            line,
+        )
+        .map(Value::Fn)
     }
 
     pub fn try_new_compiled_module_fn(
@@ -1671,6 +1830,7 @@ impl Value {
                     .collect::<Result<Vec<_>, _>>()?;
                 Value::Fn(Rc::new(BopFn {
                     params: value.params.clone(),
+                    param_modes: value.param_modes.clone(),
                     captures,
                     body,
                     self_name: value.self_name.clone(),

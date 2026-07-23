@@ -45,7 +45,15 @@ fn render_chunk(chunk: &Chunk, out: &mut String, indent: usize) {
             pad,
             i,
             f.name,
-            f.params.join(", ")
+            f.params
+                .iter()
+                .zip(f.param_modes.iter())
+                .map(|(name, mode)| match mode {
+                    bop::parser::ParamMode::Value => name.clone(),
+                    bop::parser::ParamMode::Ref => format!("ref {name}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         render_chunk(&f.chunk, out, indent + 1);
     }
@@ -149,6 +157,39 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
             format!("Call {}/{}", chunk.name(*name), argc)
         }
         Instr::CallValue { argc } => format!("CallValue /{}", argc),
+        Instr::PrepareCall { name, site } => {
+            format!("PrepareCall {}/#{}", chunk.name(*name), site.0)
+        }
+        Instr::PrepareCallValue { site } => format!("PrepareCallValue #{}", site.0),
+        Instr::PrepareMethodValue {
+            method,
+            site,
+            nested_place,
+        } => format!(
+            "PrepareMethodValue .{}/#{}{}",
+            chunk.name(*method),
+            site.0,
+            if *nested_place { " (nested place)" } else { "" }
+        ),
+        Instr::PrepareMethodNamed {
+            target,
+            method,
+            site,
+        } => match target.slot_idx() {
+            Some(slot) => format!(
+                "PrepareMethodNamed .{}/#{} (target @{})",
+                chunk.name(*method),
+                site.0,
+                slot.0
+            ),
+            None => format!(
+                "PrepareMethodNamed .{}/#{} (target {})",
+                chunk.name(*method),
+                site.0,
+                chunk.name(target.name_idx())
+            ),
+        },
+        Instr::CallPrepared { site } => format!("CallPrepared #{}", site.0),
         Instr::CallMethod {
             method,
             argc,

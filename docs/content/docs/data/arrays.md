@@ -49,8 +49,11 @@ print(items)    // [99, 20, 30]
 ## Methods
 
 Mutating methods such as `push`, `pop`, `insert`, `remove`, `reverse`, and
-`sort` write their updated array back to a variable receiver. Nested index and
-field receivers are not write-back places yet: `dict["items"].push(value)` and
+`sort` write their updated array back to a mutable variable receiver using the
+same transactional copy-in/copy-out mechanism as a [`ref`
+parameter](/docs/functions/defining-functions/#reference-parameters). Method
+arguments run before the receiver snapshot. Nested index and field receivers
+are not write-back places yet: `dict["items"].push(value)` and
 `holder.items.sort()` raise a runtime error with the workaround rather than
 silently doing nothing. Use an explicit variable and assignment:
 

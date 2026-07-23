@@ -47,10 +47,11 @@ fn numeric_literal_and_print() {
     assert_disasm(
         "print(42)",
         r#"
-        0: LoadConst 42
-        1: Call print/1
-        2: Pop
-        3: Halt
+        0: PrepareCall print/#0
+        1: LoadConst 42
+        2: CallPrepared #0
+        3: Pop
+        4: Halt
         "#,
     );
 }
@@ -62,10 +63,11 @@ fn let_and_use() {
         r#"
         0: LoadConst 10
         1: DefineLocal x
-        2: LoadVar x
-        3: Call print/1
-        4: Pop
-        5: Halt
+        2: PrepareCall print/#0
+        3: LoadVar x
+        4: CallPrepared #0
+        5: Pop
+        6: Halt
         "#,
     );
 }
@@ -75,14 +77,15 @@ fn arithmetic_chain() {
     assert_disasm(
         "print(1 + 2 * 3)",
         r#"
-        0: LoadConst 1
-        1: LoadConst 2
-        2: LoadConst 3
-        3: Mul
-        4: Add
-        5: Call print/1
-        6: Pop
-        7: Halt
+        0: PrepareCall print/#0
+        1: LoadConst 1
+        2: LoadConst 2
+        3: LoadConst 3
+        4: Mul
+        5: Add
+        6: CallPrepared #0
+        7: Pop
+        8: Halt
         "#,
     );
 }
@@ -121,15 +124,17 @@ fn unary_ops() {
     assert_disasm(
         "print(-5)\nprint(!true)",
         r#"
-        0: LoadConst 5
-        1: Neg
-        2: Call print/1
-        3: Pop
-        4: LoadTrue
-        5: Not
-        6: Call print/1
-        7: Pop
-        8: Halt
+        0: PrepareCall print/#0
+        1: LoadConst 5
+        2: Neg
+        3: CallPrepared #0
+        4: Pop
+        5: PrepareCall print/#1
+        6: LoadTrue
+        7: Not
+        8: CallPrepared #1
+        9: Pop
+        10: Halt
         "#,
     );
 }
@@ -141,15 +146,16 @@ fn short_circuit_and() {
     assert_disasm(
         "print(true && false)",
         r#"
-        0: LoadTrue
-        1: TruthyToBool
-        2: JumpIfFalsePeek -> 6
-        3: Pop
-        4: LoadFalse
-        5: TruthyToBool
-        6: Call print/1
-        7: Pop
-        8: Halt
+        0: PrepareCall print/#0
+        1: LoadTrue
+        2: TruthyToBool
+        3: JumpIfFalsePeek -> 7
+        4: Pop
+        5: LoadFalse
+        6: TruthyToBool
+        7: CallPrepared #0
+        8: Pop
+        9: Halt
         "#,
     );
 }
@@ -159,15 +165,16 @@ fn short_circuit_or() {
     assert_disasm(
         "print(true || false)",
         r#"
-        0: LoadTrue
-        1: TruthyToBool
-        2: JumpIfTruePeek -> 6
-        3: Pop
-        4: LoadFalse
-        5: TruthyToBool
-        6: Call print/1
-        7: Pop
-        8: Halt
+        0: PrepareCall print/#0
+        1: LoadTrue
+        2: TruthyToBool
+        3: JumpIfTruePeek -> 7
+        4: Pop
+        5: LoadFalse
+        6: TruthyToBool
+        7: CallPrepared #0
+        8: Pop
+        9: Halt
         "#,
     );
 }
@@ -178,19 +185,21 @@ fn if_else() {
         r#"if true { print("yes") } else { print("no") }"#,
         r#"
         0: LoadTrue
-        1: JumpIfFalse -> 8
+        1: JumpIfFalse -> 9
         2: PushScope
-        3: LoadConst "yes"
-        4: Call print/1
-        5: Pop
-        6: PopScope
-        7: Jump -> 13
-        8: PushScope
-        9: LoadConst "no"
-        10: Call print/1
-        11: Pop
-        12: PopScope
-        13: Halt
+        3: PrepareCall print/#0
+        4: LoadConst "yes"
+        5: CallPrepared #0
+        6: Pop
+        7: PopScope
+        8: Jump -> 15
+        9: PushScope
+        10: PrepareCall print/#1
+        11: LoadConst "no"
+        12: CallPrepared #1
+        13: Pop
+        14: PopScope
+        15: Halt
         "#,
     );
 }
@@ -236,15 +245,16 @@ fn for_over_array() {
         1: LoadConst 2
         2: MakeArray 2
         3: MakeIter
-        4: IterNext -> 12
+        4: IterNext -> 13
         5: PushScope
         6: DefineLocal x
-        7: LoadVar x
-        8: Call print/1
-        9: Pop
-        10: PopScope
-        11: Jump -> 4
-        12: Halt
+        7: PrepareCall print/#0
+        8: LoadVar x
+        9: CallPrepared #0
+        10: Pop
+        11: PopScope
+        12: Jump -> 4
+        13: Halt
         "#,
     );
 }
@@ -369,14 +379,15 @@ fn repeat_loop() {
         r#"
         0: LoadConst 3
         1: MakeRepeatCount
-        2: RepeatNext -> 9
+        2: RepeatNext -> 10
         3: PushScope
-        4: LoadConst 1
-        5: Call print/1
-        6: Pop
-        7: PopScope
-        8: Jump -> 2
-        9: Halt
+        4: PrepareCall print/#0
+        5: LoadConst 1
+        6: CallPrepared #0
+        7: Pop
+        8: PopScope
+        9: Jump -> 2
+        10: Halt
         "#,
     );
 }
@@ -388,7 +399,7 @@ fn function_declaration_and_call() {
 print(double(5))"#,
     );
     assert!(d.contains("DefineFn #0 (double)"), "top-level missing fn def:\n{}", d);
-    assert!(d.contains("Call double/1"), "call site missing:\n{}", d);
+    assert!(d.contains("PrepareCall double/#1"), "call site missing:\n{}", d);
     assert!(d.contains("fn #0 double(x):"), "nested body header missing:\n{}", d);
     // Param `x` resolves to the function's slot 0 (the compile-
     // time `LocalResolver` assigns params in declaration order),
@@ -429,10 +440,11 @@ fn method_call_records_back_assign_for_ident() {
         r#"
         0: MakeArray 0
         1: DefineLocal arr
-        2: LoadConst 1
-        3: CallMethodInPlace .push/1 (target arr)
-        4: Pop
-        5: Halt
+        2: PrepareMethodNamed .push/#0 (target arr)
+        3: LoadConst 1
+        4: CallPrepared #0
+        5: Pop
+        6: Halt
         "#,
     );
 }
@@ -442,8 +454,9 @@ fn method_call_on_literal_has_no_back_assign() {
     // `[1,2].len()` operates on a literal expression; no back-assign.
     let d = disasm("print([1, 2].len())");
     assert!(
-        d.contains("CallMethod .len/0\n") || d.contains("CallMethod .len/0 "),
-        "expected bare CallMethod .len/0 in:\n{}",
+        d.contains("PrepareMethodValue .len/#1\n")
+            || d.contains("PrepareMethodValue .len/#1 "),
+        "expected prepared temporary method call in:\n{}",
         d
     );
     assert!(!d.contains("(back to"), "literal method call shouldn't back-assign:\n{}", d);
@@ -461,12 +474,13 @@ fn index_get_and_set() {
         4: LoadConst 99
         5: LoadConst 0
         6: SetIndexInPlace (target a)
-        7: LoadVar a
-        8: LoadConst 1
-        9: GetIndex
-        10: Call print/1
-        11: Pop
-        12: Halt
+        7: PrepareCall print/#0
+        8: LoadVar a
+        9: LoadConst 1
+        10: GetIndex
+        11: CallPrepared #0
+        12: Pop
+        13: Halt
         "#,
     );
 }

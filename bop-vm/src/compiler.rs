@@ -7,9 +7,9 @@ use alloc::{rc::Rc, string::{String, ToString}, vec, vec::Vec};
 use std::rc::Rc;
 
 use bop::error::BopError;
-use bop::methods;
 use bop::parser::{
-    AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp, Visibility,
+    AssignOp, AssignTarget, BinOp, CallArg, Expr, ExprKind, ParamMode, Parameter, Stmt, StmtKind,
+    UnaryOp, Visibility,
 };
 
 #[cfg(not(feature = "no_std"))]
@@ -18,11 +18,11 @@ use std::collections::BTreeMap;
 use alloc::collections::BTreeMap;
 
 use crate::chunk::{
-    CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, ConstructFieldsIdx, EnumConstructShape,
-    EnumDef, EnumIdx, EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, Instr,
-    InterpIdx, InterpPart, InterpRecipe, LoopRange, LoopStateKind, NameIdx, NamespaceIdx,
-    NamespaceRef,
-    PatternIdx, PatternRecipe, SlotIdx, StructDef, StructIdx,
+    CallSite, CallSiteIdx, CaptureSource, Chunk, CodeOffset, ConstIdx, Constant,
+    ConstructFieldsIdx, EnumConstructShape, EnumDef, EnumIdx, EnumVariantDef, EnumVariantShape,
+    FnDef, FnIdx, InPlaceAssignOp, Instr, InterpIdx, InterpPart, InterpRecipe, LoopRange,
+    LoopStateKind, NameIdx, NamespaceIdx, NamespaceRef, PatternIdx, PatternRecipe, RefArgTarget,
+    SlotIdx, StructDef, StructIdx,
 };
 use bop::parser::{MatchArm, Pattern, VariantKind};
 
@@ -51,20 +51,27 @@ struct LocalResolver {
     /// High-water mark across the whole function body. Becomes
     /// `FnDef::slot_count`.
     max_slot: u32,
+    ref_param_slots: Vec<SlotIdx>,
 }
 
 impl LocalResolver {
-    fn new(params: &[String]) -> Self {
+    fn new(params: &[Parameter]) -> Self {
         let mut scopes: Vec<Vec<(String, SlotIdx)>> = vec![Vec::with_capacity(params.len())];
         let mut next_slot = 0u32;
+        let mut ref_param_slots = Vec::new();
         for p in params {
-            scopes[0].push((p.clone(), SlotIdx(next_slot)));
+            let slot = SlotIdx(next_slot);
+            scopes[0].push((p.name.clone(), slot));
+            if p.mode == ParamMode::Ref {
+                ref_param_slots.push(slot);
+            }
             next_slot += 1;
         }
         Self {
             scopes,
             next_slot,
             max_slot: next_slot,
+            ref_param_slots,
         }
     }
 
@@ -554,6 +561,28 @@ impl Compiler {
     fn add_construct_fields(&mut self, fields: Vec<String>) -> ConstructFieldsIdx {
         let idx = ConstructFieldsIdx(self.chunk.construct_fields.len() as u32);
         self.chunk.construct_fields.push(fields);
+        idx
+    }
+
+    fn add_call_site(&mut self, args: &[CallArg]) -> CallSiteIdx {
+        let arg_modes = args.iter().map(|arg| arg.mode).collect();
+        let ref_targets = args
+            .iter()
+            .map(|arg| {
+                if arg.mode != ParamMode::Ref {
+                    return None;
+                }
+                Some(match &arg.value.kind {
+                    ExprKind::Ident(name) => RefArgTarget::Binding(self.namespace_ref(name)),
+                    _ => RefArgTarget::Invalid,
+                })
+            })
+            .collect();
+        let idx = CallSiteIdx(self.chunk.call_sites.len() as u32);
+        self.chunk.call_sites.push(CallSite {
+            arg_modes,
+            ref_targets,
+        });
         idx
     }
 
@@ -1187,67 +1216,29 @@ impl Compiler {
             }
 
             ExprKind::Call { callee, args } => {
-                // Three cases for bare-ident callees:
-                //  1. The ident resolves to a function-level slot
-                //     — it's a `Value::Fn` parameter or a lambda
-                //     stored in a local. Load it onto the stack
-                //     and go through `CallValue` so the VM
-                //     dispatches on the `Value::Fn` directly.
-                //  2. The ident is some other name (builtin,
-                //     host fn, declared user fn, captured value)
-                //     — the fast `Call { name }` path does the
-                //     dynamic resolution.
-                //  3. Non-ident callee (`funcs[0](x)`,
-                //     `make_adder(5)(3)`) — evaluate arguments
-                //     first, then the callee, and use `CallValue`.
+                let site = self.add_call_site(args);
+                // Resolve and preflight the callee before compiling any
+                // ordinary argument. Ref expressions are place recipes in
+                // `CallSite`, never value-producing bytecode.
                 if let ExprKind::Ident(name) = &callee.kind {
                     if let Some(slot) = self.resolve_local_slot(name) {
-                        for arg in args {
-                            self.compile_expr(arg)?;
-                        }
                         self.emit(Instr::LoadLocal(slot), line);
-                        self.emit(
-                            Instr::CallValue {
-                                argc: args.len() as u32,
-                            },
-                            line,
-                        );
+                        self.emit(Instr::PrepareCallValue { site }, line);
                     } else {
-                        for arg in args {
-                            self.compile_expr(arg)?;
-                        }
                         let name_idx = self.add_name(name);
-                        // `Call { name }` may end up consulting
-                        // captures / scopes at runtime, so a
-                        // bare-ident callee is effectively a free
-                        // variable from the lambda's point of
-                        // view. Record so the enclosing fn
-                        // packages the binding at `MakeLambda`
-                        // time (covers cases like `fn f() { let
-                        // g = fn() { ... }; return fn() { g() }
-                        // }` where the inner lambda calls a
-                        // captured local by name).
                         self.note_free_var(name);
-                        self.emit(
-                            Instr::Call {
-                                name: name_idx,
-                                argc: args.len() as u32,
-                            },
-                            line,
-                        );
+                        self.emit(Instr::PrepareCall { name: name_idx, site }, line);
                     }
                 } else {
-                    for arg in args {
-                        self.compile_expr(arg)?;
-                    }
                     self.compile_expr(callee)?;
-                    self.emit(
-                        Instr::CallValue {
-                            argc: args.len() as u32,
-                        },
-                        line,
-                    );
+                    self.emit(Instr::PrepareCallValue { site }, line);
                 }
+                for arg in args {
+                    if arg.mode == ParamMode::Value {
+                        self.compile_expr(&arg.value)?;
+                    }
+                }
+                self.emit(Instr::CallPrepared { site }, line);
             }
 
             ExprKind::MethodCall {
@@ -1255,87 +1246,39 @@ impl Compiler {
                 method,
                 args,
             } => {
-                // A bare-ident receiver gets a write-back target
-                // so mutating methods (`arr.push(v)`, etc.) update
-                // the original binding. Slot-resolved locals go
-                // through `AssignBack::Slot` for a direct frame
-                // write; everything else keeps the name-keyed
-                // fallback via `AssignBack::Name`.
-                let assign_back_to = match &object.kind {
-                    ExprKind::Ident(n) => {
-                        if let Some(slot) = self.resolve_local_slot(n) {
-                            Some(crate::chunk::AssignBack::Slot(slot))
-                        } else {
-                            // The in-place opcode deliberately skips
-                            // `compile_expr(object)`, so record this unresolved
-                            // receiver explicitly for lambda capture analysis.
-                            self.note_free_var(n);
-                            Some(crate::chunk::AssignBack::Name(self.add_name(n)))
-                        }
-                    }
-                    _ => None,
-                };
+                let site = self.add_call_site(args);
+                let method_idx = self.add_name(method);
                 let nested_place = matches!(
                     &object.kind,
                     ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
                 );
-                let method_idx = self.add_name(method);
-                if methods::is_mutating_method(method) {
-                    if let Some(target) = assign_back_to {
-                        let in_place_target = match (&object.kind, target) {
-                            (ExprKind::Ident(name), crate::chunk::AssignBack::Slot(slot)) => {
-                                NamespaceRef::from_slot(self.add_name(name), slot)
-                            }
-                            (ExprKind::Ident(_), crate::chunk::AssignBack::Name(name)) => {
-                                NamespaceRef::from_name(name)
-                            }
-                            _ => unreachable!("assign-back target requires an identifier"),
-                        };
-                        // Walker and AOT evaluate method arguments before a
-                        // bare identifier receiver. Resolve the live binding
-                        // only after the arguments so nested calls such as
-                        // `a.push(a.pop())` observe the same state everywhere.
-                        for arg in args {
-                            self.compile_expr(arg)?;
-                        }
-                        self.emit(
-                            Instr::CallMethodInPlace {
-                                target: in_place_target,
-                                method: method_idx,
-                                argc: args.len() as u32,
-                            },
-                            line,
-                        );
-                    } else {
-                        for arg in args {
-                            self.compile_expr(arg)?;
-                        }
-                        self.compile_expr(object)?;
-                        self.emit(
-                            Instr::CallMethod {
-                                method: method_idx,
-                                argc: args.len() as u32,
-                                assign_back_to: None,
-                                nested_place,
-                            },
-                            line,
-                        );
-                    }
+                if let ExprKind::Ident(name) = &object.kind {
+                    let target = self.namespace_ref(name);
+                    self.emit(
+                        Instr::PrepareMethodNamed {
+                            target,
+                            method: method_idx,
+                            site,
+                        },
+                        line,
+                    );
                 } else {
-                    for arg in args {
-                        self.compile_expr(arg)?;
-                    }
                     self.compile_expr(object)?;
                     self.emit(
-                        Instr::CallMethod {
+                        Instr::PrepareMethodValue {
                             method: method_idx,
-                            argc: args.len() as u32,
-                            assign_back_to,
+                            site,
                             nested_place,
                         },
                         line,
                     );
                 }
+                for arg in args {
+                    if arg.mode == ParamMode::Value {
+                        self.compile_expr(&arg.value)?;
+                    }
+                }
+                self.emit(Instr::CallPrepared { site }, line);
             }
 
             ExprKind::Index { object, index } => {
@@ -1713,7 +1656,7 @@ impl Compiler {
     fn compile_function(
         &mut self,
         name: &str,
-        params: &[String],
+        params: &[Parameter],
         body: &[Stmt],
     ) -> Result<FnDef, BopError> {
         // Save outer compile state so the body's chunk / loops /
@@ -1775,6 +1718,22 @@ impl Compiler {
             })
             .collect();
 
+        if resolutions.iter().any(|(_, source)| {
+            matches!(
+                source,
+                CaptureSource::ParentSlot(slot)
+                    if self
+                        .resolvers
+                        .last()
+                        .is_some_and(|resolver| resolver.ref_param_slots.contains(slot))
+            )
+        }) {
+            let mut error = err(0, "a `ref` parameter can't be captured by a closure");
+            error.friendly_hint =
+                Some("Pass it through an explicit `ref` parameter instead.".to_string());
+            return Err(error);
+        }
+
         let mut capture_names: Vec<String> = Vec::with_capacity(resolutions.len());
         let mut capture_sources: Vec<CaptureSource> = Vec::with_capacity(resolutions.len());
         for (name, source) in resolutions {
@@ -1798,7 +1757,8 @@ impl Compiler {
         chunk.slot_count = resolver.max_slot;
         Ok(FnDef {
             name: name.to_string(),
-            params: params.to_vec(),
+            params: params.iter().map(|param| param.name.clone()).collect(),
+            param_modes: params.iter().map(|param| param.mode).collect(),
             chunk: Rc::new(chunk),
             slot_count: resolver.max_slot,
             capture_names,

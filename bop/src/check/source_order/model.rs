@@ -1,5 +1,5 @@
 use crate::ast_visit::{DeclarationSiteVisitor, visit_declaration_sites};
-use crate::parser::{Stmt, VariantDecl, VariantKind};
+use crate::parser::{Parameter, Stmt, VariantDecl, VariantKind};
 
 #[cfg(feature = "no_std")]
 use alloc::{string::{String, ToString}, vec, vec::Vec};
@@ -327,7 +327,7 @@ impl DeclarationSiteVisitor for SiteCollector<'_> {
         &mut self,
         _type_name: &str,
         _method_name: &str,
-        _params: &[String],
+        _params: &[Parameter],
         _body: &[Stmt],
         _stmt: &Stmt,
     ) {

@@ -36,8 +36,8 @@ use bop::error::BopError;
 use bop::lexer::StringPart;
 use bop::methods;
 use bop::parser::{
-    AssignOp, AssignTarget, BinOp, Expr, ExprKind, MatchArm, Stmt, StmtKind, UnaryOp, VariantKind,
-    VariantDecl, VariantPayload, Visibility,
+    AssignOp, AssignTarget, BinOp, CallArg, Expr, ExprKind, MatchArm, ParamMode, Parameter, Stmt,
+    StmtKind, UnaryOp, VariantDecl, VariantKind, VariantPayload, Visibility,
 };
 
 use crate::Options;
@@ -45,8 +45,8 @@ use crate::Options;
 mod runtime_templates;
 
 use runtime_templates::{
-    CTX_BASE, CTX_SANDBOX, HEADER, MAIN_FN, MAIN_FN_SANDBOX, PUBLIC_ENTRY,
-    PUBLIC_ENTRY_SANDBOX, RUNTIME_HEADER, RUNTIME_SHARED, TICK_HELPER,
+    CTX_BASE, CTX_SANDBOX, HEADER, MAIN_FN, MAIN_FN_SANDBOX, PUBLIC_ENTRY, PUBLIC_ENTRY_SANDBOX,
+    RUNTIME_HEADER, RUNTIME_SHARED, TICK_HELPER,
 };
 
 pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
@@ -56,9 +56,31 @@ pub(crate) fn emit(stmts: &[Stmt], opts: &Options) -> Result<String, BopError> {
     let modules = build_module_graph(stmts, opts)?;
     let info = collect_fn_info(stmts);
     let types = collect_type_registry(stmts, &modules)?;
-    let mut emitter = Emitter::new(opts.clone(), info, modules, types);
+    let mut persistent_constants = HashMap::new();
+    persistent_constants.insert(
+        bop::value::ROOT_MODULE_PATH.to_string(),
+        direct_persistent_constants(stmts),
+    );
+    for (module, entry) in &modules.modules {
+        persistent_constants.insert(module.clone(), direct_persistent_constants(&entry.ast));
+    }
+    let mut emitter = Emitter::new(opts.clone(), info, modules, types, persistent_constants);
     emitter.emit_program(stmts)?;
     Ok(emitter.finish())
+}
+
+fn direct_persistent_constants(stmts: &[Stmt]) -> HashSet<String> {
+    stmts
+        .iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::Let {
+                name,
+                is_const: true,
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 // ─── Persistent function-site catalogue ──────────────────────────
@@ -71,7 +93,7 @@ struct FunctionSite {
     id: usize,
     module_path: String,
     name: String,
-    params: Vec<String>,
+    params: Vec<Parameter>,
     visibility: Visibility,
     line: u32,
     abi_eligible: bool,
@@ -144,16 +166,14 @@ impl TypeRegistry {
                 .any(|site| site.module_path == module_path)
     }
 
-    fn method_slot(
-        &self,
-        module_path: &str,
-        type_name: &str,
-        method_name: &str,
-    ) -> usize {
+    fn method_slot(&self, module_path: &str, type_name: &str, method_name: &str) -> usize {
         self.method_slots
             .binary_search_by(|(module, ty, method)| {
-                (module.as_str(), ty.as_str(), method.as_str())
-                    .cmp(&(module_path, type_name, method_name))
+                (module.as_str(), ty.as_str(), method.as_str()).cmp(&(
+                    module_path,
+                    type_name,
+                    method_name,
+                ))
             })
             .expect("every method site has a dense slot")
     }
@@ -173,17 +193,14 @@ pub(crate) struct MethodSite {
     pub module_path: String,
     pub type_name: String,
     pub method_name: String,
-    pub params: Vec<String>,
+    pub params: Vec<Parameter>,
     pub body: Vec<Stmt>,
     pub module_prefix: String,
     pub line: u32,
     pub column: Option<core::num::NonZeroU32>,
 }
 
-fn collect_type_registry(
-    root: &[Stmt],
-    modules: &ModuleGraph,
-) -> Result<TypeRegistry, BopError> {
+fn collect_type_registry(root: &[Stmt], modules: &ModuleGraph) -> Result<TypeRegistry, BopError> {
     let mut reg = TypeRegistry {
         struct_sites: Vec::new(),
         enum_sites: Vec::new(),
@@ -247,11 +264,13 @@ fn collect_types_from_stmts(
 ) {
     let mut collector = RegistryDeclarationCollector::default();
     visit_declaration_sites(stmts, &mut collector);
-    reg.struct_sites.extend(collector.struct_names.into_iter().map(|name| StructSite {
+    reg.struct_sites
+        .extend(collector.struct_names.into_iter().map(|name| StructSite {
         module_path: module_path.to_string(),
         name,
     }));
-    reg.enum_sites.extend(collector.enum_names.into_iter().map(|name| EnumSite {
+    reg.enum_sites
+        .extend(collector.enum_names.into_iter().map(|name| EnumSite {
         module_path: module_path.to_string(),
         name,
     }));
@@ -296,7 +315,7 @@ struct RegistryDeclarationCollector {
 struct CollectedMethodSite {
     type_name: String,
     method_name: String,
-    params: Vec<String>,
+    params: Vec<Parameter>,
     body: Vec<Stmt>,
     line: u32,
     column: Option<core::num::NonZeroU32>,
@@ -315,7 +334,7 @@ impl DeclarationSiteVisitor for RegistryDeclarationCollector {
         &mut self,
         type_name: &str,
         method_name: &str,
-        params: &[String],
+        params: &[Parameter],
         body: &[Stmt],
         stmt: &Stmt,
     ) {
@@ -349,7 +368,7 @@ pub(crate) struct ModuleEntry {
     /// discovery, when only the parsed AST would otherwise remain.
     pub source: String,
     pub ast: Vec<Stmt>,
-    pub own_fns: HashMap<String, Vec<String>>,
+    pub own_fns: HashMap<String, Vec<Parameter>>,
     /// Every name reachable from this module's final scope —
     /// its own `let`s and `fn`s plus, transitively, its imports'
     /// effective exports. Matches the walker's injection
@@ -399,10 +418,7 @@ struct ResolvedModule {
     ast: Vec<Stmt>,
 }
 
-fn build_module_graph(
-    root: &[Stmt],
-    opts: &Options,
-) -> Result<ModuleGraph, BopError> {
+fn build_module_graph(root: &[Stmt], opts: &Options) -> Result<ModuleGraph, BopError> {
     let root_imports = collect_imports_in_stmts(root);
     if root_imports.is_empty() {
         return Ok(ModuleGraph {
@@ -487,8 +503,8 @@ fn resolve_module_tree(
             }
         }
     };
-    let ast = bop::parse(&source)
-        .map_err(|error| error.with_module_source(name, source.as_str()))?;
+    let ast =
+        bop::parse(&source).map_err(|error| error.with_module_source(name, source.as_str()))?;
     let imports = collect_imports_in_stmts(&ast);
 
     // Insert before recursion: this is both the resolver-work cache
@@ -562,8 +578,7 @@ fn analyze_module(
 
     let own_lets = collect_top_level_lets(&ast);
     let own_fns = collect_top_level_fn_params(&ast);
-    let function_candidates: BTreeSet<String> =
-        collect_fn_info(&ast).all_fns.into_keys().collect();
+    let function_candidates: BTreeSet<String> = collect_fn_info(&ast).all_fns.into_keys().collect();
     let own_types = collect_top_level_types(&ast);
 
     // Effective exports mirror the bindings that each `use` shape
@@ -667,7 +682,10 @@ fn analyze_module(
             ast,
             own_fns,
             own_lets,
-            direct_imports: direct_imports.into_iter().map(|import| import.path).collect(),
+            direct_imports: direct_imports
+                .into_iter()
+                .map(|import| import.path)
+                .collect(),
             effective_exports: exports,
             effective_function_exports,
             effective_types: type_exports,
@@ -708,7 +726,9 @@ fn effective_module_value_exports(
                     let exposed_bindings = match items {
                         Some(items) => items
                             .iter()
-                            .filter(|name| module.effective_exports.iter().any(|item| item == *name))
+                            .filter(|name| {
+                                module.effective_exports.iter().any(|item| item == *name)
+                            })
                             .cloned()
                             .collect(),
                         None => module.effective_exports.clone(),
@@ -839,9 +859,7 @@ fn rebindable_binding_surface(
     Some(names)
 }
 
-fn module_imports_from_exports(
-    exports: &BTreeMap<String, ModuleValueExport>,
-) -> Vec<ModuleImport> {
+fn module_imports_from_exports(exports: &BTreeMap<String, ModuleValueExport>) -> Vec<ModuleImport> {
     exports
         .iter()
         .map(|(alias, export)| {
@@ -876,10 +894,7 @@ fn collect_imports_in_stmts(stmts: &[Stmt]) -> Vec<ModuleImport> {
 }
 
 fn collect_top_level_imports(stmts: &[Stmt]) -> Vec<ModuleImport> {
-    stmts
-        .iter()
-        .filter_map(module_import_from_stmt)
-        .collect()
+    stmts.iter().filter_map(module_import_from_stmt).collect()
 }
 
 fn module_import_from_stmt(stmt: &Stmt) -> Option<ModuleImport> {
@@ -1073,7 +1088,7 @@ fn collect_top_level_types(stmts: &[Stmt]) -> Vec<String> {
         .collect()
 }
 
-fn collect_top_level_fn_params(stmts: &[Stmt]) -> HashMap<String, Vec<String>> {
+fn collect_top_level_fn_params(stmts: &[Stmt]) -> HashMap<String, Vec<Parameter>> {
     let mut out = HashMap::new();
     for stmt in stmts {
         if let StmtKind::FnDecl { name, params, .. } = &stmt.kind {
@@ -1092,7 +1107,7 @@ fn collect_top_level_fn_params(stmts: &[Stmt]) -> HashMap<String, Vec<String>> {
 /// emitted wrapper.
 #[derive(Clone)]
 struct FnInfo {
-    all_fns: HashMap<String, Vec<String>>,
+    all_fns: HashMap<String, Vec<Parameter>>,
     top_level_fns: HashSet<String>,
 }
 
@@ -1100,7 +1115,10 @@ fn collect_fn_info(stmts: &[Stmt]) -> FnInfo {
     let mut all_fns = HashMap::new();
     let mut top_level_fns = HashSet::new();
     for stmt in stmts {
-        if let StmtKind::FnDecl { name, params, body, .. } = &stmt.kind {
+        if let StmtKind::FnDecl {
+            name, params, body, ..
+        } = &stmt.kind
+        {
             all_fns.insert(name.clone(), params.clone());
             top_level_fns.insert(name.clone());
             collect_nested_fns(body, &mut all_fns);
@@ -1114,20 +1132,22 @@ fn collect_fn_info(stmts: &[Stmt]) -> FnInfo {
     }
 }
 
-fn collect_nested_fns(stmts: &[Stmt], all: &mut HashMap<String, Vec<String>>) {
+fn collect_nested_fns(stmts: &[Stmt], all: &mut HashMap<String, Vec<Parameter>>) {
     for stmt in stmts {
         collect_nested_fns_in_stmt(stmt, all);
     }
 }
 
-fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<String>>) {
+fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<Parameter>>) {
     match &stmt.kind {
         StmtKind::Let { value, .. } => collect_nested_fns_in_expr(value, all),
         StmtKind::Assign { target, value, .. } => {
             collect_nested_fns_in_assign_target(target, all);
             collect_nested_fns_in_expr(value, all);
         }
-        StmtKind::FnDecl { name, params, body, .. } => {
+        StmtKind::FnDecl {
+            name, params, body, ..
+        } => {
             all.insert(name.clone(), params.clone());
             collect_nested_fns(body, all);
         }
@@ -1169,7 +1189,7 @@ fn collect_nested_fns_in_stmt(stmt: &Stmt, all: &mut HashMap<String, Vec<String>
 
 fn collect_nested_fns_in_assign_target(
     target: &AssignTarget,
-    all: &mut HashMap<String, Vec<String>>,
+    all: &mut HashMap<String, Vec<Parameter>>,
 ) {
     match target {
         AssignTarget::Variable(_) => {}
@@ -1181,7 +1201,7 @@ fn collect_nested_fns_in_assign_target(
     }
 }
 
-fn collect_nested_fns_in_expr(expr: &Expr, all: &mut HashMap<String, Vec<String>>) {
+fn collect_nested_fns_in_expr(expr: &Expr, all: &mut HashMap<String, Vec<Parameter>>) {
     match &expr.kind {
         ExprKind::Int(_)
         | ExprKind::Number(_)
@@ -1191,7 +1211,10 @@ fn collect_nested_fns_in_expr(expr: &Expr, all: &mut HashMap<String, Vec<String>
         | ExprKind::None
         | ExprKind::Ident(_) => {}
         ExprKind::BinaryOp { left, right, .. }
-        | ExprKind::Index { object: left, index: right } => {
+        | ExprKind::Index {
+            object: left,
+            index: right,
+        } => {
             collect_nested_fns_in_expr(left, all);
             collect_nested_fns_in_expr(right, all);
         }
@@ -1240,7 +1263,11 @@ fn collect_nested_fns_in_expr(expr: &Expr, all: &mut HashMap<String, Vec<String>
                 collect_nested_fns_in_expr(value, all);
             }
         }
-        ExprKind::IfExpr { condition, then_expr, else_expr } => {
+        ExprKind::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             collect_nested_fns_in_expr(condition, all);
             collect_nested_fns_in_expr(then_expr, all);
             collect_nested_fns_in_expr(else_expr, all);
@@ -1302,6 +1329,9 @@ fn callable_assignment_names(stmts: &[Stmt]) -> HashSet<String> {
 struct EmissionScope {
     locals: HashSet<String>,
     persistent_bindings: HashSet<String>,
+    constants: HashSet<String>,
+    captured_locals: HashSet<String>,
+    ref_parameters: HashSet<String>,
     optional_imports: HashMap<String, OptionalImportBinding>,
     module_alias_locals: HashSet<String>,
     mutated_locals: HashSet<String>,
@@ -1334,6 +1364,12 @@ enum BindingStorage {
         module: String,
         name: String,
     },
+}
+
+enum RefTargetCandidate {
+    DirectLocal(String),
+    OptionalLocal(String),
+    Persistent { module: String, name: String },
 }
 
 #[derive(Clone)]
@@ -1455,6 +1491,7 @@ struct Emitter {
     rebindable_call_surfaces: HashMap<String, Option<HashSet<String>>>,
     /// Root copy restored after temporarily emitting imported modules/methods.
     root_declaration_aliases: Vec<ModuleImport>,
+    persistent_constants: HashMap<String, HashSet<String>>,
 }
 
 impl Emitter {
@@ -1463,6 +1500,7 @@ impl Emitter {
         fn_info: FnInfo,
         modules: ModuleGraph,
         types: TypeRegistry,
+        persistent_constants: HashMap<String, HashSet<String>>,
     ) -> Self {
         // Seed the outermost type_bindings frame with the
         // engine-wide builtins so bare `Result::Ok(...)` and
@@ -1508,6 +1546,7 @@ impl Emitter {
             callable_mutations: Vec::new(),
             rebindable_call_surfaces: HashMap::new(),
             root_declaration_aliases: Vec::new(),
+            persistent_constants,
         }
     }
 
@@ -1532,11 +1571,7 @@ impl Emitter {
     /// and module_aliases state. Returns `None` if the name isn't
     /// in scope — callers treat that as a type-not-declared
     /// error at emit time.
-    fn resolve_type_module(
-        &self,
-        namespace: Option<&str>,
-        type_name: &str,
-    ) -> Option<String> {
+    fn resolve_type_module(&self, namespace: Option<&str>, type_name: &str) -> Option<String> {
         if let Some(ns) = namespace {
             for frame in self.module_aliases.iter().rev() {
                 if let Some(binding) = frame.get(ns) {
@@ -1578,11 +1613,7 @@ impl Emitter {
         }
     }
 
-    fn bind_module_alias(
-        &mut self,
-        alias: &str,
-        exposed_types: &[(String, String)],
-    ) {
+    fn bind_module_alias(&mut self, alias: &str, exposed_types: &[(String, String)]) {
         if let Some(frame) = self.module_aliases.last_mut() {
             frame.insert(
                 alias.to_string(),
@@ -1630,8 +1661,7 @@ impl Emitter {
         let mut aliases: Vec<(&String, &ModuleAliasBinding)> = Vec::new();
         let mut seen_aliases: HashSet<String> = HashSet::new();
         for frame in self.module_aliases.iter().rev() {
-            let mut frame_aliases: Vec<(&String, &ModuleAliasBinding)> =
-                frame.iter().collect();
+            let mut frame_aliases: Vec<(&String, &ModuleAliasBinding)> = frame.iter().collect();
             frame_aliases.sort_by(|a, b| a.0.cmp(b.0));
             for (alias, binding) in frame_aliases {
                 if seen_aliases.insert(alias.clone()) {
@@ -1641,14 +1671,12 @@ impl Emitter {
         }
         aliases.sort_by(|a, b| a.0.cmp(b.0));
         for (alias, _) in aliases {
-            let optional_storage = self.binding_storage(alias).and_then(|storage| {
-                self.storage_optional_value_src(&storage, 0)
-            });
+            let optional_storage = self
+                .binding_storage(alias)
+                .and_then(|storage| self.storage_optional_value_src(&storage, 0));
             let value = if let Some(optional) = optional_storage {
                 let snapshot = declaration_alias_pattern_snapshot_ident(alias);
-                alias_prelude.push_str(&format!(
-                    "            let {snapshot} = {optional};\n",
-                ));
+                alias_prelude.push_str(&format!("            let {snapshot} = {optional};\n",));
                 format!("{snapshot}.as_ref()")
             } else if self.is_local(alias) {
                 format!("::std::option::Option::Some(&{})", rust_user_ident(alias))
@@ -1659,9 +1687,7 @@ impl Emitter {
                     module = rust_string_literal(&self.current_module),
                     alias = rust_string_literal(alias),
                 ));
-                format!(
-                    "{snapshot}.as_ref()",
-                )
+                format!("{snapshot}.as_ref()",)
             } else if let Some(overlay) = self.declaration_alias_overlay(alias) {
                 let snapshot = declaration_alias_pattern_snapshot_ident(alias);
                 alias_prelude.push_str(&format!(
@@ -1669,9 +1695,7 @@ impl Emitter {
                     module = rust_string_literal(&self.current_module),
                     alias = rust_string_literal(alias),
                 ));
-                format!(
-                    "{snapshot}.as_ref()",
-                )
+                format!("{snapshot}.as_ref()",)
             } else if self
                 .declaration_aliases
                 .iter()
@@ -1727,6 +1751,73 @@ impl Emitter {
         }
     }
 
+    fn mark_constant(&mut self, name: &str) {
+        if let Some(top) = self.scope_stack.last_mut() {
+            top.constants.insert(name.to_string());
+        }
+    }
+
+    fn mark_captured_local(&mut self, name: &str) {
+        if let Some(top) = self.scope_stack.last_mut() {
+            top.captured_locals.insert(name.to_string());
+        }
+    }
+
+    fn mark_ref_parameter(&mut self, name: &str) {
+        if let Some(top) = self.scope_stack.last_mut() {
+            top.ref_parameters.insert(name.to_string());
+        }
+    }
+
+    fn binding_has_flag(&self, name: &str, flag: impl Fn(&EmissionScope) -> bool) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            if scope.locals.contains(name)
+                || scope.persistent_bindings.contains(name)
+                || scope.optional_imports.contains_key(name)
+            {
+                return flag(scope);
+            }
+        }
+        false
+    }
+
+    fn is_constant_binding(&self, name: &str) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            if scope.locals.contains(name) {
+                return scope.constants.contains(name);
+            }
+            if scope.persistent_bindings.contains(name) {
+                return scope.constants.contains(name)
+                    || self
+                        .persistent_constants
+                        .get(&self.current_module)
+                        .is_some_and(|constants| constants.contains(name));
+            }
+        }
+        self.persistent_constants
+            .get(&self.current_module)
+            .is_some_and(|constants| constants.contains(name))
+    }
+
+    fn is_captured_binding(&self, name: &str) -> bool {
+        for scope in self.scope_stack.iter().rev() {
+            if scope.captured_locals.contains(name) {
+                return true;
+            }
+            if scope.locals.contains(name)
+                || scope.persistent_bindings.contains(name)
+                || scope.optional_imports.contains_key(name)
+            {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn is_ref_parameter(&self, name: &str) -> bool {
+        self.binding_has_flag(name, |scope| scope.ref_parameters.contains(name))
+    }
+
     fn bind_persistent(&mut self, name: &str) {
         self.scope_stack
             .last_mut()
@@ -1751,8 +1842,7 @@ impl Emitter {
             return;
         }
         let authoritative_alias = (self.opts.sandbox
-            && (self.has_declaration_alias_overlay(name)
-                || self.has_module_alias_candidate(name)))
+            && (self.has_declaration_alias_overlay(name) || self.has_module_alias_candidate(name)))
             || self.declaration_alias_writes_through(name);
         if !self.is_module_top_scope() && !authoritative_alias {
             return;
@@ -1823,9 +1913,7 @@ impl Emitter {
                         expr_uses_runtime_type_bindings(object)
                             || expr_uses_runtime_type_bindings(index)
                     }
-                    AssignTarget::Field { object, .. } => {
-                        expr_uses_runtime_type_bindings(object)
-                    }
+                    AssignTarget::Field { object, .. } => expr_uses_runtime_type_bindings(object),
                 };
                 target_uses_types || expr_uses_runtime_type_bindings(value)
             }
@@ -1859,9 +1947,9 @@ impl Emitter {
             }
             // Nested named functions own their call-time context.
             StmtKind::FnDecl { .. } | StmtKind::MethodDecl { .. } => false,
-            StmtKind::Return { value } => value
-                .as_ref()
-                .is_some_and(expr_uses_runtime_type_bindings),
+            StmtKind::Return { value } => {
+                value.as_ref().is_some_and(expr_uses_runtime_type_bindings)
+            }
             StmtKind::Break | StmtKind::Continue => false,
             StmtKind::Use {
                 path,
@@ -1981,7 +2069,8 @@ impl Emitter {
             fallback,
             name,
             ..
-        } = storage else {
+        } = storage
+        else {
             return None;
         };
         let mut parts = bindings
@@ -2072,9 +2161,17 @@ impl Emitter {
         let mut body = String::from("{");
         for (index, source) in sources.iter().enumerate() {
             if index == 0 {
-                write!(body, " if let ::std::option::Option::Some(__value) = {source} {{ __value }}").unwrap();
+                write!(
+                    body,
+                    " if let ::std::option::Option::Some(__value) = {source} {{ __value }}"
+                )
+                .unwrap();
             } else {
-                write!(body, " else if let ::std::option::Option::Some(__value) = {source} {{ __value }}").unwrap();
+                write!(
+                    body,
+                    " else if let ::std::option::Option::Some(__value) = {source} {{ __value }}"
+                )
+                .unwrap();
             }
         }
         write!(
@@ -2084,6 +2181,163 @@ impl Emitter {
         )
         .unwrap();
         body
+    }
+
+    fn ref_target_candidates(storage: &BindingStorage, out: &mut Vec<RefTargetCandidate>) {
+        match storage {
+            BindingStorage::RustLocal { ident } => {
+                out.push(RefTargetCandidate::DirectLocal(ident.clone()));
+            }
+            BindingStorage::Persistent { module, name } => {
+                out.push(RefTargetCandidate::Persistent {
+                    module: module.clone(),
+                    name: name.clone(),
+                });
+            }
+            BindingStorage::OptionalImport {
+                bindings,
+                fallback,
+                module,
+                name,
+            } => {
+                for binding in bindings {
+                    match binding {
+                        OptionalImportBinding::Local { value, .. } => {
+                            out.push(RefTargetCandidate::OptionalLocal(value.clone()));
+                        }
+                        OptionalImportBinding::Persistent => {
+                            out.push(RefTargetCandidate::Persistent {
+                                module: module.clone(),
+                                name: name.clone(),
+                            });
+                        }
+                    }
+                }
+                if let Some(fallback) = fallback {
+                    Self::ref_target_candidates(fallback, out);
+                }
+            }
+        }
+    }
+
+    /// Generate a preflight token plus snapshot/commit accessors for one ref
+    /// target. Persistent bindings resolve their origin chain exactly once
+    /// before ordinary arguments execute; commit then uses the stable key via
+    /// an infallible internal accessor. Presence-aware optional imports also
+    /// retain the exact local/persistent candidate selected at preflight.
+    fn ref_target_sources(
+        &mut self,
+        storage: &BindingStorage,
+        exposed_name: &str,
+        line: u32,
+    ) -> (String, String, String) {
+        let mut candidates = Vec::new();
+        Self::ref_target_candidates(storage, &mut candidates);
+        if candidates.len() == 1 {
+            match &candidates[0] {
+                RefTargetCandidate::DirectLocal(ident) => {
+                    return (
+                        String::new(),
+                        format!("{ident}.clone()"),
+                        format!("&mut {ident}"),
+                    );
+                }
+                RefTargetCandidate::OptionalLocal(value) => {
+                    let prelude = format!(
+                        "if {value}.is_none() {{ return Err(::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({}), {line})); }} ",
+                        rust_string_literal(exposed_name),
+                    );
+                    return (
+                        prelude,
+                        format!(
+                            "{value}.as_ref().expect(\"pre-resolved optional ref binding\").clone()"
+                        ),
+                        format!("{value}.as_mut().expect(\"pre-resolved optional ref binding\")"),
+                    );
+                }
+                RefTargetCandidate::Persistent { module, name } => {
+                    let key = self.fresh_tmp();
+                    let prelude = format!(
+                        "let {key} = __bop_resolve_binding_key(ctx, {}, {}).ok_or_else(|| ::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({}), {line}))?; ",
+                        rust_string_literal(module),
+                        rust_string_literal(name),
+                        rust_string_literal(exposed_name),
+                    );
+                    return (
+                        prelude,
+                        format!("__bop_binding_key_value(ctx, &{key}).clone()"),
+                        format!("__bop_binding_key_mut(ctx, &{key})"),
+                    );
+                }
+            }
+        }
+
+        let selector = self.fresh_tmp();
+        let key = self.fresh_tmp();
+        let mut selection = String::new();
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let prefix = if index == 0 { "if" } else { "else if" };
+            match candidate {
+                RefTargetCandidate::DirectLocal(ident) => {
+                    write!(
+                        selection,
+                        "{prefix} true {{ ({index}usize, ::std::option::Option::None) }} "
+                    )
+                    .unwrap();
+                    reads.push(format!("{index} => {ident}.clone()"));
+                    writes.push(format!("{index} => &mut {ident}"));
+                }
+                RefTargetCandidate::OptionalLocal(value) => {
+                    write!(
+                        selection,
+                        "{prefix} {value}.is_some() {{ ({index}usize, ::std::option::Option::None) }} "
+                    )
+                    .unwrap();
+                    reads.push(format!(
+                        "{index} => {value}.as_ref().expect(\"pre-resolved optional ref binding\").clone()"
+                    ));
+                    writes.push(format!(
+                        "{index} => {value}.as_mut().expect(\"pre-resolved optional ref binding\")"
+                    ));
+                }
+                RefTargetCandidate::Persistent { module, name } => {
+                    let candidate_key = self.fresh_tmp();
+                    write!(
+                        selection,
+                        "{prefix} let ::std::option::Option::Some({candidate_key}) = __bop_resolve_binding_key(ctx, {}, {}) {{ ({index}usize, ::std::option::Option::Some({candidate_key})) }} ",
+                        rust_string_literal(module),
+                        rust_string_literal(name),
+                    )
+                    .unwrap();
+                    reads.push(format!(
+                        "{index} => __bop_binding_key_value(ctx, {key}.as_ref().expect(\"persistent ref key\")).clone()"
+                    ));
+                    writes.push(format!(
+                        "{index} => __bop_binding_key_mut(ctx, {key}.as_ref().expect(\"persistent ref key\"))"
+                    ));
+                }
+            }
+        }
+        write!(
+            selection,
+            "else {{ return Err(::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({}), {line})); }}",
+            rust_string_literal(exposed_name),
+        )
+        .unwrap();
+        let prelude = format!("let ({selector}, {key}) = {selection}; ");
+        (
+            prelude,
+            format!(
+                "match {selector} {{ {}, _ => unreachable!(\"pre-resolved ref selector\") }}",
+                reads.join(", "),
+            ),
+            format!(
+                "match {selector} {{ {}, _ => unreachable!(\"pre-resolved ref selector\") }}",
+                writes.join(", "),
+            ),
+        )
     }
 
     fn is_dynamic_namespace_local(&self, name: &str) -> bool {
@@ -2226,12 +2480,7 @@ impl Emitter {
         })
     }
 
-    fn declaration_alias_assign_src(
-        &self,
-        name: &str,
-        value: &str,
-        line: u32,
-    ) -> Option<String> {
+    fn declaration_alias_assign_src(&self, name: &str, value: &str, line: u32) -> Option<String> {
         if self.opts.sandbox {
             return None;
         }
@@ -2356,7 +2605,7 @@ impl Emitter {
     fn register_function_site(
         &mut self,
         name: &str,
-        params: &[String],
+        params: &[Parameter],
         visibility: Visibility,
         line: u32,
         abi_eligible: bool,
@@ -2462,10 +2711,7 @@ impl Emitter {
         }
     }
 
-    fn seed_module_alias_candidates(
-        &mut self,
-        candidates: &BTreeMap<String, ModuleValueExport>,
-    ) {
+    fn seed_module_alias_candidates(&mut self, candidates: &BTreeMap<String, ModuleValueExport>) {
         if let Some(frame) = self.module_aliases.last_mut() {
             frame.clear();
         }
@@ -2474,18 +2720,14 @@ impl Emitter {
         }
     }
 
-    fn declaration_aliases_for_callable(
-        &self,
-        params: &[String],
-        body: &[Stmt],
-    ) -> Vec<String> {
+    fn declaration_aliases_for_callable(&self, params: &[Parameter], body: &[Stmt]) -> Vec<String> {
         let mut outer = EmissionScope::default();
         for import in &self.declaration_aliases {
             if let Some(alias) = &import.alias {
                 outer.locals.insert(alias.clone());
             }
         }
-        let mut known: HashSet<String> = params.iter().cloned().collect();
+        let mut known: HashSet<String> = params.iter().map(|param| param.name.clone()).collect();
         let mut referenced = FreeVarDependencies::for_declaration_aliases();
         scan_free_vars_stmts(
             body,
@@ -2617,6 +2859,7 @@ impl Emitter {
         // dense slots; lifting itself does not make a method visible.
         self.emit_method_sites()?;
         self.emit_method_dispatcher();
+        self.emit_method_ref_dispatcher();
         self.emit_run_program(stmts)?;
         if self.opts.sandbox {
             self.emit_function_site_dispatcher();
@@ -2652,11 +2895,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_one_module(
-        &mut self,
-        name: &str,
-        entry: &ModuleEntry,
-    ) -> Result<(), BopError> {
+    fn emit_one_module(&mut self, name: &str, entry: &ModuleEntry) -> Result<(), BopError> {
         // Swap in this module's scope: prefix every user fn we
         // emit with the module slug, and replace `fn_info` with
         // the module's own fns so `is_local` / Ident / Call
@@ -2664,16 +2903,9 @@ impl Emitter {
         // `current_module` also switches to the module's
         // source-level path so types declared in this module's
         // body tag their values correctly.
-        let saved_prefix = std::mem::replace(
-            &mut self.module_prefix,
-            module_fn_prefix(name),
-        );
-        let saved_fn_info =
-            std::mem::replace(&mut self.fn_info, collect_fn_info(&entry.ast));
-        let saved_module = std::mem::replace(
-            &mut self.current_module,
-            name.to_string(),
-        );
+        let saved_prefix = std::mem::replace(&mut self.module_prefix, module_fn_prefix(name));
+        let saved_fn_info = std::mem::replace(&mut self.fn_info, collect_fn_info(&entry.ast));
+        let saved_module = std::mem::replace(&mut self.current_module, name.to_string());
         // Fresh type_bindings frame for this module's body —
         // bare names declared here shouldn't leak back to the
         // caller / other modules. Seeded with the builtins the
@@ -2688,12 +2920,8 @@ impl Emitter {
             String::from("RuntimeError"),
             String::from(bop::value::BUILTIN_MODULE_PATH),
         );
-        let saved_bindings =
-            std::mem::replace(&mut self.type_bindings, vec![module_frame]);
-        let saved_aliases = std::mem::replace(
-            &mut self.module_aliases,
-            vec![HashMap::new()],
-        );
+        let saved_bindings = std::mem::replace(&mut self.type_bindings, vec![module_frame]);
+        let saved_aliases = std::mem::replace(&mut self.module_aliases, vec![HashMap::new()]);
         let saved_declaration_aliases = std::mem::replace(
             &mut self.declaration_aliases,
             module_imports_from_exports(&entry.module_alias_candidates),
@@ -2791,16 +3019,8 @@ impl Emitter {
         if items.is_none() && alias.is_none() && already_imported_here {
             return Ok(());
         }
-        let entry = self
-            .modules
-            .modules
-            .get(path)
-            .cloned()
-            .ok_or_else(|| {
-                BopError::runtime(
-                    format!("Module `{}` not found (bop-compile)", path),
-                    line,
-                )
+        let entry = self.modules.modules.get(path).cloned().ok_or_else(|| {
+            BopError::runtime(format!("Module `{}` not found (bop-compile)", path), line)
             })?;
 
         // Load once, regardless of form — the exports struct is
@@ -2975,9 +3195,7 @@ impl Emitter {
                         // won, the runtime rejects this flat import; mirror the
                         // same source-ordered decision in static storage
                         // resolution so later calls reach the named function.
-                        if !self.opts.sandbox
-                            && self.function_claimed_in_current_scope(name)
-                        {
+                        if !self.opts.sandbox && self.function_claimed_in_current_scope(name) {
                             // The claim statically guarantees the shadow, so
                             // the glob warning is unconditional — mirroring
                             // the walker/VM, which warn before skipping the
@@ -3162,11 +3380,7 @@ impl Emitter {
     /// the `Loading` sentinel, emits the module body (imports +
     /// user statements), then packs every effective export into
     /// the module's exports struct and caches the result.
-    fn emit_module_load_fn(
-        &mut self,
-        name: &str,
-        entry: &ModuleEntry,
-    ) -> Result<(), BopError> {
+    fn emit_module_load_fn(&mut self, name: &str, entry: &ModuleEntry) -> Result<(), BopError> {
         let has_type_sites = self.types.module_has_type_sites(name);
         let method_slots = self.types.module_method_slots(name);
         let load = module_load_fn_name(name);
@@ -3325,12 +3539,7 @@ impl Emitter {
         // a `Value::Fn`.
         writeln!(self.out).unwrap();
         self.pad();
-        writeln!(
-            self.out,
-            "let __exports = {exports} {{",
-            exports = exports
-        )
-        .unwrap();
+        writeln!(self.out, "let __exports = {exports} {{", exports = exports).unwrap();
         for export in &entry.effective_exports {
             self.pad();
             if self.opts.sandbox {
@@ -3407,7 +3616,9 @@ impl Emitter {
                 "ctx.module_imported_function_sites.retain(|(module, _), _| module != {});",
                 rust_string_literal(name),
             ));
-            self.line("ctx.module_imported_function_sites.extend(__saved_imported_function_sites);");
+            self.line(
+                "ctx.module_imported_function_sites.extend(__saved_imported_function_sites);",
+            );
         }
         self.line(&format!(
             "ctx.bindings.remove({});",
@@ -3472,7 +3683,10 @@ impl Emitter {
             return self.emit_registered_function_bodies(stmts);
         }
         for stmt in stmts {
-            if let StmtKind::FnDecl { name, params, body, .. } = &stmt.kind {
+            if let StmtKind::FnDecl {
+                name, params, body, ..
+            } = &stmt.kind
+            {
                 self.emit_fn_decl(name, params, body, stmt.line)?;
             }
         }
@@ -3489,9 +3703,14 @@ impl Emitter {
                     self.register_named_function_sites_in_target(target);
                     self.register_named_function_sites_in_expr(value);
                 }
-                StmtKind::FnDecl { name, params, body, visibility } => {
-                    let abi_eligible = direct
-                        && self.current_module == bop::value::ROOT_MODULE_PATH;
+                StmtKind::FnDecl {
+                    name,
+                    params,
+                    body,
+                    visibility,
+                } => {
+                    let abi_eligible =
+                        direct && self.current_module == bop::value::ROOT_MODULE_PATH;
                     let site = self.register_function_site(
                         name,
                         params,
@@ -3509,7 +3728,12 @@ impl Emitter {
                     }
                     self.register_named_function_sites(body, false);
                 }
-                StmtKind::If { condition, body, else_ifs, else_body } => {
+                StmtKind::If {
+                    condition,
+                    body,
+                    else_ifs,
+                    else_body,
+                } => {
                     self.register_named_function_sites_in_expr(condition);
                     self.register_named_function_sites(body, false);
                     for (condition, body) in else_ifs {
@@ -3536,8 +3760,7 @@ impl Emitter {
                 // are registered from that stable slice immediately before
                 // method emission so duplicate occurrences keep their IDs.
                 StmtKind::MethodDecl { .. } => {}
-                StmtKind::Return { value: Some(value) }
-                | StmtKind::ExprStmt(value) => {
+                StmtKind::Return { value: Some(value) } | StmtKind::ExprStmt(value) => {
                     self.register_named_function_sites_in_expr(value);
                 }
                 _ => {}
@@ -3568,7 +3791,10 @@ impl Emitter {
             | ExprKind::None
             | ExprKind::Ident(_) => {}
             ExprKind::BinaryOp { left, right, .. }
-            | ExprKind::Index { object: left, index: right } => {
+            | ExprKind::Index {
+                object: left,
+                index: right,
+            } => {
                 self.register_named_function_sites_in_expr(left);
                 self.register_named_function_sites_in_expr(right);
             }
@@ -3617,7 +3843,11 @@ impl Emitter {
                     self.register_named_function_sites_in_expr(value);
                 }
             }
-            ExprKind::IfExpr { condition, then_expr, else_expr } => {
+            ExprKind::IfExpr {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
                 self.register_named_function_sites_in_expr(condition);
                 self.register_named_function_sites_in_expr(then_expr);
                 self.register_named_function_sites_in_expr(else_expr);
@@ -3647,7 +3877,9 @@ impl Emitter {
                     self.emit_registered_function_bodies_in_target(target)?;
                     self.emit_registered_function_bodies_in_expr(value)?;
                 }
-                StmtKind::FnDecl { name, params, body, .. } => {
+                StmtKind::FnDecl {
+                    name, params, body, ..
+                } => {
                     let site = self.function_site_for_stmt(stmt);
                     self.emit_fn_decl_as_site(
                         &function_site_fn_name(site),
@@ -3658,7 +3890,12 @@ impl Emitter {
                     )?;
                     self.emit_registered_function_bodies(body)?;
                 }
-                StmtKind::If { condition, body, else_ifs, else_body } => {
+                StmtKind::If {
+                    condition,
+                    body,
+                    else_ifs,
+                    else_body,
+                } => {
                     self.emit_registered_function_bodies_in_expr(condition)?;
                     self.emit_registered_function_bodies(body)?;
                     for (condition, body) in else_ifs {
@@ -3682,8 +3919,7 @@ impl Emitter {
                     self.emit_registered_function_bodies(body)?;
                 }
                 StmtKind::MethodDecl { .. } => {}
-                StmtKind::Return { value: Some(value) }
-                | StmtKind::ExprStmt(value) => {
+                StmtKind::Return { value: Some(value) } | StmtKind::ExprStmt(value) => {
                     self.emit_registered_function_bodies_in_expr(value)?;
                 }
                 _ => {}
@@ -3709,10 +3945,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_registered_function_bodies_in_expr(
-        &mut self,
-        expr: &Expr,
-    ) -> Result<(), BopError> {
+    fn emit_registered_function_bodies_in_expr(&mut self, expr: &Expr) -> Result<(), BopError> {
         match &expr.kind {
             ExprKind::Int(_)
             | ExprKind::Number(_)
@@ -3722,7 +3955,10 @@ impl Emitter {
             | ExprKind::None
             | ExprKind::Ident(_) => {}
             ExprKind::BinaryOp { left, right, .. }
-            | ExprKind::Index { object: left, index: right } => {
+            | ExprKind::Index {
+                object: left,
+                index: right,
+            } => {
                 self.emit_registered_function_bodies_in_expr(left)?;
                 self.emit_registered_function_bodies_in_expr(right)?;
             }
@@ -3771,7 +4007,11 @@ impl Emitter {
                     self.emit_registered_function_bodies_in_expr(value)?;
                 }
             }
-            ExprKind::IfExpr { condition, then_expr, else_expr } => {
+            ExprKind::IfExpr {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
                 self.emit_registered_function_bodies_in_expr(condition)?;
                 self.emit_registered_function_bodies_in_expr(then_expr)?;
                 self.emit_registered_function_bodies_in_expr(else_expr)?;
@@ -3811,7 +4051,15 @@ impl Emitter {
             let arity = params.len();
             let params_list = params
                 .iter()
-                .map(|p| format!("\"{}\".to_string()", p))
+                .map(|p| format!("\"{}\".to_string()", p.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let modes_list = params
+                .iter()
+                .map(|p| match p.mode {
+                    ParamMode::Value => "::bop::parser::ParamMode::Value",
+                    ParamMode::Ref => "::bop::parser::ParamMode::Ref",
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
 
@@ -3846,7 +4094,7 @@ impl Emitter {
             .unwrap();
             writeln!(
                 self.out,
-                "    let callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{"
+                "    let callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<__BopCallOutcome, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{"
             )
             .unwrap();
             writeln!(
@@ -3859,32 +4107,43 @@ impl Emitter {
             .unwrap();
             // Move args into positional locals in declaration order.
             for i in 0..arity {
-                writeln!(
-                    self.out,
-                    "        let __a{i} = args.remove(0);",
-                    i = i
-                )
-                .unwrap();
+                writeln!(self.out, "        let mut __a{i} = args.remove(0);", i = i).unwrap();
             }
             let call_args = (0..arity)
-                .map(|i| format!("__a{}", i))
+                .map(|i| {
+                    if params[i].mode == ParamMode::Ref {
+                        format!("&mut __a{i}")
+                    } else {
+                        format!("__a{i}.clone()")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let final_args = (0..arity)
+                .map(|i| format!("__a{i}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             if arity == 0 {
-                writeln!(self.out, "        {}(ctx)", rust_fn).unwrap();
+                writeln!(
+                    self.out,
+                    "        let value = {}(ctx)?;\n        Ok(__BopCallOutcome {{ value, args: ::std::vec::Vec::new() }})",
+                    rust_fn
+                )
+                .unwrap();
             } else {
                 writeln!(
                     self.out,
-                    "        {}(ctx, {})",
-                    rust_fn, call_args
+                    "        let value = {}(ctx, {})?;\n        Ok(__BopCallOutcome {{ value, args: vec![{}] }})",
+                    rust_fn, call_args, final_args
                 )
                 .unwrap();
             }
             writeln!(self.out, "    }});").unwrap();
             writeln!(
                 self.out,
-                "    __bop_wrap_callable(vec![{params}], ::std::vec::Vec::new(), Some(\"{name}\".to_string()), 0u16, line, callable)",
+                "    __bop_wrap_callable(vec![{params}], vec![{modes}], ::std::vec::Vec::new(), Some(\"{name}\".to_string()), 0u16, line, callable)",
                 params = params_list,
+                modes = modes_list,
                 name = name
             )
             .unwrap();
@@ -3896,10 +4155,8 @@ impl Emitter {
         let sites = self.types.method_sites.clone();
         for site in &sites {
             let method_fn_name = method_site_fn_name(site.id);
-            let saved_prefix = std::mem::replace(
-                &mut self.module_prefix,
-                site.module_prefix.clone(),
-            );
+            let saved_prefix =
+                std::mem::replace(&mut self.module_prefix, site.module_prefix.clone());
             let saved_module_context = if site.module_path == bop::value::ROOT_MODULE_PATH {
                 None
             } else {
@@ -3910,10 +4167,8 @@ impl Emitter {
                     .expect("method's declaring module must be in the module graph")
                     .clone();
                 let module_ast = module_entry.ast.clone();
-                let saved_module = std::mem::replace(
-                    &mut self.current_module,
-                    site.module_path.clone(),
-                );
+                let saved_module =
+                    std::mem::replace(&mut self.current_module, site.module_path.clone());
                 let mut builtin_types = HashMap::new();
                 for name in ["Result", "RuntimeError", "Iter"] {
                     builtin_types.insert(
@@ -3921,14 +4176,10 @@ impl Emitter {
                         bop::value::BUILTIN_MODULE_PATH.to_string(),
                     );
                 }
-                let saved_type_bindings = std::mem::replace(
-                    &mut self.type_bindings,
-                    vec![builtin_types],
-                );
-                let saved_module_aliases = std::mem::replace(
-                    &mut self.module_aliases,
-                    vec![HashMap::new()],
-                );
+                let saved_type_bindings =
+                    std::mem::replace(&mut self.type_bindings, vec![builtin_types]);
+                let saved_module_aliases =
+                    std::mem::replace(&mut self.module_aliases, vec![HashMap::new()]);
                 let saved_declaration_aliases = std::mem::replace(
                     &mut self.declaration_aliases,
                     module_imports_from_exports(&module_entry.module_alias_candidates),
@@ -3962,10 +4213,7 @@ impl Emitter {
             method_fn_info
                 .top_level_fns
                 .extend(module_fn_info.top_level_fns);
-            let saved_fn_info = std::mem::replace(
-                &mut self.fn_info,
-                method_fn_info,
-            );
+            let saved_fn_info = std::mem::replace(&mut self.fn_info, method_fn_info);
             let saved_non_capturing_method = self.in_non_capturing_method;
             self.in_non_capturing_method = true;
             if self.opts.sandbox {
@@ -4013,10 +4261,76 @@ impl Emitter {
         if arity == 0 {
             writeln!(self.out, "    {body}(ctx)").unwrap();
         } else {
-            let args = (0..arity - 1)
-                .map(|index| format!(", args[{index}].clone()"))
+            for index in 0..arity.saturating_sub(1) {
+                writeln!(self.out, "    let mut __a{index} = args[{index}].clone();").unwrap();
+            }
+            let args = site
+                .params
+                .iter()
+                .skip(1)
+                .enumerate()
+                .map(|(index, param)| {
+                    if param.mode == ParamMode::Ref {
+                        format!(", &mut __a{index}")
+                    } else {
+                        format!(", __a{index}")
+                    }
+                })
                 .collect::<String>();
             writeln!(self.out, "    {body}(ctx, obj.clone(){args})").unwrap();
+        }
+        self.out.push_str("}\n\n");
+
+        let outcome_adapter = method_site_outcome_adapter_name(site.id);
+        writeln!(
+            self.out,
+            "fn {outcome_adapter}(ctx: &mut Ctx<'_>, obj: ::bop::value::Value, mut args: ::std::vec::Vec<::bop::value::Value>, line: u32) -> Result<__BopCallOutcome, ::bop::error::BopError> {{"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "    if args.len() + 1 != {arity} {{ return Err(::bop::error::BopError::runtime(format!({message}, args.len() + 1), line)); }}",
+            message = rust_string_literal(&format!(
+                "`{}.{}` expects {} argument{} (including `self`), but got {{}}",
+                site.type_name,
+                site.method_name,
+                arity,
+                if arity == 1 { "" } else { "s" },
+            )),
+        )
+        .unwrap();
+        for index in 0..arity.saturating_sub(1) {
+            writeln!(self.out, "    let mut __a{index} = args.remove(0);").unwrap();
+        }
+        let call_args = site
+            .params
+            .iter()
+            .skip(1)
+            .enumerate()
+            .map(|(index, param)| {
+                if param.mode == ParamMode::Ref {
+                    format!(", &mut __a{index}")
+                } else {
+                    format!(", __a{index}.clone()")
+                }
+            })
+            .collect::<String>();
+        let final_args = (0..arity.saturating_sub(1))
+            .map(|index| format!("__a{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if arity == 0 {
+            writeln!(
+                self.out,
+                "    let value = {body}(ctx)?;\n    Ok(__BopCallOutcome {{ value, args: ::std::vec::Vec::new() }})"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                self.out,
+                "    let value = {body}(ctx, obj{call_args})?;\n    Ok(__BopCallOutcome {{ value, args: vec![{final_args}] }})"
+            )
+            .unwrap();
         }
         self.out.push_str("}\n\n");
     }
@@ -4026,14 +4340,14 @@ impl Emitter {
     /// The method-call emitter calls this first; on `None` it
     /// falls back to built-in method dispatch.
     fn emit_method_dispatcher(&mut self) {
-        self.out.push_str(
-            "\nfn __bop_try_user_method(\n",
-        );
+        self.out.push_str("\nfn __bop_try_user_method(\n");
         self.out.push_str(
             "    ctx: &mut Ctx<'_>,\n    obj: &::bop::value::Value,\n    method: &str,\n    args: &[::bop::value::Value],\n    line: u32,\n) -> Result<::std::option::Option<::bop::value::Value>, ::bop::error::BopError> {\n",
         );
         if self.types.method_slots.is_empty() {
-            self.out.push_str("    let _ = (ctx, obj, method, args, line);\n    Ok(None)\n}\n\n");
+            self.out.push_str(
+                "    let _ = (ctx, obj, method, args, line);\n    Ok(None)\n}\n\nfn __bop_call_preflighted_user_method(ctx: &mut Ctx<'_>, adapter: __BopMethodFn, obj: &::bop::value::Value, args: &[::bop::value::Value], line: u32) -> Result<::bop::value::Value, ::bop::error::BopError> { adapter(ctx, obj, args, line) }\n\n",
+            );
             return;
         }
         if self.opts.sandbox {
@@ -4041,7 +4355,8 @@ impl Emitter {
                 "    fn invoke(\n        ctx: &mut Ctx<'_>,\n        adapter: __BopMethodFn,\n        obj: &::bop::value::Value,\n        args: &[::bop::value::Value],\n        line: u32,\n    ) -> Result<::bop::value::Value, ::bop::error::BopError> {\n        __bop_enter_aot_call(ctx, line)?;\n        let result = adapter(ctx, obj, args, line);\n        __bop_leave_aot_call(ctx);\n        result\n    }\n",
             );
         }
-        self.out.push_str("    let type_key: ::std::option::Option<(&str, &str)> = match obj {\n");
+        self.out
+            .push_str("    let type_key: ::std::option::Option<(&str, &str)> = match obj {\n");
         self.out.push_str(
             "        ::bop::value::Value::Struct(s) => Some((s.module_path(), s.type_name())),\n",
         );
@@ -4052,7 +4367,8 @@ impl Emitter {
         self.out.push_str(
             "    let (type_mp, type_name) = match type_key { Some(k) => k, None => return Ok(None) };\n",
         );
-        self.out.push_str("    match (type_mp, type_name, method) {\n");
+        self.out
+            .push_str("    match (type_mp, type_name, method) {\n");
 
         for (slot, (module_path, type_name, method_name)) in
             self.types.method_slots.iter().enumerate()
@@ -4073,6 +4389,102 @@ impl Emitter {
         }
 
         self.out.push_str("        _ => Ok(None),\n    }\n}\n\n");
+        if self.opts.sandbox {
+            self.out.push_str(
+                "fn __bop_call_preflighted_user_method(ctx: &mut Ctx<'_>, adapter: __BopMethodFn, obj: &::bop::value::Value, args: &[::bop::value::Value], line: u32) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_enter_aot_call(ctx, line)?; let result = adapter(ctx, obj, args, line); __bop_leave_aot_call(ctx); result }\n\n",
+            );
+        } else {
+            self.out.push_str(
+                "fn __bop_call_preflighted_user_method(ctx: &mut Ctx<'_>, adapter: __BopMethodFn, obj: &::bop::value::Value, args: &[::bop::value::Value], line: u32) -> Result<::bop::value::Value, ::bop::error::BopError> { adapter(ctx, obj, args, line) }\n\n",
+            );
+        }
+    }
+
+    fn emit_method_ref_dispatcher(&mut self) {
+        self.out.push_str(
+            "fn __bop_user_method_type_key(obj: &::bop::value::Value) -> ::std::option::Option<(&str, &str)> {\n    match obj {\n        ::bop::value::Value::Struct(value) => Some((value.module_path(), value.type_name())),\n        ::bop::value::Value::EnumVariant(value) => Some((value.module_path(), value.type_name())),\n        _ => None,\n    }\n}\n\n",
+        );
+        self.out.push_str(
+            "fn __bop_preflight_user_method(\n    ctx: &Ctx<'_>,\n    obj: &::bop::value::Value,\n    method: &str,\n    actual_modes: &[::bop::parser::ParamMode],\n    line: u32,\n) -> Result<::std::option::Option<__BopMethodFn>, ::bop::error::BopError> {\n    let Some((module_path, type_name)) = __bop_user_method_type_key(obj) else { return Ok(None); };\n    match (module_path, type_name, method) {\n",
+        );
+        for (slot, (module_path, type_name, method_name)) in
+            self.types.method_slots.iter().enumerate()
+        {
+            let sites = self
+                .types
+                .method_sites
+                .iter()
+                .filter(|site| {
+                    site.module_path == *module_path
+                        && site.type_name == *type_name
+                        && site.method_name == *method_name
+                })
+                .collect::<Vec<_>>();
+            writeln!(
+                self.out,
+                "        ({module}, {ty}, {method}) => match ctx.method_slots[{slot}] {{",
+                module = rust_string_literal(module_path),
+                ty = rust_string_literal(type_name),
+                method = rust_string_literal(method_name),
+            )
+            .unwrap();
+            for site in sites {
+                let modes = site
+                    .params
+                    .iter()
+                    .skip(1)
+                    .map(|param| match param.mode {
+                        ParamMode::Value => "::bop::parser::ParamMode::Value",
+                        ParamMode::Ref => "::bop::parser::ParamMode::Ref",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(
+                    self.out,
+                    "            Some(adapter) if adapter as usize == {adapter} as *const () as usize => {{ if actual_modes.len() + 1 != {arity}usize {{ return Err(::bop::error::BopError::runtime(format!({arity_message}, actual_modes.len() + 1), line)); }} ::bop::validate_call_modes({label}, &[{modes}], actual_modes, line)?; Ok(Some(adapter)) }},",
+                    adapter = method_site_adapter_name(site.id),
+                    label = rust_string_literal(&format!("{type_name}.{method_name}")),
+                    arity = site.params.len(),
+                    arity_message = rust_string_literal(&format!(
+                        "`{}.{}` expects {} argument{} (including `self`), but got {{}}",
+                        type_name,
+                        method_name,
+                        site.params.len(),
+                        if site.params.len() == 1 { "" } else { "s" },
+                    )),
+                )
+                .unwrap();
+            }
+            self.out
+                .push_str("            _ => Ok(None),\n        },\n");
+        }
+        self.out.push_str("        _ => Ok(None),\n    }\n}\n\n");
+
+        self.out.push_str(
+            "fn __bop_call_preflighted_user_method_outcome(\n    ctx: &mut Ctx<'_>,\n    adapter: __BopMethodFn,\n    obj: ::bop::value::Value,\n    args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<__BopCallOutcome, ::bop::error::BopError> {\n    match adapter as usize {\n",
+        );
+        for site in &self.types.method_sites {
+            let invoke = if self.opts.sandbox {
+                format!(
+                    "{{ __bop_enter_aot_call(ctx, line)?; let result = {}(ctx, obj, args, line); __bop_leave_aot_call(ctx); result }}",
+                    method_site_outcome_adapter_name(site.id)
+                )
+            } else {
+                format!(
+                    "{}(ctx, obj, args, line)",
+                    method_site_outcome_adapter_name(site.id)
+                )
+            };
+            writeln!(
+                self.out,
+                "        value if value == {adapter} as *const () as usize => {invoke},",
+                adapter = method_site_adapter_name(site.id),
+            )
+            .unwrap();
+        }
+        self.out.push_str(
+            "        _ => unreachable!(\"preflighted user-method adapter has an outcome adapter\"),\n    }\n}\n\n",
+        );
     }
 
     // ─── Preamble / footer ────────────────────────────────────────
@@ -4095,10 +4507,10 @@ impl Emitter {
         } else {
             CTX_BASE
         };
+        self.out.push_str("type __BopMethodFn = for<'a> fn(&mut Ctx<'a>, &::bop::value::Value, &[::bop::value::Value], u32) -> Result<::bop::value::Value, ::bop::error::BopError>;\n\n");
         let method_field = if self.types.method_slots.is_empty() {
             String::new()
         } else {
-            self.out.push_str("type __BopMethodFn = for<'a> fn(&mut Ctx<'a>, &::bop::value::Value, &[::bop::value::Value], u32) -> Result<::bop::value::Value, ::bop::error::BopError>;\n\n");
             let visibility = if self.opts.sandbox { "" } else { "pub " };
             format!(
                 "    {visibility}method_slots: [::std::option::Option<__BopMethodFn>; {}],\n",
@@ -4119,11 +4531,11 @@ impl Emitter {
         dyn for<'__a> Fn(
             &mut Ctx<'__a>,
             ::std::vec::Vec<::bop::value::Value>,
-        ) -> Result<::bop::value::Value, ::bop::error::BopError>,
+        ) -> Result<__BopCallOutcome, ::bop::error::BopError>,
     >,
     args: ::std::vec::Vec<::bop::value::Value>,
     line: u32,
-) -> Result<::bop::value::Value, ::bop::error::BopError> {
+) -> Result<__BopCallOutcome, ::bop::error::BopError> {
     __bop_enter_aot_call(ctx, line)?;
     let result = callable(ctx, args);
     __bop_leave_aot_call(ctx);
@@ -4142,9 +4554,9 @@ impl Emitter {
             .replace(
                 "/*__BOP_WRAP_CONSTRUCTOR__*/",
                 if self.opts.sandbox {
-                    "::bop::value::BopFn::try_new_compiled_in_module_with_origin(\n        params,\n        captures,\n        body,\n        self_name,\n        ::std::option::Option::None,\n        ctx.function_origin.clone(),\n        opaque_body_depth,\n        line,\n    ).map(::bop::value::Value::Fn)"
+                    "::bop::value::BopFn::try_new_compiled_in_module_with_origin_and_modes(\n        params,\n        param_modes,\n        captures,\n        body,\n        self_name,\n        ::std::option::Option::None,\n        ctx.function_origin.clone(),\n        opaque_body_depth,\n        line,\n    ).map(::bop::value::Value::Fn)"
                 } else {
-                    "::bop::value::Value::try_new_compiled_fn(\n        params,\n        captures,\n        body,\n        self_name,\n        opaque_body_depth,\n        line,\n    )"
+                    "::bop::value::BopFn::try_new_compiled_in_module_with_origin_and_modes(\n        params,\n        param_modes,\n        captures,\n        body,\n        self_name,\n        ::std::option::Option::None,\n        ::bop::value::BopFnOrigin::__instance(\"aot\"),\n        opaque_body_depth,\n        line,\n    ).map(::bop::value::Value::Fn)"
                 },
             )
             .replace(
@@ -4153,6 +4565,14 @@ impl Emitter {
                     "                __bop_validate_aot_function(ctx, f, line)?;\n"
                 } else {
                     ""
+                },
+            )
+            .replace(
+                "/*__BOP_PREFLIGHT_AOT_ORIGIN__*/",
+                if self.opts.sandbox {
+                    "    __bop_validate_aot_function(ctx, function, line)?;\n"
+                } else {
+                    "    let _ = ctx;\n"
                 },
             )
             .replace(
@@ -4214,7 +4634,7 @@ impl Emitter {
             .replace(
                 "/*__BOP_TRY_ATTEMPT_START__*/",
                 if self.opts.sandbox {
-                    "    let attempted = (|| -> Result<\n        ::bop::value::Value,\n        ::bop::error::BopError,\n    > {\n"
+                    "    let attempted = (|| -> Result<\n        __BopCallOutcome,\n        ::bop::error::BopError,\n    > {\n"
                 } else {
                     ""
                 },
@@ -4252,12 +4672,21 @@ impl Emitter {
             let params = site
                 .params
                 .iter()
-                .map(|param| rust_string_literal(param))
+                .map(|param| rust_string_literal(&param.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let param_modes = site
+                .params
+                .iter()
+                .map(|param| match param.mode {
+                    ParamMode::Value => "::bop::parser::ParamMode::Value",
+                    ParamMode::Ref => "::bop::parser::ParamMode::Ref",
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             writeln!(
                 self.out,
-                "    __BopFunctionSite {{ id: {id}, module_path: {module}, name: {name}, params: &[{params}], is_public: {is_public}, abi_eligible: {abi_eligible}, line: {line} }},",
+                "    __BopFunctionSite {{ id: {id}, module_path: {module}, name: {name}, params: &[{params}], param_modes: &[{param_modes}], is_public: {is_public}, abi_eligible: {abi_eligible}, line: {line} }},",
                 id = site.id,
                 module = rust_string_literal(&site.module_path),
                 name = rust_string_literal(&site.name),
@@ -4444,17 +4873,19 @@ fn __bop_function_site_value(
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
     let site = &__BOP_FUNCTION_SITES[site_id];
     let params = site.params.iter().map(|param| (*param).to_string()).collect();
+    let param_modes = site.param_modes.to_vec();
     let callable: ::std::rc::Rc<
         dyn for<'__a> Fn(
             &mut Ctx<'__a>,
             ::std::vec::Vec<::bop::value::Value>,
-        ) -> Result<::bop::value::Value, ::bop::error::BopError>,
+        ) -> Result<__BopCallOutcome, ::bop::error::BopError>,
     > = ::std::rc::Rc::new(move |ctx, args| {
         __bop_call_function_site_inner(ctx, site_id, args, 0)
     });
     __bop_wrap_callable(
         ctx,
         params,
+        param_modes,
         ::std::vec::Vec::new(),
         Some(site.name.to_string()),
         0u16,
@@ -4480,11 +4911,16 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
 "#,
         );
         for site in &self.functions.sites {
-            let params = (0..site.params.len())
-                .map(|index| {
-                    format!(
-                        "__bop_param_{index}: ::bop::value::Value"
-                    )
+            let params = site
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, param)| {
+                    if param.mode == ParamMode::Ref {
+                        format!("__bop_param_{index}: &mut ::bop::value::Value")
+                    } else {
+                        format!("__bop_param_{index}: ::bop::value::Value")
+                    }
                 })
                 .collect::<Vec<_>>();
             let signature_args = if params.is_empty() {
@@ -4492,8 +4928,11 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             } else {
                 format!(", {}", params.join(", "))
             };
-            let call_args = (0..site.params.len())
-                .map(|index| format!(", __bop_param_{index}"))
+            let call_args = site
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, _)| format!(", __bop_param_{index}"))
                 .collect::<String>();
             writeln!(
                 self.out,
@@ -4504,21 +4943,40 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             .unwrap();
         }
         self.out.push_str(
-            "fn __bop_call_function_site_inner(\n    ctx: &mut Ctx<'_>,\n    site_id: usize,\n    mut args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<::bop::value::Value, ::bop::error::BopError> {\n",
+            "fn __bop_call_function_site_inner(\n    ctx: &mut Ctx<'_>,\n    site_id: usize,\n    mut args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<__BopCallOutcome, ::bop::error::BopError> {\n",
         );
-        self.out.push_str("    let site = &__BOP_FUNCTION_SITES[site_id];\n");
-        self.out.push_str("    if args.len() != site.params.len() {\n");
+        self.out
+            .push_str("    let site = &__BOP_FUNCTION_SITES[site_id];\n");
+        self.out
+            .push_str("    if args.len() != site.params.len() {\n");
         self.out.push_str("        return Err(::bop::error::BopError::runtime(format!(\"`{}` expects {} argument{}, but got {}\", site.name, site.params.len(), if site.params.len() == 1 { \"\" } else { \"s\" }, args.len()), line));\n");
         self.out.push_str("    }\n    match site_id {\n");
         for site in &self.functions.sites {
-            let args = (0..site.params.len())
-                .map(|_| "args.remove(0)")
+            let binds = (0..site.params.len())
+                .map(|index| format!("let mut __a{index} = args.remove(0);"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let call_args = site
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, param)| {
+                    if param.mode == ParamMode::Ref {
+                        format!("&mut __a{index}")
+                    } else {
+                        format!("__a{index}.clone()")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
-            if args.is_empty() {
+            let final_args = (0..site.params.len())
+                .map(|index| format!("__a{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if call_args.is_empty() {
                 writeln!(
                     self.out,
-                    "        {} => {}(ctx),",
+                    "        {} => {{ let value = {}(ctx)?; Ok(__BopCallOutcome {{ value, args: ::std::vec::Vec::new() }}) }},",
                     site.id,
                     function_site_fn_name(site.id),
                 )
@@ -4526,16 +4984,16 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             } else {
                 writeln!(
                     self.out,
-                    "        {} => {}(ctx, {}),",
+                    "        {} => {{ {binds} let value = {}(ctx, {})?; Ok(__BopCallOutcome {{ value, args: vec![{final_args}] }}) }},",
                     site.id,
                     function_site_fn_name(site.id),
-                    args,
+                    call_args,
                 )
                 .unwrap();
             }
         }
         self.out.push_str(
-            "        _ => Err(::bop::error::BopError::runtime(\"Invalid compiled function site\", line)),\n    }\n}\n\nfn __bop_call_function_site(\n    ctx: &mut Ctx<'_>,\n    site_id: usize,\n    args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<::bop::value::Value, ::bop::error::BopError> {\n    __bop_enter_aot_call(ctx, line)?;\n    let result = __bop_call_function_site_inner(ctx, site_id, args, line);\n    __bop_leave_aot_call(ctx);\n    result\n}\n\n",
+            "        _ => Err(::bop::error::BopError::runtime(\"Invalid compiled function site\", line)),\n    }\n}\n\nfn __bop_call_function_site(\n    ctx: &mut Ctx<'_>,\n    site_id: usize,\n    args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<::bop::value::Value, ::bop::error::BopError> {\n    __bop_enter_aot_call(ctx, line)?;\n    let result = __bop_call_function_site_inner(ctx, site_id, args, line).map(|outcome| outcome.value);\n    __bop_leave_aot_call(ctx);\n    result\n}\n\n",
         );
     }
 
@@ -4568,9 +5026,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             .functions
             .sites
             .iter()
-            .filter(|site| {
-                site.abi_eligible && site.visibility == Visibility::Public
-            })
+            .filter(|site| site.abi_eligible && site.visibility == Visibility::Public)
             .map(|site| site.name.clone())
             .collect::<std::collections::BTreeSet<_>>();
         for name in names {
@@ -4594,7 +5050,11 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
     }
 
     fn emit_run_program(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
-        writeln!(self.out, "fn run_program(ctx: &mut Ctx<'_>) -> Result<(), ::bop::error::BopError> {{").unwrap();
+        writeln!(
+            self.out,
+            "fn run_program(ctx: &mut Ctx<'_>) -> Result<(), ::bop::error::BopError> {{"
+        )
+        .unwrap();
         self.indent = 1;
         self.tmp_counter = 0;
         // Mark the body as top-level so `try` lowers `Err` to a
@@ -4695,7 +5155,11 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), BopError> {
         let line = stmt.line;
         match &stmt.kind {
-            StmtKind::Let { name, value, is_const: _ } => {
+            StmtKind::Let {
+                name,
+                value,
+                is_const,
+            } => {
                 let rhs = self.expr_src(value)?;
                 if self.is_module_top_scope() {
                     let value_tmp = self.fresh_tmp();
@@ -4706,12 +5170,21 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         rust_string_literal(name),
                     ));
                     self.bind_persistent(name);
+                    if *is_const {
+                        self.mark_constant(name);
+                    }
                     self.emit_module_alias_context_sync(name);
                     return Ok(());
                 }
                 let ident = rust_user_ident(name);
-                self.line(&format!("let mut {}: ::bop::value::Value = {};", ident, rhs));
+                self.line(&format!(
+                    "let mut {}: ::bop::value::Value = {};",
+                    ident, rhs
+                ));
                 self.bind_local(name);
+                if *is_const {
+                    self.mark_constant(name);
+                }
                 if let Some(scope) = self.scope_stack.last_mut() {
                     scope.module_alias_locals.remove(name);
                 }
@@ -4988,7 +5461,8 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         for (elif_cond, elif_body) in else_ifs {
             let c = self.expr_src(elif_cond)?;
             self.pad();
-            self.out.push_str(&format!("}} else if ({}).is_truthy() {{\n", c));
+            self.out
+                .push_str(&format!("}} else if ({}).is_truthy() {{\n", c));
             self.indent += 1;
             self.emit_runtime_type_scope_for(elif_body);
             self.push_scope();
@@ -5045,10 +5519,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                             let current = self
                                 .declaration_alias_read_src(name, line)
                                 .expect("overlay checked above");
-                            self.line(&format!(
-                                "let {} = {};",
-                                current_tmp, current
-                            ));
+                            self.line(&format!("let {} = {};", current_tmp, current));
                             self.line(&format!(
                                 "let {} = {}(&{}, &{}, {})?;",
                                 next_tmp,
@@ -5081,11 +5552,11 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                             rust_string_literal(&format!("Variable `{name}` doesn't exist yet")),
                         ));
                     }
-                    let storage = self.binding_storage(name).unwrap_or_else(|| {
-                        BindingStorage::Persistent {
+                    let storage =
+                        self.binding_storage(name)
+                            .unwrap_or_else(|| BindingStorage::Persistent {
                             module: self.current_module.clone(),
                             name: name.to_string(),
-                        }
                     });
                     let target_src = self.storage_mut_src(&storage, name, line);
                     self.line(&format!(
@@ -5148,9 +5619,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 self.line(&format!("let {} = {};", idx_tmp, idx_src));
                 let target_tmp = self.fresh_tmp();
                 let target_src = if !self.is_local(target_name) {
-                    if let Some(target_src) =
-                        self.declaration_alias_mut_src(target_name, line)
-                    {
+                    if let Some(target_src) = self.declaration_alias_mut_src(target_name, line) {
                         target_src
                     } else {
                         let storage = self.binding_storage(target_name).unwrap_or_else(|| {
@@ -5286,7 +5755,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
     fn emit_fn_decl(
         &mut self,
         name: &str,
-        params: &[String],
+        params: &[Parameter],
         body: &[Stmt],
         line: u32,
     ) -> Result<(), BopError> {
@@ -5297,7 +5766,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
     fn emit_fn_decl_as(
         &mut self,
         fn_name: &str,
-        params: &[String],
+        params: &[Parameter],
         body: &[Stmt],
         line: u32,
     ) -> Result<(), BopError> {
@@ -5307,7 +5776,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
     fn emit_fn_decl_as_site(
         &mut self,
         fn_name: &str,
-        params: &[String],
+        params: &[Parameter],
         body: &[Stmt],
         line: u32,
         self_site: Option<(&str, usize)>,
@@ -5316,7 +5785,13 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let param_list = params
             .iter()
             .enumerate()
-            .map(|(index, _)| format!("__bop_param_{index}: ::bop::value::Value"))
+            .map(|(index, param)| {
+                if param.mode == ParamMode::Ref {
+                    format!("__bop_param_{index}: &mut ::bop::value::Value")
+                } else {
+                    format!("__bop_param_{index}: ::bop::value::Value")
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let sig = if params.is_empty() {
@@ -5358,8 +5833,18 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         // merely because its alias has not been declared yet.
         let saved_scope_stack = core::mem::take(&mut self.scope_stack);
         self.push_scope();
-        let declaration_aliases =
-            self.declaration_aliases_for_callable(params, body);
+        // Lifted Rust functions cannot retain the outer emission scopes, but
+        // ref-target validation still needs source-ordered metadata for
+        // persistent constants that were visible at the declaration site.
+        for scope in &saved_scope_stack {
+            for name in &scope.persistent_bindings {
+                self.bind_persistent(name);
+                if scope.constants.contains(name) {
+                    self.mark_constant(name);
+                }
+            }
+        }
+        let declaration_aliases = self.declaration_aliases_for_callable(params, body);
         let declaration_alias_overlays =
             self.emit_declaration_alias_overlays(&declaration_aliases, &HashMap::new());
         self.declaration_alias_overlays
@@ -5375,14 +5860,52 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             self.bind_function_site(name, site);
         }
         for (index, p) in params.iter().enumerate() {
-            self.bind_local(p);
+            self.bind_local(&p.name);
+            if p.mode == ParamMode::Ref {
+                self.mark_ref_parameter(&p.name);
+            }
+            let source = if p.mode == ParamMode::Ref {
+                format!("__bop_param_{index}.clone()")
+            } else {
+                format!("__bop_param_{index}")
+            };
             self.line(&format!(
-                "let mut {}: ::bop::value::Value = __bop_param_{};",
-                rust_user_ident(p), index
+                "let mut {}: ::bop::value::Value = {};",
+                rust_user_ident(&p.name),
+                source
             ));
+        }
+        let has_refs = params.iter().any(|param| param.mode == ParamMode::Ref);
+        if has_refs {
+            self.line("let __bop_call_result = (|| -> Result<::bop::value::Value, ::bop::error::BopError> {");
+            self.indent += 1;
         }
         for s in body {
             self.emit_stmt(s)?;
+        }
+        if has_refs {
+            self.line("#[allow(unreachable_code)] Ok(::bop::value::Value::None)");
+            self.indent -= 1;
+            self.line("})();");
+            self.line("match __bop_call_result {");
+            self.indent += 1;
+            self.line("Ok(__bop_return_value) => {");
+            self.indent += 1;
+            self.emit_tick(line);
+            for (index, param) in params.iter().enumerate() {
+                if param.mode == ParamMode::Ref {
+                    self.line(&format!(
+                        "*__bop_param_{index} = {}.clone();",
+                        rust_user_ident(&param.name)
+                    ));
+                }
+            }
+            self.line("Ok(__bop_return_value)");
+            self.indent -= 1;
+            self.line("}");
+            self.line("Err(__bop_error) => Err(__bop_error),");
+            self.indent -= 1;
+            self.line("}");
         }
         self.pop_scope();
         self.pop_scope();
@@ -5393,7 +5916,9 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         // Implicit `return none` if control falls off the end. The
         // `allow(unreachable_code)` at the top of the file silences
         // the warning for bodies that always return explicitly.
+        if !has_refs {
         self.line("Ok(::bop::value::Value::None)");
+        }
         self.tmp_counter = saved_tmp;
         self.in_top_level = saved_top_level;
         self.in_callable_body = saved_callable_body;
@@ -5421,9 +5946,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             }
             ExprKind::None => "::bop::value::Value::None".to_string(),
 
-            ExprKind::Ident(name) => {
-                self.ident_value_src(name, line)?
-            }
+            ExprKind::Ident(name) => self.ident_value_src(name, line)?,
 
             ExprKind::StringInterp(parts) => self.string_interp_src(parts, line)?,
 
@@ -5439,22 +5962,20 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 )
             }
 
-            ExprKind::StructConstruct { namespace, type_name, fields } => {
-                self.struct_construct_src(namespace.as_deref(), type_name, fields, line)?
-            }
+            ExprKind::StructConstruct {
+                namespace,
+                type_name,
+                fields,
+            } => self.struct_construct_src(namespace.as_deref(), type_name, fields, line)?,
 
             ExprKind::EnumConstruct {
                 namespace,
                 type_name,
                 variant,
                 payload,
-            } => self.enum_construct_src(
-                namespace.as_deref(),
-                type_name,
-                variant,
-                payload,
-                line,
-            )?,
+            } => {
+                self.enum_construct_src(namespace.as_deref(), type_name, variant, payload, line)?
+            }
 
             ExprKind::Lambda { params, body } => self.lambda_src(params, body, line)?,
 
@@ -5657,10 +6178,9 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             // Patterns reaching this point use the same lexical
             // scope we're in *right now*, so statically baking
             // the mapping is both correct and efficient.
-            src.push_str(&self.emit_resolver_closure_src(
-                &namespaces,
-                pattern_uses_bare_type(&arm.pattern),
-            ));
+            src.push_str(
+                &self.emit_resolver_closure_src(&namespaces, pattern_uses_bare_type(&arm.pattern)),
+            );
             src.push_str(&format!(
                 "            if ::bop::pattern_matches(&__pat, &{}, &mut __bindings, &__resolver) {{\n",
                 sc_name
@@ -5776,34 +6296,135 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         }
     }
 
-    fn call_src(&mut self, callee: &Expr, args: &[Expr], line: u32) -> Result<String, BopError> {
-        // Non-Ident callees go through the value-call path. Evaluate
-        // arguments first, then the callee, matching the walker and the
-        // language's call-dispatch order. Captures `funcs[0](x)`,
-        // `make_adder(5)(3)`, `(if cond { f } else { g })(x)`, etc.
+    fn dynamic_value_call_src(
+        &mut self,
+        callee_src: String,
+        args: &[CallArg],
+        line: u32,
+    ) -> Result<String, BopError> {
+                let callee_tmp = self.fresh_tmp();
+        let modes = args
+            .iter()
+            .map(|arg| match arg.mode {
+                ParamMode::Value => "::bop::parser::ParamMode::Value",
+                ParamMode::Ref => "::bop::parser::ParamMode::Ref",
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut fences = String::new();
+        let mut seen_targets = HashSet::new();
+        let mut targets: Vec<Option<(String, String)>> = vec![None; args.len()];
+        for (index, arg) in args.iter().enumerate() {
+            if arg.mode != ParamMode::Ref {
+                continue;
+                }
+            let position = index + 1;
+            let ExprKind::Ident(name) = &arg.value.kind else {
+                write!(
+                    fences,
+                    "return Err(::bop::ref_params::invalid_ref_target({position}, {line})); "
+                )
+                .unwrap();
+                continue;
+                };
+            if !seen_targets.insert(name.clone()) {
+                write!(
+                    fences,
+                    "return Err(::bop::ref_params::duplicate_ref_target({line})); "
+                )
+                .unwrap();
+                continue;
+            }
+            if self.is_constant_binding(name) {
+                write!(
+                    fences,
+                    "return Err(::bop::error_messages::constant_mutation_error({}, {line})); ",
+                    rust_string_literal(name),
+                )
+                .unwrap();
+                continue;
+            }
+            if self.is_captured_binding(name) {
+                write!(
+                    fences,
+                    "return Err(::bop::ref_params::captured_ref_target({position}, {line})); "
+                )
+                .unwrap();
+                continue;
+            }
+            let storage =
+                self.binding_storage(name)
+                    .unwrap_or_else(|| BindingStorage::Persistent {
+                        module: self.current_module.clone(),
+                        name: name.clone(),
+                    });
+            let (target_preflight, target_read, target_write) =
+                self.ref_target_sources(&storage, name, line);
+            fences.push_str(&target_preflight);
+            targets[index] = Some((target_read, target_write));
+        }
+        let mut ordinary_lets = String::new();
+        let mut arg_names: Vec<Option<String>> = vec![None; args.len()];
+        for (index, arg) in args.iter().enumerate() {
+            if arg.mode == ParamMode::Ref {
+                continue;
+            }
+            let src = self.expr_src(&arg.value)?;
+            let tmp = self.fresh_tmp();
+            write!(ordinary_lets, "let {tmp} = {src}; ").unwrap();
+            arg_names[index] = Some(tmp);
+        }
+        let mut snapshot_lets = String::new();
+        for (index, target) in targets.iter().enumerate() {
+            let Some((read, _)) = target else {
+                continue;
+            };
+            let tmp = self.fresh_tmp();
+            write!(snapshot_lets, "let {tmp} = {read}; ").unwrap();
+            arg_names[index] = Some(tmp);
+        }
+        let arg_values = arg_names
+            .iter()
+            .map(|name| {
+                name.clone()
+                    .unwrap_or_else(|| "::bop::value::Value::None".to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let args_vec = if args.is_empty() {
+            "::std::vec::Vec::new()".to_string()
+        } else {
+            format!("vec![{arg_values}]")
+        };
+        let outcome_tmp = self.fresh_tmp();
+        let mut commits = String::new();
+        for (index, target) in targets.iter().enumerate() {
+            let Some((_, target)) = target else {
+                continue;
+            };
+            write!(
+                commits,
+                "{{ let __bop_target: &mut ::bop::value::Value = {target}; *__bop_target = {outcome_tmp}.args[{index}].clone(); }} "
+            )
+            .unwrap();
+        }
+        Ok(format!(
+            "{{ let {callee_tmp} = {callee_src}; \
+             __bop_preflight_value_call(ctx, &{callee_tmp}, &[{modes}], {line})?; \
+             {fences}{ordinary_lets}{snapshot_lets}\
+             let {outcome_tmp} = __bop_call_value(ctx, {callee_tmp}, {args_vec}, {line})?; \
+             {commits}{outcome_tmp}.value }}"
+        ))
+    }
+
+    fn call_src(&mut self, callee: &Expr, args: &[CallArg], line: u32) -> Result<String, BopError> {
+        // Dynamic callees use the shared preflight/staging path so the callee
+        // resolves exactly once before any argument side effect.
         let name = match &callee.kind {
             ExprKind::Ident(n) => n.clone(),
             _ => {
                 let callee_src = self.expr_src(callee)?;
-                let callee_tmp = self.fresh_tmp();
-                let mut arg_lets = String::new();
-                let mut arg_names = Vec::with_capacity(args.len());
-                for arg in args {
-                    let src = self.expr_src(arg)?;
-                    let tmp = self.fresh_tmp();
-                    write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
-                    arg_names.push(tmp);
-                }
-                write!(arg_lets, "let {} = {}; ", callee_tmp, callee_src).unwrap();
-                let args_vec = if arg_names.is_empty() {
-                    "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
-                } else {
-                    format!("vec![{}]", arg_names.join(", "))
-                };
-                return Ok(format!(
-                    "{{ {}__bop_call_value(ctx, {}, {}, {})? }}",
-                    arg_lets, callee_tmp, args_vec, line
-                ));
+                return self.dynamic_value_call_src(callee_src, args, line);
             }
         };
 
@@ -5812,26 +6433,46 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         // local shadowing wins over builtin / host / named-fn.
         if self.is_local(&name) {
             let callee_src = self.ident_value_src(&name, line)?;
-            let mut arg_lets = String::new();
-            let mut arg_names = Vec::with_capacity(args.len());
-            for arg in args {
-                let src = self.expr_src(arg)?;
-                let tmp = self.fresh_tmp();
-                write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
-                arg_names.push(tmp);
+            return self.dynamic_value_call_src(callee_src, args, line);
             }
-            let args_vec = if arg_names.is_empty() {
-                "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
+
+        let declared_has_ref = self
+            .fn_info
+            .all_fns
+            .get(&name)
+            .is_some_and(|params| params.iter().any(|param| param.mode == ParamMode::Ref));
+        let call_has_ref = args.iter().any(|arg| arg.mode == ParamMode::Ref);
+        if declared_has_ref || call_has_ref {
+            if self.fn_info.all_fns.contains_key(&name) {
+                let callee_src = if self.opts.sandbox {
+                    format!(
+                        "__bop_active_function_value(ctx, {}, {}, {})?",
+                        rust_string_literal(&self.current_module),
+                        rust_string_literal(&name),
+                        line,
+                    )
             } else {
-                format!("vec![{}]", arg_names.join(", "))
+                    format!("{}({})?", self.wrapper_fn_name(&name), line)
             };
+                return self.dynamic_value_call_src(callee_src, args, line);
+            }
+            if let Some(storage) = self.binding_storage(&name) {
+                let callee_src = self.storage_read_src(&storage, line);
+                return self.dynamic_value_call_src(callee_src, args, line);
+            }
+            let modes = args
+                .iter()
+                .map(|arg| match arg.mode {
+                    ParamMode::Value => "::bop::parser::ParamMode::Value",
+                    ParamMode::Ref => "::bop::parser::ParamMode::Ref",
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             return Ok(format!(
-                "{{ {}__bop_call_named_value(ctx, {}, {}, {}, {})? }}",
-                arg_lets,
-                callee_src,
-                args_vec,
+                "{{ ::bop::validate_value_only_call_modes({}, &[{}], {})?; unreachable!() }}",
                 rust_string_literal(&name),
-                line
+                modes,
+                line,
             ));
         }
 
@@ -5853,16 +6494,14 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         if self.opts.sandbox {
             if let Some(site) = self.local_function_site(&name) {
                 let call = self.exact_function_site_call_src(site, &arg_names, line);
-                return Ok(format!(
-                    "{{ {}{} }}",
-                    arg_lets, call,
-                ));
+                return Ok(format!("{{ {}{} }}", arg_lets, call,));
             }
         }
 
         let binding_storage = self.binding_storage(&name);
-        if let Some(storage @ (BindingStorage::RustLocal { .. } | BindingStorage::Persistent { .. })) =
-            binding_storage.as_ref()
+        if let Some(
+            storage @ (BindingStorage::RustLocal { .. } | BindingStorage::Persistent { .. }),
+        ) = binding_storage.as_ref()
         {
             let callee = self.storage_read_src(storage, line);
             let args_vec = if arg_names.is_empty() {
@@ -5919,11 +6558,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         line,
                     )
                 } else {
-                    format!(
-                        "__bop_try_call(ctx, {}, {})?",
-                        arg_names[0],
-                        line,
-                    )
+                    format!("__bop_try_call(ctx, {}, {})?", arg_names[0], line,)
                 }
             }
             _ => {
@@ -6036,9 +6671,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 name = rust_string_literal(&name),
             );
         }
-        if let Some(storage @ BindingStorage::OptionalImport { .. }) =
-            binding_storage.as_ref()
-        {
+        if let Some(storage @ BindingStorage::OptionalImport { .. }) = binding_storage.as_ref() {
             let optional = self
                 .storage_optional_value_src(storage, line)
                 .expect("optional import storage");
@@ -6099,7 +6732,11 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             let src = self.expr_src(value)?;
             let tmp = self.fresh_tmp();
             write!(lets, "let {} = {}; ", tmp, src).unwrap();
-            pairs.push(format!("({}.to_string(), {})", rust_string_literal(key), tmp));
+            pairs.push(format!(
+                "({}.to_string(), {})",
+                rust_string_literal(key),
+                tmp
+            ));
         }
         Ok(format!(
             "{{ {}::bop::value::Value::try_new_dict(vec![{}], {})? }}",
@@ -6134,12 +6771,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 rust_string_literal(type_name),
                 line,
             );
-            return self.runtime_struct_construct_src(
-                &module_path_src,
-                type_name,
-                fields,
-                line,
-            );
+            return self.runtime_struct_construct_src(&module_path_src, type_name, fields, line);
         }
         if namespace.is_none() {
             let module_path_src = format!(
@@ -6147,20 +6779,12 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 rust_string_literal(type_name),
                 line,
             );
-            return self.runtime_struct_construct_src(
-                &module_path_src,
-                type_name,
-                fields,
-                line,
-            );
+            return self.runtime_struct_construct_src(&module_path_src, type_name, fields, line);
         }
         let module_path = self
             .resolve_type_module(namespace, type_name)
             .ok_or_else(|| {
-                BopError::runtime(
-                    bop::error_messages::struct_not_declared(type_name),
-                    line,
-                )
+                BopError::runtime(bop::error_messages::struct_not_declared(type_name), line)
             })?;
         let ns = namespace.expect("namespaced branch");
         let namespace_value = if self.is_local(ns) {
@@ -6270,10 +6894,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let module_path = self
             .resolve_type_module(namespace, type_name)
             .ok_or_else(|| {
-                BopError::runtime(
-                    bop::error_messages::enum_not_declared(type_name),
-                    line,
-                )
+                BopError::runtime(bop::error_messages::enum_not_declared(type_name), line)
             })?;
         let ns = namespace.expect("namespaced branch");
         let namespace_value = if self.is_local(ns) {
@@ -6370,11 +6991,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         }
     }
 
-    fn string_interp_src(
-        &mut self,
-        parts: &[StringPart],
-        line: u32,
-    ) -> Result<String, BopError> {
+    fn string_interp_src(&mut self, parts: &[StringPart], line: u32) -> Result<String, BopError> {
         // Mirror the tree-walker: for each Variable part, resolve the
         // current Bop value at the point where that part executes.
         let mut body = String::from("{ let mut __s = ::std::string::String::new(); ");
@@ -6388,12 +7005,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     // The cloned Value lives only for the duration
                     // of the format call; its Drop tracks the
                     // de-alloc correctly against `bop::memory`.
-                    write!(
-                        body,
-                        "__s.push_str(&format!(\"{{}}\", {})); ",
-                        value
-                    )
-                    .unwrap();
+                    write!(body, "__s.push_str(&format!(\"{{}}\", {})); ", value).unwrap();
                 }
             }
         }
@@ -6405,14 +7017,259 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         &mut self,
         object: &Expr,
         method: &str,
-        args: &[Expr],
+        args: &[CallArg],
         line: u32,
     ) -> Result<String, BopError> {
-        // Tree-walker evaluates args first, then the object. We
-        // match that here so any future programs with side-effecting
-        // sub-expressions behave identically.
+        if args.iter().any(|arg| arg.mode == ParamMode::Ref) {
+            let object_src = self.expr_src(object)?;
+            let object_tmp = self.fresh_tmp();
+            let modes = args
+                .iter()
+                .map(|arg| match arg.mode {
+                    ParamMode::Value => "::bop::parser::ParamMode::Value",
+                    ParamMode::Ref => "::bop::parser::ParamMode::Ref",
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut fences = String::new();
+            let mut seen = HashSet::new();
+            let mut targets: Vec<Option<(String, String)>> = vec![None; args.len()];
+            for (index, arg) in args.iter().enumerate() {
+                if arg.mode != ParamMode::Ref {
+                    continue;
+                }
+                let position = index + 1;
+                let ExprKind::Ident(name) = &arg.value.kind else {
+                    write!(
+                        fences,
+                        "return Err(::bop::ref_params::invalid_ref_target({position}, {line})); "
+                    )
+                    .unwrap();
+                    continue;
+                };
+                if !seen.insert(name.clone()) {
+                    write!(
+                        fences,
+                        "return Err(::bop::ref_params::duplicate_ref_target({line})); "
+                    )
+                    .unwrap();
+                    continue;
+                }
+                if self.is_constant_binding(name) {
+                    write!(
+                        fences,
+                        "return Err(::bop::error_messages::constant_mutation_error({}, {line})); ",
+                        rust_string_literal(name),
+                    )
+                    .unwrap();
+                    continue;
+                }
+                if self.is_captured_binding(name) {
+                    write!(
+                        fences,
+                        "return Err(::bop::ref_params::captured_ref_target({position}, {line})); "
+                    )
+                    .unwrap();
+                    continue;
+                }
+                let storage =
+                    self.binding_storage(name)
+                        .unwrap_or_else(|| BindingStorage::Persistent {
+                            module: self.current_module.clone(),
+                            name: name.clone(),
+                        });
+                let (target_preflight, target_read, target_write) =
+                    self.ref_target_sources(&storage, name, line);
+                fences.push_str(&target_preflight);
+                targets[index] = Some((target_read, target_write));
+            }
+            let mut ordinary = String::new();
+            let mut names: Vec<Option<String>> = vec![None; args.len()];
+            for (index, arg) in args.iter().enumerate() {
+                if arg.mode == ParamMode::Ref {
+                    continue;
+                }
+                let src = self.expr_src(&arg.value)?;
+                let tmp = self.fresh_tmp();
+                write!(ordinary, "let {tmp} = {src}; ").unwrap();
+                names[index] = Some(tmp);
+            }
+            let mut snapshots = String::new();
+            for (index, target) in targets.iter().enumerate() {
+                let Some((read, _)) = target else {
+                    continue;
+                };
+                let tmp = self.fresh_tmp();
+                write!(snapshots, "let {tmp} = {read}; ").unwrap();
+                names[index] = Some(tmp);
+            }
+            let values = names
+                .into_iter()
+                .map(|name| name.unwrap_or_else(|| "::bop::value::Value::None".to_string()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let outcome = self.fresh_tmp();
+            let user_method = self.fresh_tmp();
+            let module_callable = self.fresh_tmp();
+            let mut commits = String::new();
+            for (index, target) in targets.iter().enumerate() {
+                let Some((_, target)) = target else {
+                    continue;
+                };
+                write!(
+                    commits,
+                    "{{ let __target: &mut ::bop::value::Value = {target}; *__target = {outcome}.args[{index}].clone(); }} "
+                )
+                .unwrap();
+            }
+            return Ok(format!(
+                "{{ let {object_tmp} = {object_src}; \
+                 let {user_method} = __bop_preflight_user_method(ctx, &{object_tmp}, {method}, &[{modes}], {line})?; \
+                 let {module_callable} = if {user_method}.is_some() {{ ::std::option::Option::None }} else {{ __bop_preflight_module_call(ctx, &{object_tmp}, {method}, &[{modes}], {line})? }}; \
+                 if {user_method}.is_none() && {module_callable}.is_none() {{ \
+                     ::bop::validate_value_only_call_modes({method}, &[{modes}], {line})?; \
+                     unreachable!(); \
+                 }} \
+                 {fences}{ordinary}{snapshots}\
+                 let {outcome} = if let ::std::option::Option::Some(__bop_method_adapter) = {user_method} {{ \
+                     __bop_call_preflighted_user_method_outcome(ctx, __bop_method_adapter, {object_tmp}, vec![{values}], {line})? \
+                 }} else {{ \
+                     __bop_call_value(ctx, {module_callable}.expect(\"preflight selected a live module export\"), vec![{values}], {line})? \
+                 }}; \
+                 {commits}{outcome}.value }}",
+                method = rust_string_literal(method),
+            ));
+        }
+        let mutating = methods::is_mutating_method(method);
+        let named_mutating = mutating && matches!(&object.kind, ExprKind::Ident(_));
+        let mut resolved_object = None;
+        let mut resolved_user_method = None;
+        let mut resolved_module_callee = None;
+        let mut named_user_method = None;
+        let mut named_user_receiver = None;
+        let mut object_preflight = String::new();
+        if !named_mutating {
+            let src = self.expr_src(object)?;
+            let tmp = self.fresh_tmp();
+            let user_tmp = self.fresh_tmp();
+            let module_tmp = self.fresh_tmp();
+            let value_modes = args
+                .iter()
+                .map(|_| "::bop::parser::ParamMode::Value")
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(
+                object_preflight,
+                "let {tmp} = {src}; let {user_tmp} = __bop_preflight_user_method(ctx, &{tmp}, {method}, &[{value_modes}], {line})?; let {module_tmp} = if {user_tmp}.is_some() {{ ::std::option::Option::None }} else {{ __bop_preflight_module_call(ctx, &{tmp}, {method}, &[{value_modes}], {line})? }}; ",
+                method = rust_string_literal(method),
+            )
+            .unwrap();
+            if let Some(expected) = methods::builtin_method_arity(method) {
+                write!(
+                    object_preflight,
+                    "if {user_tmp}.is_none() && {module_tmp}.is_none() {{ ::bop::validate_value_only_call_modes({method}, &[{}], {line})?; if {actual}usize != {expected}usize {{ return Err(::bop::error::BopError::runtime({message}, {line})); }} }} ",
+                    args.iter()
+                        .map(|_| "::bop::parser::ParamMode::Value")
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    actual = args.len(),
+                    method = rust_string_literal(method),
+                    message = rust_string_literal(&format!(
+                        "`.{}()` needs {} argument{}",
+                        method,
+                        expected,
+                        if expected == 1 { "" } else { "s" }
+                    )),
+                )
+                .unwrap();
+            }
+            if mutating
+                && matches!(
+                    &object.kind,
+                    ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
+                )
+            {
+                write!(
+                    object_preflight,
+                    "::bop::methods::reject_nested_array_mutation(&{tmp}, {}, {line})?; ",
+                    rust_string_literal(method),
+                )
+                .unwrap();
+            }
+            resolved_object = Some(tmp);
+            resolved_user_method = Some(user_tmp);
+            resolved_module_callee = Some(module_tmp);
+        }
+
+        // Ordinary arguments are evaluated only after receiver/callable
+        // preflight. A named implicit-ref receiver is the exception: its value
+        // is deliberately snapshotted by the transactional helper after args.
         let mut arg_tmps = Vec::with_capacity(args.len());
-        let mut arg_lets = String::new();
+        let mut arg_lets = object_preflight;
+        if named_mutating {
+            let ExprKind::Ident(target_name) = &object.kind else {
+                unreachable!("named mutating receiver is an identifier");
+            };
+            let receiver = if let Some(BindingStorage::RustLocal { ident }) =
+                self.binding_storage(target_name)
+            {
+                format!("&{ident}")
+            } else {
+                let storage = self.binding_storage(target_name).unwrap_or_else(|| {
+                    BindingStorage::Persistent {
+                        module: self.current_module.clone(),
+                        name: target_name.clone(),
+                    }
+                });
+                match storage {
+                    BindingStorage::Persistent { module, name } => format!(
+                        "__bop_binding_entry(ctx, {}, {}).ok_or_else(|| ::bop::error::BopError::runtime(::bop::error_messages::variable_not_found({}), {line}))?",
+                        rust_string_literal(&module),
+                        rust_string_literal(&name),
+                        rust_string_literal(target_name),
+                    ),
+                    _ => {
+                        let read = self.storage_read_src(&storage, line);
+                        format!(
+                            "&{{ let __bop_preflight_receiver = {read}; __bop_preflight_receiver }}"
+                        )
+                    }
+                }
+            };
+            let user_tmp = self.fresh_tmp();
+            let receiver_tmp = self.fresh_tmp();
+            let receiver_is_array_tmp = self.fresh_tmp();
+            let expected = methods::builtin_method_arity(method)
+                .expect("known mutating built-in has declared arity");
+            let captured_guard = if self.is_captured_binding(target_name) {
+                format!(
+                    "return Err(::bop::ref_params::captured_ref_target(1, {line})); "
+                )
+            } else {
+                String::new()
+            };
+            write!(
+                arg_lets,
+                "let ({user_tmp}, {receiver_tmp}, {receiver_is_array_tmp}) = {{ let __bop_preflight_receiver: &::bop::value::Value = {receiver}; let __bop_method_adapter = __bop_preflight_user_method(ctx, __bop_preflight_receiver, {}, &[{}], {line})?; let __bop_saved_receiver = if __bop_method_adapter.is_some() {{ ::std::option::Option::Some(__bop_preflight_receiver.clone()) }} else {{ ::std::option::Option::None }}; let __bop_receiver_is_array = matches!(__bop_preflight_receiver, ::bop::value::Value::Array(_)); (__bop_method_adapter, __bop_saved_receiver, __bop_receiver_is_array) }}; if {user_tmp}.is_none() && {receiver_is_array_tmp} {{ {captured_guard}::bop::methods::reject_constant_array_mutation({}, {}, {line})?; if {actual}usize != {expected}usize {{ return Err(::bop::error::BopError::runtime({}, {line})); }} }} ",
+                rust_string_literal(method),
+                args.iter()
+                    .map(|_| "::bop::parser::ParamMode::Value")
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                rust_string_literal(target_name),
+                rust_string_literal(method),
+                rust_string_literal(&format!(
+                    "`.{}()` needs {} argument{}",
+                    method,
+                    expected,
+                    if expected == 1 { "" } else { "s" }
+                )),
+                actual = args.len(),
+            )
+            .unwrap();
+            named_user_method = Some(user_tmp);
+            named_user_receiver = Some(receiver_tmp);
+        }
         for arg in args {
             let src = self.expr_src(arg)?;
             let tmp = self.fresh_tmp();
@@ -6442,11 +7299,6 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         // up "is this mutating?" up-front so we only emit the
         // back-assign branch when it's actually needed.
         let method_lit = rust_string_literal(method);
-        let mutating = methods::is_mutating_method(method);
-        let nested_place = matches!(
-            &object.kind,
-            ExprKind::Index { .. } | ExprKind::FieldAccess { .. }
-        );
         let ident_target = if mutating {
             match &object.kind {
                 ExprKind::Ident(n) => Some(n.clone()),
@@ -6470,6 +7322,12 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         // user-method-before-builtin dispatcher. Only the built-in Array arm
         // takes the in-place path.
         if let Some(target_name) = ident_target {
+            let user_token = named_user_method
+                .clone()
+                .expect("named mutating preflight token");
+            let user_receiver = named_user_receiver
+                .clone()
+                .expect("named mutating receiver snapshot");
             let owned_args = if arg_tmps.is_empty() {
                 "::std::vec::Vec::new()".to_string()
             } else {
@@ -6493,30 +7351,26 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     let mut body = String::new();
                     write!(
                         body,
-                        "{{ {}let __ret = if let ::std::option::Option::Some(::bop::value::Value::Array(__bop_array)) = {}.overlay.as_mut() {{ \
-                            {constant_guard}::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                        "{{ {}let __ret = if matches!({}.overlay.as_ref(), ::std::option::Option::Some(::bop::value::Value::Array(_))) {{ \
+                            {constant_guard}::bop::methods::transactional_array_method({}.overlay.as_mut().expect(\"array overlay\"), {}, {}, {})? \
+                        }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
+                            __bop_call_preflighted_user_method(ctx, __bop_method_adapter, {user_receiver}.as_ref().expect(\"preflighted user receiver\"), &{}, {})? \
                         }} else {{ \
                             let {} = {}; \
-                            match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
-                                Some(v) => v, \
-                                None => {{ \
                                     let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
                                     if let Some(__new_obj) = __mutated {{ {}.overlay = ::std::option::Option::Some(__new_obj); }} \
                                     __r \
-                                }}, \
-                            }} \
                         }}; __ret }}",
                         arg_lets,
+                        overlay,
                         overlay,
                         method_lit,
                         owned_args,
                         line,
-                        obj_tmp,
-                        read,
-                        obj_tmp,
-                        method_lit,
                         args_arr,
                         line,
+                        obj_tmp,
+                        read,
                         obj_tmp,
                         method_lit,
                         args_arr,
@@ -6549,27 +7403,22 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 write!(
                     body,
                     "{{ {}let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
-                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; let ::bop::value::Value::Array(__bop_array) = &mut *{target_tmp} else {{ unreachable!() }}; {constant_guard}::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; {constant_guard}::bop::methods::transactional_array_method({target_tmp}, {}, {}, {})? \
+                    }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
+                        __bop_call_preflighted_user_method(ctx, __bop_method_adapter, {user_receiver}.as_ref().expect(\"preflighted user receiver\"), &{}, {})? \
                     }} else {{ \
                         let {} = {read_src}; \
-                        match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
-                            Some(v) => v, \
-                            None => {{ \
                                 let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
                                 if let Some(__new_obj) = __mutated {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; *{target_tmp} = __new_obj; }} \
                                 __r \
-                            }}, \
-                        }} \
                     }}; {overlay_sync} __ret }}",
                     arg_lets,
                     method_lit,
                     owned_args,
                     line,
-                    obj_tmp,
-                    obj_tmp,
-                    method_lit,
                     args_arr,
                     line,
+                    obj_tmp,
                     obj_tmp,
                     method_lit,
                     args_arr,
@@ -6583,30 +7432,26 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             let mut body = String::new();
             write!(
                 body,
-                "{{ {}let __ret = if let ::bop::value::Value::Array(__bop_array) = &mut {} {{ \
-                    {constant_guard}::bop::methods::array_method_mut(__bop_array, {}, {}, {})? \
+                "{{ {}let __ret = if matches!(&{}, ::bop::value::Value::Array(_)) {{ \
+                    {constant_guard}::bop::methods::transactional_array_method(&mut {}, {}, {}, {})? \
+                }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
+                    __bop_call_preflighted_user_method(ctx, __bop_method_adapter, {user_receiver}.as_ref().expect(\"preflighted user receiver\"), &{}, {})? \
                 }} else {{ \
                     let {} = {}.clone(); \
-                    match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
-                        Some(v) => v, \
-                        None => {{ \
                             let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
                             if let Some(__new_obj) = __mutated {{ {} = __new_obj; }} \
                             __r \
-                        }}, \
-                    }} \
                 }}; __ret }}",
                 arg_lets,
+                target,
                 target,
                 method_lit,
                 owned_args,
                 line,
-                obj_tmp,
-                target,
-                obj_tmp,
-                method_lit,
                 args_arr,
                 line,
+                obj_tmp,
+                target,
                 obj_tmp,
                 method_lit,
                 args_arr,
@@ -6617,7 +7462,10 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             return Ok(body);
         }
 
-        let obj_src = self.expr_src(object)?;
+        let obj_src = match resolved_object {
+            Some(tmp) => tmp,
+            None => self.expr_src(object)?,
+        };
         let obj_tmp = self.fresh_tmp();
         let mut body = String::new();
         write!(body, "{{ {}let {} = {}; ", arg_lets, obj_tmp, obj_src).unwrap();
@@ -6625,27 +7473,31 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         // `Some(Value)` when a match is found, else `None`
         // (meaning "fall through to the built-in method
         // dispatch"). Matches walker / VM precedence.
-        let nested_guard = if nested_place {
+        let module_dispatch = resolved_module_callee
+            .map(|callee| {
             format!(
-                "::bop::methods::reject_nested_array_mutation(&{}, {}, {})?; ",
-                obj_tmp, method_lit, line
+                    "if let ::std::option::Option::Some(__bop_module_callable) = {callee} {{ \
+                        __bop_call_value(ctx, __bop_module_callable, ::std::vec![{}], {line})?.value \
+                    }} else ",
+                    arg_tmps
+                        .iter()
+                        .map(|tmp| format!("{tmp}.clone()"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
             )
-        } else {
-            String::new()
-        };
+            })
+            .unwrap_or_default();
         write!(
             body,
-            "let __ret = match __bop_try_user_method(ctx, &{}, {}, &{}, {})? {{ \
-                Some(v) => v, \
-                None => {{ \
-                    {}let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
-                }}, \
-            }}; __ret }}",
+            "let __ret = {module_dispatch}{{ if let ::std::option::Option::Some(__bop_method_adapter) = {} {{ \
+                __bop_call_preflighted_user_method(ctx, __bop_method_adapter, &{}, &{}, {})? \
+            }} else {{ \
+                    let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
+            }} }}; __ret }}",
+            resolved_user_method.unwrap_or_else(|| "::std::option::Option::None".to_string()),
             obj_tmp,
-            method_lit,
             args_arr,
             line,
-            nested_guard,
             obj_tmp,
             method_lit,
             args_arr,
@@ -6662,7 +7514,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
     /// usual Call / Ident dispatch inside the body.
     fn lambda_src(
         &mut self,
-        params: &[String],
+        params: &[Parameter],
         body: &[Stmt],
         line: u32,
     ) -> Result<String, BopError> {
@@ -6671,7 +7523,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let mut dependencies = FreeVarDependencies::default();
         let mut body_known = HashSet::new();
         for p in params {
-            body_known.insert(p.clone());
+            body_known.insert(p.name.clone());
         }
         scan_free_vars_stmts(
             body,
@@ -6680,8 +7532,18 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             &self.scope_stack,
             &self.fn_info,
         );
-        dependencies.required.extend(dependencies.pattern_namespaces);
+        dependencies
+            .required
+            .extend(dependencies.pattern_namespaces);
         let captures_ordered: Vec<String> = dependencies.required.into_iter().collect();
+        if captures_ordered
+            .iter()
+            .any(|name| self.is_ref_parameter(name))
+        {
+            return Ok(format!(
+                "{{ return Err(::bop::ref_params::ref_capture_error({line})); }}"
+            ));
+        }
         let capture_storages = captures_ordered
             .iter()
             .map(|name| self.binding_storage(name))
@@ -6695,7 +7557,10 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let saved_scope_stack = core::mem::take(&mut self.scope_stack);
         self.push_scope();
         for p in params {
-            self.bind_local(p);
+            self.bind_local(&p.name);
+            if p.mode == ParamMode::Ref {
+                self.mark_ref_parameter(&p.name);
+            }
         }
         for (index, cap) in captures_ordered.iter().enumerate() {
             if matches!(
@@ -6709,12 +7574,16 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         function_site: format!("__bop_optional_capture_site_{index}"),
                     },
                 );
+                self.mark_captured_local(cap);
             } else {
                 self.bind_local(cap);
+                self.mark_captured_local(cap);
             }
         }
-        let declaration_aliases =
-            self.declaration_aliases_for_callable(params, body);
+        let declaration_aliases = self.declaration_aliases_for_callable(params, body);
+        for alias in &declaration_aliases {
+            self.mark_captured_local(alias);
+        }
         let mut alias_initializers = HashMap::new();
         let mut alias_captures = Vec::new();
         for (index, alias) in declaration_aliases.iter().enumerate() {
@@ -6787,12 +7656,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 ),
                 None => format!("{}.clone()", rust_user_ident(cap)),
             };
-            writeln!(
-                capture_prelude,
-                "let __cap_{i} = {capture_source};",
-                i = i,
-            )
-            .unwrap();
+            writeln!(capture_prelude, "let __cap_{i} = {capture_source};", i = i,).unwrap();
             // `Fn` closures can be invoked repeatedly, so captures
             // must stay owned by the closure body. Clone per
             // invocation; the outer capture is the stable source.
@@ -6841,13 +7705,25 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let arity = params.len();
         let arity_suffix = if arity == 1 { "" } else { "s" };
         let mut param_binds = String::new();
-        for p in params {
+        for (index, p) in params.iter().enumerate() {
             writeln!(
                 param_binds,
-                "let mut {ident}: ::bop::value::Value = args.remove(0);",
-                ident = rust_user_ident(p)
+                "let mut __bop_lambda_arg_{index}: ::bop::value::Value = args.remove(0); let mut {ident}: ::bop::value::Value = __bop_lambda_arg_{index}.clone();",
+                ident = rust_user_ident(&p.name)
             )
             .unwrap();
+        }
+        let mut param_sync = String::new();
+        for (index, p) in params.iter().enumerate() {
+            let is_visible_binding = !params[index + 1..].iter().any(|later| later.name == p.name);
+            if is_visible_binding {
+                writeln!(
+                    param_sync,
+                    "__bop_lambda_arg_{index} = {ident};",
+                    ident = rust_user_ident(&p.name),
+                )
+                .unwrap();
+            }
         }
         let params_array = if params.is_empty() {
             "::std::vec::Vec::<String>::new()".to_string()
@@ -6856,7 +7732,33 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 "vec![{}]",
                 params
                     .iter()
-                    .map(|p| format!("\"{}\".to_string()", p))
+                    .map(|p| format!("\"{}\".to_string()", p.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let modes_array = if params.is_empty() {
+            "::std::vec::Vec::<::bop::parser::ParamMode>::new()".to_string()
+        } else {
+            format!(
+                "vec![{}]",
+                params
+                    .iter()
+                    .map(|p| match p.mode {
+                        ParamMode::Value => "::bop::parser::ParamMode::Value",
+                        ParamMode::Ref => "::bop::parser::ParamMode::Ref",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let final_args = if params.is_empty() {
+            "::std::vec::Vec::new()".to_string()
+        } else {
+            format!(
+                "vec![{}]",
+                (0..params.len())
+                    .map(|index| format!("__bop_lambda_arg_{index}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -6873,7 +7775,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let wrap_ctx = if self.opts.sandbox { "ctx, " } else { "" };
 
         Ok(format!(
-            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<::bop::value::Value, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{moves}{param_binds}{body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }}); __bop_wrap_callable({wrap_ctx}{params_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
+            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<__BopCallOutcome, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{moves}{param_binds}let __bop_value_result = (|| -> Result<::bop::value::Value, ::bop::error::BopError> {{ {body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }})(); let value = __bop_value_result?; {param_sync}Ok(__BopCallOutcome {{ value, args: {final_args} }}) }}); __bop_wrap_callable({wrap_ctx}{params_array}, {modes_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
             prelude = capture_prelude,
             opaque_body_depth = opaque_body_depth,
             arity = arity,
@@ -6882,8 +7784,11 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             type_bindings_init = type_bindings_init,
             moves = capture_moves,
             param_binds = param_binds,
+            param_sync = param_sync,
             body = body_src,
             params_array = params_array,
+            modes_array = modes_array,
+            final_args = final_args,
             wrap_ctx = wrap_ctx,
         ))
     }
@@ -6941,11 +7846,19 @@ fn scan_free_vars_stmt(
     fn_info: &FnInfo,
 ) {
     match &stmt.kind {
-        StmtKind::Let { name, value, is_const: _ } => {
+        StmtKind::Let {
+            name,
+            value,
+            is_const: _,
+        } => {
             scan_free_vars_expr(value, known, free, outer_scopes, fn_info);
             known.insert(name.clone());
         }
-        StmtKind::Assign { target, op: _, value } => {
+        StmtKind::Assign {
+            target,
+            op: _,
+            value,
+        } => {
             match target {
                 AssignTarget::Variable(n) => {
                     if !known.contains(n) && is_outer_local(n, outer_scopes) {
@@ -7005,7 +7918,9 @@ fn scan_free_vars_stmt(
             scan_free_vars_stmts(body, known, free, outer_scopes, fn_info);
             *known = saved;
         }
-        StmtKind::FnDecl { name, params, body, .. } => {
+        StmtKind::FnDecl {
+            name, params, body, ..
+        } => {
             // A nested fn decl introduces `name` into the body's
             // scope (so recursive refs work) but its own body is
             // analysed with only its params in scope — matches
@@ -7016,7 +7931,7 @@ fn scan_free_vars_stmt(
             }
             let mut inner_known = HashSet::new();
             for p in params {
-                inner_known.insert(p.clone());
+                inner_known.insert(p.name.clone());
             }
             inner_known.insert(name.clone());
             scan_free_vars_stmts(body, &mut inner_known, free, outer_scopes, fn_info);
@@ -7147,14 +8062,10 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
 fn literal_pattern_rust(lit: &bop::parser::LiteralPattern) -> String {
     use bop::parser::LiteralPattern;
     match lit {
-        LiteralPattern::Int(n) => format!(
-            "::bop::parser::LiteralPattern::Int({}i64)",
-            n
-        ),
-        LiteralPattern::Number(n) => format!(
-            "::bop::parser::LiteralPattern::Number({})",
-            rust_f64(*n)
-        ),
+        LiteralPattern::Int(n) => format!("::bop::parser::LiteralPattern::Int({}i64)", n),
+        LiteralPattern::Number(n) => {
+            format!("::bop::parser::LiteralPattern::Number({})", rust_f64(*n))
+        }
         LiteralPattern::Str(s) => format!(
             "::bop::parser::LiteralPattern::Str({}.to_string())",
             rust_string_literal(s)
@@ -7167,9 +8078,7 @@ fn literal_pattern_rust(lit: &bop::parser::LiteralPattern) -> String {
 fn variant_payload_rust(payload: &bop::parser::VariantPatternPayload) -> String {
     use bop::parser::VariantPatternPayload;
     match payload {
-        VariantPatternPayload::Unit => {
-            "::bop::parser::VariantPatternPayload::Unit".to_string()
-        }
+        VariantPatternPayload::Unit => "::bop::parser::VariantPatternPayload::Unit".to_string(),
         VariantPatternPayload::Tuple(items) => {
             let parts: Vec<String> = items.iter().map(pattern_rust).collect();
             let inner = if parts.is_empty() {
@@ -7207,26 +8116,24 @@ fn pattern_uses_bare_type(pattern: &bop::parser::Pattern) -> bool {
     use bop::parser::{Pattern, VariantPatternPayload};
     match pattern {
         Pattern::EnumVariant {
-            namespace,
-            payload,
-            ..
+            namespace, payload, ..
         } => {
             namespace.is_none()
                 || match payload {
                     VariantPatternPayload::Unit => false,
-                    VariantPatternPayload::Tuple(items) => {
-                        items.iter().any(pattern_uses_bare_type)
-                    }
-                    VariantPatternPayload::Struct { fields, .. } => {
-                        fields.iter().any(|(_, field)| pattern_uses_bare_type(field))
-                    }
+                    VariantPatternPayload::Tuple(items) => items.iter().any(pattern_uses_bare_type),
+                    VariantPatternPayload::Struct { fields, .. } => fields
+                        .iter()
+                        .any(|(_, field)| pattern_uses_bare_type(field)),
                 }
         }
         Pattern::Struct {
             namespace, fields, ..
         } => {
             namespace.is_none()
-                || fields.iter().any(|(_, field)| pattern_uses_bare_type(field))
+                || fields
+                    .iter()
+                    .any(|(_, field)| pattern_uses_bare_type(field))
         }
         Pattern::Array { elements, .. } | Pattern::Or(elements) => {
             elements.iter().any(pattern_uses_bare_type)
@@ -7252,11 +8159,15 @@ fn expr_uses_runtime_type_bindings(expr: &Expr) -> bool {
         }
         ExprKind::Call { callee, args } => {
             expr_uses_runtime_type_bindings(callee)
-                || args.iter().any(expr_uses_runtime_type_bindings)
+                || args
+                    .iter()
+                    .any(|arg| expr_uses_runtime_type_bindings(&arg.value))
         }
         ExprKind::MethodCall { object, args, .. } => {
             expr_uses_runtime_type_bindings(object)
-                || args.iter().any(expr_uses_runtime_type_bindings)
+                || args
+                    .iter()
+                    .any(|arg| expr_uses_runtime_type_bindings(&arg.value))
         }
         ExprKind::Index { object, index } => {
             expr_uses_runtime_type_bindings(object) || expr_uses_runtime_type_bindings(index)
@@ -7401,7 +8312,7 @@ fn scan_free_vars_expr(
             // mistaken for a same-named binding outside both lambdas.
             let mut inner_known = known.clone();
             for p in params {
-                inner_known.insert(p.clone());
+                inner_known.insert(p.name.clone());
             }
             scan_free_vars_stmts(body, &mut inner_known, free, outer_scopes, fn_info);
         }
@@ -7409,9 +8320,7 @@ fn scan_free_vars_expr(
             scan_free_vars_expr(object, known, free, outer_scopes, fn_info);
         }
         ExprKind::StructConstruct {
-            namespace,
-            fields,
-            ..
+            namespace, fields, ..
         } => {
             // Namespaced construction emits a runtime validation
             // against the module Value. Record that otherwise-hidden
@@ -7426,9 +8335,7 @@ fn scan_free_vars_expr(
             }
         }
         ExprKind::EnumConstruct {
-            namespace,
-            payload,
-            ..
+            namespace, payload, ..
         } => {
             if let Some(name) = namespace {
                 if !known.contains(name) && is_outer_local(name, outer_scopes) {
@@ -7457,9 +8364,7 @@ fn scan_free_vars_expr(
             scan_free_vars_expr(scrutinee, known, free, outer_scopes, fn_info);
             for arm in arms {
                 for namespace in arm.pattern.namespace_names() {
-                    if !known.contains(&namespace)
-                        && is_outer_local(&namespace, outer_scopes)
-                    {
+                    if !known.contains(&namespace) && is_outer_local(&namespace, outer_scopes) {
                         free.pattern_namespaces.insert(namespace);
                     }
                 }
@@ -7478,9 +8383,7 @@ fn scan_free_vars_expr(
 }
 
 fn is_outer_local(name: &str, outer_scopes: &[EmissionScope]) -> bool {
-    outer_scopes
-        .iter()
-        .any(|scope| {
+    outer_scopes.iter().any(|scope| {
             scope.locals.contains(name)
                 || scope.persistent_bindings.contains(name)
                 || scope.optional_imports.contains_key(name)
@@ -7589,6 +8492,10 @@ fn method_site_adapter_name(site: usize) -> String {
     format!("__bop_method_adapter_{site}")
 }
 
+fn method_site_outcome_adapter_name(site: usize) -> String {
+    format!("__bop_method_outcome_adapter_{site}")
+}
+
 fn function_site_fn_name(site: usize) -> String {
     format!("__bop_function_site_{site}")
 }
@@ -7694,7 +8601,11 @@ mod tests {
 
         assert_eq!(context.module_path, "inner");
         assert_eq!(context.source.as_deref(), Some(inner_source));
-        assert!(error.render("use outer").contains("in module `inner` at line 2"));
+        assert!(
+            error
+                .render("use outer")
+                .contains("in module `inner` at line 2")
+        );
     }
 
     #[test]
@@ -7741,20 +8652,19 @@ mod tests {
         let output = emitted("let a = [1]\na.push(2)");
 
         assert!(
-            output.contains(
-                "__bop_binding_mut_option(ctx, \"<root>\", \"a\")"
-            ),
+            output.contains("__bop_binding_mut_option(ctx, \"<root>\", \"a\")"),
             "missing authoritative mutable Array binding:\n{output}"
         );
         assert!(
-            output.contains("::bop::methods::array_method_mut(__bop_array, \"push\""),
+            output.contains("::bop::methods::transactional_array_method(")
+                && output.contains("\"push\""),
             "missing shared in-place array dispatch:\n{output}"
         );
         assert!(
-            output.contains("} else { let ")
-                && output.contains(
-                    "= __bop_read_binding(ctx, \"<root>\", \"a\", 2)?; match __bop_try_user_method"
-                ),
+            output.contains("__bop_preflight_user_method(ctx")
+                && output.contains("__bop_call_preflighted_user_method(ctx")
+                && output.contains("} else { let ")
+                && output.contains("= __bop_read_binding(ctx, \"<root>\", \"a\", 2)?;"),
             "dynamic non-array fallback must retain user-method dispatch:\n{output}"
         );
     }
@@ -7763,11 +8673,11 @@ mod tests {
     fn nested_mutating_argument_is_emitted_before_outer_receiver_borrow() {
         let output = emitted("let a = [1, 2]\na.push(a.pop())");
         let pop = output
-            .find("::bop::methods::array_method_mut(__bop_array, \"pop\"")
-            .expect("inner pop fast path");
+            .find("\"pop\", ::std::vec::Vec::new(), 2")
+            .unwrap_or_else(|| panic!("inner pop fast path:\n{output}"));
         let push = output
-            .find("::bop::methods::array_method_mut(__bop_array, \"push\"")
-            .expect("outer push fast path");
+            .rfind("\"push\", ::std::vec![")
+            .unwrap_or_else(|| panic!("outer push fast path:\n{output}"));
 
         assert!(
             pop < push,
@@ -7780,7 +8690,7 @@ mod tests {
         let output = emitted("[1].push(2)");
 
         assert!(
-            !output.contains("::bop::methods::array_method_mut(__bop_array, \"push\""),
+            !output.contains("::bop::methods::transactional_array_method(&mut"),
             "temporary receiver must not use identifier write-back fast path:\n{output}"
         );
         assert!(

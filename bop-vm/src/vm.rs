@@ -62,13 +62,14 @@ use bop::builtins::{self, error, error_fatal_with_hint, error_with_hint};
 use bop::error::{BopError, BopWarning};
 use bop::methods;
 use bop::ops;
-use bop::parser::Visibility;
+use bop::parser::{ParamMode, Visibility};
 use bop::value::{BopFn, BopFnOrigin, FnBody, Value};
 use bop::{BopHost, BopLimits, EntryPoint};
 
 use crate::chunk::{
-    CaptureSource, Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx, EnumVariantShape,
-    FnDef, FnIdx, Instr, InterpPart, LoopStateKind, NameIdx, PatternIdx, StructIdx,
+    CallSiteIdx, CaptureSource, Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx,
+    EnumVariantShape, FnDef, FnIdx, Instr, InterpPart, LoopStateKind, NameIdx, NamespaceRef,
+    PatternIdx, RefArgTarget, SlotIdx, StructIdx,
 };
 
 /// Hard cap on call depth; matches the tree-walker.
@@ -172,6 +173,15 @@ struct Frame {
     /// before being pushed for the caller. See [`FrameWrap`].
     wrap: FrameWrap,
     defining_environment_module: Option<String>,
+    /// Names copied into this closure from an enclosing frame. They remain
+    /// readable values but are never legal explicit `ref` targets.
+    captured_names: BTreeSet<String>,
+    /// Calls whose callee and static fences have passed preflight while their
+    /// ordinary argument expressions are still being evaluated.
+    prepared_calls: Vec<PreparedCall>,
+    /// Copy-out records owned by this invocation. They are committed only by
+    /// the normal-return path and are otherwise dropped during unwind.
+    pending_write_backs: Vec<PendingWriteBack>,
 }
 
 impl Frame {
@@ -193,6 +203,9 @@ impl Frame {
             lexical_context,
             wrap: FrameWrap::None,
             defining_environment_module: None,
+            captured_names: BTreeSet::new(),
+            prepared_calls: Vec::new(),
+            pending_write_backs: Vec::new(),
         }
     }
 
@@ -219,6 +232,9 @@ impl Frame {
             lexical_context: context.lexical_context,
             wrap,
             defining_environment_module: None,
+            captured_names: BTreeSet::new(),
+            prepared_calls: Vec::new(),
+            pending_write_backs: Vec::new(),
         }
     }
 
@@ -293,8 +309,62 @@ fn unwrap_iter_step(v: &Value) -> IterStep {
 
 struct FnEntry {
     params: Vec<String>,
+    param_modes: Vec<ParamMode>,
     chunk: Rc<Chunk>,
     module_path: String,
+    declaration_alias_names: BTreeSet<String>,
+}
+
+enum PreparedCallable {
+    User(Rc<FnEntry>),
+    Closure(Rc<BopFn>),
+    UserMethod {
+        entry: Rc<FnEntry>,
+        receiver: Value,
+    },
+    DeferredMethod {
+        receiver: Value,
+        method: String,
+        nested_place: bool,
+    },
+    NamedMethodInPlace {
+        target: NamespaceRef,
+        method: String,
+    },
+    /// Builtins and host callables are value-only. Host arity is intentionally
+    /// deferred because the embedding trait does not expose signature metadata.
+    NamedFallback(String),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ResolvedRefTarget {
+    Slot {
+        frame: usize,
+        slot: SlotIdx,
+    },
+    Scope {
+        frame: usize,
+        scope: usize,
+        name: String,
+    },
+}
+
+struct PreparedRef {
+    param: usize,
+    recipe: NamespaceRef,
+}
+
+struct PreparedCall {
+    site: CallSiteIdx,
+    callable: PreparedCallable,
+    display_name: String,
+    refs: Vec<PreparedRef>,
+    value_count: usize,
+}
+
+struct PendingWriteBack {
+    param_slot: SlotIdx,
+    target: ResolvedRefTarget,
 }
 
 /// Structural equality check for two enum-variant lists.
@@ -1132,6 +1202,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         self.type_bindings.push(BTreeMap::new());
     }
 
+    fn apply_entry_alias_context(&mut self, entry: &FnEntry) {
+        let frame = self.frames.last_mut().expect("callee frame");
+        let mut context = (*frame.lexical_context).clone();
+        context
+            .module_aliases
+            .retain(|name, _| entry.declaration_alias_names.contains(name));
+        frame.lexical_context = Rc::new(context);
+    }
+
     fn park_active_defining_environment(&mut self) {
         let active_module = self.frames.last().and_then(|frame| {
             frame
@@ -1651,8 +1730,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         let params = entry.params.clone();
                         let chunk_rc = entry.chunk.clone();
                         let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-                        let v = BopFn::try_new_compiled_in_module_with_origin(
+                        let v = BopFn::try_new_compiled_in_module_with_origin_and_modes(
                             params,
+                            entry.param_modes.clone(),
                             Vec::new(),
                             body,
                             Some(name.to_string()),
@@ -2116,6 +2196,31 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Instr::CallValue { argc } => {
                 return self.call_value(argc as usize, line);
             }
+            Instr::PrepareCall { name, site } => {
+                self.prepare_named_call(name, site, line)?;
+            }
+            Instr::PrepareCallValue { site } => {
+                let callee = self.pop_value(line)?;
+                self.prepare_value_call(callee, site, line)?;
+            }
+            Instr::PrepareMethodValue {
+                method,
+                site,
+                nested_place,
+            } => {
+                let receiver = self.pop_value(line)?;
+                self.prepare_method_call(receiver, method, site, nested_place, line)?;
+            }
+            Instr::PrepareMethodNamed {
+                target,
+                method,
+                site,
+            } => {
+                self.prepare_named_method_call(target, method, site, line)?;
+            }
+            Instr::CallPrepared { site } => {
+                return self.call_prepared(site, line);
+            }
             Instr::CallMethod {
                 method,
                 argc,
@@ -2147,10 +2252,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
             Instr::Return => {
                 let v = self.pop_value(line)?;
-                return self.do_return(v);
+                return self.do_return(v, line);
             }
             Instr::ReturnNone => {
-                return self.do_return(Value::None);
+                return self.do_return(Value::None, line);
             }
 
             // ─── Iteration / repeat ──────────────────────────────
@@ -2576,6 +2681,654 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
 
     // ─── Calls ───────────────────────────────────────────────────
 
+    fn prepare_named_call(
+        &mut self,
+        name_idx: NameIdx,
+        site: CallSiteIdx,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+        let name = chunk.name(name_idx).to_string();
+
+        let scoped = self
+            .current_scopes()
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name))
+            .cloned();
+        let callable = if let Some(value) = scoped {
+            match value {
+                Value::Fn(function) => PreparedCallable::Closure(function),
+                other => {
+                    return Err(error(
+                        line,
+                        format!("`{name}` is a {}, not a function", other.type_name()),
+                    ));
+                }
+            }
+        } else if let Some(module) = self.frames.last().and_then(|frame| {
+            frame.lexical_context.module_aliases.get(&name).cloned()
+        }) {
+            return Err(error(
+                line,
+                format!(
+                    "`{name}` is a {}, not a function",
+                    Value::Module(module).type_name()
+                ),
+            ));
+        } else if let Some(entry) = self.imported_function(&name).cloned() {
+            PreparedCallable::User(entry)
+        } else if self.frames.last().is_some_and(|frame| {
+            frame.is_function
+                && frame.function_module.as_deref() == Some(bop::value::ROOT_MODULE_PATH)
+        }) {
+            match self
+                .frames
+                .first()
+                .and_then(|root| {
+                    root.scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(&name))
+                })
+                .cloned()
+            {
+                Some(Value::Fn(function)) => PreparedCallable::Closure(function),
+                Some(other) => {
+                    return Err(error(
+                        line,
+                        format!("`{name}` is a {}, not a function", other.type_name()),
+                    ));
+                }
+                None => self
+                    .lookup_function_entry(&name)
+                    .map(PreparedCallable::User)
+                    .unwrap_or_else(|| PreparedCallable::NamedFallback(name.clone())),
+            }
+        } else {
+            self.lookup_function_entry(&name)
+                .map(PreparedCallable::User)
+                .unwrap_or_else(|| PreparedCallable::NamedFallback(name.clone()))
+        };
+        self.preflight_call(callable, name, site, line)
+    }
+
+    fn prepare_value_call(
+        &mut self,
+        callee: Value,
+        site: CallSiteIdx,
+        line: u32,
+    ) -> Result<(), BopError> {
+        match callee {
+            Value::Fn(function) => {
+                let display = function.self_name.as_deref().unwrap_or("fn").to_string();
+                self.preflight_call(
+                    PreparedCallable::Closure(function),
+                    display,
+                    site,
+                    line,
+                )
+            }
+            other => Err(error(
+                line,
+                bop::error_messages::cant_call_a(other.type_name()),
+            )),
+        }
+    }
+
+    fn prepare_method_call(
+        &mut self,
+        receiver: Value,
+        method_idx: NameIdx,
+        site: CallSiteIdx,
+        nested_place: bool,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let method = self.current_chunk().name(method_idx).to_string();
+        if let Value::Module(module) = &receiver {
+            // Universal common methods win over same-named exports.
+            if matches!(method.as_str(), "type" | "to_str" | "inspect") {
+                return self.preflight_call(
+                    PreparedCallable::DeferredMethod {
+                        receiver,
+                        method: method.clone(),
+                        nested_place,
+                    },
+                    method,
+                    site,
+                    line,
+                );
+            }
+            let callee = self.module_binding(module, &method).ok_or_else(|| {
+                error(
+                    line,
+                    format!("`{method}` isn't exported from `{}`", module.path),
+                )
+            })?;
+            return self.prepare_value_call(callee, site, line);
+        }
+
+        let type_key = match &receiver {
+            Value::Struct(value) => Some((
+                value.module_path().to_string(),
+                value.type_name().to_string(),
+            )),
+            Value::EnumVariant(value) => Some((
+                value.module_path().to_string(),
+                value.type_name().to_string(),
+            )),
+            _ => None,
+        };
+        if let Some(type_key) = type_key {
+            if let Some(entry) = self
+                .user_methods
+                .get(&type_key)
+                .and_then(|methods| methods.get(&method))
+                .cloned()
+            {
+                return self.preflight_call(
+                    PreparedCallable::UserMethod { entry, receiver },
+                    format!("{}.{}", type_key.1, method),
+                    site,
+                    line,
+                );
+            }
+        }
+        if nested_place {
+            methods::reject_nested_array_mutation(&receiver, &method, line)?;
+        }
+        self.preflight_call(
+            PreparedCallable::DeferredMethod {
+                receiver,
+                method: method.clone(),
+                nested_place,
+            },
+            method,
+            site,
+            line,
+        )
+    }
+
+    fn prepare_named_method_call(
+        &mut self,
+        target: NamespaceRef,
+        method_idx: NameIdx,
+        site: CallSiteIdx,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let method = self.current_chunk().name(method_idx).to_string();
+        let receiver_name = self.current_chunk().name(target.name_idx()).to_string();
+        let receiver = match target.slot_idx() {
+            Some(slot) => self
+                .frames
+                .last()
+                .and_then(|frame| frame.slots.get(slot.0 as usize))
+                .cloned()
+                .ok_or_else(|| error(line, "VM: local slot out of range"))?,
+            None => {
+                let value = self
+                    .current_scopes()
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(&receiver_name))
+                    .cloned();
+                match value {
+                    Some(value) => value,
+                    None => {
+                        if let Some(entry) = self.lookup_function_entry(&receiver_name) {
+                            let body: Rc<dyn core::any::Any + 'static> =
+                                entry.chunk.clone();
+                            let function =
+                                BopFn::try_new_compiled_in_module_with_origin_and_modes(
+                                    entry.params.clone(),
+                                    entry.param_modes.clone(),
+                                    Vec::new(),
+                                    body,
+                                    Some(receiver_name.clone()),
+                                    Some(entry.module_path.clone()),
+                                    self.function_origin.clone(),
+                                    0,
+                                    line,
+                                )?;
+                            return self.prepare_method_call(
+                                Value::Fn(function),
+                                method_idx,
+                                site,
+                                false,
+                                line,
+                            );
+                        }
+                        if let Some(module) = self.module_alias(&receiver_name).cloned() {
+                            return self.prepare_method_call(
+                                Value::Module(module),
+                                method_idx,
+                                site,
+                                false,
+                                line,
+                            );
+                        }
+                        let hint = self.value_candidates_hint(&receiver_name).unwrap_or_else(|| {
+                            "Did you forget to create it with `let`?".to_string()
+                        });
+                        return Err(error_with_hint(
+                            line,
+                            bop::error_messages::variable_not_found(&receiver_name),
+                            hint,
+                        ));
+                    }
+                }
+            }
+        };
+
+        if matches!(receiver, Value::Array(_)) && methods::is_mutating_method(&method) {
+            return self.preflight_call(
+                PreparedCallable::NamedMethodInPlace { target, method: method.clone() },
+                method,
+                site,
+                line,
+            );
+        }
+        self.prepare_method_call(receiver, method_idx, site, false, line)
+    }
+
+    fn preflight_call(
+        &mut self,
+        callable: PreparedCallable,
+        display_name: String,
+        site_idx: CallSiteIdx,
+        line: u32,
+    ) -> Result<(), BopError> {
+        let site = self.current_chunk().call_site(site_idx).clone();
+        if let PreparedCallable::NamedFallback(name) = &callable {
+            validate_named_builtin_arity(name, site.arg_modes.len(), line)?;
+        }
+        let expected_modes: Option<&[ParamMode]> = match &callable {
+            PreparedCallable::User(entry) => Some(&entry.param_modes),
+            PreparedCallable::Closure(function) => Some(&function.param_modes),
+            PreparedCallable::UserMethod { entry, .. } => {
+                let actual_arity = site.arg_modes.len() + 1;
+                if entry.param_modes.len() != actual_arity {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{display_name}` expects {} argument{} (including `self`), but got {}",
+                            entry.param_modes.len(),
+                            if entry.param_modes.len() == 1 { "" } else { "s" },
+                            actual_arity
+                        ),
+                    ));
+                }
+                if entry.param_modes.first() != Some(&ParamMode::Value) {
+                    return Err(error(line, "VM: user method receiver cannot be `ref`"));
+                }
+                Some(&entry.param_modes[1..])
+            }
+            PreparedCallable::NamedFallback(_)
+            | PreparedCallable::DeferredMethod { .. }
+            | PreparedCallable::NamedMethodInPlace { .. } => None,
+        };
+        if let Some(expected) = expected_modes {
+            if site.arg_modes.len() != expected.len() {
+                return Err(error(
+                    line,
+                    format!(
+                        "`{display_name}` expects {} argument{}, but got {}",
+                        expected.len(),
+                        if expected.len() == 1 { "" } else { "s" },
+                        site.arg_modes.len()
+                    ),
+                ));
+            }
+            for (index, (actual, expected)) in
+                site.arg_modes.iter().zip(expected.iter()).enumerate()
+            {
+                if actual != expected {
+                    return Err(call_mode_error(
+                        line,
+                        &display_name,
+                        index,
+                        *expected,
+                    ));
+                }
+            }
+        } else if let Some((index, _)) = site
+            .arg_modes
+            .iter()
+            .enumerate()
+            .find(|(_, mode)| **mode == ParamMode::Ref)
+        {
+            return Err(call_mode_error(
+                line,
+                &display_name,
+                index,
+                ParamMode::Value,
+            ));
+        }
+
+        if matches!(
+            &callable,
+            PreparedCallable::DeferredMethod { .. }
+                | PreparedCallable::NamedMethodInPlace { .. }
+        ) {
+            validate_builtin_method_arity(&display_name, site.arg_modes.len(), line)?;
+        }
+        if let PreparedCallable::NamedMethodInPlace { target, method } = &callable {
+            let receiver_name = self.current_chunk().name(target.name_idx());
+            methods::reject_constant_array_mutation(receiver_name, method, line)?;
+            if target.slot_idx().is_none()
+                && self
+                    .frames
+                    .last()
+                    .is_some_and(|frame| frame.captured_names.contains(receiver_name))
+            {
+                return Err(bop::ref_params::captured_ref_target(1, line));
+            }
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut refs = Vec::new();
+        for (index, (mode, target)) in site
+            .arg_modes
+            .iter()
+            .zip(site.ref_targets.iter())
+            .enumerate()
+        {
+            if *mode == ParamMode::Value {
+                continue;
+            }
+            let recipe = match target {
+                Some(RefArgTarget::Binding(recipe)) => *recipe,
+                Some(RefArgTarget::Invalid) | None => {
+                    return Err(invalid_ref_target_error(line, index));
+                }
+            };
+            let name = self.current_chunk().name(recipe.name_idx());
+            if bop::naming::is_constant_name(name) {
+                return Err(bop::error_messages::constant_mutation_error(name, line));
+            }
+            if recipe.slot_idx().is_none()
+                && self
+                    .frames
+                    .last()
+                    .is_some_and(|frame| frame.captured_names.contains(name))
+            {
+                return Err(bop::ref_params::captured_ref_target(index + 1, line));
+            }
+            let identity = match recipe.slot_idx() {
+                Some(slot) => (0_u8, slot.0),
+                None => (1_u8, recipe.name_idx().0),
+            };
+            if !seen.insert(identity) {
+                return Err(duplicate_ref_target_error(line));
+            }
+            refs.push(PreparedRef {
+                param: index,
+                recipe,
+            });
+        }
+        let value_count = site
+            .arg_modes
+            .iter()
+            .filter(|mode| **mode == ParamMode::Value)
+            .count();
+        self.frames
+            .last_mut()
+            .expect("frame present")
+            .prepared_calls
+            .push(PreparedCall {
+                site: site_idx,
+                callable,
+                display_name,
+                refs,
+                value_count,
+            });
+        Ok(())
+    }
+
+    fn call_prepared(
+        &mut self,
+        site: CallSiteIdx,
+        line: u32,
+    ) -> Result<Next, BopError> {
+        let prepared = self
+            .frames
+            .last_mut()
+            .expect("frame present")
+            .prepared_calls
+            .pop()
+            .ok_or_else(|| error(line, "VM: missing prepared call"))?;
+        if prepared.site != site {
+            return Err(error(line, "VM: prepared call-site mismatch"));
+        }
+        let ordinary = self.pop_n_values(prepared.value_count, line)?;
+        let modes = self.current_chunk().call_site(site).arg_modes.clone();
+        let param_offset = usize::from(matches!(
+            &prepared.callable,
+            PreparedCallable::UserMethod { .. }
+        ));
+        let mut ordinary = ordinary.into_iter();
+        let mut full_args: Vec<Option<Value>> =
+            core::iter::repeat_with(|| None).take(modes.len()).collect();
+        for (index, mode) in modes.iter().enumerate() {
+            if *mode == ParamMode::Value {
+                full_args[index] = ordinary.next();
+            }
+        }
+
+        let mut pending = Vec::with_capacity(prepared.refs.len());
+        for prepared_ref in prepared.refs {
+            let (target, snapshot) =
+                self.resolve_ref_target(prepared_ref.recipe, prepared_ref.param, line)?;
+            if pending
+                .iter()
+                .any(|write_back: &PendingWriteBack| write_back.target == target)
+            {
+                return Err(duplicate_ref_target_error(line));
+            }
+            full_args[prepared_ref.param] = Some(snapshot);
+            pending.push(PendingWriteBack {
+                param_slot: SlotIdx((prepared_ref.param + param_offset) as u32),
+                target,
+            });
+        }
+        let args = full_args
+            .into_iter()
+            .map(|value| value.ok_or_else(|| error(line, "VM: incomplete prepared arguments")))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let before = self.frames.len();
+        let next = match prepared.callable {
+            PreparedCallable::User(entry) => self.enter_user_fn_args(entry, args, line)?,
+            PreparedCallable::Closure(function) => self.call_closure(&function, args, line)?,
+            PreparedCallable::UserMethod { entry, receiver } => {
+                let mut method_args = Vec::with_capacity(args.len() + 1);
+                method_args.push(receiver);
+                method_args.extend(args);
+                self.enter_user_fn_args(entry, method_args, line)?
+            }
+            PreparedCallable::DeferredMethod {
+                receiver,
+                method,
+                nested_place,
+            } => {
+                debug_assert!(pending.is_empty());
+                return self.dispatch_method(
+                    receiver,
+                    &method,
+                    args,
+                    None,
+                    nested_place,
+                    line,
+                );
+            }
+            PreparedCallable::NamedMethodInPlace { target, method } => {
+                debug_assert!(pending.is_empty());
+                return self.call_method_in_place_args(target, &method, args, line);
+            }
+            PreparedCallable::NamedFallback(name) => {
+                debug_assert!(pending.is_empty());
+                return self.invoke_named_fallback(&name, args, line);
+            }
+        };
+        if !pending.is_empty() {
+            if self.frames.len() != before + 1 {
+                return Err(error(
+                    line,
+                    format!(
+                        "VM: `{}` did not enter a function frame",
+                        prepared.display_name
+                    ),
+                ));
+            }
+            self.frames
+                .last_mut()
+                .expect("callee frame")
+                .pending_write_backs = pending;
+        }
+        Ok(next)
+    }
+
+    fn resolve_ref_target(
+        &self,
+        recipe: NamespaceRef,
+        position: usize,
+        line: u32,
+    ) -> Result<(ResolvedRefTarget, Value), BopError> {
+        let frame_index = self.frames.len().saturating_sub(1);
+        let frame = self.frames.last().expect("frame present");
+        if let Some(slot) = recipe.slot_idx() {
+            let value = frame
+                .slots
+                .get(slot.0 as usize)
+                .cloned()
+                .ok_or_else(|| error(line, "VM: local slot out of range"))?;
+            return Ok((
+                ResolvedRefTarget::Slot {
+                    frame: frame_index,
+                    slot,
+                },
+                value,
+            ));
+        }
+        let name = frame.chunk.name(recipe.name_idx()).to_string();
+        if frame.captured_names.contains(&name) {
+            return Err(bop::ref_params::captured_ref_target(position + 1, line));
+        }
+        for (scope_index, scope) in frame.scopes.iter().enumerate().rev() {
+            if let Some(value) = scope.get(&name) {
+                return Ok((
+                    ResolvedRefTarget::Scope {
+                        frame: frame_index,
+                        scope: scope_index,
+                        name,
+                    },
+                    value.clone(),
+                ));
+            }
+        }
+        Err(error_with_hint(
+            line,
+            bop::error_messages::variable_not_found(&name),
+            "Did you forget to create it with `let`?",
+        ))
+    }
+
+    fn enter_user_fn_args(
+        &mut self,
+        entry: Rc<FnEntry>,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Next, BopError> {
+        if self.frames.len().saturating_sub(1) >= MAX_CALL_DEPTH {
+            return Err(error_with_hint(
+                line,
+                "Too many nested function calls (possible infinite recursion)",
+                "Check that your recursive function has a base case that stops calling itself.",
+            ));
+        }
+        let slot_count = (entry.chunk.slot_count as usize).max(args.len());
+        let mut slots = self.take_slots(slot_count);
+        for (index, arg) in args.into_iter().enumerate() {
+            slots[index] = arg;
+        }
+        self.push_function_frame(
+            entry.chunk.clone(),
+            slots,
+            Vec::new(),
+            self.stack.len(),
+            Some(entry.module_path.clone()),
+            FrameWrap::None,
+        );
+        self.apply_entry_alias_context(&entry);
+        Ok(Next::Continue)
+    }
+
+    fn invoke_named_fallback(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Next, BopError> {
+        match name {
+            "range" => {
+                let value = builtins::builtin_range(&args, line, &mut self.rand_state)?;
+                self.push_value(value);
+                return Ok(Next::Continue);
+            }
+            "rand" => {
+                let value = builtins::builtin_rand(&args, line, &mut self.rand_state)?;
+                self.push_value(value);
+                return Ok(Next::Continue);
+            }
+            "print" => {
+                let message = args
+                    .iter()
+                    .map(|arg| format!("{arg}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
+                self.host.on_print(&message);
+                self.push_value(Value::None);
+                return Ok(Next::Continue);
+            }
+            "try_call" => return self.builtin_try_call(args, line),
+            "panic" => {
+                let value = builtins::builtin_panic(&args, line)?;
+                self.push_value(value);
+                return Ok(Next::Continue);
+            }
+            _ => {}
+        }
+        let host_result = {
+            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
+            self.host.call(name, &args, line)
+        };
+        if let Some(result) = host_result {
+            self.push_value(result?);
+            return Ok(Next::Continue);
+        }
+        if let Some(hint) = self.callable_candidates_hint(name) {
+            return Err(error_with_hint(
+                line,
+                bop::error_messages::function_not_found(name),
+                hint,
+            ));
+        }
+        let host_hint = {
+            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
+            self.host.function_hint().to_string()
+        };
+        Err(if host_hint.is_empty() {
+            error(line, bop::error_messages::function_not_found(name))
+        } else {
+            error_with_hint(
+                line,
+                bop::error_messages::function_not_found(name),
+                host_hint,
+            )
+        })
+    }
+
     fn call(&mut self, name_idx: NameIdx, argc: usize, line: u32) -> Result<Next, BopError> {
         // Borrow the name out of the chunk without allocating a
         // fresh `String` per call — `fib(25)` dispatches this
@@ -2864,6 +3617,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Some(entry.module_path.clone()),
             FrameWrap::None,
         );
+        self.apply_entry_alias_context(&entry);
         // A fresh type_bindings frame scopes any type decl
         // inside this fn to the fn body itself — same rule
         // as push_scope / pop_scope for block scoping. On
@@ -2931,10 +3685,20 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     ) -> Result<Next, BopError> {
         let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
         let method = chunk.name(method_idx);
+        let args = self.pop_n_values(argc, line)?;
+        self.call_method_in_place_args(target, method, args, line)
+    }
+
+    fn call_method_in_place_args(
+        &mut self,
+        target: crate::chunk::NamespaceRef,
+        method: &str,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<Next, BopError> {
+        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
         let receiver_idx = target.name_idx();
         let receiver_name = chunk.name(receiver_idx);
-        let args = self.pop_n_values(argc, line)?;
-
         // The compiler only emits this instruction for a bare identifier and
         // a built-in mutating method name. Resolve the binding after argument
         // evaluation, matching the walker/AOT order. Arrays take the direct
@@ -2949,9 +3713,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .slots
                     .get_mut(slot.0 as usize)
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
-                if let Value::Array(array) = value {
+                if matches!(value, Value::Array(_)) {
                     methods::reject_constant_array_mutation(receiver_name, method, line)?;
-                    let result = methods::array_method_mut(array, method, args, line)?;
+                    let result =
+                        methods::transactional_array_method(value, method, args, line)?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
@@ -2984,9 +3749,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 let value = self
                     .lookup_var_mut_by_idx(receiver_idx)
                     .expect("binding checked above");
-                if let Value::Array(array) = value {
+                if matches!(value, Value::Array(_)) {
                     methods::reject_constant_array_mutation(receiver_name, method, line)?;
-                    let result = methods::array_method_mut(array, method, args, line)?;
+                    let result =
+                        methods::transactional_array_method(value, method, args, line)?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
@@ -3097,6 +3863,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     Some(entry.module_path.clone()),
                     FrameWrap::None,
                 );
+                self.apply_entry_alias_context(&entry);
                 // User methods don't do mutation back-assign
                 // — the receiver is passed by value, and the
                 // method returns a fresh instance if it wants to
@@ -3298,8 +4065,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let fn_def = chunk.function(fn_idx);
         let entry = Rc::new(FnEntry {
             params: fn_def.params.clone(),
+            param_modes: fn_def.param_modes.clone(),
             chunk: Rc::clone(&fn_def.chunk),
             module_path: self.current_module.clone(),
+            declaration_alias_names: self
+                .frames
+                .last()
+                .expect("defining frame")
+                .lexical_context
+                .module_aliases
+                .keys()
+                .cloned()
+                .collect(),
         });
         // Methods attach to the *full* receiver-type identity.
         // A method declared inside `paint` for `Color` only
@@ -3914,7 +4691,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
                 // Fast-return with the Err value: identical path
                 // to an ordinary `return err`.
-                self.do_return(value)
+                self.do_return(value, line)
             }
             other => Err(error(
                 line,
@@ -3932,8 +4709,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let name = fn_def.name.clone();
         let entry = Rc::new(FnEntry {
             params: fn_def.params.clone(),
+            param_modes: fn_def.param_modes.clone(),
             chunk: Rc::clone(&fn_def.chunk),
             module_path: self.active_module_path().to_string(),
+            declaration_alias_names: self
+                .frames
+                .last()
+                .expect("defining frame")
+                .lexical_context
+                .module_aliases
+                .keys()
+                .cloned()
+                .collect(),
         });
         self.functions.insert(name.clone(), Rc::clone(&entry));
         if self.is_module_top_scope()
@@ -3960,8 +4747,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let captures = self.snapshot_captures_for(fn_def);
         let compiled_chunk = Rc::clone(&fn_def.chunk);
         let body: Rc<dyn core::any::Any + 'static> = compiled_chunk;
-        let value = BopFn::try_new_compiled_in_module_with_origin(
+        let value = BopFn::try_new_compiled_in_module_with_origin_and_modes(
             fn_def.params.clone(),
+            fn_def.param_modes.clone(),
             captures,
             body,
             None,
@@ -4114,6 +4902,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             func.module_path.clone(),
             FrameWrap::None,
         );
+        if let Some(frame) = self.frames.last_mut() {
+            frame.captured_names = func
+                .captures
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+        }
         Ok(Next::Continue)
     }
 
@@ -4200,8 +4995,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
             let chunk_rc: Rc<Chunk> = entry.chunk.clone();
             let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-            let value = BopFn::try_new_compiled_in_module_with_origin(
+            let value = BopFn::try_new_compiled_in_module_with_origin_and_modes(
                 entry.params.clone(),
+                entry.param_modes.clone(),
                 Vec::new(),
                 body,
                 Some(name.clone()),
@@ -4789,7 +5585,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         Ok(())
     }
 
-    fn do_return(&mut self, value: Value) -> Result<Next, BopError> {
+    fn do_return(&mut self, value: Value, line: u32) -> Result<Next, BopError> {
+        if bop::memory::bop_memory_exceeded() {
+            return Err(error_fatal_with_hint(
+                line,
+                "Memory limit exceeded",
+                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+            ));
+        }
         if self.frames.last().is_some_and(|frame| !frame.is_function) {
             drop(value);
             let frame = self.frames.last_mut().expect("frame present");
@@ -4816,14 +5619,6 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         self.module_aliases.truncate(frame.alias_scope_base);
         self.imported_functions.truncate(frame.alias_scope_base);
         self.imported_here.truncate(frame.alias_scope_base);
-        // Recycle the slot vec so the next call can reuse its
-        // allocation. Dropping it here would drop every `Value`
-        // slot in place, which is still cheap for `Int`/`Bool`
-        // but releases the vec's backing buffer — the exact
-        // alloc/dealloc churn we're here to avoid.
-        if !frame.slots.is_empty() {
-            self.return_slots(frame.slots);
-        }
         // Iterator-protocol landing pads get their own return
         // handling — they don't just push the value; they
         // manipulate the caller's stack (and maybe jump) to
@@ -4892,6 +5687,23 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 unreachable!("handled above")
             }
         };
+        if bop::memory::bop_memory_exceeded() {
+            return Err(error_fatal_with_hint(
+                line,
+                "Memory limit exceeded",
+                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+            ));
+        }
+        // All fallible return processing is complete. Validate every resolved
+        // target before the first store, then perform the infallible copy-out
+        // as one user-observable commit.
+        self.commit_frame_write_backs(&frame, line)?;
+
+        // Recycle the slot vec only after copy-out has read the staged ref
+        // parameters.
+        if !frame.slots.is_empty() {
+            self.return_slots(core::mem::take(&mut frame.slots));
+        }
         if frame.is_function {
             self.push_value(final_value);
             Ok(Next::Continue)
@@ -4901,6 +5713,68 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             drop(final_value);
             Ok(Next::Halt)
         }
+    }
+
+    fn commit_frame_write_backs(
+        &mut self,
+        frame: &Frame,
+        line: u32,
+    ) -> Result<(), BopError> {
+        if frame.pending_write_backs.is_empty() {
+            return Ok(());
+        }
+        let mut values = Vec::with_capacity(frame.pending_write_backs.len());
+        for pending in &frame.pending_write_backs {
+            let value = frame
+                .slots
+                .get(pending.param_slot.0 as usize)
+                .cloned()
+                .ok_or_else(|| error(line, "VM: ref parameter slot out of range"))?;
+            match &pending.target {
+                ResolvedRefTarget::Slot { frame, slot } => {
+                    if self
+                        .frames
+                        .get(*frame)
+                        .and_then(|target| target.slots.get(slot.0 as usize))
+                        .is_none()
+                    {
+                        return Err(error(line, "VM: ref write-back slot is no longer live"));
+                    }
+                }
+                ResolvedRefTarget::Scope {
+                    frame,
+                    scope,
+                    name,
+                } => {
+                    if !self
+                        .frames
+                        .get(*frame)
+                        .and_then(|target| target.scopes.get(*scope))
+                        .is_some_and(|scope| scope.contains_key(name))
+                    {
+                        return Err(error(line, "VM: ref write-back binding is no longer live"));
+                    }
+                }
+            }
+            values.push(value);
+        }
+        for (pending, value) in frame.pending_write_backs.iter().zip(values) {
+            match &pending.target {
+                ResolvedRefTarget::Slot { frame, slot } => {
+                    self.frames[*frame].slots[slot.0 as usize] = value;
+                }
+                ResolvedRefTarget::Scope {
+                    frame,
+                    scope,
+                    name,
+                } => {
+                    *self.frames[*frame].scopes[*scope]
+                        .get_mut(name)
+                        .expect("write-back target prevalidated") = value;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Implement the `try_call(f)` builtin. Validates the arg
@@ -5033,6 +5907,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Some(entry.module_path.clone()),
             wrap,
         );
+        self.apply_entry_alias_context(&entry);
         Ok(())
     }
 
@@ -5377,6 +6252,12 @@ impl BopInstance {
                 ),
             ));
         }
+        bop::ref_params::validate_call_modes(
+            name,
+            &target.param_modes,
+            &vec![ParamMode::Value; args.len()],
+            0,
+        )?;
         if self.memory.__exceeded() {
             return Err(instance_memory_error());
         }
@@ -5437,6 +6318,13 @@ impl BopInstance {
                 ),
             ));
         }
+        let display_name = function.self_name.as_deref().unwrap_or("fn");
+        bop::ref_params::validate_call_modes(
+            display_name,
+            &function.param_modes,
+            &vec![ParamMode::Value; args.len()],
+            0,
+        )?;
         if self.memory.__exceeded() {
             return Err(instance_memory_error());
         }
@@ -5463,6 +6351,95 @@ impl BopInstance {
 
 fn instance_memory_error() -> BopError {
     BopError::fatal("Memory limit exceeded", 0)
+}
+
+fn call_mode_error(
+    line: u32,
+    callable: &str,
+    zero_based_position: usize,
+    expected: ParamMode,
+) -> BopError {
+    let position = zero_based_position + 1;
+    match expected {
+        ParamMode::Ref => error_with_hint(
+            line,
+            format!("argument {position} to `{callable}` must be passed with `ref`"),
+            format!("Write `ref` before argument {position}."),
+        ),
+        ParamMode::Value => error_with_hint(
+            line,
+            format!(
+                "argument {position} to `{callable}` is a value parameter and can't use `ref`"
+            ),
+            format!("Remove `ref` from argument {position}."),
+        ),
+    }
+}
+
+fn invalid_ref_target_error(line: u32, zero_based_position: usize) -> BopError {
+    error_with_hint(
+        line,
+        format!(
+            "`ref` argument {} must name a mutable variable",
+            zero_based_position + 1
+        ),
+        "Assign the value to a `let` variable, then pass that variable with `ref`.",
+    )
+}
+
+fn duplicate_ref_target_error(line: u32) -> BopError {
+    error_with_hint(
+        line,
+        "the same variable can't be passed to more than one `ref` parameter",
+        "Use a distinct variable for each `ref` argument.",
+    )
+}
+
+fn validate_named_builtin_arity(
+    name: &str,
+    count: usize,
+    line: u32,
+) -> Result<(), BopError> {
+    let expected = match name {
+        "rand" | "try_call" | "panic" => Some((1, 1)),
+        "range" => Some((1, 3)),
+        "print" => None,
+        _ => return Ok(()),
+    };
+    if let Some((min, max)) = expected {
+        if count < min || count > max {
+            let expectation = if min == max {
+                format!("{} argument{}", min, if min == 1 { "" } else { "s" })
+            } else {
+                format!("{min} to {max} arguments")
+            };
+            return Err(error(
+                line,
+                format!("`{name}` expects {expectation}, but got {count}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_builtin_method_arity(
+    method: &str,
+    count: usize,
+    line: u32,
+) -> Result<(), BopError> {
+    let Some(expected) = methods::builtin_method_arity(method) else {
+        return Ok(());
+    };
+    if count != expected {
+        return Err(error(
+            line,
+            format!(
+                "`.{method}()` needs {expected} argument{}",
+                if expected == 1 { "" } else { "s" }
+            ),
+        ));
+    }
+    Ok(())
 }
 
 struct VmOperationGuard<'a>(&'a Cell<bool>);
@@ -5620,7 +6597,7 @@ for outer in [1, 2] {
         assert_eq!(vm.type_bindings.len(), 2);
         vm.push_scope();
         vm.push_scope();
-        vm.do_return(Value::None).expect("return");
+        vm.do_return(Value::None, 0).expect("return");
         assert_eq!(vm.frames.len(), 1);
         assert_eq!(vm.type_bindings.len(), 1);
 
@@ -5649,7 +6626,7 @@ for outer in [1, 2] {
         // Error unwinding must remove both the try-call frame and a nested
         // function's still-open runtime scopes, restoring the top-level type
         // depth exactly.
-        vm.do_return(Value::None).expect("closure return");
+        vm.do_return(Value::None, 0).expect("closure return");
         vm.push_function_frame(
             Rc::new(Chunk::new()),
             Vec::new(),

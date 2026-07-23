@@ -3,6 +3,7 @@
 //! instruction set.
 
 use core::num::{NonZeroU32, NonZeroU64};
+use bop::parser::ParamMode;
 
 #[cfg(feature = "no_std")]
 use alloc::{rc::Rc, string::String, vec::Vec};
@@ -179,6 +180,32 @@ pub enum Instr {
     /// bare ident (e.g. `funcs[0](x)` or `make_adder(5)(3)`). Arguments
     /// are evaluated before the callee, matching the tree walker.
     CallValue { argc: u32 },
+    /// Resolve a named callable exactly once and validate the call-site shape
+    /// before any ordinary argument expression is evaluated.
+    PrepareCall {
+        name: NameIdx,
+        site: CallSiteIdx,
+    },
+    /// Pop and preflight an already-evaluated callable value.
+    PrepareCallValue { site: CallSiteIdx },
+    /// Pop an already-evaluated method receiver and preflight its positional
+    /// non-receiver arguments. Used when any explicit `ref` marker is present.
+    PrepareMethodValue {
+        method: NameIdx,
+        site: CallSiteIdx,
+        nested_place: bool,
+    },
+    /// Preflight a named method receiver without snapshotting a built-in
+    /// mutator. The VM snapshots value receivers immediately, but defers an
+    /// implicit-ref array receiver until ordinary arguments have run.
+    PrepareMethodNamed {
+        target: NamespaceRef,
+        method: NameIdx,
+        site: CallSiteIdx,
+    },
+    /// Snapshot the prepared call's `ref` targets, interleave them with the
+    /// ordinary argument values, and enter the callable.
+    CallPrepared { site: CallSiteIdx },
     /// Method call: `[.., args..., obj]` → `[.., ret]`, and if the
     /// method is mutating and `obj` came from a variable, the VM
     /// writes the mutated value back to the original binding. The
@@ -443,7 +470,7 @@ pub struct PatternIdx(pub u32);
 /// name-based lookup. The non-zero packed representation keeps side-table
 /// entries at eight bytes. Name index `u32::MAX` and slot index `u32::MAX` are
 /// reserved; neither can address a materializable bytecode pool or frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NamespaceRef(NonZeroU64);
 
 impl NamespaceRef {
@@ -535,6 +562,10 @@ pub struct UseIdx(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConstructFieldsIdx(pub u32);
 
+/// Index into a chunk's call-site metadata pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallSiteIdx(pub u32);
+
 /// Shape of an enum variant's payload at the construction site —
 /// tells the VM how many stack entries to pop.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -560,6 +591,25 @@ pub enum AssignBack {
     /// first entry named `name`, overwrite it. Matches the
     /// pre-slot `CallMethod` behaviour.
     Name(NameIdx),
+}
+
+/// Compile-time classification of one explicit `ref` argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefArgTarget {
+    /// A mutable-binding candidate. Runtime preflight resolves the name form
+    /// to an exact scope entry and rejects captures/constants before arguments.
+    Binding(NamespaceRef),
+    /// Any expression other than a transparent-grouped plain identifier.
+    Invalid,
+}
+
+/// Passive metadata for one source call. `arg_modes` retains positional
+/// markers even when the callee is reached dynamically. `ref_targets` is
+/// positionally parallel and must contain a target exactly at `Ref` positions.
+#[derive(Debug, Clone)]
+pub struct CallSite {
+    pub arg_modes: Vec<ParamMode>,
+    pub ref_targets: Vec<Option<RefArgTarget>>,
 }
 
 /// Assignment operation carried by direct named index/field stores.
@@ -646,6 +696,8 @@ pub struct Chunk {
     /// Source-order field names for struct and struct-variant construction
     /// preflight instructions.
     pub construct_fields: Vec<Vec<String>>,
+    /// Positional modes and reference-place recipes for source calls.
+    pub call_sites: Vec<CallSite>,
     /// Match patterns referenced by `MatchFail` instructions. Pool entries
     /// are shared because matching may execute the same arm in a hot loop.
     pub patterns: Vec<PatternRecipe>,
@@ -733,6 +785,10 @@ impl Chunk {
         &self.construct_fields[idx.0 as usize]
     }
 
+    pub fn call_site(&self, idx: CallSiteIdx) -> &CallSite {
+        &self.call_sites[idx.0 as usize]
+    }
+
     pub fn namespace_ref(&self, idx: NamespaceIdx) -> NamespaceRef {
         self.namespace_refs[idx.index() as usize]
     }
@@ -777,6 +833,8 @@ pub struct PatternRecipe {
 pub struct FnDef {
     pub name: String,
     pub params: Vec<String>,
+    /// Positional parameter modes retained by every callable representation.
+    pub param_modes: Vec<ParamMode>,
     /// Immutable compiled body shared by the defining chunk, function
     /// registry, and every closure materialised from this definition.
     pub chunk: Rc<Chunk>,

@@ -4,7 +4,7 @@ mod model;
 use diagnostics::check_match_exhaustive;
 use crate::error::{BopError, BopWarning};
 use crate::parser::{
-    AssignTarget, Expr, ExprKind, Stmt, StmtKind, VariantPayload,
+    AssignTarget, Expr, ExprKind, Parameter, Stmt, StmtKind, VariantPayload,
 };
 use model::*;
 
@@ -529,14 +529,15 @@ where
 
     fn check_callable(
         &mut self,
-        params: &[String],
+        params: &[Parameter],
         body: &[Stmt],
         callable_base: &Frame,
         module_path: &str,
         sites: &SiteCatalogue,
         warnings: &mut Vec<BopWarning>,
     ) {
-        let mut callable = LexicalEnv::callable(callable_base, params);
+        let param_names: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
+        let mut callable = LexicalEnv::callable(callable_base, &param_names);
         self.check_stmts(
             body,
             &mut callable,
