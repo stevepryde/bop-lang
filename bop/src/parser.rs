@@ -301,8 +301,8 @@ pub enum Pattern {
     Literal(LiteralPattern),
     /// `_` — matches anything, binds nothing.
     Wildcard,
-    /// Bare identifier — matches anything, binds the value to
-    /// this name for the arm's body.
+    /// Value-shaped bare identifier — matches anything, binds
+    /// the value to this name for the arm's body.
     Binding(String),
     /// `Type::Variant` / `Type::Variant(...)` / `Type::Variant { ... }`,
     /// optionally namespaced via `ns.Type::Variant(...)`.
@@ -458,7 +458,7 @@ pub enum VariantPatternPayload {
 pub enum ArrayRest {
     /// `..` — matches any remaining elements, binds nothing.
     Ignored,
-    /// `..name` — captures remaining elements as an array.
+    /// `..name` — captures remaining elements under a value-shaped name.
     Named(String),
 }
 
@@ -2153,7 +2153,7 @@ impl Parser {
     /// Keeping the budget owner outside the parsing body ensures every `?`
     /// and early `return` below is balanced by [`Self::leave`].
     fn parse_pattern_single_inner(&mut self) -> Result<Pattern, BopError> {
-        let (line, _column) = self.peek_pos();
+        let (line, column) = self.peek_pos();
         match self.peek() {
             Token::Int(n) => {
                 let n = *n;
@@ -2289,6 +2289,12 @@ impl Parser {
                 } else {
                     // Bare identifier = binding. `_` is handled
                     // above as wildcard.
+                    ensure_value_name_at(
+                        &name,
+                        "`match` pattern binding",
+                        line,
+                        column,
+                    )?;
                     Ok(Pattern::Binding(name))
                 }
             }
@@ -2316,9 +2322,16 @@ impl Parser {
                     // Optional name binding after `..`.
                     let captured = match self.peek() {
                         Token::Ident(n) if n != "_" => {
+                            let (line, column) = self.peek_pos();
                             let Token::Ident(n) = self.take() else {
                                 unreachable!("identifier variant checked before taking token")
                             };
+                            ensure_value_name_at(
+                                &n,
+                                "`match` pattern rest binding",
+                                line,
+                                column,
+                            )?;
                             ArrayRest::Named(n)
                         }
                         other => {
@@ -2450,6 +2463,7 @@ impl Parser {
                     rest = true;
                     break;
                 }
+                let (field_line, field_column) = self.peek_pos();
                 let (fname, _) = self.expect_ident()?;
                 // Shorthand `{ field }` binds the field value to
                 // a local named `field`. Full form `{ field: pat }`
@@ -2458,6 +2472,12 @@ impl Parser {
                     self.advance();
                     self.parse_pattern()?
                 } else {
+                    ensure_value_name_at(
+                        &fname,
+                        "`match` pattern shorthand binding",
+                        field_line,
+                        field_column,
+                    )?;
                     Pattern::Binding(fname.clone())
                 };
                 fields.push((fname, sub));
@@ -3091,6 +3111,148 @@ let right = match pair {
 }"#,
         )
         .expect("valid dictionary arms and rest patterns must still parse");
+    }
+}
+
+#[cfg(test)]
+mod pattern_binding_name_tests {
+    use super::*;
+
+    fn parse_source(source: &str) -> Result<Vec<Stmt>, BopError> {
+        parse(crate::lexer::lex(source)?)
+    }
+
+    fn assert_pattern_binding_error(
+        source: &str,
+        site: &str,
+        name: &str,
+        kind: &str,
+        line: u32,
+        column: u32,
+    ) {
+        let error = parse_source(source)
+            .expect_err("constant- and type-shaped pattern bindings must be rejected");
+        assert_eq!(
+            error.message,
+            format!(
+                "{site} `{name}` looks like a {kind}, but a value name is required here"
+            ),
+            "source: {source}"
+        );
+        assert_eq!(error.line, Some(line), "source: {source}");
+        assert_eq!(error.column, Some(column), "source: {source}");
+        assert_eq!(
+            error.friendly_hint.as_deref(),
+            Some(naming::hint_for("value", name).as_str()),
+            "source: {source}"
+        );
+    }
+
+    #[test]
+    fn constant_shaped_bare_pattern_cannot_shadow_constant() {
+        assert_pattern_binding_error(
+            "const Y = 2\nmatch 3 { Y => 0 }",
+            "`match` pattern binding",
+            "Y",
+            "constant",
+            2,
+            11,
+        );
+    }
+
+    #[test]
+    fn nested_and_specialized_pattern_bindings_apply_value_name_rules() {
+        let cases = [
+            (
+                "match value {\n  [head, TypeName] => 0,\n}",
+                "`match` pattern binding",
+                "TypeName",
+                "type",
+                2,
+                10,
+            ),
+            (
+                "match value {\n  Maybe::Some(CONSTANT) => 0,\n}",
+                "`match` pattern binding",
+                "CONSTANT",
+                "constant",
+                2,
+                15,
+            ),
+            (
+                "match value {\n  Point { x: TypeName } => 0,\n}",
+                "`match` pattern binding",
+                "TypeName",
+                "type",
+                2,
+                14,
+            ),
+            (
+                "match value {\n  [head, ..TAIL] => 0,\n}",
+                "`match` pattern rest binding",
+                "TAIL",
+                "constant",
+                2,
+                12,
+            ),
+            (
+                "match value {\n  Point { Field } => 0,\n}",
+                "`match` pattern shorthand binding",
+                "Field",
+                "type",
+                2,
+                11,
+            ),
+            (
+                "match value {\n  Maybe::Named { FIELD } => 0,\n}",
+                "`match` pattern shorthand binding",
+                "FIELD",
+                "constant",
+                2,
+                18,
+            ),
+        ];
+
+        for (source, site, name, kind, line, column) in cases {
+            assert_pattern_binding_error(source, site, name, kind, line, column);
+        }
+    }
+
+    #[test]
+    fn constant_shaped_or_alternative_reports_the_naming_error_first() {
+        assert_pattern_binding_error(
+            "match 1 {\n  1 | Y => 0,\n}",
+            "`match` pattern binding",
+            "Y",
+            "constant",
+            2,
+            7,
+        );
+    }
+
+    #[test]
+    fn uppercase_type_variant_syntax_and_wildcards_remain_valid() {
+        parse_source(
+            r#"enum HTTP { OK(value), EMPTY }
+fn classify(value) {
+  return match value {
+    HTTP::OK(inner) => inner,
+    HTTP::EMPTY => 0,
+    _ => 0,
+  }
+}
+fn classify_imported(value) {
+  return match value {
+    network.HTTP::OK(inner) => inner,
+    _ => 0,
+  }
+}
+match [1, 2] {
+  [head, ..] => head,
+  _ => 0,
+}"#,
+        )
+        .expect("type/variant names and wildcard patterns must retain their grammar");
     }
 }
 
