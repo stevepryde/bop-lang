@@ -2652,6 +2652,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 // Runtime non-arrays continue through user/common dispatch.
                 if methods::is_mutating_method(method) {
                     if let ExprKind::Ident(name) = &object.kind {
+                        if matches!(self.get_var(name), Some(Value::Array(_))) {
+                            methods::reject_constant_array_mutation(
+                                name,
+                                method,
+                                expr.line,
+                            )?;
+                        }
                         if let Some(Value::Array(arr)) = self.get_var_mut(name) {
                             return methods::array_method_mut(
                                 arr,

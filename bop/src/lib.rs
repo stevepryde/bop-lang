@@ -3787,6 +3787,85 @@ print(leak())"#,
     }
 
     #[test]
+    fn const_array_mutating_methods_use_the_canonical_constant_error() {
+        let cases = [
+            "VALUES.push(4)",
+            "VALUES.pop()",
+            "VALUES.insert(0, 4)",
+            "VALUES.remove(0)",
+            "VALUES.reverse()",
+            "(VALUES).sort()",
+        ];
+
+        for call in cases {
+            let source = format!("const VALUES = [3, 1, 2]\n{call}");
+            let err = run_err_full(&source);
+            assert_eq!(
+                err.message,
+                "can't reassign `VALUES` — it's a constant",
+                "source: {source}"
+            );
+            assert_eq!(err.line, Some(2), "source: {source}");
+            assert_eq!(
+                err.friendly_hint.as_deref(),
+                Some(error_messages::CONSTANT_MUTATION_HINT),
+                "source: {source}"
+            );
+        }
+
+        let err = run_err_full(
+            r#"fn mutate() {
+    const VALUES = [3, 1, 2]
+    VALUES.sort()
+}
+mutate()"#,
+        );
+        assert_eq!(
+            err.message,
+            "can't reassign `VALUES` — it's a constant"
+        );
+        assert_eq!(err.line, Some(3));
+    }
+
+    #[test]
+    fn const_non_array_receivers_keep_ordinary_method_dispatch() {
+        assert_eq!(
+            say(
+                r#"struct Accumulator { total }
+fn Accumulator.push(self, value) { return self.total + value }
+fn Accumulator.pop(self) { return self.total }
+const ACCUMULATOR = Accumulator { total: 7 }
+const LOOKUP = {"n": 1}
+print([ACCUMULATOR.push(5), ACCUMULATOR.pop(), LOOKUP.keys()])"#
+            ),
+            r#"[12, 7, ["n"]]"#
+        );
+
+        assert_eq!(
+            run_err(r#"const LOOKUP = {"n": 1}
+LOOKUP.remove("n")"#),
+            "Dict doesn't have a .remove() method"
+        );
+    }
+
+    #[test]
+    fn lowercase_array_mutating_methods_remain_valid() {
+        assert_eq!(
+            say(
+                r#"let values = [3, 1, 2]
+values.sort()
+values.reverse()
+values.insert(1, 4)
+values.remove(0)
+values.push(5)
+values.pop()
+print(values)"#
+            ),
+            "[4, 2, 1]"
+        );
+    }
+
+    #[test]
     fn const_declarations_remain_declarations_not_assignments() {
         // Issue #7 distinguishes a declaration that shadows/replaces an
         // existing same-shaped binding from an assignment to that binding.

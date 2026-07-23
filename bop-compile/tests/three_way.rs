@@ -441,6 +441,38 @@ let wrapped = (fn() {
 print(functions[0]() + wrapped())"#,
     ),
     (
+        "const_array_mutation_error",
+        r#"fn mutate() {
+    const VALUES = [3, 1, 2]
+    VALUES.sort()
+}
+mutate()"#,
+    ),
+    (
+        "const_user_mutator_name_remains_value_method",
+        r#"struct Accumulator { total }
+fn Accumulator.push(self, value) { return self.total + value }
+fn Accumulator.pop(self) { return self.total }
+const ACCUMULATOR = Accumulator { total: 7 }
+print(ACCUMULATOR.push(5), ACCUMULATOR.pop())"#,
+    ),
+    (
+        "const_non_array_mutator_name_keeps_method_error",
+        r#"const LOOKUP = {"n": 1}
+LOOKUP.remove("n")"#,
+    ),
+    (
+        "mutable_array_mutators_still_write",
+        r#"let values = [3, 1, 2]
+values.sort()
+values.reverse()
+values.insert(1, 4)
+values.remove(0)
+values.push(5)
+values.pop()
+print(values)"#,
+    ),
+    (
         "asi_return_newline",
         r#"fn bare() {
     return

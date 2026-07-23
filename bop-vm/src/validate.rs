@@ -215,7 +215,7 @@ impl<'a> Validator<'a> {
                 }
             }
             Instr::CallMethodInPlace { target, method, .. } => {
-                self.assign_back(target, line, &at)?;
+                self.namespace_ref(target, line, &at)?;
                 self.pool(method.0, self.chunk.names.len(), line, "name", &at)?;
             }
             Instr::DefineFn(index) | Instr::MakeLambda(index) => {

@@ -1238,6 +1238,15 @@ impl Compiler {
                 let method_idx = self.add_name(method);
                 if methods::is_mutating_method(method) {
                     if let Some(target) = assign_back_to {
+                        let in_place_target = match (&object.kind, target) {
+                            (ExprKind::Ident(name), crate::chunk::AssignBack::Slot(slot)) => {
+                                NamespaceRef::from_slot(self.add_name(name), slot)
+                            }
+                            (ExprKind::Ident(_), crate::chunk::AssignBack::Name(name)) => {
+                                NamespaceRef::from_name(name)
+                            }
+                            _ => unreachable!("assign-back target requires an identifier"),
+                        };
                         // Walker and AOT evaluate method arguments before a
                         // bare identifier receiver. Resolve the live binding
                         // only after the arguments so nested calls such as
@@ -1247,7 +1256,7 @@ impl Compiler {
                         }
                         self.emit(
                             Instr::CallMethodInPlace {
-                                target,
+                                target: in_place_target,
                                 method: method_idx,
                                 argc: args.len() as u32,
                             },

@@ -95,6 +95,21 @@ pub fn no_such_method(kind: &str, method: &str) -> String {
     format!("{} doesn't have a .{}() method", kind, method)
 }
 
+/// Actionable recovery paired with the canonical constant-mutation error.
+pub const CONSTANT_MUTATION_HINT: &str =
+    "constants are immutable. Use `let` if you want a mutable binding.";
+
+/// Construct the canonical error for an assignment or built-in mutation
+/// rooted at a constant binding.
+pub fn constant_mutation_error(name: &str, line: u32) -> crate::error::BopError {
+    let mut error = crate::error::BopError::runtime(
+        format!("can't reassign `{}` — it's a constant", name),
+        line,
+    );
+    error.friendly_hint = Some(String::from(CONSTANT_MUTATION_HINT));
+    error
+}
+
 /// Exact diagnostic contract for a mutating built-in array method
 /// whose receiver is an index or field place that cannot yet be
 /// written back.
@@ -170,6 +185,20 @@ mod tests {
         assert_eq!(
             NESTED_MUTATION_HINT,
             "Assign the value to a variable, mutate that variable, then assign it back."
+        );
+    }
+
+    #[test]
+    fn constant_mutation_error_keeps_message_hint_and_line_together() {
+        let error = constant_mutation_error("VALUES", 12);
+        assert_eq!(error.line, Some(12));
+        assert_eq!(
+            error.message,
+            "can't reassign `VALUES` — it's a constant"
+        );
+        assert_eq!(
+            error.friendly_hint.as_deref(),
+            Some(CONSTANT_MUTATION_HINT)
         );
     }
 

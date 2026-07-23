@@ -779,6 +779,27 @@ pub fn is_mutating_method(method: &str) -> bool {
     )
 }
 
+/// Reject a built-in array mutation after dispatch has proven that the named
+/// receiver is an array rather than a user-defined value with a colliding
+/// method name.
+///
+/// Callers deliberately invoke this only on the built-in Array path. That
+/// preserves ordinary user methods named `push`, `pop`, and so on, plus the
+/// usual method-not-found diagnostics for non-array values.
+pub fn reject_constant_array_mutation(
+    receiver_name: &str,
+    method: &str,
+    line: u32,
+) -> Result<(), BopError> {
+    if crate::naming::is_constant_name(receiver_name) && is_mutating_method(method) {
+        return Err(crate::error_messages::constant_mutation_error(
+            receiver_name,
+            line,
+        ));
+    }
+    Ok(())
+}
+
 /// Reject a built-in array mutation whose receiver was evaluated
 /// from an index or field access. Those syntactic forms are not yet
 /// write-back places, so accepting the call would mutate a detached
