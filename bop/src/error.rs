@@ -3,12 +3,28 @@
 #[cfg(feature = "no_std")]
 use alloc::{format, string::String};
 
+/// Identifies the non-root source that produced a diagnostic.
+///
+/// Module parsers and engines attach this only on an error path, so retaining
+/// the source has no cost during successful execution. `source` is optional
+/// for boundaries that know the module identity but no longer own its text;
+/// rendering such a context deliberately omits a snippet instead of borrowing
+/// an unrelated root-file line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceContext {
+    pub module_path: String,
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct BopError {
     pub line: Option<u32>,
     pub column: Option<u32>,
     pub message: String,
     pub friendly_hint: Option<String>,
+    /// Non-root source identity and, when available, the source text needed
+    /// for accurate snippet rendering.
+    pub source_context: Option<SourceContext>,
     /// Fatal errors can't be caught by `try_call`; they always
     /// unwind to the engine boundary. This is the load-bearing
     /// property that makes `BopLimits` a real sandbox — a
@@ -52,6 +68,7 @@ impl BopError {
             column: None,
             message: message.into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }
@@ -66,6 +83,7 @@ impl BopError {
                 "`{}` is part of Bop syntax and can't be used as an identifier. Choose a different name.",
                 keyword
             )),
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }
@@ -86,6 +104,7 @@ impl BopError {
             column: column.map(|c| c.get()),
             message: message.into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }
@@ -101,6 +120,7 @@ impl BopError {
             column: None,
             message: message.into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: true,
             is_try_return: false,
         }
@@ -119,15 +139,58 @@ impl BopError {
             column: None,
             message: String::new(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
             is_try_return: true,
         }
+    }
+
+    /// Attach the imported module and its source text to this diagnostic.
+    ///
+    /// The deepest context wins: if a transitive import already attached its
+    /// own module, an outer importer must not replace it.
+    pub fn with_module_source(
+        mut self,
+        module_path: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        if self.source_context.is_none() {
+            self.source_context = Some(SourceContext {
+                module_path: module_path.into(),
+                source: Some(source.into()),
+            });
+        }
+        self
+    }
+
+    /// Attach a module identity when its source text is unavailable.
+    ///
+    /// [`Self::render`] will show the module path and line/column but will
+    /// never render the caller-provided root source for this diagnostic.
+    pub fn with_module(mut self, module_path: impl Into<String>) -> Self {
+        if self.source_context.is_none() {
+            self.source_context = Some(SourceContext {
+                module_path: module_path.into(),
+                source: None,
+            });
+        }
+        self
     }
 }
 
 impl core::fmt::Display for BopError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if let Some(line) = self.line {
+        if let Some(context) = &self.source_context {
+            if let Some(line) = self.line {
+                write!(
+                    f,
+                    "[module {}, line {}] {}",
+                    context.module_path, line, self.message
+                )
+            } else {
+                write!(f, "[module {}] {}", context.module_path, self.message)
+            }
+        } else if let Some(line) = self.line {
             write!(f, "[line {}] {}", line, self.message)
         } else {
             write!(f, "{}", self.message)
@@ -153,16 +216,25 @@ impl BopError {
     /// embedders can call it from their own error path.
     pub fn render(&self, source: &str) -> String {
         let mut out = String::new();
+        let (source, module_path) = match &self.source_context {
+            Some(context) => (context.source.as_deref(), Some(context.module_path.as_str())),
+            None => (Some(source), None),
+        };
         match self.line {
             Some(line) if line > 0 => {
                 out.push_str(&format!("error: {}\n", self.message));
-                let line_str = format!("  --> line {}", line);
+                let line_str = match module_path {
+                    Some(path) => format!("  --> in module `{}` at line {}", path, line),
+                    None => format!("  --> line {}", line),
+                };
                 if let Some(col) = self.column {
                     out.push_str(&format!("{}:{}\n", line_str, col));
                 } else {
                     out.push_str(&format!("{}\n", line_str));
                 }
-                if let Some(src_line) = source.lines().nth((line - 1) as usize) {
+                if let Some(src_line) =
+                    source.and_then(|source| source.lines().nth((line - 1) as usize))
+                {
                     let gutter_width = digits_of(line);
                     let gutter_pad = " ".repeat(gutter_width);
                     out.push_str(&format!("{} |\n", gutter_pad));
@@ -191,6 +263,9 @@ impl BopError {
             }
             _ => {
                 out.push_str(&format!("error: {}\n", self.message));
+                if let Some(path) = module_path {
+                    out.push_str(&format!("  --> in module `{}`\n", path));
+                }
             }
         }
         if let Some(hint) = &self.friendly_hint {
@@ -242,7 +317,7 @@ impl BopWarning {
             column: None,
             message: message.into(),
             friendly_hint: None,
-            }
+        }
     }
 
     /// Attach a "hint:" line to the rendered output. Chained
@@ -260,6 +335,7 @@ impl BopWarning {
             column: self.column,
             message: self.message,
             friendly_hint: self.friendly_hint,
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }
@@ -274,6 +350,7 @@ impl BopWarning {
             column: self.column,
             message: self.message.clone(),
             friendly_hint: self.friendly_hint.clone(),
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         };
@@ -299,6 +376,7 @@ mod tests {
         assert_eq!(err.line, Some(7));
         assert_eq!(err.column, None);
         assert_eq!(err.friendly_hint, None);
+        assert_eq!(err.source_context, None);
         assert!(!err.is_fatal);
     }
 
@@ -324,6 +402,7 @@ mod tests {
             column: None,
             message: "something broke".into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
 
             is_try_return: false,
@@ -342,6 +421,7 @@ mod tests {
             column: Some(11),
             message: "undefined".into(),
             friendly_hint: Some("did you mean `bar`?".into()),
+            source_context: None,
             is_fatal: false,
 
             is_try_return: false,
@@ -366,6 +446,7 @@ mod tests {
             column: Some(3),
             message: "off the end".into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
 
             is_try_return: false,
@@ -387,6 +468,7 @@ mod tests {
             column: Some(10),
             message: "undefined".into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
 
             is_try_return: false,
@@ -395,5 +477,51 @@ mod tests {
         // The carat line has one tab (from column 1's tab in
         // source) plus 8 spaces for columns 2–9, then `^`.
         assert!(rendered.contains("\t        ^"), "rendered:\n{}", rendered);
+    }
+
+    #[test]
+    fn module_source_context_renders_its_own_snippet() {
+        let root = "use bad";
+        let module = "let okay = 1\nlet broken =";
+        let mut err = BopError::runtime_at(
+            "Expected expression",
+            2,
+            core::num::NonZeroU32::new(13),
+        );
+        err.friendly_hint = Some("finish the assignment".into());
+        let err = err.with_module_source("bad", module);
+
+        let rendered = err.render(root);
+
+        assert!(rendered.contains("in module `bad` at line 2:13"));
+        assert!(rendered.contains("let broken ="));
+        assert!(rendered.contains("hint: finish the assignment"));
+        assert!(!rendered.contains("use bad"));
+    }
+
+    #[test]
+    fn snippet_free_module_context_never_uses_root_source() {
+        let root = "this root line must not render";
+        let err = BopError::runtime_at("broken", 1, core::num::NonZeroU32::new(99))
+            .with_module("nested.bad");
+
+        let rendered = err.render(root);
+
+        assert!(rendered.contains("in module `nested.bad` at line 1:99"));
+        assert!(!rendered.contains(root));
+        assert!(!rendered.contains('^'));
+    }
+
+    #[test]
+    fn nested_module_context_preserves_deepest_identity() {
+        let err = BopError::runtime("broken", 3)
+            .with_module_source("inner", "a\nb\nc")
+            .with_module_source("outer", "x\ny\nz");
+
+        let rendered = err.render("root");
+
+        assert!(rendered.contains("in module `inner`"));
+        assert!(rendered.contains("3 | c"));
+        assert!(!rendered.contains("outer"));
     }
 }

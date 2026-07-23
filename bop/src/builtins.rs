@@ -325,6 +325,7 @@ pub fn error(line: u32, message: impl Into<String>) -> BopError {
         column: None,
         message: message.into(),
         friendly_hint: None,
+        source_context: None,
         is_fatal: false,
         is_try_return: false,
     }
@@ -344,6 +345,7 @@ pub fn error_at(
         column: column.map(|c| c.get()),
         message: message.into(),
         friendly_hint: None,
+        source_context: None,
         is_fatal: false,
         is_try_return: false,
     }
@@ -359,6 +361,7 @@ pub fn error_with_hint(
         column: None,
         message: message.into(),
         friendly_hint: Some(hint.into()),
+        source_context: None,
         is_fatal: false,
         is_try_return: false,
     }
@@ -378,6 +381,7 @@ pub fn error_with_hint_at(
         column: column.map(|c| c.get()),
         message: message.into(),
         friendly_hint: Some(hint.into()),
+        source_context: None,
         is_fatal: false,
         is_try_return: false,
     }
@@ -398,6 +402,7 @@ pub fn error_fatal_with_hint(
         column: None,
         message: message.into(),
         friendly_hint: Some(hint.into()),
+        source_context: None,
         is_fatal: true,
         is_try_return: false,
     }
@@ -411,6 +416,7 @@ pub fn error_fatal(line: u32, message: impl Into<String>) -> BopError {
         column: None,
         message: message.into(),
         friendly_hint: None,
+        source_context: None,
         is_fatal: true,
         is_try_return: false,
     }

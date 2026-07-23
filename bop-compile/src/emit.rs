@@ -345,6 +345,9 @@ pub(crate) struct ModuleGraph {
 
 #[derive(Clone)]
 pub(crate) struct ModuleEntry {
+    /// Original module source retained for diagnostics emitted after graph
+    /// discovery, when only the parsed AST would otherwise remain.
+    pub source: String,
     pub ast: Vec<Stmt>,
     pub own_fns: HashMap<String, Vec<String>>,
     /// Every name reachable from this module's final scope —
@@ -391,6 +394,11 @@ struct ModuleImport {
     line: u32,
 }
 
+struct ResolvedModule {
+    source: String,
+    ast: Vec<Stmt>,
+}
+
 fn build_module_graph(
     root: &[Stmt],
     opts: &Options,
@@ -418,7 +426,7 @@ fn build_module_graph(
     // containing module loads nor contributes re-exports. Treating
     // that lazy edge like a top-level edge would also report false
     // cycles for harmless patterns such as `fn f() { use self }`.
-    let mut resolved: HashMap<String, Vec<Stmt>> = HashMap::new();
+    let mut resolved: HashMap<String, ResolvedModule> = HashMap::new();
     let mut discovery_order: Vec<(String, u32)> = Vec::new();
     for import in &root_imports {
         resolve_module_tree(
@@ -459,7 +467,7 @@ fn resolve_module_tree(
     name: &str,
     line: u32,
     resolver: &crate::ModuleResolver,
-    resolved: &mut HashMap<String, Vec<Stmt>>,
+    resolved: &mut HashMap<String, ResolvedModule>,
     discovery_order: &mut Vec<(String, u32)>,
 ) -> Result<(), BopError> {
     if resolved.contains_key(name) {
@@ -470,7 +478,7 @@ fn resolve_module_tree(
         let mut r = resolver.borrow_mut();
         match r(name) {
             Some(Ok(s)) => s,
-            Some(Err(e)) => return Err(e),
+            Some(Err(e)) => return Err(e.with_module(name)),
             None => {
                 return Err(BopError::runtime(
                     format!("Module `{}` not found", name),
@@ -479,12 +487,19 @@ fn resolve_module_tree(
             }
         }
     };
-    let ast = bop::parse(&source)?;
+    let ast = bop::parse(&source)
+        .map_err(|error| error.with_module_source(name, source.as_str()))?;
     let imports = collect_imports_in_stmts(&ast);
 
     // Insert before recursion: this is both the resolver-work cache
     // and the guard against false cycles through lazy import sites.
-    resolved.insert(name.to_string(), ast);
+    resolved.insert(
+        name.to_string(),
+        ResolvedModule {
+            source: source.clone(),
+            ast,
+        },
+    );
     discovery_order.push((name.to_string(), line));
     for import in &imports {
         resolve_module_tree(
@@ -493,7 +508,8 @@ fn resolve_module_tree(
             resolver,
             resolved,
             discovery_order,
-        )?;
+        )
+        .map_err(|error| error.with_module_source(name, source.as_str()))?;
     }
     Ok(())
 }
@@ -505,7 +521,7 @@ fn resolve_module_tree(
 fn analyze_module(
     name: &str,
     line: u32,
-    resolved: &HashMap<String, Vec<Stmt>>,
+    resolved: &HashMap<String, ResolvedModule>,
     graph: &mut ModuleGraph,
     visiting: &mut BTreeSet<String>,
     visited: &mut BTreeSet<String>,
@@ -522,10 +538,11 @@ fn analyze_module(
     }
     visiting.insert(name.to_string());
 
-    let ast = resolved
+    let resolved_module = resolved
         .get(name)
-        .cloned()
         .expect("discovered module has a parsed AST");
+    let ast = resolved_module.ast.clone();
+    let source = resolved_module.source.clone();
 
     // Only top-level imports execute as part of module loading and
     // can contribute bindings/types to this module's exports.
@@ -539,7 +556,8 @@ fn analyze_module(
             visiting,
             visited,
             sandbox,
-        )?;
+        )
+        .map_err(|error| error.with_module_source(name, source.as_str()))?;
     }
 
     let own_lets = collect_top_level_lets(&ast);
@@ -645,6 +663,7 @@ fn analyze_module(
     graph.modules.insert(
         name.to_string(),
         ModuleEntry {
+            source,
             ast,
             own_fns,
             own_lets,
@@ -2471,7 +2490,8 @@ impl Emitter {
                 .get(name)
                 .cloned()
                 .expect("module present in graph");
-            self.emit_one_module(name, &entry)?;
+            self.emit_one_module(name, &entry)
+                .map_err(|error| error.with_module_source(name, entry.source.as_str()))?;
         }
         Ok(())
     }
@@ -7385,11 +7405,70 @@ fn rust_string_literal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::emit;
-    use crate::Options;
+    use crate::{Options, modules_from_map};
 
     fn emitted(source: &str) -> String {
         let statements = bop::parse(source).expect("parse test program");
         emit(&statements, &Options::default()).expect("emit test program")
+    }
+
+    #[test]
+    fn module_graph_parse_error_retains_transitive_source_context() {
+        let root = bop::parse("use outer").unwrap();
+        let inner_source = "let okay = 1\nlet broken =";
+        let options = Options {
+            module_resolver: Some(modules_from_map([
+                ("outer", "use inner\nlet outer = 1"),
+                ("inner", inner_source),
+            ])),
+            ..Options::default()
+        };
+
+        let error = emit(&root, &options).unwrap_err();
+        let context = error.source_context.as_ref().expect("module context");
+
+        assert_eq!(context.module_path, "inner");
+        assert_eq!(context.source.as_deref(), Some(inner_source));
+        assert!(error.render("use outer").contains("in module `inner` at line 2"));
+    }
+
+    #[test]
+    fn module_graph_cycle_points_at_importing_module_source() {
+        let root = bop::parse("use a").unwrap();
+        let options = Options {
+            module_resolver: Some(modules_from_map([
+                ("a", "use b\nlet a_value = 1"),
+                ("b", "use a\nlet b_value = 2"),
+            ])),
+            ..Options::default()
+        };
+
+        let error = emit(&root, &options).unwrap_err();
+        let rendered = error.render("use a");
+
+        assert!(error.message.contains("Circular import"));
+        assert!(rendered.contains("in module `b` at line 1"));
+        assert!(rendered.contains("1 | use a"));
+    }
+
+    #[test]
+    fn module_emission_error_uses_owning_module_source() {
+        let root = bop::parse("use facade").unwrap();
+        let facade_source = "use dep.{missing}\nlet okay = 1";
+        let options = Options {
+            module_resolver: Some(modules_from_map([
+                ("facade", facade_source),
+                ("dep", "let present = 1"),
+            ])),
+            ..Options::default()
+        };
+
+        let error = emit(&root, &options).unwrap_err();
+        let rendered = error.render("use facade");
+
+        assert!(error.message.contains("no export `missing`"));
+        assert!(rendered.contains("in module `facade` at line 1"));
+        assert!(rendered.contains("1 | use dep.{missing}"));
     }
 
     #[test]

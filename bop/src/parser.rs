@@ -892,6 +892,7 @@ impl Parser {
             column,
             message: message.into(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }
@@ -2613,6 +2614,7 @@ fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError
                 "You can only assign to a variable, an index (`arr[0]`), or a struct field (`point.x`)"
                     .to_string(),
             friendly_hint: None,
+            source_context: None,
             is_fatal: false,
             is_try_return: false,
         }),

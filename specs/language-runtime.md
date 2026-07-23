@@ -30,6 +30,9 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
 - **RUN-007 — Stable diagnostics.** Invalid syntax and runtime failures must
   produce actionable Bop errors with source context when available; equivalent
   engine failures should retain the same error shape and helpful hints.
+  Diagnostics originating in imported modules must identify the deepest owning
+  module and render only that module's source; if its source is unavailable,
+  they must omit the snippet rather than substituting root source.
 - **RUN-008 — General-purpose language semantics.** Functions and closures,
   collections, user-defined types, pattern matching, control flow, iterators,
   and modules must compose according to the documented grammar and reference
@@ -107,6 +110,9 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   `no_std`, and WASM configurations documented by the project.
 - **AC-RUN-005:** Parser, runtime, and CLI errors identify the real failure and
   do not replace I/O, binding, or limit failures with misleading results.
+  Walker, VM, AOT, and CLI diagnostics for direct and transitive module parse
+  failures identify the owning module, retain line/column/hints, and never
+  clamp a caret against root-file text.
 - **AC-RUN-006:** Cloning a container handle does not charge a second backing
   allocation; unique mutation does not copy its backing storage; the first
   mutation of shared storage detaches exactly once; and tracked storage is
