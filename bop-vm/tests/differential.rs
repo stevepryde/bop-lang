@@ -22,6 +22,15 @@
 //!   the same way — the existing safety tests assert via substring,
 //!   so the slightly different step-counts between engines don't
 //!   matter as long as *some* limit-based error fires on both.
+//! - Step-limit error *lines*, however, are aligned: both engines
+//!   report the header line of the outermost active source loop at
+//!   the moment the budget trips (see `tick` in each engine), which
+//!   is stable no matter where each engine's counter happens to
+//!   cross the limit. The only residual divergence is a budget trip
+//!   with no loop on the call stack (e.g. branching recursion, or a
+//!   finite loop whose step cost differs enough between the
+//!   engines' accounting that only one of them trips inside it) —
+//!   there the engines fall back to their own current line.
 //!
 //! # Fuzzer
 //!
@@ -230,6 +239,43 @@ fn assert_both_resource_limit(tw: &str, vm: &str) {
             "{} did not hit a resource limit; got: {}",
             engine,
             msg
+        );
+    }
+}
+
+/// Run both engines, assert both hit the step limit, and assert the
+/// error carries `expected_line` — the header line of the outermost
+/// active loop. The two engines charge steps at different points
+/// (per-statement vs per-bytecode-instruction), so this only holds
+/// because both resolve the error line through their loop context
+/// rather than reporting wherever the counter happened to trip.
+#[track_caller]
+fn assert_both_step_limit_at_line(code: &str, limits: &BopLimits, expected_line: u32) {
+    for engine in ["tree-walker", "bytecode vm"] {
+        let mut host = RecordHost::new();
+        let result = if engine == "tree-walker" {
+            bop::run(code, &mut host, limits)
+        } else {
+            bop_vm::run(code, &mut host, limits)
+        };
+        let err = match result {
+            Err(err) => err,
+            Ok(()) => panic!("{} did not error on:\n{}", engine, code),
+        };
+        assert!(err.is_fatal, "{} returned non-fatal error: {}", engine, err);
+        assert!(
+            err.message.contains("too many steps"),
+            "{} errored with `{}` instead of the step limit on:\n{}",
+            engine,
+            err.message,
+            code
+        );
+        assert_eq!(
+            err.line,
+            Some(expected_line),
+            "{} reported the step limit at the wrong line on:\n{}",
+            engine,
+            code
         );
     }
 }
@@ -2665,6 +2711,93 @@ print("should never run")"#;
         tw_msg
     );
     assert!(vm_msg.contains("too many steps"), "vm msg: {}", vm_msg);
+}
+
+// ─── Step-limit error lines ────────────────────────────────────────
+//
+// The engines charge steps at different points (per-statement vs
+// per-bytecode-instruction, with the VM's budget scaled by
+// STEP_SCALE), so *where* the counter crosses the limit is an
+// accident of phase. Both engines therefore attribute the error to
+// the outermost active loop's header line. These tests pin that
+// alignment, including padding variants that shift each engine's
+// trip point relative to the loop body.
+
+#[test]
+fn step_limit_line_is_the_loop_header_on_both_engines() {
+    // Padding shifts the step-count phase; the reported line must
+    // not move with it.
+    for pad in 0u32..4 {
+        let mut code = String::new();
+        for i in 0..pad {
+            code.push_str(&format!("let pad{} = {}\n", i, i));
+        }
+        code.push_str("let n = 0\nwhile true {\n    n = n + 1\n}");
+        assert_both_step_limit_at_line(&code, &tight(), pad + 2);
+    }
+}
+
+#[test]
+fn step_limit_line_in_imported_function_matches_across_engines() {
+    // The original divergence repro: import shifts the two engines'
+    // step counts by different amounts, so before loop-header
+    // attribution the walker and VM tripped on different lines of
+    // the module.
+    set_modules(&[(
+        "spin",
+        r#"fn spin_forever() {
+    let n = 0
+    while true {
+        n = n + 1
+    }
+    return n
+}"#,
+    )]);
+    assert_both_step_limit_at_line(
+        "use spin.{spin_forever}\nspin_forever()",
+        &tight(),
+        3,
+    );
+    set_modules(&[]);
+}
+
+#[test]
+fn step_limit_line_in_nested_loops_is_the_outermost_header() {
+    // Infinite outer loop with a finite inner loop: each engine may
+    // trip inside the inner loop or between passes, so only the
+    // outermost header is stable.
+    assert_both_step_limit_at_line(
+        "while true {\n    for x in [1, 2, 3] {\n        let y = x\n    }\n}",
+        &tight(),
+        1,
+    );
+    // Infinite inner loop: the outer `for` never finishes its first
+    // pass, so it is the outermost active loop on both engines.
+    assert_both_step_limit_at_line(
+        "let items = [1, 2, 3]\nfor x in items {\n    while true {\n        let y = x\n    }\n}",
+        &tight(),
+        2,
+    );
+}
+
+#[test]
+fn step_limit_line_for_repeat_is_the_loop_header() {
+    assert_both_step_limit_at_line(
+        "repeat 999999999 {\n    let y = 1\n}",
+        &tight(),
+        1,
+    );
+}
+
+#[test]
+fn step_limit_line_inside_loop_free_callee_is_the_calling_loop() {
+    // The budget can trip while executing a callee that contains no
+    // loop; both engines walk back to the calling loop's header.
+    assert_both_step_limit_at_line(
+        "fn work(a) {\n    let b = a + 1\n    return b\n}\nlet n = 0\nwhile true {\n    n = work(n)\n}",
+        &tight(),
+        6,
+    );
 }
 
 #[test]
