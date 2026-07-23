@@ -19,7 +19,7 @@
   <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
   <link rel="preload" href="/fonts/source-sans-3-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/fonts/jetbrains-mono-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="/site.css">
+  <link rel="stylesheet" href="{{ get_url(path='site.css', cachebust=true) | safe }}">
   <script>
     (() => {
       const saved = localStorage.getItem("bop-theme");
@@ -95,6 +95,6 @@
     <ol class="search-results" data-search-results></ol>
   </dialog>
 
-  <script src="/js/site.js" defer></script>
+  <script src="{{ get_url(path='js/site.js', cachebust=true) | safe }}" defer></script>
 </body>
 </html>
