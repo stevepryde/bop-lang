@@ -4322,7 +4322,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .and_then(|f| f.scopes.last())
                     .map(|s| s.contains_key(&name))
                     .unwrap_or(false)
-                    || (module_top_scope && self.functions.contains_key(&name));
+                    || (module_top_scope && self.functions.contains_key(&name))
+                    // Slot-allocated locals / params visible at the
+                    // `use` site never appear in the dynamic scope
+                    // maps above; the compiler records them in the
+                    // spec (sorted) so this check sees them too.
+                    || spec.shadowed_locals.binary_search(&name).is_ok();
                 if clashes {
                     if is_plain_glob {
                         self.runtime_warnings.push(BopWarning::at(

@@ -2756,6 +2756,29 @@ print(pick())"#,
         &[("dep", "fn pick() { return 42 }")],
     ),
     (
+        "import_glob_value_export_preserves_named_fn",
+        r#"fn pick() { return 1 }
+use dep
+print(pick())"#,
+        &[("dep", "let pick = 42")],
+    ),
+    (
+        "import_glob_in_fn_body_preserves_slot_local_and_param",
+        r#"fn local_case() {
+    let picked = "local"
+    use dep
+    return picked
+}
+fn param_case(picked) {
+    use dep
+    return picked
+}
+print(local_case())
+print(param_case("param"))
+print(param_case("again"))"#,
+        &[("dep", "fn picked() { return \"imported\" }")],
+    ),
+    (
         "import_local_callable_shadows_then_restores",
         r#"use outer
 fn local() {

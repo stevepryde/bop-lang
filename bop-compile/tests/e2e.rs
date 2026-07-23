@@ -2094,6 +2094,62 @@ print(wrapped.marker)"#;
 
 #[test]
 #[ignore]
+fn e2e_glob_shadow_warnings_cover_claimed_fns_and_slot_locals() {
+    // Orderings from issue #117: a named fn declared *before* the
+    // glob import claims its binding statically (both against a fn
+    // export and a value export of the same name), and a fn-body
+    // import clashing with a slot-allocated local / parameter.
+    // Every engine must warn identically, once per executed `use`
+    // (so twice for the double-called `caller`).
+    let code = r#"fn dup() { return 1 }
+fn dupval() { return 2 }
+use top_module
+fn caller(dup) {
+    let local = 3
+    use fn_module
+    return dup + local
+}
+print(dup() + dupval())
+print(caller(40))
+print(caller(50))"#;
+    let modules = &[
+        ("top_module", "fn dup() { return 10 }\nlet dupval = 20"),
+        ("fn_module", "let local = 30\nfn dup() { return 40 }"),
+    ];
+    let runs = cross_engine_warning_runs(
+        "glob_warning_claimed_fns_and_slot_locals",
+        code,
+        modules,
+    );
+    let expected = [
+        expected_glob_warnings("top_module", &["dup", "dupval"]),
+        expected_glob_warnings("fn_module", &["dup", "local"]),
+        expected_glob_warnings("fn_module", &["dup", "local"]),
+    ]
+    .concat();
+    let expected_stdout = &runs[0].1.stdout;
+
+    for (engine, run) in &runs {
+        assert_eq!(
+            run.status,
+            Some(0),
+            "{engine} warning contract program failed:\n{}\n--- generated ---\n{}",
+            run.stderr,
+            run.rust_src,
+        );
+        assert_eq!(
+            &run.stdout, expected_stdout,
+            "{engine} changed stdout while reporting warnings"
+        );
+        assert_eq!(
+            run.stderr, expected,
+            "{engine} warning text/count/order diverged"
+        );
+    }
+}
+
+#[test]
+#[ignore]
 fn e2e_non_glob_private_and_absent_exports_are_silent_in_all_engines() {
     let code = r#"use first.{alpha, beta}
 use second.{alpha, beta}
