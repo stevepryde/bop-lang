@@ -54,6 +54,8 @@ fn resolve_validated_module_from_root(
 }
 
 impl StandardHost {
+    /// Create a host that resolves filesystem modules relative to the current
+    /// working directory.
     pub fn new() -> Self {
         Self::default()
     }

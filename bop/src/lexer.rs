@@ -161,7 +161,7 @@ pub struct SpannedToken {
     pub token: Token,
     pub line: u32,
     /// 1-indexed column where the token starts. Used by the
-    /// parser and runtime to point error carats at the exact
+    /// parser and runtime to point error carets at the exact
     /// offending character rather than just the line.
     pub column: u32,
 }

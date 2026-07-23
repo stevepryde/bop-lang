@@ -164,9 +164,8 @@ pub enum Instr {
     /// Pop `n` items, push an array.
     MakeArray(u32),
     /// Pop `n` (key, value) pairs (value on top), push a dict.
-    /// Keys come from the name pool via [`Self::DictKey`] entries
-    /// immediately preceding this op? No — simpler: keys are pushed
-    /// as string values on the stack, interleaved with values.
+    /// Keys are pushed as string values on the stack, interleaved with
+    /// values.
     MakeDict(u32),
 
     // ─── Calls ────────────────────────────────────────────────────

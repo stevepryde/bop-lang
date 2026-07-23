@@ -3,7 +3,7 @@ members = ["bop", "bop-cli", "bop-compile", "bop-sys", "bop-vm"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 # MSRV pinned to the release that stabilised the 2024 edition
 # we compile with. If something in the source requires something

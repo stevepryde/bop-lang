@@ -1,13 +1,14 @@
 //! Bytecode VM execution.
 //!
-//! This is step 2b of the execution-modes roadmap: a stack-based
-//! dispatch loop that walks a [`Chunk`] produced by [`crate::compile`]
-//! and produces the same observable behaviour as the tree-walking
-//! evaluator in `bop-lang`.
+//! The stack-based dispatch loop executes a validated [`Chunk`] produced by
+//! [`crate::compile`] and preserves the observable behavior of the
+//! tree-walking evaluator in `bop-lang`. The public surface includes
+//! one-shot [`run`] / [`execute`] calls, the lower-level [`Vm`], and
+//! persistent [`BopInstance`] programs.
 //!
 //! # Stack model
 //!
-//! All runtime values live on a single [`Slot`] stack. A [`Slot`] is
+//! All runtime values live on a single internal slot stack. A slot is
 //! either a [`Value`], an in-progress `for`-loop iterator, or an
 //! in-progress `repeat` counter. Iterators and counters are sidecar
 //! items pushed by [`Instr::MakeIter`] / [`Instr::MakeRepeatCount`]
@@ -19,7 +20,7 @@
 //! # Frames
 //!
 //! Each function call — including the top-level program — runs in its
-//! own [`Frame`]. A frame owns its chunk (wrapped in `Rc` so repeated
+//! own internal frame. A frame owns its chunk (wrapped in `Rc` so repeated
 //! calls share the compiled code), its instruction pointer, and its
 //! lexical scope stack. Returning from a function pops the frame and
 //! truncates the value stack back to the frame's base in case the body
@@ -34,7 +35,7 @@
 //!   and invokes [`BopHost::on_tick`]. `max_memory` is shared with the
 //!   tree-walker via the per-value allocation tracking in
 //!   [`bop::memory`], so no VM-specific bookkeeping is needed.
-//! - The VM scales `max_steps` internally by [`STEP_SCALE`] so a single
+//! - The VM scales `max_steps` internally so a single
 //!   source-level step, which typically maps to several bytecode ops,
 //!   still fits under the tree-walker's calibration of
 //!   `BopLimits::standard()` / `BopLimits::demo()`.

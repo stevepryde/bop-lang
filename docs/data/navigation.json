@@ -6,6 +6,11 @@
         "title": "Introduction",
         "source": "introduction.md",
         "path": "/docs/"
+      },
+      {
+        "title": "What's new in 0.4",
+        "source": "whats-new-0-4.md",
+        "path": "/docs/whats-new-0-4/"
       }
     ]
   },
@@ -91,6 +96,11 @@
         "title": "REPL",
         "source": "repl.md",
         "path": "/docs/repl/"
+      },
+      {
+        "title": "CLI",
+        "source": "cli.md",
+        "path": "/docs/cli/"
       }
     ]
   },

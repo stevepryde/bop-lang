@@ -28,7 +28,7 @@ When you want to wire the transpiler into your own build pipeline (a `build.rs`,
 
 ```toml
 [dependencies]
-bop-compile = "0.3"
+bop-compile = "0.4"
 ```
 
 ```rust

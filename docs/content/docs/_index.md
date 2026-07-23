@@ -5,8 +5,8 @@ weight = 1
 template = "docs/section.html"
 page_template = "docs/page.html"
 [extra.next]
-title = "Syntax"
-path = "/docs/basics/syntax/"
+title = "What's new in 0.4"
+path = "/docs/whats-new-0-4/"
 +++
 
 # Welcome to Bop
@@ -41,7 +41,7 @@ That's a complete Bop program — no imports, no boilerplate, no semicolons. The
 
   All three are wire-compatible on `Value` and `BopError`, and the test suite pins them to byte-for-byte output agreement via a three-way differential harness.
 - **`no_std` and wasm.** The core crate compiles unchanged for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade; the rest of the language is already `#![cfg_attr(no_std)]`.
-- **Friendly errors.** Parse and runtime errors both include the source snippet, a carat under the offending column, and a `hint:` line when the parser or runtime can guess what you meant (`"I don't know what 'pritn' is — did you mean 'print'?"`). Designed to be read by humans *and* by automated callers that need to correct themselves.
+- **Friendly errors.** Parse and runtime errors both include the source snippet, a caret under the offending column, and a `hint:` line when the parser or runtime can guess what you meant (`"I don't know what 'pritn' is — did you mean 'print'?"`). Imported-module failures retain their owning module and source. Designed to be read by humans *and* by automated callers that need to correct themselves.
 - **Small, stable grammar.** Variables, loops, functions, arrays, dicts, structs, enums, pattern matching, modules, `Result` / `Iter` built-ins — that's close to the whole surface. Everything else (math, JSON, iteration helpers, string utilities, test assertions) lives in the bundled `std.*` modules or as methods on the value types. The shape is deliberately small so it stays consistent across versions.
 
 ## Where to start
@@ -50,3 +50,4 @@ That's a complete Bop program — no imports, no boilerplate, no semicolons. The
 - **Learning the language** — start with the [Language Guide](/docs/basics/syntax/) and work through `Basics` → `Control Flow` → `Data` → `Functions` → `Modules` → `Error Handling`.
 - **Looking up a specific thing** — the [Reference](/docs/reference/operators/) covers [Operators](/docs/reference/operators/), [Built-in Functions](/docs/reference/builtins/), [Methods](/docs/reference/methods/), and the [Grammar](/docs/reference/grammar/). The [Standard Library](/docs/stdlib/) section documents every `std.*` module.
 - **Trying it interactively** — [`bop repl`](/docs/repl/) opens a persistent REPL with multi-line input, history, and tab completion.
+- **Upgrading from 0.3** — [What's new in Bop 0.4](/docs/whats-new-0-4/) covers every new language and embedding feature plus the breaking syntax changes.

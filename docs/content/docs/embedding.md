@@ -22,9 +22,9 @@ Add the crates you need to `Cargo.toml`:
 
 ```toml
 [dependencies]
-bop = { package = "bop-lang", version = "0.3" }
-bop-sys = "0.3"          # optional — OS-backed standard host
-bop-vm = "0.3"           # optional — bytecode VM (faster per-fn cost)
+bop = { package = "bop-lang", version = "0.4" }
+bop-sys = "0.4"          # optional — OS-backed standard host
+bop-vm = "0.4"           # optional — bytecode VM (faster per-fn cost)
 ```
 
 Run a program with the standard host:
@@ -402,7 +402,7 @@ prefer [`BopInstance`](/docs/embedding/instances/).
 
 ## Error rendering
 
-`BopError::render(source)` produces a terminal-friendly error with a source snippet and a `^` carat under the offending column (when the error carries column info). Parse errors always have columns; runtime errors do when the failing expression was parsed from source.
+`BopError::render(source)` produces a terminal-friendly error with a source snippet and a `^` caret under the offending column (when the error carries column info). Parse errors always have columns; runtime errors do when the failing expression was parsed from source.
 
 Errors raised while loading an imported module carry a `source_context`.
 `render` automatically uses that module's source and labels the location as

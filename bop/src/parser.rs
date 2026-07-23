@@ -153,7 +153,7 @@ pub struct Expr {
     /// to a specific source position. Niche-packed into 4 bytes
     /// so the column field costs nothing beyond a plain `u32`
     /// — runtime error construction reads it out to render a
-    /// carat under the offending character.
+    /// caret under the offending character.
     pub column: Option<core::num::NonZeroU32>,
 }
 
@@ -326,10 +326,8 @@ pub struct MatchArm {
     pub line: u32,
 }
 
-/// A pattern appears in `match` arms (phase 4 introduces this;
-/// future phases may reuse it in `let` destructuring and fn
-/// params). Structurally mirrors the runtime `Value` enum so each
-/// variant's matcher reads as "does this value fit here?".
+/// A pattern in a `match` arm. Structurally mirrors the runtime `Value` enum
+/// so each variant's matcher reads as "does this value fit here?".
 #[derive(Debug, Clone)]
 pub enum Pattern {
     /// Matches a specific value verbatim: `1`, `"foo"`, `true`,
@@ -527,7 +525,7 @@ pub struct Stmt {
     pub line: u32,
     /// 1-indexed column where this statement starts. See
     /// [`Expr::column`] — same niche-packed shape, same
-    /// purpose (carat rendering on runtime errors).
+    /// purpose (caret rendering on runtime errors).
     pub column: Option<core::num::NonZeroU32>,
 }
 
@@ -551,8 +549,7 @@ pub enum StmtKind {
     /// = expr` (constant binding, immutable). The `is_const` flag
     /// flips enforcement at use/assign sites: reassigning a
     /// constant is a compile-time error (the parser refuses any
-    /// assignment whose LHS is an all-uppercase identifier — see
-    /// [`parse_assign`]).
+    /// assignment whose LHS is an all-uppercase identifier).
     Let {
         name: String,
         value: Expr,
@@ -765,7 +762,7 @@ impl Parser {
     }
 
     /// 1-indexed column of the current token's first character.
-    /// Used for parse-error reporting so the carat under the
+    /// Used for parse-error reporting so the caret under the
     /// offending line points at the right place.
     fn peek_column(&self) -> u32 {
         self.tokens.get(self.pos).map(|t| t.column).unwrap_or(0)

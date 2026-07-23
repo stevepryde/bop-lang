@@ -1,12 +1,12 @@
 +++
 title = "Syntax"
-description = "Bop's syntax is deliberately simple. If you've seen Python or a C-family language, most of it will look familiar — curly braces for blocks, `#` for comments, newlines (rather than semicolons) terminating statements."
+description = "Bop's syntax is deliberately simple. If you've seen Python or a C-family language, most of it will look familiar — curly braces for blocks, `//` for comments, newlines (rather than semicolons) terminating statements."
 weight = 2
 template = "docs/page.html"
 page_template = "docs/page.html"
 [extra.previous]
-title = "Introduction"
-path = "/docs/"
+title = "What's new in 0.4"
+path = "/docs/whats-new-0-4/"
 [extra.next]
 title = "Types"
 path = "/docs/basics/types/"
@@ -14,7 +14,7 @@ path = "/docs/basics/types/"
 
 # Syntax
 
-Bop's syntax is deliberately simple. If you've seen Python or a C-family language, most of it will look familiar — curly braces for blocks, `#` for comments, newlines (rather than semicolons) terminating statements.
+Bop's syntax is deliberately simple. If you've seen Python or a C-family language, most of it will look familiar — curly braces for blocks, `//` for comments, newlines (rather than semicolons) terminating statements.
 
 ## Blocks
 

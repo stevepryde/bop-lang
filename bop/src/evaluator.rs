@@ -4330,8 +4330,7 @@ fn variants_equivalent(a: &[VariantDecl], b: &[VariantDecl]) -> bool {
 }
 
 /// Walk a pair of scope stacks to resolve a source-level type
-/// reference — the same logic as
-/// [`Evaluator::resolve_type_ref`], but free-standing so the
+/// reference. This is free-standing so the
 /// pattern matcher can be called with a borrow of the
 /// evaluator's tables without needing the evaluator itself.
 /// Returns `None` if the name isn't in scope.

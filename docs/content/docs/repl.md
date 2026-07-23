@@ -8,8 +8,8 @@ page_template = "docs/page.html"
 title = "Error Handling"
 path = "/docs/errors/"
 [extra.next]
-title = "Operators"
-path = "/docs/reference/operators/"
+title = "Command-line interface"
+path = "/docs/cli/"
 +++
 
 # REPL
@@ -79,7 +79,7 @@ A different parse error (typo, unexpected token) submits immediately so you can 
 Hit Tab on an identifier prefix to see matches from:
 
 - Bop keywords (`let`, `fn`, `match`, `use`, …)
-- Built-in functions (`print`, `len`, `range`, `int`, `float`, `sqrt`, …)
+- Built-in functions (`print`, `range`, `rand`, `try_call`, `panic`)
 - Names currently in the session (`let my_var = …` shows up after declaration)
 - Identifiers the REPL has seen you type in previous submissions (covers fn parameters, struct field names)
 
@@ -102,7 +102,7 @@ Arrow keys browse history. `~/.bop_history` (`$USERPROFILE\.bop_history` on Wind
 
 ## Error handling
 
-Runtime and parse errors render with the same source-snippet + carat as errors from `bop run`:
+Runtime and parse errors render with the same source-snippet + caret as errors from `bop run`:
 
 ```
 > let f = fn(n) { return missing(n) }

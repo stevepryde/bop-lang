@@ -10,11 +10,25 @@
 //! | `run --novm FILE`        | executes `FILE` with the tree-walker        |
 //! | `compile FILE`           | AOT-transpiles and builds a native binary   |
 //! | `compile --emit-rs FILE` | emits the transpiled Rust source only       |
+//! | `--help` / `--version`   | prints command help or the installed version |
 //!
 //! The default `run` path goes through the bytecode VM — it's
 //! 2–3× faster than the walker on realistic workloads and the
 //! semantics are identical. `--novm` is kept as an escape hatch
 //! for debugging or when binary size matters.
+//!
+//! The REPL retains bindings, functions, types, methods, and loaded modules
+//! across submissions. It supports multiline input, expression echo, tab
+//! completion, persistent history, `:vars`, `:reset`, `:help`, and
+//! `:quit`. Non-TTY stdin uses the same submission model for scripted
+//! transcripts.
+//!
+//! `bop run` and the REPL surface source-aware warnings before execution.
+//! Parse and runtime errors retain line/column information, source snippets,
+//! hints, and the owning source for failures raised from imported modules.
+//!
+//! Full command documentation is available at
+//! <https://bop-lang.com/docs/cli/>.
 
 use std::process::ExitCode;
 
