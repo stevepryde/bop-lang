@@ -867,6 +867,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 // them. The path still goes through the helper so
                 // the two error paths behave identically.
                 if let Err(err) = self.tick(line) {
+                    let err = self.attach_frame_module_context(err);
                     self.unwind_to_try_call(err)?;
                     continue;
                 }
@@ -874,6 +875,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     Ok(Next::Continue) => {}
                     Ok(Next::Halt) => break,
                     Err(err) => {
+                        let err = self.attach_frame_module_context(err);
                         self.unwind_to_try_call(err)?;
                     }
                 }
@@ -4771,6 +4773,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     fn run_internal(&mut self) -> Result<(), BopError> {
         while let Some((instr, line)) = self.fetch() {
             if let Err(err) = self.tick(line) {
+                let err = self.attach_frame_module_context(err);
                 self.unwind_to_try_call(err)?;
                 continue;
             }
@@ -4778,6 +4781,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 Ok(Next::Continue) => {}
                 Ok(Next::Halt) => break,
                 Err(err) => {
+                    let err = self.attach_frame_module_context(err);
                     self.unwind_to_try_call(err)?;
                 }
             }
@@ -5150,6 +5154,37 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 // `do_return` path (`FrameWrap::None`).
                 self.call_closure(&func, vec![payload], line)
             }
+        }
+    }
+
+    /// Attach the raising frame's defining module to an escaping
+    /// runtime error. The error's line numbers refer to the chunk
+    /// of the frame that raised it, so the frame's
+    /// `function_module` — the fn's *defining* module — is the
+    /// source the error must render against, no matter which file
+    /// the call chain started in. Root-declared fns attach the
+    /// root sentinel ([`bop::value::ROOT_MODULE_PATH`]), which
+    /// renders as plain root source but keeps an enclosing module
+    /// fn (e.g. one invoking a root callback) from claiming the
+    /// error later. Deepest context wins: an error that already
+    /// carries a context (a nested module VM's load boundary, or
+    /// an earlier pass through this helper) is left untouched.
+    ///
+    /// Top-of-program frames have no `function_module`; their
+    /// errors stay uncontexted here and, for a module's top-level
+    /// code, pick up their context (with source) at the
+    /// `load_module` boundary instead.
+    fn attach_frame_module_context(&self, err: BopError) -> BopError {
+        if err.source_context.is_some() || err.is_try_return {
+            return err;
+        }
+        match self
+            .frames
+            .last()
+            .and_then(|frame| frame.function_module.as_deref())
+        {
+            Some(module) => err.with_module(module),
+            None => err,
         }
     }
 

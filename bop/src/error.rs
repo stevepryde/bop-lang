@@ -10,6 +10,12 @@ use alloc::{boxed::Box, format, string::String};
 /// for boundaries that know the module identity but no longer own its text;
 /// rendering such a context deliberately omits a snippet instead of borrowing
 /// an unrelated root-file line.
+///
+/// A `module_path` equal to [`crate::value::ROOT_MODULE_PATH`] is the
+/// root-ownership sentinel: it marks the error as belonging to the root
+/// program so an enclosing module boundary can't claim it, and rendering
+/// treats it exactly like an uncontexted error (see
+/// [`BopError::with_module`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceContext {
     pub module_path: String,
@@ -152,17 +158,29 @@ impl BopError {
     /// Attach the imported module and its source text to this diagnostic.
     ///
     /// The deepest context wins: if a transitive import already attached its
-    /// own module, an outer importer must not replace it.
+    /// own module, an outer importer must not replace it. When the existing
+    /// context names the *same* module but couldn't supply its source (a
+    /// runtime-error boundary attached [`Self::with_module`] first), the
+    /// caller's source text is backfilled so rendering keeps its snippet.
     pub fn with_module_source(
         mut self,
         module_path: impl Into<String>,
         source: impl Into<String>,
     ) -> Self {
-        if self.source_context.is_none() {
-            self.source_context = Some(Box::new(SourceContext {
-                module_path: module_path.into(),
-                source: Some(source.into()),
-            }));
+let module_path = module_path.into();
+        match &mut self.source_context {
+            None => {
+                self.source_context = Some(Box::new(SourceContext {
+                    module_path,
+                    source: Some(source.into()),
+                }));
+            }
+            Some(context)
+                if context.module_path == module_path && context.source.is_none() =>
+            {
+                context.source = Some(source.into());
+            }
+            Some(_) => {}
         }
         self
     }
@@ -171,6 +189,14 @@ impl BopError {
     ///
     /// [`Self::render`] will show the module path and line/column but will
     /// never render the caller-provided root source for this diagnostic.
+    ///
+    /// Passing [`crate::value::ROOT_MODULE_PATH`] marks the diagnostic as
+    /// owned by the root program instead: rendering treats it exactly like
+    /// an uncontexted error (root source, no ``in module`` label), but the
+    /// deepest-context-wins rule still applies, so an enclosing module
+    /// boundary can no longer claim a root-owned error. Engines use this
+    /// when a root-declared fn escapes with an error while running inside
+    /// a module fn (e.g. a callback).
     pub fn with_module(mut self, module_path: impl Into<String>) -> Self {
         if self.source_context.is_none() {
             self.source_context = Some(Box::new(SourceContext {
@@ -180,11 +206,19 @@ impl BopError {
         }
         self
     }
+
+    /// The module context to use for rendering, with the root-ownership
+    /// sentinel (see [`Self::with_module`]) treated as "no module".
+    fn render_context(&self) -> Option<&SourceContext> {
+        self.source_context
+            .as_deref()
+            .filter(|context| context.module_path != crate::value::ROOT_MODULE_PATH)
+    }
 }
 
 impl core::fmt::Display for BopError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if let Some(context) = &self.source_context {
+        if let Some(context) = self.render_context() {
             if let Some(line) = self.line {
                 write!(
                     f,
@@ -220,7 +254,7 @@ impl BopError {
     /// embedders can call it from their own error path.
     pub fn render(&self, source: &str) -> String {
         let mut out = String::new();
-        let (source, module_path) = match &self.source_context {
+        let (source, module_path) = match self.render_context() {
             Some(context) => (context.source.as_deref(), Some(context.module_path.as_str())),
             None => (Some(source), None),
         };
@@ -527,5 +561,64 @@ mod tests {
         assert!(rendered.contains("in module `inner`"));
         assert!(rendered.contains("3 | c"));
         assert!(!rendered.contains("outer"));
+    }
+
+    #[test]
+    fn with_module_source_backfills_snippet_for_same_module_context() {
+        // A runtime-error boundary attaches the module identity
+        // first (no source in hand); the load boundary that still
+        // owns the text supplies it afterwards.
+        let err = BopError::runtime("broken", 2)
+            .with_module("m")
+            .with_module_source("m", "a\nb\nc");
+
+        let rendered = err.render("root");
+
+        assert!(rendered.contains("in module `m` at line 2"));
+        assert!(rendered.contains("2 | b"));
+    }
+
+    #[test]
+    fn with_module_source_never_backfills_across_modules() {
+        let err = BopError::runtime("broken", 1)
+            .with_module("inner")
+            .with_module_source("outer", "outer line");
+
+        let rendered = err.render("root");
+
+        assert!(rendered.contains("in module `inner` at line 1"));
+        assert!(!rendered.contains("outer line"));
+    }
+
+    #[test]
+    fn root_sentinel_context_renders_root_source() {
+        let root = "let a = 1\nlet zero = 0\nlet b = a / zero";
+        let err = BopError::runtime("Division by zero", 3)
+            .with_module(crate::value::ROOT_MODULE_PATH);
+
+        let rendered = err.render(root);
+
+        assert!(rendered.contains("--> line 3"));
+        assert!(rendered.contains("3 | let b = a / zero"));
+        assert!(!rendered.contains("in module"));
+        assert_eq!(format!("{}", err), "[line 3] Division by zero");
+    }
+
+    #[test]
+    fn root_sentinel_blocks_outer_module_claim() {
+        // A root-declared callback errors while running inside a
+        // module fn: the callback's boundary marks root ownership
+        // and the module boundary must not repaint it.
+        let root = "line one\nline two";
+        let err = BopError::runtime("boom", 2)
+            .with_module(crate::value::ROOT_MODULE_PATH)
+            .with_module("m")
+            .with_module_source("m", "module text");
+
+        let rendered = err.render(root);
+
+        assert!(rendered.contains("--> line 2"));
+        assert!(rendered.contains("2 | line two"));
+        assert!(!rendered.contains("in module"));
     }
 }
