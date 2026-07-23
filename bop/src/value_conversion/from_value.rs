@@ -82,6 +82,20 @@ impl FromValue<'_> for f64 {
     }
 }
 
+impl FromValue<'_> for f32 {
+    fn from_value(value: &Value) -> Result<Self, ValueConversionError> {
+        let value = f64::from_value(value)?;
+        let finite_f32_range = f64::from(f32::MIN)..=f64::from(f32::MAX);
+        if value.is_finite() && !finite_f32_range.contains(&value) {
+            return Err(ValueConversionError::new(
+                "number representable in Rust `f32` without overflow",
+                format!("number {value}"),
+            ));
+        }
+        Ok(value as f32)
+    }
+}
+
 impl FromValue<'_> for bool {
     fn from_value(value: &Value) -> Result<Self, ValueConversionError> {
         match value {

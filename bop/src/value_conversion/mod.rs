@@ -7,6 +7,11 @@
 //! matches the `&[Value]` received by [`crate::BopHost`] and permits zero-copy
 //! extraction such as `&str`.
 //!
+//! `Number` to `f32` extraction uses range-checked IEEE-754 narrowing: finite
+//! values outside `f32`'s finite range return [`ValueConversionError`] instead
+//! of becoming infinity. In-range values may round to the nearest `f32`, while
+//! `NaN` and positive or negative infinity are preserved.
+//!
 //! ```
 //! use std::collections::BTreeMap;
 //! use bop::{FromValue, IntoValue, Value, bop_value};

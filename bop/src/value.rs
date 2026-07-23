@@ -985,6 +985,13 @@ impl Value {
     /// Trusted compatibility constructor. Runtime engines must use
     /// [`Self::try_new_array`] so a source line can be attached to a clean
     /// fatal diagnostic.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Value nesting limit exceeded (maximum 64 levels)"` if
+    /// `items` would make the returned value's [`Self::ownership_depth`]
+    /// exceed [`MAX_VALUE_DEPTH`]. Use [`Self::try_new_array`] to handle that
+    /// condition without panicking.
     pub fn new_array(items: Vec<Value>) -> Self {
         trusted(Self::try_new_array(items, 0))
     }
@@ -1002,6 +1009,14 @@ impl Value {
         Ok(Value::Array(BopArray(Rc::new(data))))
     }
 
+    /// Trusted compatibility constructor for a dictionary.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Value nesting limit exceeded (maximum 64 levels)"` if an
+    /// entry value would make the returned value's
+    /// [`Self::ownership_depth`] exceed [`MAX_VALUE_DEPTH`]. Use
+    /// [`Self::try_new_dict`] to handle that condition without panicking.
     pub fn new_dict(entries: Vec<(String, Value)>) -> Self {
         trusted(Self::try_new_dict(entries, 0))
     }
@@ -1021,6 +1036,13 @@ impl Value {
     /// the module path *and* the type name match — so a
     /// `struct Color { ... }` declared in two separate modules
     /// produces genuinely distinct values.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Value nesting limit exceeded (maximum 64 levels)"` if a
+    /// field value would make the returned value's
+    /// [`Self::ownership_depth`] exceed [`MAX_VALUE_DEPTH`]. Use
+    /// [`Self::try_new_struct`] to handle that condition without panicking.
     pub fn new_struct(
         module_path: String,
         type_name: String,
@@ -1051,6 +1073,14 @@ impl Value {
     /// `items` in order. Cloning the returned `Value::Iter`
     /// shares the iteration cursor, so `let b = a; a.next()`
     /// advances `b` too.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Value nesting limit exceeded (maximum 64 levels)"` if
+    /// `items` would make the returned iterator's
+    /// [`Self::ownership_depth`] exceed [`MAX_VALUE_DEPTH`]. Use
+    /// [`Self::try_new_array_iter`] to handle that condition without
+    /// panicking.
     pub fn new_array_iter(items: Vec<Value>) -> Self {
         trusted(Self::try_new_array_iter(items, 0))
     }
@@ -1101,6 +1131,14 @@ impl Value {
         Value::EnumVariant(BopEnumVariant(Rc::new(data)))
     }
 
+    /// Build a tuple-payload enum variant.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Value nesting limit exceeded (maximum 64 levels)"` if
+    /// `items` would make the returned value's [`Self::ownership_depth`]
+    /// exceed [`MAX_VALUE_DEPTH`]. Use [`Self::try_new_enum_tuple`] to handle
+    /// that condition without panicking.
     pub fn new_enum_tuple(
         module_path: String,
         type_name: String,
@@ -1136,6 +1174,15 @@ impl Value {
         Ok(Value::EnumVariant(BopEnumVariant(Rc::new(data))))
     }
 
+    /// Build a struct-payload enum variant.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Value nesting limit exceeded (maximum 64 levels)"` if a
+    /// field value would make the returned value's
+    /// [`Self::ownership_depth`] exceed [`MAX_VALUE_DEPTH`]. Use
+    /// [`Self::try_new_enum_struct`] to handle that condition without
+    /// panicking.
     pub fn new_enum_struct(
         module_path: String,
         type_name: String,
@@ -1174,6 +1221,13 @@ impl Value {
     /// Build a tree-walker-ready closure value. The AST body moves
     /// into a shared [`BopFn`] behind an `Rc`; subsequent clones
     /// of the resulting `Value::Fn` just bump the refcount.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Value nesting limit exceeded (maximum 64 levels)"` if a
+    /// captured value would make the returned function's
+    /// [`Self::ownership_depth`] exceed [`MAX_VALUE_DEPTH`]. Use
+    /// [`Self::try_new_fn`] to handle that condition without panicking.
     pub fn new_fn(
         params: Vec<String>,
         captures: Vec<(String, Value)>,
@@ -1216,6 +1270,14 @@ impl Value {
     /// Used by the bytecode VM (and any future engine) to carry
     /// its pre-compiled form inside a `Value::Fn` without
     /// `bop-lang` depending on the engine crate.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Value nesting limit exceeded (maximum 64 levels)"` if a
+    /// captured value would make the returned function's
+    /// [`Self::ownership_depth`] exceed [`MAX_VALUE_DEPTH`]. Use
+    /// [`Self::try_new_compiled_fn`] to provide the engine-opaque body's
+    /// ownership depth and handle depth-limit failures without panicking.
     pub fn new_compiled_fn(
         params: Vec<String>,
         captures: Vec<(String, Value)>,
@@ -2430,6 +2492,64 @@ mod depth_tests {
             ),
             23,
         );
+    }
+
+    #[test]
+    fn every_infallible_depth_checked_constructor_has_the_documented_panic() {
+        fn assert_depth_panic(constructor: impl FnOnce() -> Value) {
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(constructor))
+                .expect_err("compatibility constructor should panic at the depth cap");
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied());
+            assert_eq!(message, Some(VALUE_DEPTH_ERROR_MESSAGE));
+        }
+
+        let child = nested_array(MAX_VALUE_DEPTH);
+
+        assert_depth_panic(|| Value::new_array(vec![child.clone()]));
+        assert_depth_panic(|| Value::new_dict(vec![("x".into(), child.clone())]));
+        assert_depth_panic(|| {
+            Value::new_struct(
+                "m".into(),
+                "S".into(),
+                vec![("x".into(), child.clone())],
+            )
+        });
+        assert_depth_panic(|| Value::new_array_iter(vec![child.clone()]));
+        assert_depth_panic(|| {
+            Value::new_enum_tuple(
+                "m".into(),
+                "E".into(),
+                "V".into(),
+                vec![child.clone()],
+            )
+        });
+        assert_depth_panic(|| {
+            Value::new_enum_struct(
+                "m".into(),
+                "E".into(),
+                "V".into(),
+                vec![("x".into(), child.clone())],
+            )
+        });
+        assert_depth_panic(|| {
+            Value::new_fn(
+                Vec::new(),
+                vec![("x".into(), child.clone())],
+                Vec::new(),
+                None,
+            )
+        });
+        assert_depth_panic(|| {
+            Value::new_compiled_fn(
+                Vec::new(),
+                vec![("x".into(), child)],
+                Rc::new(()),
+                None,
+            )
+        });
     }
 
     #[test]
