@@ -371,6 +371,20 @@ fn __bop_import_binding_value(
     ctx.bindings.insert(key, value);
 }
 
+/// Current value of a module-alias member. The live binding wins when
+/// the name (or its re-export origin — `__bop_binding_value` chases
+/// `binding_origins`, so facades resolve to the deepest origin) is
+/// still tracked as a rebindable binding; fn exports and anything the
+/// module never defined as a binding fall back to the import-time
+/// snapshot. Mirrors the walker's `module_binding`.
+fn __bop_module_member(
+    ctx: &Ctx<'_>,
+    module: &::bop::value::BopModule,
+    name: &str,
+) -> ::std::option::Option<::bop::value::Value> {
+    __bop_binding_value(ctx, &module.path, name).or_else(|| module.__binding(name))
+}
+
 fn __bop_read_binding(
     ctx: &Ctx<'_>,
     module_path: &str,
@@ -1118,7 +1132,7 @@ fn __bop_field_get(
                 ));
             }
             Err(::bop::error::BopError::runtime(
-                format!("Module `{}` has no export `{}`", m.path, field),
+                format!("`{}` isn't exported from `{}`", field, m.path),
                 line,
             ))
         }
@@ -1127,6 +1141,28 @@ fn __bop_field_get(
             line,
         )),
     }
+}
+
+/// Live-module-aware variant of `__bop_field_get` for expression
+/// field reads. Module members resolve through `__bop_module_member`
+/// so mutations a module fn makes to its own globals stay visible
+/// through `alias.member`; every other receiver (and the module
+/// miss / type errors) delegates to `__bop_field_get`. The compound
+/// field-assignment path keeps the ctx-free helper because its
+/// receiver already holds a mutable borrow of `ctx`.
+#[inline]
+fn __bop_field_get_live(
+    ctx: &Ctx<'_>,
+    obj: &::bop::value::Value,
+    field: &str,
+    line: u32,
+) -> Result<::bop::value::Value, ::bop::error::BopError> {
+    if let ::bop::value::Value::Module(m) = obj {
+        if let ::std::option::Option::Some(v) = __bop_module_member(ctx, m, field) {
+            return Ok(v);
+        }
+    }
+    __bop_field_get(obj, field, line)
 }
 
 /// Runtime guard for namespaced type access: verifies that the
@@ -1320,17 +1356,12 @@ fn __bop_call_method(
             ::bop::methods::iter_method(obj, method, args, line)
         }
         ::bop::value::Value::Module(m) => {
-            let binding = m
-                .bindings
-                .iter()
-                .find(|(k, _)| k == method)
-                .map(|(_, v)| v.clone())
-                .ok_or_else(|| {
-                    ::bop::error::BopError::runtime(
-                        format!("Module `{}` has no export `{}`", m.path, method),
-                        line,
-                    )
-                })?;
+            let binding = __bop_module_member(ctx, m, method).ok_or_else(|| {
+                ::bop::error::BopError::runtime(
+                    format!("`{}` isn't exported from `{}`", method, m.path),
+                    line,
+                )
+            })?;
             let result = __bop_call_value(ctx, binding, args.to_vec(), line)?;
             Ok((result, None))
         }
