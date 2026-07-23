@@ -8,11 +8,11 @@
 //!
 //! # Why it's `#[ignore]`'d
 //!
-//! The AOT leg spins up a single `cargo run` per test invocation.
-//! Even with a batched driver that compiles all corpus programs in
-//! one Rust source file, each run is ~2s (first build) to ~0.5s
-//! (warm), which is too slow for every `cargo test` pass. Run it
-//! with
+//! The AOT leg spins up a single release-mode `cargo run` per test
+//! invocation. Even with a batched driver, compiling every corpus
+//! program in both native and sandboxed output shapes takes minutes
+//! on a typical development machine, which is too slow for every
+//! `cargo test` pass. Run it with
 //!
 //! ```text
 //! cargo test -p bop-compile --test three_way -- --ignored
@@ -22,13 +22,14 @@
 //!
 //! # Batching
 //!
-//! Each program is transpiled into its own `pub mod p_<name>` via
-//! `Options::module_name`. All modules plus a small driver `fn
-//! main()` are concatenated into one `src/main.rs`. The driver
-//! runs each program sequentially, captures its prints into a
-//! buffered host, and emits a delimited envelope on stdout. The
-//! harness parses that envelope back into `(Vec<String>, Result)`
-//! outcomes and compares them against the walker / VM.
+//! Each program is transpiled into native and sandboxed `pub mod`
+//! variants via `Options::module_name`. All modules plus a small
+//! driver `fn main()` are concatenated into one `src/main.rs`. The
+//! driver runs each program sequentially in both modes, captures its
+//! prints into a buffered host, and emits a delimited envelope on
+//! stdout. The harness parses that envelope back into
+//! `(Vec<String>, Result)` outcomes and compares them against the
+//! walker / VM.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -37,6 +38,27 @@ use std::process::{Command, Stdio};
 
 use bop::{BopError, BopHost, BopLimits, Value};
 use bop_compile::{Options, transpile};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AotMode {
+    Native,
+    Sandbox,
+}
+
+impl AotMode {
+    const ALL: [Self; 2] = [Self::Native, Self::Sandbox];
+
+    fn sandbox(self) -> bool {
+        matches!(self, Self::Sandbox)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Sandbox => "sandbox",
+        }
+    }
+}
 
 // ─── Shared test host ─────────────────────────────────────────────
 
@@ -160,67 +182,87 @@ fn build_driver(programs: &[CorpusEntry]) -> String {
     let mut out = String::new();
     out.push_str(DRIVER_HEADER);
 
-    // One pub mod per program. Sandbox is on so runaway programs
-    // can't hang the CI machine — the walker and VM run with the
-    // same `BopLimits::standard()` so the comparison stays fair.
-    for entry in programs {
-        // Resolver: entry-local modules first, then bop-std
-        // stdlib as a fallback. Programs with no imports and no
-        // stdlib reach get `None` to avoid building an empty
-        // resolver for every no-use corpus entry.
-        let resolver = build_resolver(entry.modules);
-        let mod_src = transpile(
-            entry.source,
-            &Options {
-                emit_main: false,
-                use_bop_sys: false,
-                sandbox: true,
-                module_name: Some(format!("p_{}", entry.name)),
-                module_resolver: resolver,
-            },
-        )
-        .unwrap_or_else(|e| panic!("transpile failed for {}: {}", entry.name, e.message));
-        out.push_str(&mod_src);
-        out.push('\n');
+    // One pub mod per program and AOT mode. The native mode is the
+    // shape emitted by `bop compile`; keeping it in this differential
+    // harness ensures fixes cannot accidentally cover only the
+    // persistent sandbox runtime. The curated corpus excludes
+    // runaway programs, so executing its native variants is safe.
+    for mode in AotMode::ALL {
+        for entry in programs {
+            // Resolver: entry-local modules first, then bop-std
+            // stdlib as a fallback. Each transpilation gets its own
+            // resolver because module resolution is stateful.
+            let resolver = build_resolver(entry.modules);
+            let mod_src = transpile(
+                entry.source,
+                &Options {
+                    emit_main: false,
+                    use_bop_sys: false,
+                    sandbox: mode.sandbox(),
+                    module_name: Some(format!("p_{}_{}", mode.label(), entry.name)),
+                    module_resolver: resolver,
+                },
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "transpile failed for {} ({}): {}",
+                    entry.name,
+                    mode.label(),
+                    e.message
+                )
+            });
+            out.push_str(&mod_src);
+            out.push('\n');
+        }
     }
 
-    // Driver: iterate through programs, capture prints, emit
-    // envelope. We inline the calls rather than build a Vec of
-    // trait objects — each `p_X::run` is generic over H and can't
-    // be trivially type-erased.
+    // Driver: iterate through modes and programs, capture prints,
+    // and emit an envelope for each pair. We inline the calls rather
+    // than build a Vec of trait objects — each generated `run` is
+    // generic over H and can't be trivially type-erased.
     out.push_str("fn main() {\n");
     out.push_str("    let mut out = ::std::string::String::new();\n");
-    for entry in programs {
-        let name = entry.name;
-        writeln!(
-            out,
-            concat!(
-                "    {{\n",
-                // Driver-side BufHost, defined in DRIVER_HEADER —
-                // distinct from the harness-side one, no modules
-                // map (AOT resolves at compile time).
-                "        let mut host = BufHost::new();\n",
-                "        let limits = ::bop::BopLimits::standard();\n",
-                "        let result = p_{name}::run(&mut host, &limits);\n",
-                "        out.push_str(\"<<TEST>>{name}\\n\");\n",
-                "        for p in &host.prints {{\n",
-                "            out.push_str(\"<<PRINT>>\");\n",
-                "            out.push_str(p);\n",
-                "            out.push_str(\"<<END>>\\n\");\n",
-                "        }}\n",
-                "        match result {{\n",
-                "            Ok(()) => out.push_str(\"<<OK>>\\n\"),\n",
-                "            Err(e) => {{\n",
-                "                out.push_str(\"<<ERR>>\");\n",
-                "                out.push_str(&e.message);\n",
-                "                out.push_str(\"<<END>>\\n\");\n",
-                "            }}\n",
-                "        }}\n",
-                "    }}\n",
-            ),
-            name = name
-        )
-        .unwrap();
+    for mode in AotMode::ALL {
+        for entry in programs {
+            let mode_label = mode.label();
+            let name = entry.name;
+            let run = if mode.sandbox() {
+                format!("p_{mode_label}_{name}::run(&mut host, &limits)")
+            } else {
+                format!("p_{mode_label}_{name}::run(&mut host)")
+            };
+            writeln!(
+                out,
+                concat!(
+                    "    {{\n",
+                    // Driver-side BufHost, defined in DRIVER_HEADER —
+                    // distinct from the harness-side one, no modules
+                    // map (AOT resolves at compile time).
+                    "        let mut host = BufHost::new();\n",
+                    "        let limits = ::bop::BopLimits::standard();\n",
+                    "        let result = {run};\n",
+                    "        out.push_str(\"<<TEST>>{mode_label}/{name}\\n\");\n",
+                    "        for p in &host.prints {{\n",
+                    "            out.push_str(\"<<PRINT>>\");\n",
+                    "            out.push_str(p);\n",
+                    "            out.push_str(\"<<END>>\\n\");\n",
+                    "        }}\n",
+                    "        match result {{\n",
+                    "            Ok(()) => out.push_str(\"<<OK>>\\n\"),\n",
+                    "            Err(e) => {{\n",
+                    "                out.push_str(\"<<ERR>>\");\n",
+                    "                out.push_str(&e.message);\n",
+                    "                out.push_str(\"<<END>>\\n\");\n",
+                    "            }}\n",
+                    "        }}\n",
+                    "    }}\n",
+                ),
+                run = run,
+                mode_label = mode_label,
+                name = name
+            )
+            .unwrap();
+        }
     }
     out.push_str("    ::std::print!(\"{}\", out);\n");
     out.push_str("}\n");
@@ -353,8 +395,8 @@ fn parse_envelope(stdout: &str) -> Vec<(String, Outcome)> {
 // ─── The corpus ───────────────────────────────────────────────────
 //
 // A focused set of programs spanning every feature the AOT supports.
-// Kept intentionally small so the AOT leg stays under ~10s (cold
-// cargo build dominates; parsing + asserting is negligible).
+// Keep additions intentional: every entry is emitted twice, and generated
+// Rust release compilation dominates the ignored harness's runtime.
 //
 // Safety / tight-limit tests are deliberately *not* included here:
 // the walker, VM, and AOT sandbox each measure "steps" differently
@@ -1799,6 +1841,36 @@ print(square(7))"#,
         &[("math", "fn square(n) { return n * n }")],
     ),
     (
+        "module_fn_reads_and_mutates_module_bindings",
+        r#"use counter
+print(next())
+print(next())"#,
+        &[(
+            "counter",
+            r#"const STEP = 3
+let value = 4
+fn next() {
+    value += STEP
+    return value
+}"#,
+        )],
+    ),
+    (
+        "named_fns_call_bare_and_transitive_imports",
+        r#"use outer
+fn root_call(n) { return increment(n) }
+print(root_call(10))
+print(transitive(10))"#,
+        &[
+            (
+                "outer",
+                r#"use inner
+fn transitive(n) { return increment(increment(n)) }"#,
+            ),
+            ("inner", "fn increment(n) { return n + 1 }"),
+        ],
+    ),
+    (
         "reexported_type_origins_two_hop_facade",
         r#"use top
 use top.{Point, Signal, make_point, make_named} as api
@@ -2220,6 +2292,28 @@ fn increment() {
 }
 fn invalid() { dep += 1 }
 print(increment(), try_call(invalid).is_err(), dep.Stack { items: [] }.items.len())"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_compound_assignment_writes_through",
+        r#"use types as dep
+fn increment() {
+    dep = 1
+    dep += 2
+    return dep
+}
+print(increment(), dep)"#,
+        &[("types", "struct Stack { items }")],
+    ),
+    (
+        "declaration_alias_mutating_method_writes_through",
+        r#"use types as dep
+fn mutate() {
+    dep = []
+    dep.push(1)
+    return dep.len()
+}
+print(mutate(), dep.len())"#,
         &[("types", "struct Stack { items }")],
     ),
     (
@@ -3197,25 +3291,45 @@ fn three_way_diff() {
         vm.insert(e.name, vm_outcome(e.source, e.modules));
     }
 
-    // Step 2: run the batched AOT once.
+    // Step 2: run both AOT modes in one batched native process.
     let aot_results = run_aot_batch(&entries);
-    let aot: std::collections::HashMap<String, Outcome> = aot_results.into_iter().collect();
+    let expected_aot_results = entries.len() * AotMode::ALL.len();
+    let mut aot = std::collections::HashMap::with_capacity(expected_aot_results);
+    for (key, outcome) in aot_results {
+        assert!(
+            aot.insert(key.clone(), outcome).is_none(),
+            "AOT produced a duplicate envelope for {key}"
+        );
+    }
+    assert_eq!(
+        aot.len(),
+        expected_aot_results,
+        "AOT produced an unexpected number of result envelopes"
+    );
 
-    // Step 3: every program's outcome must agree across all three.
+    // Step 3: every program's outcome must agree across the walker,
+    // VM, native AOT, and sandboxed AOT.
     let mut failures: Vec<String> = Vec::new();
     for e in &entries {
         let w = &walker[e.name];
         let v = &vm[e.name];
-        let a = aot.get(e.name).unwrap_or_else(|| {
-            panic!("AOT did not produce an envelope for {}", e.name);
-        });
+        for mode in AotMode::ALL {
+            let key = format!("{}/{}", mode.label(), e.name);
+            let a = aot.get(&key).unwrap_or_else(|| {
+                panic!(
+                    "AOT did not produce an envelope for {} ({})",
+                    e.name,
+                    mode.label()
+                );
+            });
 
-        if w != v || v != a {
-            let mut msg = format!("\n--- {} ---\n", e.name);
-            writeln!(msg, "walker: {:?}", w).unwrap();
-            writeln!(msg, "vm:     {:?}", v).unwrap();
-            writeln!(msg, "aot:    {:?}", a).unwrap();
-            failures.push(msg);
+            if w != v || v != a {
+                let mut msg = format!("\n--- {} ({}) ---\n", e.name, mode.label());
+                writeln!(msg, "walker: {:?}", w).unwrap();
+                writeln!(msg, "vm:     {:?}", v).unwrap();
+                writeln!(msg, "aot:    {:?}", a).unwrap();
+                failures.push(msg);
+            }
         }
     }
 
