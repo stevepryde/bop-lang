@@ -37,11 +37,66 @@ fn wide_integers_are_checked_without_truncation() {
 fn reverse_numeric_conversion_preserves_int_number_distinction() {
     assert_eq!(Value::Int(42).to_rust::<i64>().unwrap(), 42);
     assert_eq!(Value::Number(42.5).to_rust::<f64>().unwrap(), 42.5);
+    assert_eq!(Value::Number(42.5).to_rust::<f32>().unwrap(), 42.5_f32);
     assert_eq!(
         Value::Number(42.0).to_rust::<i64>().unwrap_err().actual(),
         "number"
     );
     assert_eq!(Value::Int(42).to_rust::<f64>().unwrap_err().actual(), "int");
+    let error = Value::Int(42).to_rust::<f32>().unwrap_err();
+    assert_eq!(error.expected(), "number");
+    assert_eq!(error.actual(), "int");
+}
+
+#[test]
+fn f32_values_round_trip_through_number_including_ieee_specials() {
+    for input in [
+        0.0_f32,
+        -0.0,
+        0.1,
+        f32::MIN_POSITIVE,
+        f32::from_bits(1),
+        f32::MIN,
+        f32::MAX,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+    ] {
+        let output = Value::from(input).to_rust::<f32>().unwrap();
+        assert_eq!(output.to_bits(), input.to_bits());
+    }
+
+    assert!(Value::from(f32::NAN).to_rust::<f32>().unwrap().is_nan());
+}
+
+#[test]
+fn f32_extraction_accepts_finite_bounds_and_rejects_overflow() {
+    assert_eq!(
+        Value::Number(f64::from(f32::MIN)).to_rust::<f32>().unwrap(),
+        f32::MIN
+    );
+    assert_eq!(
+        Value::Number(f64::from(f32::MAX)).to_rust::<f32>().unwrap(),
+        f32::MAX
+    );
+
+    let above_max = f64::from(f32::MAX) * (1.0 + f64::EPSILON);
+    let error = Value::Number(above_max).to_rust::<f32>().unwrap_err();
+    assert_eq!(
+        error.expected(),
+        "number representable in Rust `f32` without overflow"
+    );
+    assert_eq!(error.actual(), format!("number {above_max}"));
+    assert!(error.path().is_empty());
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "value conversion failed at $: expected number representable in Rust `f32` without overflow, got number {above_max}"
+        )
+    );
+
+    let below_min = f64::from(f32::MIN) * (1.0 + f64::EPSILON);
+    assert!(Value::Number(below_min).to_rust::<f32>().is_err());
+    assert!(Value::Number(f64::MAX).to_rust::<f32>().is_err());
 }
 
 #[test]
