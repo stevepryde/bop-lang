@@ -81,7 +81,7 @@ let value = instance.call("add", &[Value::Int(3)], &mut host)?;
 
 `entry_points()` exposes each public entry's name and arity, while
 `call_value()` invokes a callback returned by that same instance. See the
-[stateful embedding guide](https://stevepryde.github.io/bop-lang/embedding/instances.html)
+[stateful embedding guide](https://bop-lang.com/docs/embedding/instances/)
 for lifecycle, affinity, limits, and error-state behavior.
 
 Host arguments support borrowed or owned typed extraction through
