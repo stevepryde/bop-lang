@@ -315,6 +315,13 @@ fn __bop_has_binding(ctx: &Ctx<'_>, module_path: &str, name: &str) -> bool {
         || ctx.binding_claims.contains(&key)
 }
 
+fn __bop_warn_glob_shadow(name: &str, path: &str) {
+    ::std::eprintln!(
+        "warning: {}",
+        ::bop::error_messages::glob_shadow_warning(name, path),
+    );
+}
+
 fn __bop_define_binding(
     ctx: &mut Ctx<'_>,
     module_path: &str,

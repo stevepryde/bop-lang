@@ -85,6 +85,7 @@ fn write_scratch_project(test_name: &str, rust_src: &str) -> PathBuf {
 
     let bop_path = root.join("bop");
     let bop_sys_path = root.join("bop-sys");
+    let bop_vm_path = root.join("bop-vm");
     let manifest = format!(
         r#"[package]
 name = "bop-e2e-{name}"
@@ -95,6 +96,7 @@ publish = false
 [dependencies]
 bop = {{ path = "{bop}", package = "bop-lang" }}
 bop-sys = {{ path = "{bop_sys}" }}
+bop-vm = {{ path = "{bop_vm}" }}
 
 [[bin]]
 name = "program"
@@ -105,6 +107,7 @@ path = "src/main.rs"
         name = test_name,
         bop = bop_path.display(),
         bop_sys = bop_sys_path.display(),
+        bop_vm = bop_vm_path.display(),
     );
     std::fs::write(dir.join("Cargo.toml"), manifest).expect("write Cargo.toml");
     std::fs::write(src_dir.join("main.rs"), rust_src).expect("write main.rs");
@@ -1901,6 +1904,227 @@ fn assert_aot_modes_match_with_modules(
         assert_eq!(
             run.stdout, expected,
             "AOT output diverged from walker for {test_name} (sandbox={sandbox})",
+        );
+    }
+}
+
+fn cross_engine_warning_runs(
+    test_name: &str,
+    code: &str,
+    modules: &[(&str, &str)],
+) -> Vec<(String, AotRun)> {
+    let compile_mode = |module_name: &str, sandbox: bool| {
+        transpile(
+            code,
+            &Options {
+                emit_main: false,
+                use_bop_sys: false,
+                sandbox,
+                module_name: Some(module_name.to_string()),
+                module_resolver: Some(modules_from_map(
+                    modules.iter().map(|(name, source)| (*name, *source)),
+                )),
+            },
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to transpile {test_name} ({module_name}): {}",
+                error.message
+            )
+        })
+    };
+    let native = compile_mode("__aot_native", false);
+    let sandbox = compile_mode("__aot_sandbox", true);
+
+    let mut rust_src = String::new();
+    rust_src.push_str(&native);
+    rust_src.push('\n');
+    rust_src.push_str(&sandbox);
+    rust_src.push_str(
+        r#"
+struct WarningHost {
+    modules: ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+}
+
+impl ::bop::BopHost for WarningHost {
+    fn call(
+        &mut self,
+        _name: &str,
+        _args: &[::bop::value::Value],
+        _line: u32,
+    ) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        None
+    }
+
+    fn on_print(&mut self, message: &str) {
+        println!("{}", message);
+    }
+
+    fn resolve_module(
+        &mut self,
+        name: &str,
+    ) -> Option<Result<::std::string::String, ::bop::error::BopError>> {
+        self.modules.get(name).cloned().map(Ok)
+    }
+}
+
+fn main() {
+    let engine = ::std::env::args().nth(1).expect("engine argument");
+    let mut modules = ::std::collections::HashMap::new();
+"#,
+    );
+    for (name, source) in modules {
+        rust_src.push_str(&format!(
+            "    modules.insert({name:?}.to_string(), {source:?}.to_string());\n"
+        ));
+    }
+    rust_src.push_str(&format!(
+        r#"    let mut host = WarningHost {{ modules }};
+    let result = match engine.as_str() {{
+        "walker" => ::bop::run({code:?}, &mut host, &::bop::BopLimits::standard()),
+        "vm" => ::bop_vm::run({code:?}, &mut host, &::bop::BopLimits::standard()),
+        "aot-native" => __aot_native::run(&mut host),
+        "aot-sandbox" => __aot_sandbox::run(&mut host, &::bop::BopLimits::standard()),
+        other => panic!("unknown engine: {{other}}"),
+    }};
+    result.unwrap();
+}}
+"#
+    ));
+
+    let dir = write_scratch_project(test_name, &rust_src);
+    ["walker", "vm", "aot-native", "aot-sandbox"]
+        .into_iter()
+        .map(|engine| {
+            let output = Command::new("cargo")
+                .arg("run")
+                .arg("--quiet")
+                .arg("--release")
+                .arg("--")
+                .arg(engine)
+                .current_dir(&dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .expect("run cross-engine warning driver");
+            (
+                engine.to_string(),
+                AotRun {
+                    status: output.status.code(),
+                    stdout: String::from_utf8_lossy(&output.stdout)
+                        .trim_end_matches('\n')
+                        .to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    rust_src: rust_src.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn expected_glob_warnings(path: &str, names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| {
+            format!(
+                "warning: {}\n",
+                bop::error_messages::glob_shadow_warning(name, path)
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn e2e_glob_shadow_warnings_match_all_engines_and_module_boundaries() {
+    let code = r#"use root_first
+use root_second
+fn nested() {
+    use function_first
+    use function_second
+    return alpha + beta() + delta + gamma()
+}
+print(alpha + beta() + delta + gamma())
+print(nested())
+use wrapper as wrapped
+print(wrapped.marker)"#;
+    let mixed_first =
+        "fn gamma() { return 1 }\nlet delta = 1\nfn beta() { return 1 }\nlet alpha = 1";
+    let mixed_second =
+        "let delta = 2\nfn gamma() { return 2 }\nlet alpha = 2\nfn beta() { return 2 }";
+    let modules = &[
+        ("root_first", mixed_first),
+        ("root_second", mixed_second),
+        ("function_first", mixed_first),
+        ("function_second", mixed_second),
+        ("internal_first", mixed_first),
+        ("internal_second", mixed_second),
+        (
+            "wrapper",
+            "use internal_first\nuse internal_second\nlet marker = alpha + beta() + delta + gamma()",
+        ),
+    ];
+    let runs = cross_engine_warning_runs("glob_warning_all_engines", code, modules);
+    let expected = [
+        expected_glob_warnings("root_second", &["alpha", "beta", "delta", "gamma"]),
+        expected_glob_warnings("function_second", &["alpha", "beta", "delta", "gamma"]),
+        expected_glob_warnings("internal_second", &["alpha", "beta", "delta", "gamma"]),
+    ]
+    .concat();
+    let expected_stdout = &runs[0].1.stdout;
+
+    for (engine, run) in &runs {
+        assert_eq!(
+            run.status,
+            Some(0),
+            "{engine} warning contract program failed:\n{}\n--- generated ---\n{}",
+            run.stderr,
+            run.rust_src,
+        );
+        assert_eq!(
+            &run.stdout, expected_stdout,
+            "{engine} changed stdout while reporting warnings"
+        );
+        assert_eq!(
+            run.stderr, expected,
+            "{engine} warning text/count/order diverged"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn e2e_non_glob_private_and_absent_exports_are_silent_in_all_engines() {
+    let code = r#"use first.{alpha, beta}
+use second.{alpha, beta}
+use second as module
+use private
+use absent
+print(alpha + beta() + module.alpha)"#;
+    let modules = &[
+        ("first", "fn beta() { return 1 }\nlet alpha = 1"),
+        ("second", "let alpha = 2\nfn beta() { return 2 }"),
+        ("private", "let _alpha = 3\nfn _beta() { return 3 }"),
+        (
+            "absent",
+            "if false { let alpha = 4; fn beta() { return 4 } }",
+        ),
+    ];
+    let runs = cross_engine_warning_runs("glob_warning_negative_all_engines", code, modules);
+    let expected_stdout = &runs[0].1.stdout;
+
+    for (engine, run) in &runs {
+        assert_eq!(
+            run.status,
+            Some(0),
+            "{engine} negative warning program failed:\n{}\n--- generated ---\n{}",
+            run.stderr,
+            run.rust_src,
+        );
+        assert_eq!(&run.stdout, expected_stdout, "{engine} stdout diverged");
+        assert_eq!(
+            run.stderr, "",
+            "{engine} warned for selective, aliased, private, or absent exports"
         );
     }
 }

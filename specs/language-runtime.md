@@ -153,6 +153,10 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   function, lambda, and dead-code type/method sites, while checker tests cover
   source order, lexical frames, imported identities, shadowing, and ambiguous
   control flow without false-positive exhaustiveness warnings.
+- **AC-RUN-015:** Plain-glob value/function collisions remain first-definition
+  wins and emit the same runtime warning on stderr in the walker, VM, and both
+  native AOT modes. Selective and aliased imports, private names, absent
+  conditional exports, stdout, and binding/source order are unaffected.
 
 ## Design notes
 
