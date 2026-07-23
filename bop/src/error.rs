@@ -24,7 +24,11 @@ pub struct BopError {
     pub friendly_hint: Option<String>,
     /// Non-root source identity and, when available, the source text needed
     /// for accurate snippet rendering.
-    pub source_context: Option<SourceContext>,
+    /// Boxed so the cold error path doesn't bloat `BopError` itself:
+    /// every recursive parser frame returns `Result<_, BopError>` by
+    /// value, and an inline context (~48 bytes) pushed 128-deep parses
+    /// past a 2 MiB thread stack before the depth guard could fire.
+    pub source_context: Option<Box<SourceContext>>,
     /// Fatal errors can't be caught by `try_call`; they always
     /// unwind to the engine boundary. This is the load-bearing
     /// property that makes `BopLimits` a real sandbox — a
@@ -155,10 +159,10 @@ impl BopError {
         source: impl Into<String>,
     ) -> Self {
         if self.source_context.is_none() {
-            self.source_context = Some(SourceContext {
+            self.source_context = Some(Box::new(SourceContext {
                 module_path: module_path.into(),
                 source: Some(source.into()),
-            });
+            }));
         }
         self
     }
@@ -169,10 +173,10 @@ impl BopError {
     /// never render the caller-provided root source for this diagnostic.
     pub fn with_module(mut self, module_path: impl Into<String>) -> Self {
         if self.source_context.is_none() {
-            self.source_context = Some(SourceContext {
+            self.source_context = Some(Box::new(SourceContext {
                 module_path: module_path.into(),
                 source: None,
-            });
+            }));
         }
         self
     }
