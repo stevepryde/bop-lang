@@ -2702,9 +2702,10 @@ impl Emitter {
     ///   it under `m`.
     ///
     /// Shadow conflicts on injected names are emitted as a
-    /// transpile-time error for the explicit (selective + alias)
-    /// forms and silently skipped for glob — matching the walker's
-    /// "first-win, warn on conflict" behaviour.
+    /// transpile-time error for aliased forms. Flat imports remain
+    /// first-win; plain globs additionally emit the same runtime
+    /// warning as the walker when an available export loses a
+    /// same-frame conflict.
     fn emit_use_stmt(
         &mut self,
         path: &str,
@@ -2772,7 +2773,7 @@ impl Emitter {
         }
 
         // Decide which names to expose + in what form.
-        let expose_bindings: Vec<String> = match items {
+        let mut expose_bindings: Vec<String> = match items {
             Some(list) => list
                 .iter()
                 .filter(|n| entry.effective_exports.iter().any(|e| e == *n))
@@ -2785,6 +2786,11 @@ impl Emitter {
                 .cloned()
                 .collect(),
         };
+        // A module's values and functions are one import namespace even
+        // though the analysis stores their origins separately. Emit the
+        // combined surface lexicographically so multi-name warning order is
+        // byte-identical to the walker and VM.
+        expose_bindings.sort();
         let expose_types: Vec<(String, String)> = match items {
             Some(list) => list
                 .iter()
@@ -2911,30 +2917,53 @@ impl Emitter {
                         }
                         if self.opts.sandbox {
                             self.line(&format!(
-                                "__bop_import_export(ctx, {}, {}, {}, {}, {tmp}.{ident}.clone(), {line})?;",
+                                "__bop_import_export(ctx, {}, {}, {}, {}, {tmp}.{ident}.clone(), {}, {line})?;",
                                 rust_string_literal(&self.current_module),
                                 rust_string_literal(name),
                                 rust_string_literal(path),
                                 rust_string_literal(name),
+                                items.is_none(),
                                 ident = rust_user_ident(name),
                             ));
                             self.bind_optional_import(name, OptionalImportBinding::Persistent);
                         } else if entry.effective_value_exports.contains(name) {
-                            self.line(&format!(
+                            let import = format!(
                                 "__bop_import_binding_alias(ctx, {}, {}, {}, {});",
                                 rust_string_literal(&self.current_module),
                                 rust_string_literal(name),
                                 rust_string_literal(path),
                                 rust_string_literal(name),
-                            ));
+                            );
+                            if items.is_none() {
+                                self.line(&format!(
+                                    "if __bop_has_binding(ctx, {}, {}) {{ __bop_warn_glob_shadow({}, {}); }} else {{ {import} }}",
+                                    rust_string_literal(&self.current_module),
+                                    rust_string_literal(name),
+                                    rust_string_literal(name),
+                                    rust_string_literal(path),
+                                ));
+                            } else {
+                                self.line(&import);
+                            }
                             self.bind_persistent(name);
                         } else {
-                            self.line(&format!(
+                            let import = format!(
                                 "__bop_import_binding_value(ctx, {}, {}, {tmp}.{ident}.clone());",
                                 rust_string_literal(&self.current_module),
                                 rust_string_literal(name),
                                 ident = rust_user_ident(name),
-                            ));
+                            );
+                            if items.is_none() {
+                                self.line(&format!(
+                                    "if __bop_has_binding(ctx, {}, {}) {{ __bop_warn_glob_shadow({}, {}); }} else {{ {import} }}",
+                                    rust_string_literal(&self.current_module),
+                                    rust_string_literal(name),
+                                    rust_string_literal(name),
+                                    rust_string_literal(path),
+                                ));
+                            } else {
+                                self.line(&import);
+                            }
                             self.bind_persistent(name);
                         }
                         if let Some(module_export) = entry.effective_module_exports.get(name) {
@@ -2952,6 +2981,22 @@ impl Emitter {
                             && self.fn_info.all_fns.contains_key(name)
                             && !self.has_module_alias_candidate(name))
                     {
+                        if items.is_none() {
+                            if self.opts.sandbox {
+                                self.line(&format!(
+                                    "if {tmp}.{ident}.is_some() {{ __bop_warn_glob_shadow({}, {}); }}",
+                                    rust_string_literal(name),
+                                    rust_string_literal(path),
+                                    ident = rust_user_ident(name),
+                                ));
+                            } else {
+                                self.line(&format!(
+                                    "__bop_warn_glob_shadow({}, {});",
+                                    rust_string_literal(name),
+                                    rust_string_literal(path),
+                                ));
+                            }
+                        }
                         continue;
                     }
                     if self.opts.sandbox {
@@ -2965,6 +3010,13 @@ impl Emitter {
                             function_site,
                         }) = self.optional_import_in_current_scope(name)
                         {
+                            if items.is_none() {
+                                self.line(&format!(
+                                    "if {value}.is_some() && {candidate}.is_some() {{ __bop_warn_glob_shadow({}, {}); }}",
+                                    rust_string_literal(name),
+                                    rust_string_literal(path),
+                                ));
+                            }
                             self.line(&format!(
                                 "if {value}.is_none() {{ {function_site} = __bop_export_function_site(&{candidate}); {value} = __bop_export_value(ctx, {candidate}, {line})?; }}"
                             ));
@@ -4218,13 +4270,17 @@ fn __bop_import_export(
     origin_module_path: &str,
     origin_name: &str,
     export: ::std::option::Option<__BopExport>,
+    warn_on_shadow: bool,
     line: u32,
 ) -> Result<(), ::bop::error::BopError> {
     let key = (module_path.to_string(), name.to_string());
-    if __bop_has_binding(ctx, module_path, name)
+    let shadows_existing = __bop_has_binding(ctx, module_path, name)
         || ctx.active_function_sites.contains_key(&key)
-        || ctx.module_imported_function_sites.contains_key(&key)
-    {
+        || ctx.module_imported_function_sites.contains_key(&key);
+    if export.is_some() && shadows_existing {
+        if warn_on_shadow {
+            __bop_warn_glob_shadow(name, origin_module_path);
+        }
         return Ok(());
     }
     match export {

@@ -95,6 +95,16 @@ pub fn no_such_method(kind: &str, method: &str) -> String {
     format!("{} doesn't have a .{}() method", kind, method)
 }
 
+/// Canonical runtime warning for a name rejected by a plain-glob import.
+///
+/// The caller adds the leading `warning: ` when writing the diagnostic.
+pub fn glob_shadow_warning(name: &str, path: &str) -> String {
+    format!(
+        "`{}` from `{}` shadowed by an existing binding — the first definition wins",
+        name, path
+    )
+}
+
 /// Actionable recovery paired with the canonical constant-mutation error.
 pub const CONSTANT_MUTATION_HINT: &str =
     "constants are immutable. Use `let` if you want a mutable binding.";
@@ -185,6 +195,14 @@ mod tests {
         assert_eq!(
             NESTED_MUTATION_HINT,
             "Assign the value to a variable, mutate that variable, then assign it back."
+        );
+    }
+
+    #[test]
+    fn glob_shadow_warning_is_the_cross_engine_contract() {
+        assert_eq!(
+            glob_shadow_warning("alpha", "second"),
+            "`alpha` from `second` shadowed by an existing binding — the first definition wins"
         );
     }
 

@@ -59,7 +59,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use alloc::collections::{BTreeMap, BTreeSet};
 
 use bop::builtins::{self, error, error_fatal_with_hint, error_with_hint};
-use bop::error::BopError;
+use bop::error::{BopError, BopWarning};
 use bop::methods;
 use bop::ops;
 use bop::parser::Visibility;
@@ -637,6 +637,9 @@ pub struct Vm<'h, H: BopHost + ?Sized> {
     live_value_environments: LiveValueEnvironments,
     binding_origins: BTreeMap<String, BindingOrigin>,
     live_binding_origins: LiveBindingOrigins,
+    /// Non-fatal runtime diagnostics accumulated across the root VM and any
+    /// nested module VMs. Only a public operation boundary writes them.
+    runtime_warnings: Vec<BopWarning>,
 }
 
 struct VmState {
@@ -662,6 +665,7 @@ struct VmState {
     live_value_environments: LiveValueEnvironments,
     binding_origins: BTreeMap<String, BindingOrigin>,
     live_binding_origins: LiveBindingOrigins,
+    runtime_warnings: Vec<BopWarning>,
 }
 
 /// A loaded bytecode program whose globals and module state survive calls.
@@ -738,6 +742,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             live_value_environments: module_runtime.environments,
             binding_origins: BTreeMap::new(),
             live_binding_origins: module_runtime.origins,
+            runtime_warnings: Vec::new(),
         }
     }
 
@@ -765,6 +770,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             live_value_environments: self.live_value_environments,
             binding_origins: self.binding_origins,
             live_binding_origins: self.live_binding_origins,
+            runtime_warnings: self.runtime_warnings,
         }
     }
 
@@ -797,6 +803,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             live_value_environments: state.live_value_environments,
             binding_origins: state.binding_origins,
             live_binding_origins: state.live_binding_origins,
+            runtime_warnings: state.runtime_warnings,
         }
     }
 
@@ -851,38 +858,54 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 self.limits.max_memory,
             ),
         };
-        let mut last_line: u32 = 0;
-        while let Some((instr, line)) = self.fetch() {
-            last_line = line;
-            // Tick errors (resource-limit violations) are always
-            // fatal, so `unwind_to_try_call` will short-circuit
-            // them. The path still goes through the helper so
-            // the two error paths behave identically.
-            if let Err(err) = self.tick(line) {
-                self.unwind_to_try_call(err)?;
-                continue;
-            }
-            match self.dispatch(instr, line) {
-                Ok(Next::Continue) => {}
-                Ok(Next::Halt) => break,
-                Err(err) => {
+        let result = (|| {
+            let mut last_line: u32 = 0;
+            while let Some((instr, line)) = self.fetch() {
+                last_line = line;
+                // Tick errors (resource-limit violations) are always
+                // fatal, so `unwind_to_try_call` will short-circuit
+                // them. The path still goes through the helper so
+                // the two error paths behave identically.
+                if let Err(err) = self.tick(line) {
                     self.unwind_to_try_call(err)?;
+                    continue;
+                }
+                match self.dispatch(instr, line) {
+                    Ok(Next::Continue) => {}
+                    Ok(Next::Halt) => break,
+                    Err(err) => {
+                        self.unwind_to_try_call(err)?;
+                    }
                 }
             }
+            // Programs that allocate past the memory limit and then
+            // finish in fewer ticks than the periodic memory-check
+            // cadence (see `TICK_MEMCHECK_MASK`) would otherwise slip
+            // through silently. Catch them here — cheap, and a
+            // program ending always runs this exactly once.
+            if bop::memory::bop_memory_exceeded() {
+                return Err(error_fatal_with_hint(
+                    last_line,
+                    "Memory limit exceeded",
+                    "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+                ));
+            }
+            Ok(())
+        })();
+        self.write_runtime_warnings();
+        result
+    }
+
+    /// Deliver accumulated warnings once at an externally visible execution
+    /// boundary. The Vec exists in no_std builds too; only stderr delivery is
+    /// unavailable there.
+    fn write_runtime_warnings(&mut self) {
+        #[cfg(not(feature = "no_std"))]
+        for warning in self.runtime_warnings.drain(..) {
+            eprintln!("warning: {}", warning.message);
         }
-        // Programs that allocate past the memory limit and then
-        // finish in fewer ticks than the periodic memory-check
-        // cadence (see `TICK_MEMCHECK_MASK`) would otherwise slip
-        // through silently. Catch them here — cheap, and a
-        // program ending always runs this exactly once.
-        if bop::memory::bop_memory_exceeded() {
-            return Err(error_fatal_with_hint(
-                last_line,
-                "Memory limit exceeded",
-                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
-            ));
-        }
-        Ok(())
+        #[cfg(feature = "no_std")]
+        self.runtime_warnings.clear();
     }
 
     // ─── Fetch / ip ──────────────────────────────────────────────
@@ -4146,8 +4169,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // plain let bindings contribute just the value.
         let mut exports: Vec<(String, Value)> =
             Vec::with_capacity(artifacts.fn_decls.len() + artifacts.bindings.len());
-        let mut fn_entries: Vec<(String, Rc<FnEntry>)> =
-            Vec::with_capacity(artifacts.fn_decls.len());
+        let mut fn_entries: BTreeMap<String, Rc<FnEntry>> = BTreeMap::new();
         for (name, entry) in &artifacts.fn_decls {
             if artifacts.bindings.iter().any(|(binding, _)| binding == name) {
                 continue;
@@ -4165,11 +4187,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 line,
             ).map(Value::Fn)?;
             exports.push((name.clone(), value));
-            fn_entries.push((name.clone(), entry.clone()));
+            fn_entries.insert(name.clone(), entry.clone());
         }
         for (name, value) in &artifacts.bindings {
             exports.push((name.clone(), value.clone()));
         }
+        // Functions and values are stored separately inside module artifacts,
+        // but a flat import exposes one namespace. Sorting the combined
+        // projection makes warning order match the walker and generated AOT.
+        exports.sort_by(|(left, _), (right, _)| left.cmp(right));
 
         // Selective filter: ensure every listed name exists, then
         // retain only the listed exports.
@@ -4192,7 +4218,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             let listed: BTreeSet<String> =
                 list.iter().cloned().collect();
             exports.retain(|(k, _)| listed.contains(k));
-            fn_entries.retain(|(k, _)| listed.contains(k));
+            fn_entries.retain(|name, _| listed.contains(name));
         }
 
         // Decide which of the module's declared type names the
@@ -4286,34 +4312,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             // (the user explicitly asked).
             let skip_private = items.is_none();
             let module_top_scope = self.is_module_top_scope();
-            let mut blocked_function_values = BTreeSet::new();
-            for (name, entry) in fn_entries {
-                if skip_private && bop::naming::is_private(&name) {
-                    continue;
-                }
-                let clashes = self
-                    .frames
-                    .last()
-                    .and_then(|f| f.scopes.last())
-                    .map(|s| s.contains_key(&name))
-                    .unwrap_or(false)
-                    || (module_top_scope && self.functions.contains_key(&name));
-                if clashes {
-                    blocked_function_values.insert(name);
-                    continue;
-                }
-                self.imported_functions
-                    .last_mut()
-                    .expect("imported function scope")
-                    .insert(name, entry);
-            }
             for (name, mut value) in exports {
                 if skip_private && bop::naming::is_private(&name) {
                     continue;
                 }
-                if blocked_function_values.contains(&name) {
-                    continue;
-                }
                 let clashes = self
                     .frames
                     .last()
@@ -4322,7 +4324,19 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .unwrap_or(false)
                     || (module_top_scope && self.functions.contains_key(&name));
                 if clashes {
+                    if is_plain_glob {
+                        self.runtime_warnings.push(BopWarning::at(
+                            bop::error_messages::glob_shadow_warning(&name, path),
+                            line,
+                        ));
+                    }
                     continue;
+                }
+                if let Some(entry) = fn_entries.remove(&name) {
+                    self.imported_functions
+                        .last_mut()
+                        .expect("imported function scope")
+                        .insert(name.clone(), entry);
                 }
                 let module = artifacts.module_exports.get(&name).cloned();
                 let origin = artifacts
@@ -4592,7 +4606,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             BTreeMap::new(),
             self.function_origin.clone(),
         );
-        if let Err(module_error) = sub.run_internal() {
+        let module_result = sub.run_internal();
+        // Nested module VMs are an implementation detail of the root
+        // operation. Preserve their diagnostics (including transitive ones)
+        // and defer stderr delivery to that operation's public boundary.
+        self.runtime_warnings.append(&mut sub.runtime_warnings);
+        if let Err(module_error) = module_result {
             sub.restore_instance_baseline();
             let failed_environment = sub
                 .frames
@@ -5245,7 +5264,9 @@ impl BopInstance {
         );
         {
             let _active = bop::memory::ActiveMemoryGuard::__activate(&memory);
-            vm.run_internal()?;
+            let execution = vm.run_internal();
+            vm.write_runtime_warnings();
+            execution?;
             if memory.__exceeded() {
                 return Err(instance_memory_error());
             }
@@ -5315,6 +5336,7 @@ impl BopInstance {
                 value
             }
         };
+        vm.write_runtime_warnings();
         self.state = Some(vm.into_state());
         result
     }
@@ -5371,6 +5393,7 @@ impl BopInstance {
                 value
             }
         };
+        vm.write_runtime_warnings();
         self.state = Some(vm.into_state());
         result
     }

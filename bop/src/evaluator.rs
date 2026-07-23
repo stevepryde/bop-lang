@@ -581,9 +581,18 @@ pub struct Evaluator<'h, H: BopHost + ?Sized> {
     pending_try_return: Option<Value>,
     /// Non-fatal runtime warnings accumulated during execution —
     /// currently only `use`-time name-shadowing events (glob
-    /// imports bringing in a name that's already bound). Read
-    /// after `run()` returns via [`Self::take_warnings`].
+    /// imports bringing in a name that's already bound). Nested
+    /// module evaluators transfer theirs into this root queue.
     runtime_warnings: Vec<crate::error::BopWarning>,
+}
+
+fn write_runtime_warnings(warnings: &mut Vec<crate::error::BopWarning>) {
+    #[cfg(not(feature = "no_std"))]
+    for warning in warnings.drain(..) {
+        eprintln!("warning: {}", warning.message);
+    }
+    #[cfg(feature = "no_std")]
+    warnings.clear();
 }
 
 impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
@@ -686,19 +695,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             self.limits.max_memory,
         );
         let result = self.exec_block(stmts);
-        #[cfg(not(feature = "no_std"))]
-        {
-            // Surface any runtime warnings accumulated during the
-            // run (currently: glob-import shadowing). They land on
-            // stderr with the standard `warning:` prefix so
-            // terminal users see them — no public API change
-            // needed. Embedders that want structured access can
-            // use `run_with_warnings` (future) or implement their
-            // own evaluation loop.
-            for w in &self.runtime_warnings {
-                eprintln!("warning: {}", w.message);
-            }
-        }
+        // Surface warnings only after the root evaluator (including every
+        // imported-module evaluator) has finished.
+        write_runtime_warnings(&mut self.runtime_warnings);
         match result? {
             Signal::Break => {
                 return Err(error(0, "break used outside of a loop"));
@@ -1588,8 +1587,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // order.
         let mut exports: Vec<(String, Value)> =
             Vec::with_capacity(bindings.fn_decls.len() + bindings.bindings.len());
-        let mut fn_entries: Vec<(String, FnDef)> =
-            Vec::with_capacity(bindings.fn_decls.len());
+        let mut fn_entries: BTreeMap<String, FnDef> = BTreeMap::new();
         for (name, fn_def) in &bindings.fn_decls {
             if bindings.bindings.iter().any(|(binding, _)| binding == name) {
                 continue;
@@ -1604,11 +1602,15 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 line,
             ).map(Value::Fn)?;
             exports.push((name.clone(), value));
-            fn_entries.push((name.clone(), fn_def.clone()));
+            fn_entries.insert(name.clone(), fn_def.clone());
         }
         for (name, value) in &bindings.bindings {
             exports.push((name.clone(), value.clone()));
         }
+        // Module values and functions live in separate runtime tables, but a
+        // single `use` projects one logical namespace. Sort the combined
+        // surface so warning order is deterministic across all engines.
+        exports.sort_by(|(left, _), (right, _)| left.cmp(right));
 
         // Selective filter: restrict to the listed names.
         // Missing names error loudly — a silent skip would make
@@ -1632,7 +1634,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             let listed: alloc_import::collections::BTreeSet<String> =
                 list.iter().cloned().collect();
             exports.retain(|(k, _)| listed.contains(k));
-            fn_entries.retain(|(k, _)| listed.contains(k));
+            fn_entries.retain(|name, _| listed.contains(name));
         }
 
         // Figure out which of the module's types the caller
@@ -1732,41 +1734,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             // bindings explicitly.
             let skip_private = items.is_none();
             let module_top_scope = self.is_module_top_scope();
-            let mut blocked_function_values =
-                alloc_import::collections::BTreeSet::new();
-            for (name, fn_def) in fn_entries {
-                if skip_private && crate::naming::is_private(&name) {
-                    continue;
-                }
-                if self
-                    .scopes
-                    .last()
-                    .map(|s| s.contains_key(&name))
-                    .unwrap_or(false)
-                    || (module_top_scope && self.functions.contains_key(&name))
-                {
-                    blocked_function_values.insert(name.clone());
-                    self.runtime_warnings.push(crate::error::BopWarning::at(
-                        format!(
-                            "`{}` from `{}` shadowed by an existing binding — the first definition wins",
-                            name, path
-                        ),
-                        line,
-                    ));
-                    continue;
-                }
-                self.imported_functions
-                    .last_mut()
-                    .expect("imported function scope")
-                    .insert(name, fn_def);
-            }
             for (name, mut value) in exports {
                 if skip_private && crate::naming::is_private(&name) {
                     continue;
                 }
-                if blocked_function_values.contains(&name) {
-                    continue;
-                }
                 if self
                     .scopes
                     .last()
@@ -1774,14 +1745,19 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     .unwrap_or(false)
                     || (module_top_scope && self.functions.contains_key(&name))
                 {
-                    self.runtime_warnings.push(crate::error::BopWarning::at(
-                        format!(
-                            "`{}` from `{}` shadowed by an existing binding — the first definition wins",
-                            name, path
-                        ),
-                        line,
-                    ));
+                    if is_plain_glob {
+                        self.runtime_warnings.push(crate::error::BopWarning::at(
+                            crate::error_messages::glob_shadow_warning(&name, path),
+                            line,
+                        ));
+                    }
                     continue;
+                }
+                if let Some(fn_def) = fn_entries.remove(&name) {
+                    self.imported_functions
+                        .last_mut()
+                        .expect("imported function scope")
+                        .insert(name.clone(), fn_def);
                 }
                 let module = bindings.module_exports.get(&name).cloned();
                 if module_top_scope {
@@ -1949,6 +1925,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         let module_result = sub.exec_block(&stmts);
         self.steps = sub.steps;
         self.rand_state = sub.rand_state;
+        // A module evaluator is an implementation detail of this root run.
+        // Preserve its warnings (including transitive-module warnings) and
+        // let only the root boundary write them to stderr.
+        self.runtime_warnings.append(&mut sub.runtime_warnings);
         let module_signal = match module_result {
             Ok(signal) => signal,
             Err(module_error) => {
@@ -4397,12 +4377,7 @@ impl ReplSession {
         // matches `Evaluator::run`; embedders that want
         // structured access can call `eval` via a custom host
         // and take warnings out through that path.
-        #[cfg(not(feature = "no_std"))]
-        {
-            for w in &eval.runtime_warnings {
-                eprintln!("warning: {}", w.message);
-            }
-        }
+        write_runtime_warnings(&mut eval.runtime_warnings);
         self.put_evaluator(eval);
         result
     }
@@ -4434,6 +4409,7 @@ impl ReplSession {
 
         let mut eval = self.take_evaluator(host, limits.clone());
         let result = eval.call_bop_fn(&func, args, 0);
+        write_runtime_warnings(&mut eval.runtime_warnings);
         self.put_evaluator(eval);
         result
     }
@@ -4478,6 +4454,7 @@ impl ReplSession {
         }
         let mut eval = self.take_evaluator(host, limits.clone());
         let result = eval.call_bop_fn(&target, args.to_vec(), 0);
+        write_runtime_warnings(&mut eval.runtime_warnings);
         self.put_evaluator(eval);
         result
     }
