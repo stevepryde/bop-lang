@@ -451,6 +451,7 @@ where
                 name,
                 params,
                 body,
+                ..
             } => {
                 self.check_callable(
                     params,

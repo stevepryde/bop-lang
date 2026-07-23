@@ -572,7 +572,8 @@ fn index_assign_routes_through_ops_index_set() {
     contains_all(
         &out,
         &[
-            "::bop::ops::index_set(&mut __bop_user_value_61,",
+            "let __t6: &mut ::bop::value::Value = &mut __bop_user_value_61;",
+            "::bop::ops::index_set(__t6, &__t5, __t4, 2)?;",
         ],
     );
 }
@@ -583,9 +584,10 @@ fn compound_index_assign_reads_then_writes() {
     contains_all(
         &out,
         &[
-            "::bop::ops::index_get(&__bop_user_value_61,",
-            "::bop::ops::add(",
-            "::bop::ops::index_set(&mut __bop_user_value_61,",
+            "let __t5: &mut ::bop::value::Value = &mut __bop_user_value_61;",
+            "let __t6 = ::bop::ops::index_get(__t5, &__t4, 2)?;",
+            "let __t7 = ::bop::ops::add(&__t6, &__t3, 2)?;",
+            "::bop::ops::index_set(__t5, &__t4, __t7, 2)?;",
         ],
     );
 }
@@ -635,8 +637,9 @@ fn const_index_reads_in_mutable_targets_still_emit_aot() {
         &out,
         &[
             "__bop_user_value_494e444558.clone()",
-            "::bop::ops::index_get(&__bop_user_value_76616c756573,",
-            "::bop::ops::index_set(&mut __bop_user_value_76616c756573,",
+            "let __t5: &mut ::bop::value::Value = &mut __bop_user_value_76616c756573;",
+            "let __t6 = ::bop::ops::index_get(__t5, &__t4, 3)?;",
+            "::bop::ops::index_set(__t5, &__t4, __t7, 3)?;",
         ],
     );
 }
@@ -657,11 +660,12 @@ fn compile_sandbox(code: &str) -> String {
 #[test]
 fn sandbox_off_by_default_emits_no_tick_helper() {
     let out = compile("while true { }");
-    assert!(
-        !out.contains("__bop_tick"),
-        "non-sandbox build shouldn't emit __bop_tick:\n{}",
-        out
-    );
+    for sandbox_only in ["__bop_tick", "BopInstance", "BopFnOrigin", "call_depth"] {
+        assert!(
+            !out.contains(sandbox_only),
+            "non-sandbox build shouldn't emit {sandbox_only}:\n{out}",
+        );
+    }
     assert!(
         out.contains("bop_memory_init(usize::MAX)"),
         "non-sandbox init should disable the memory ceiling:\n{}",
@@ -676,7 +680,10 @@ fn sandbox_on_emits_tick_helper_and_limits_param() {
     for needle in [
         "fn __bop_tick(ctx: &mut Ctx<'_>, line: u32)",
         "ctx.max_steps",
-        "bop_memory_init(limits.max_memory)",
+        "pub struct BopInstance",
+        "let memory = ::bop::memory::MemoryAccount::__new(limits.max_memory);",
+        "let _active = ::bop::memory::ActiveMemoryGuard::__activate(&memory);",
+        "call_depth: 0",
         "pub fn run<H: ::bop::BopHost>( host: &mut H, limits: &::bop::BopLimits, )",
         "let limits = ::bop::BopLimits::standard();",
     ] {
@@ -687,6 +694,61 @@ fn sandbox_on_emits_tick_helper_and_limits_param() {
             out
         );
     }
+    assert!(!out.contains("bop_memory_init(limits.max_memory)"));
+}
+
+#[test]
+fn sandbox_state_is_persistent_while_operation_context_is_ephemeral() {
+    let sandbox = compile_sandbox("print(1)");
+    contains_all(
+        &sandbox,
+        &[
+            "struct __BopState",
+            "struct Ctx<'h>",
+            "state: &'h mut __BopState",
+            "impl<'h> ::core::ops::Deref for Ctx<'h>",
+            "let mut state = __BopState",
+            "state: &mut state",
+            "sandbox embedders should use `run` and the generated `BopInstance`",
+            "layout\n/// is not a supported embedding API",
+        ],
+    );
+    for public_internal in [
+        "pub struct __BopState",
+        "pub struct Ctx<'h>",
+        "pub struct AotClosure",
+        "pub callable:",
+    ] {
+        assert!(
+            !sandbox.contains(public_internal),
+            "sandbox output exposed generated internal {public_internal:?}"
+        );
+    }
+    let unsandboxed = compile("print(1)");
+    assert!(!unsandboxed.contains("__BopState"));
+    assert!(!unsandboxed.contains("__BOP_FUNCTION_SITES"));
+    contains_all(
+        &unsandboxed,
+        &[
+            "pub struct Ctx<'h>",
+            "pub struct AotClosure",
+            "pub callable:",
+        ],
+    );
+}
+
+#[test]
+fn sandbox_catalogues_repeated_function_declarations_by_unique_site() {
+    let out = compile_sandbox(
+        "pub fn entry(x) { return x }\npub fn entry(x, y) { return y }",
+    );
+    contains_all(
+        &out,
+        &[
+            "__BopFunctionSite { id: 0, module_path: \"<root>\", name: \"entry\", params: &[\"x\"], is_public: true, abi_eligible: true, line: 1 }",
+            "__BopFunctionSite { id: 1, module_path: \"<root>\", name: \"entry\", params: &[\"x\", \"y\"], is_public: true, abi_eligible: true, line: 2 }",
+        ],
+    );
 }
 
 #[test]
@@ -744,7 +806,7 @@ fn sandbox_emits_tick_at_fn_entry() {
     let out = norm(&compile_sandbox("fn foo() { return 1 }\nprint(foo())"));
     assert!(
         out.contains(
-            "fn __bop_user_fn_n666f6f(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_tick(ctx,"
+            "fn __bop_function_site_0(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_tick(ctx,"
         ),
         "expected tick at function entry:\n{}",
         out
@@ -1339,9 +1401,11 @@ fn from_api() { return api.Second { value: 2 } }"#,
     contains_all(
         &output,
         &[
-            "matches!(&__bop_user_value_636f7079, ::bop::value::Value::Module(_))",
+            "let __t4 = __bop_user_value_636f7079.clone();",
+            "matches!(&__t4, ::bop::value::Value::Module(_))",
             "(\"<root>\".to_string(), \"copy\".to_string())",
-            "matches!(&__bop_user_value_617069, ::bop::value::Value::Module(_))",
+            "let __t5 = __bop_user_value_617069.clone();",
+            "matches!(&__t5, ::bop::value::Value::Module(_))",
             "ctx.module_aliases.remove(&(\"<root>\".to_string(), \"api\".to_string()))",
         ],
     );

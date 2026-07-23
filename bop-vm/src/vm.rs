@@ -51,7 +51,7 @@ use alloc::{
 #[cfg(not(feature = "no_std"))]
 use std::rc::Rc;
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 #[cfg(not(feature = "no_std"))]
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,8 +62,9 @@ use bop::builtins::{self, error, error_fatal_with_hint, error_with_hint};
 use bop::error::BopError;
 use bop::methods;
 use bop::ops;
-use bop::value::{BopFn, FnBody, Value};
-use bop::{BopHost, BopLimits};
+use bop::parser::Visibility;
+use bop::value::{BopFn, BopFnOrigin, FnBody, Value};
+use bop::{BopHost, BopLimits, EntryPoint};
 
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, Constant, EnumConstructShape, EnumIdx, EnumVariantShape,
@@ -170,6 +171,7 @@ struct Frame {
     /// How this frame's return value should be transformed
     /// before being pushed for the caller. See [`FrameWrap`].
     wrap: FrameWrap,
+    defining_environment_module: Option<String>,
 }
 
 impl Frame {
@@ -190,6 +192,7 @@ impl Frame {
             function_module: None,
             lexical_context,
             wrap: FrameWrap::None,
+            defining_environment_module: None,
         }
     }
 
@@ -215,6 +218,7 @@ impl Frame {
             function_module: context.function_module,
             lexical_context: context.lexical_context,
             wrap,
+            defining_environment_module: None,
         }
     }
 
@@ -400,6 +404,10 @@ struct ModuleArtifacts {
     /// in `fn_decls` instead so the importer can register them
     /// in `self.functions` for cross-fn call resolution.
     bindings: Vec<(String, Value)>,
+    /// Declaring module and binding for every exported value. Facades retain
+    /// this provenance so their live execution environment can borrow the
+    /// authoritative handle rather than cloning a stale snapshot.
+    binding_origins: BTreeMap<String, BindingOrigin>,
     /// Top-level `fn` declarations. The importer copies each
     /// into its own `self.functions` table AND pushes a
     /// `Value::Fn` into the current scope so first-class use
@@ -434,6 +442,122 @@ struct ModuleLexicalContext {
 /// Import cache shared across nested VMs so recursive imports
 /// resolve exactly once per top-level run.
 type ImportCache = Rc<RefCell<BTreeMap<String, ImportSlot>>>;
+type LiveValueEnvironments = Rc<RefCell<BTreeMap<String, BTreeMap<String, Value>>>>;
+type BindingOrigin = (String, String);
+
+fn snapshot_module_bindings(
+    top_scope: &BTreeMap<String, Value>,
+    binding_origins: &BTreeMap<String, BindingOrigin>,
+    module_path: &str,
+    imports: &ImportCache,
+    line: u32,
+) -> Result<Vec<(String, Value)>, BopError> {
+    // Re-exported value bindings can reuse their origin's already-external
+    // snapshot. Named functions are intentionally absent from `bindings`
+    // (their callable metadata lives in `fn_decls`), so those are snapshot
+    // locally with the module's own values instead.
+    let forwarded: BTreeMap<String, Value> = {
+        let imports = imports.borrow();
+        top_scope
+            .keys()
+            .filter_map(|name| {
+                let origin = binding_origins.get(name)?;
+                if origin.0 == module_path && origin.1 == *name {
+                    return None;
+                }
+                let ImportSlot::Loaded(origin_module) = imports.get(&origin.0)? else {
+                    return None;
+                };
+                origin_module
+                    .bindings
+                    .iter()
+                    .find(|(origin_name, _)| origin_name == &origin.1)
+                    .map(|(_, value)| (name.clone(), value.clone()))
+            })
+            .collect()
+    };
+    let local: BTreeMap<String, Value> = top_scope
+        .iter()
+        .filter(|(name, _)| !forwarded.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let mut local_snapshots: BTreeMap<String, Value> =
+        Value::__compatibility_snapshot_bindings(&local, line)?
+            .into_iter()
+            .collect();
+
+    top_scope
+        .keys()
+        .map(|name| {
+            let value = forwarded
+                .get(name)
+                .cloned()
+                .or_else(|| local_snapshots.remove(name))
+                .ok_or_else(|| error(line, format!("Missing compatibility snapshot for `{name}`")))?;
+            Ok((name.clone(), value))
+        })
+        .collect()
+}
+type LiveBindingOrigins = Rc<RefCell<BTreeMap<String, BTreeMap<String, BindingOrigin>>>>;
+
+#[derive(Clone)]
+struct ModuleRuntime {
+    imports: ImportCache,
+    environments: LiveValueEnvironments,
+    origins: LiveBindingOrigins,
+}
+
+impl ModuleRuntime {
+    fn empty() -> Self {
+        Self {
+            imports: Rc::new(RefCell::new(BTreeMap::new())),
+            environments: Rc::new(RefCell::new(BTreeMap::new())),
+            origins: Rc::new(RefCell::new(BTreeMap::new())),
+        }
+    }
+}
+
+fn take_live_environment(
+    environments: &LiveValueEnvironments,
+    module_path: &str,
+    origins: &BTreeMap<String, BindingOrigin>,
+) -> BTreeMap<String, Value> {
+    let mut environments = environments.borrow_mut();
+    let mut environment = environments.remove(module_path).unwrap_or_default();
+    for (binding, (origin_module, origin_binding)) in origins {
+        if origin_module == module_path && origin_binding == binding {
+            continue;
+        }
+        if let Some(value) = environments
+            .get_mut(origin_module)
+            .and_then(|origin| origin.remove(origin_binding))
+        {
+            environment.insert(binding.clone(), value);
+        }
+    }
+    environment
+}
+
+fn put_live_environment(
+    environments: &LiveValueEnvironments,
+    module_path: &str,
+    mut environment: BTreeMap<String, Value>,
+    origins: &BTreeMap<String, BindingOrigin>,
+) {
+    let mut environments = environments.borrow_mut();
+    for (binding, (origin_module, origin_binding)) in origins {
+        if origin_module == module_path && origin_binding == binding {
+            continue;
+        }
+        if let Some(value) = environment.remove(binding) {
+            environments
+                .entry(origin_module.clone())
+                .or_default()
+                .insert(origin_binding.clone(), value);
+        }
+    }
+    environments.insert(module_path.to_string(), environment);
+}
 
 // ─── Next action ───────────────────────────────────────────────────
 
@@ -447,7 +571,7 @@ enum Next {
 // ─── VM ────────────────────────────────────────────────────────────
 
 /// Stack machine that executes a compiled [`Chunk`].
-pub struct Vm<'h, H: BopHost> {
+pub struct Vm<'h, H: BopHost + ?Sized> {
     frames: Vec<Frame>,
     stack: Vec<Slot>,
     /// User-declared functions, keyed by name. Wrapped in `Rc`
@@ -506,30 +630,77 @@ pub struct Vm<'h, H: BopHost> {
     /// allocations under `fib(28)`. On return we truncate + park;
     /// next call grabs one, resizes in place.
     slots_freelist: Vec<Vec<Value>>,
+    root_function_visibility: BTreeMap<u32, Visibility>,
+    abi_declarations: Vec<(String, Rc<FnEntry>)>,
+    function_origin: BopFnOrigin,
+    operation_memory: Option<Rc<bop::memory::MemoryAccount>>,
+    live_value_environments: LiveValueEnvironments,
+    binding_origins: BTreeMap<String, BindingOrigin>,
+    live_binding_origins: LiveBindingOrigins,
 }
 
-impl<'h, H: BopHost> Vm<'h, H> {
+struct VmState {
+    frames: Vec<Frame>,
+    stack: Vec<Slot>,
+    functions: BTreeMap<String, Rc<FnEntry>>,
+    rand_state: u64,
+    imports: ImportCache,
+    imported_here: Vec<BTreeSet<String>>,
+    current_module: String,
+    struct_defs: BTreeMap<(String, String), Vec<String>>,
+    enum_defs: BTreeMap<(String, String), Vec<(String, EnumVariantShape)>>,
+    user_methods: BTreeMap<(String, String), BTreeMap<String, Rc<FnEntry>>>,
+    type_exports: BTreeMap<String, String>,
+    type_bindings: Vec<BTreeMap<String, String>>,
+    module_aliases: Vec<BTreeMap<String, Rc<bop::value::BopModule>>>,
+    imported_functions: Vec<BTreeMap<String, Rc<FnEntry>>>,
+    root_lexical_context: Rc<ModuleLexicalContext>,
+    slots_freelist: Vec<Vec<Value>>,
+    root_function_visibility: BTreeMap<u32, Visibility>,
+    abi_declarations: Vec<(String, Rc<FnEntry>)>,
+    function_origin: BopFnOrigin,
+    live_value_environments: LiveValueEnvironments,
+    binding_origins: BTreeMap<String, BindingOrigin>,
+    live_binding_origins: LiveBindingOrigins,
+}
+
+/// A loaded bytecode program whose globals and module state survive calls.
+pub struct BopInstance {
+    state: Option<VmState>,
+    entries: Vec<EntryPoint>,
+    limits: BopLimits,
+    in_operation: Cell<bool>,
+    memory: Rc<bop::memory::MemoryAccount>,
+}
+
+impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     /// Construct a VM from trusted bytecode.
     ///
     /// Embedders executing a hand-built or deserialized [`Chunk`] should use
     /// [`execute`], which validates structural bytecode invariants first.
     pub fn new(chunk: Chunk, host: &'h mut H, limits: BopLimits) -> Self {
-        bop::memory::bop_memory_init(limits.max_memory);
-        Self::new_internal(
+        let memory = bop::memory::MemoryAccount::__new(limits.max_memory);
+        let mut vm = Self::new_internal(
             chunk,
             host,
             limits,
-            Rc::new(RefCell::new(BTreeMap::new())),
+            ModuleRuntime::empty(),
             String::from(bop::value::ROOT_MODULE_PATH),
-        )
+            BTreeMap::new(),
+            BopFnOrigin::__instance("vm"),
+        );
+        vm.operation_memory = Some(memory);
+        vm
     }
 
     fn new_internal(
         chunk: Chunk,
         host: &'h mut H,
         limits: BopLimits,
-        imports: ImportCache,
+        module_runtime: ModuleRuntime,
         current_module: String,
+        root_function_visibility: BTreeMap<u32, Visibility>,
+        function_origin: BopFnOrigin,
     ) -> Self {
         let step_budget = limits.max_steps.saturating_mul(STEP_SCALE);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
@@ -547,7 +718,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             steps: 0,
             step_budget,
             rand_state: 0,
-            imports,
+            imports: module_runtime.imports,
             imported_here: vec![BTreeSet::new()],
             limits,
             current_module,
@@ -560,7 +731,92 @@ impl<'h, H: BopHost> Vm<'h, H> {
             imported_functions: vec![BTreeMap::new()],
             root_lexical_context,
             slots_freelist: Vec::new(),
+            root_function_visibility,
+            abi_declarations: Vec::new(),
+            function_origin,
+            operation_memory: None,
+            live_value_environments: module_runtime.environments,
+            binding_origins: BTreeMap::new(),
+            live_binding_origins: module_runtime.origins,
         }
+    }
+
+    fn into_state(self) -> VmState {
+        VmState {
+            frames: self.frames,
+            stack: self.stack,
+            functions: self.functions,
+            rand_state: self.rand_state,
+            imports: self.imports,
+            imported_here: self.imported_here,
+            current_module: self.current_module,
+            struct_defs: self.struct_defs,
+            enum_defs: self.enum_defs,
+            user_methods: self.user_methods,
+            type_exports: self.type_exports,
+            type_bindings: self.type_bindings,
+            module_aliases: self.module_aliases,
+            imported_functions: self.imported_functions,
+            root_lexical_context: self.root_lexical_context,
+            slots_freelist: self.slots_freelist,
+            root_function_visibility: self.root_function_visibility,
+            abi_declarations: self.abi_declarations,
+            function_origin: self.function_origin,
+            live_value_environments: self.live_value_environments,
+            binding_origins: self.binding_origins,
+            live_binding_origins: self.live_binding_origins,
+        }
+    }
+
+    fn from_state(state: VmState, host: &'h mut H, limits: BopLimits) -> Self {
+        Self {
+            frames: state.frames,
+            stack: state.stack,
+            functions: state.functions,
+            host,
+            steps: 0,
+            step_budget: limits.max_steps.saturating_mul(STEP_SCALE),
+            rand_state: state.rand_state,
+            imports: state.imports,
+            imported_here: state.imported_here,
+            limits,
+            current_module: state.current_module,
+            struct_defs: state.struct_defs,
+            enum_defs: state.enum_defs,
+            user_methods: state.user_methods,
+            type_exports: state.type_exports,
+            type_bindings: state.type_bindings,
+            module_aliases: state.module_aliases,
+            imported_functions: state.imported_functions,
+            root_lexical_context: state.root_lexical_context,
+            slots_freelist: state.slots_freelist,
+            root_function_visibility: state.root_function_visibility,
+            abi_declarations: state.abi_declarations,
+            function_origin: state.function_origin,
+            operation_memory: None,
+            live_value_environments: state.live_value_environments,
+            binding_origins: state.binding_origins,
+            live_binding_origins: state.live_binding_origins,
+        }
+    }
+
+    fn restore_instance_baseline(&mut self) {
+        while self.frames.len() > 1 {
+            let mut frame = self.frames.pop().expect("frame present");
+            self.store_frame_defining_environment(&mut frame);
+            if !frame.slots.is_empty() {
+                self.return_slots(frame.slots);
+            }
+        }
+        self.restore_active_defining_environment();
+        self.stack.clear();
+        if let Some(root) = self.frames.first_mut() {
+            root.scopes.truncate(root.scope_base);
+        }
+        self.type_bindings.truncate(1);
+        self.module_aliases.truncate(1);
+        self.imported_functions.truncate(1);
+        self.imported_here.truncate(1);
     }
 
     /// Grab a slot vec from the freelist or allocate a fresh one,
@@ -589,6 +845,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
     }
 
     pub fn run(mut self) -> Result<(), BopError> {
+        let _memory = match &self.operation_memory {
+            Some(account) => bop::memory::ActiveMemoryGuard::__activate(account),
+            None => bop::memory::ActiveMemoryGuard::__activate_new_if_none(
+                self.limits.max_memory,
+            ),
+        };
         let mut last_line: u32 = 0;
         while let Some((instr, line)) = self.fetch() {
             last_line = line;
@@ -675,6 +937,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 "Your code is using too much memory. Check for large strings or arrays growing in loops.",
             ));
         }
+        let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
         self.host.on_tick()?;
         Ok(())
     }
@@ -781,6 +1044,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
         function_module: Option<String>,
         wrap: FrameWrap,
     ) {
+        self.park_active_defining_environment();
+        let defining_environment = function_module.as_ref().map(|module| {
+            let origins = self.binding_origins_for(module);
+            take_live_environment(&self.live_value_environments, module, &origins)
+        });
+        let mut scopes = scopes;
+        if let Some(environment) = defining_environment {
+            scopes.insert(0, environment);
+            // Runtime declarations/imports belong to the call, never to the
+            // defining module environment parked below it.
+            scopes.push(BTreeMap::new());
+        }
         let lexical_context = function_module
             .as_deref()
             .map(|module| self.module_lexical_context(module))
@@ -790,7 +1065,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         self.module_aliases.push(BTreeMap::new());
         self.imported_functions.push(BTreeMap::new());
         self.imported_here.push(BTreeSet::new());
-        self.frames.push(Frame::function(
+        let mut frame = Frame::function(
             chunk,
             slots,
             scopes,
@@ -804,8 +1079,86 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 lexical_context,
             },
             wrap,
-        ));
+        );
+        frame.defining_environment_module = frame.function_module.clone();
+        self.frames.push(frame);
         self.type_bindings.push(BTreeMap::new());
+    }
+
+    fn park_active_defining_environment(&mut self) {
+        let active_module = self.frames.last().and_then(|frame| {
+            frame
+                .defining_environment_module
+                .clone()
+                .or_else(|| (!frame.is_function).then(|| self.current_module.clone()))
+        });
+        let Some(module) = active_module else {
+            return;
+        };
+        let environment = self
+            .frames
+            .last_mut()
+            .and_then(|frame| frame.scopes.first_mut())
+            .map(core::mem::take)
+            .unwrap_or_default();
+        let origins = self.binding_origins_for(&module);
+        put_live_environment(
+            &self.live_value_environments,
+            &module,
+            environment,
+            &origins,
+        );
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(module, origins);
+    }
+
+    fn store_frame_defining_environment(&mut self, frame: &mut Frame) {
+        let Some(module) = frame.defining_environment_module.as_ref() else {
+            return;
+        };
+        let origins = self.binding_origins_for(module);
+        if !self.live_value_environments.borrow().contains_key(module) {
+            let environment = frame
+                .scopes
+                .first_mut()
+                .map(core::mem::take)
+                .unwrap_or_default();
+            put_live_environment(
+                &self.live_value_environments,
+                module,
+                environment,
+                &origins,
+            );
+        }
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(module.clone(), origins);
+    }
+
+    fn restore_active_defining_environment(&mut self) {
+        let active_module = self.frames.last().and_then(|frame| {
+            frame
+                .defining_environment_module
+                .clone()
+                .or_else(|| (!frame.is_function).then(|| self.current_module.clone()))
+        });
+        let Some(module) = active_module else {
+            return;
+        };
+        if !self.live_value_environments.borrow().contains_key(&module) {
+            return;
+        }
+        let origins = self.binding_origins_for(&module);
+        let environment =
+            take_live_environment(&self.live_value_environments, &module, &origins);
+        if let Some(scope) = self
+            .frames
+            .last_mut()
+            .and_then(|frame| frame.scopes.first_mut())
+        {
+            *scope = environment;
+        }
     }
 
     fn module_alias(&self, name: &str) -> Option<&Rc<bop::value::BopModule>> {
@@ -821,6 +1174,80 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     .last()
                     .and_then(|frame| frame.lexical_context.module_aliases.get(name))
             })
+    }
+
+    fn module_binding(&self, module: &bop::value::BopModule, name: &str) -> Option<Value> {
+        if let Some((active_module, environment)) = self.frames.last().and_then(|frame| {
+            let active_module = frame
+                .defining_environment_module
+                .as_deref()
+                .or_else(|| (!frame.is_function).then_some(self.current_module.as_str()))?;
+            Some((active_module, frame.scopes.first()?))
+        }) {
+            if module.path == active_module {
+                if let Some(value) = environment.get(name) {
+                    return Some(value.clone());
+                }
+            }
+            let (origin_module, origin_binding) = module.__binding_origin(name);
+            if origin_module == active_module {
+                if let Some(value) = environment.get(&origin_binding) {
+                    return Some(value.clone());
+                }
+            }
+            let active_origins = self.binding_origins_for(active_module);
+            if let Some(active_binding) = active_origins.iter().find_map(
+                |(active_binding, active_origin)| {
+                    (active_origin.0 == origin_module && active_origin.1 == origin_binding)
+                        .then_some(active_binding)
+                },
+            ) {
+                if let Some(value) = environment.get(active_binding) {
+                    return Some(value.clone());
+                }
+            }
+        }
+        module.__binding(name)
+    }
+
+    fn binding_origins_for(&self, module: &str) -> BTreeMap<String, BindingOrigin> {
+        if module == self.current_module {
+            return self.binding_origins.clone();
+        }
+        self.live_binding_origins
+            .borrow()
+            .get(module)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn live_origin_value(&self, origin: &BindingOrigin) -> Option<Value> {
+        if let Some((active_module, environment)) = self.frames.last().and_then(|frame| {
+            let active_module = frame
+                .defining_environment_module
+                .as_deref()
+                .or_else(|| (!frame.is_function).then_some(self.current_module.as_str()))?;
+            Some((active_module, frame.scopes.first()?))
+        }) {
+            if active_module == origin.0 {
+                if let Some(value) = environment.get(&origin.1) {
+                    return Some(value.clone());
+                }
+            }
+            let active_origins = self.binding_origins_for(active_module);
+            if let Some(binding) = active_origins.iter().find_map(|(binding, candidate)| {
+                (candidate == origin).then_some(binding)
+            }) {
+                if let Some(value) = environment.get(binding) {
+                    return Some(value.clone());
+                }
+            }
+        }
+        self.live_value_environments
+            .borrow()
+            .get(&origin.0)
+            .and_then(|environment| environment.get(&origin.1))
+            .cloned()
     }
 
     fn imported_function(&self, name: &str) -> Option<&Rc<FnEntry>> {
@@ -868,15 +1295,6 @@ impl<'h, H: BopHost> Vm<'h, H> {
         self.refresh_root_lexical_context();
     }
 
-    fn lookup_var(&self, name: &str) -> Option<&Value> {
-        for scope in self.current_scopes().iter().rev() {
-            if let Some(v) = scope.get(name) {
-                return Some(v);
-            }
-        }
-        None
-    }
-
     /// `lookup_var`, but pull the name from the current chunk by
     /// index. Avoids an `Rc::clone` + separate borrow at the call
     /// site — the dispatch loop's hottest read path.
@@ -888,16 +1306,48 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 return Some(v);
             }
         }
+        if frame.is_function
+            && frame.function_module.as_deref() == Some(bop::value::ROOT_MODULE_PATH)
+        {
+            return self
+                .frames
+                .first()
+                .and_then(|root| root.scopes.iter().rev().find_map(|scope| scope.get(name)));
+        }
         None
     }
 
     fn lookup_var_mut_by_idx(&mut self, idx: NameIdx) -> Option<&mut Value> {
-        let frame = self.frames.last_mut()?;
-        let name = frame.chunk.name(idx);
-        for scope in frame.scopes.iter_mut().rev() {
-            if let Some(value) = scope.get_mut(name) {
+        let (name, uses_root) = {
+            let frame = self.frames.last()?;
+            (
+                frame.chunk.name(idx).to_string(),
+                frame.is_function
+                    && frame.function_module.as_deref()
+                        == Some(bop::value::ROOT_MODULE_PATH),
+            )
+        };
+        let current_index = self.frames.len().checked_sub(1)?;
+        if current_index == 0 {
+            return self.frames[0]
+                .scopes
+                .iter_mut()
+                .rev()
+                .find_map(|scope| scope.get_mut(&name));
+        }
+        let (earlier, current) = self.frames.split_at_mut(current_index);
+        for scope in current[0].scopes.iter_mut().rev() {
+            if let Some(value) = scope.get_mut(&name) {
                 return Some(value);
             }
+        }
+        if uses_root {
+            return earlier.first_mut().and_then(|root| {
+                root.scopes
+                    .iter_mut()
+                    .rev()
+                    .find_map(|scope| scope.get_mut(&name))
+            });
         }
         None
     }
@@ -913,6 +1363,19 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 return true;
             }
         }
+        if self.frames.last().is_some_and(|frame| {
+            frame.is_function
+                && frame.function_module.as_deref() == Some(bop::value::ROOT_MODULE_PATH)
+        }) {
+            if let Some(slot) = self
+                .frames
+                .first_mut()
+                .and_then(|root| root.scopes.iter_mut().rev().find_map(|scope| scope.get_mut(name)))
+            {
+                *slot = value;
+                return true;
+            }
+        }
         false
     }
 
@@ -921,16 +1384,24 @@ impl<'h, H: BopHost> Vm<'h, H> {
     /// (for the name slice) and `&mut scopes` (for the walk)
     /// using field-level borrow splitting — no `Rc::clone`.
     fn set_existing_by_idx(&mut self, idx: NameIdx, value: Value) -> bool {
-        let frame = self.frames.last_mut().expect("frame present");
-        let name = frame.chunk.name(idx);
-        for scope in frame.scopes.iter_mut().rev() {
-            if let Some(slot) = scope.get_mut(name) {
+        let current_index = self.frames.len() - 1;
+        let name = self.frames[current_index].chunk.name(idx).to_string();
+        for scope in self.frames[current_index].scopes.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(&name) {
                 *slot = value;
                 return true;
             }
         }
-        if frame.is_function && frame.lexical_context.module_aliases.contains_key(name) {
-            let name = name.to_string();
+        let uses_root = self.frames[current_index].is_function
+            && self.frames[current_index].function_module.as_deref()
+                == Some(bop::value::ROOT_MODULE_PATH);
+        if self.frames[current_index].is_function
+            && self.frames[current_index]
+                .lexical_context
+                .module_aliases
+                .contains_key(&name)
+        {
+            let frame = &mut self.frames[current_index];
             let overlay_scope = if frame.has_declaration_overlay {
                 frame.scope_base - 1
             } else {
@@ -946,6 +1417,17 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 .expect("alias overlay scope")
                 .insert(name, value);
             return true;
+        }
+        if uses_root {
+            if let Some(slot) = self.frames[0]
+                .scopes
+                .iter_mut()
+                .rev()
+                .find_map(|scope| scope.get_mut(&name))
+            {
+                *slot = value;
+                return true;
+            }
         }
         false
     }
@@ -1122,15 +1604,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         let params = entry.params.clone();
                         let chunk_rc = entry.chunk.clone();
                         let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-                        let v = Value::try_new_compiled_module_fn(
+                        let v = BopFn::try_new_compiled_in_module_with_origin(
                             params,
                             Vec::new(),
                             body,
                             Some(name.to_string()),
-                            entry.module_path.clone(),
+                            Some(entry.module_path.clone()),
+                            self.function_origin.clone(),
                             0,
                             line,
-                        )?;
+                        ).map(Value::Fn)?;
                         self.push_value(v);
                     } else {
                         // "did you mean?" first, else the generic
@@ -1159,7 +1642,30 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     Value::Module(module) => Some(Rc::clone(module)),
                     _ => None,
                 };
+                if self.is_module_top_scope() {
+                    if let Some(origin) = self.binding_origins.get(&name).cloned() {
+                        if origin.0 != self.current_module || origin.1 != name {
+                            if let Some(previous) = self
+                                .current_scopes_mut()
+                                .last_mut()
+                                .and_then(|scope| scope.remove(&name))
+                            {
+                                self.live_value_environments
+                                    .borrow_mut()
+                                    .entry(origin.0)
+                                    .or_default()
+                                    .insert(origin.1, previous);
+                            }
+                        }
+                    }
+                }
                 self.define_local(name.clone(), v);
+                if self.is_module_top_scope() {
+                    self.binding_origins.insert(
+                        name.clone(),
+                        (self.current_module.clone(), name.clone()),
+                    );
+                }
                 self.sync_top_level_module_alias(name, module);
             }
             Instr::StoreVar(n) => {
@@ -1490,7 +1996,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     }
                     crate::chunk::AssignBack::Name(name_idx) => {
                         let name = self.current_chunk().name(name_idx).to_string();
-                        let Some(value) = self.lookup_var_mut_by_idx(name_idx) else {
+                        if self.lookup_var_mut_by_idx(name_idx).is_none() {
+                            if let Some(module) = self.module_alias(&name).cloned() {
+                                let mut value = Value::Module(module);
+                                let val = apply_in_place_assign(
+                                    op,
+                                    rhs,
+                                    line,
+                                    || ops::index_get(&value, &idx, line),
+                                )?;
+                                ops::index_set(&mut value, &idx, val, line)?;
+                                return Ok(Next::Continue);
+                            }
                             let hint = self.value_candidates_hint(&name).unwrap_or_else(|| {
                                 "Did you forget to create it with `let`?".to_string()
                             });
@@ -1499,7 +2016,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                                 bop::error_messages::variable_not_found(&name),
                                 hint,
                             ));
-                        };
+                        }
+                        let value = self
+                            .lookup_var_mut_by_idx(name_idx)
+                            .expect("binding checked above");
                         let val = apply_in_place_assign(
                             op,
                             rhs,
@@ -1864,7 +2384,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         .ok_or_else(|| error(line, "VM: local slot out of range"))?,
                     crate::chunk::AssignBack::Name(name_idx) => {
                         let name = self.current_chunk().name(name_idx).to_string();
-                        let Some(value) = self.lookup_var_mut_by_idx(name_idx) else {
+                        if self.lookup_var_mut_by_idx(name_idx).is_none() {
+                            if let Some(module) = self.module_alias(&name).cloned() {
+                                let value = Value::Module(module);
+                                let val = apply_in_place_assign(
+                                    op,
+                                    rhs,
+                                    line,
+                                    || self.field_get(&value, &field, line),
+                                )?;
+                                self.field_set(value, &field, val, line)?;
+                                return Ok(Next::Continue);
+                            }
                             let hint = self.value_candidates_hint(&name).unwrap_or_else(|| {
                                 "Did you forget to create it with `let`?".to_string()
                             });
@@ -1873,8 +2404,9 @@ impl<'h, H: BopHost> Vm<'h, H> {
                                 bop::error_messages::variable_not_found(&name),
                                 hint,
                             ));
-                        };
-                        value
+                        }
+                        self.lookup_var_mut_by_idx(name_idx)
+                            .expect("binding checked above")
                     }
                 };
                 match value {
@@ -2010,12 +2542,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // must win over a same-named builtin / user fn). We peek
         // rather than clone so the common case — no shadow —
         // pays nothing.
-        if self.lookup_var(name).is_some() {
+        let current_value = self
+            .current_scopes()
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .cloned();
+        if let Some(value) = current_value {
             let args = self.pop_n_values(argc, line)?;
-            let value = self
-                .lookup_var(name)
-                .expect("just checked via peek")
-                .clone();
             return match &value {
                 Value::Fn(f) => {
                     let f = Rc::clone(f);
@@ -2054,6 +2588,47 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     Value::Module(module).type_name()
                 ),
             ));
+        }
+
+        if let Some(entry) = self.imported_function(name).cloned() {
+            if argc != entry.params.len() {
+                return Err(error(
+                    line,
+                    format!(
+                        "`{}` expects {} argument{}, but got {}",
+                        name,
+                        entry.params.len(),
+                        if entry.params.len() == 1 { "" } else { "s" },
+                        argc
+                    ),
+                ));
+            }
+            drop(chunk);
+            return self.enter_user_fn(entry, argc, line);
+        }
+
+        if self.frames.last().is_some_and(|frame| {
+            frame.is_function
+                && frame.function_module.as_deref() == Some(bop::value::ROOT_MODULE_PATH)
+        }) {
+            let root_value = self
+                .frames
+                .first()
+                .and_then(|root| root.scopes.iter().rev().find_map(|scope| scope.get(name)))
+                .cloned();
+            if let Some(value) = root_value {
+                let args = self.pop_n_values(argc, line)?;
+                return match &value {
+                    Value::Fn(function) => {
+                        let function = Rc::clone(function);
+                        self.call_closure(&function, args, line)
+                    }
+                    other => Err(error(
+                        line,
+                        format!("`{}` is a {}, not a function", name, other.type_name()),
+                    )),
+                };
+            }
         }
 
         // User-fn hot path: if `name` is a declared fn and no
@@ -2121,6 +2696,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     .map(|a| format!("{}", a))
                     .collect::<Vec<_>>()
                     .join(" ");
+                let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
                 self.host.on_print(&message);
                 self.push_value(Value::None);
                 return Ok(Next::Continue);
@@ -2139,7 +2715,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
         }
 
         // 2. Host-provided builtins.
-        if let Some(result) = self.host.call(name, &args, line) {
+        let host_result = {
+            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
+            self.host.call(name, &args, line)
+        };
+        if let Some(result) = host_result {
             let v = result?;
             self.push_value(v);
             return Ok(Next::Continue);
@@ -2157,7 +2737,10 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 hint,
             ));
         }
-        let host_hint = self.host.function_hint().to_string();
+        let host_hint = {
+            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
+            self.host.function_hint().to_string()
+        };
         Err(if host_hint.is_empty() {
             error(line, bop::error_messages::function_not_found(name))
         } else {
@@ -2181,7 +2764,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         argc: usize,
         line: u32,
     ) -> Result<Next, BopError> {
-        if self.frames.len() >= MAX_CALL_DEPTH {
+        if self.frames.len().saturating_sub(1) >= MAX_CALL_DEPTH {
             return Err(error_with_hint(
                 line,
                 "Too many nested function calls (possible infinite recursion)",
@@ -2386,8 +2969,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 self.push_value(result.0);
                 return Ok(Next::Continue);
             }
-            if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == method) {
-                let callee = v.clone();
+            if let Some(callee) = self.module_binding(m, method) {
                 drop(obj);
                 return self.invoke_value(callee, args, line);
             }
@@ -2434,7 +3016,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                         ),
                     ));
                 }
-                if self.frames.len() >= MAX_CALL_DEPTH {
+                if self.frames.len().saturating_sub(1) >= MAX_CALL_DEPTH {
                     return Err(error_with_hint(
                         line,
                         "Too many nested function calls (possible infinite recursion)",
@@ -3111,8 +3693,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 )
             }),
             Value::Module(m) => {
-                if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
-                    return Ok(v.clone());
+                if let Some(v) = self.module_binding(m, field) {
+                    return Ok(v);
                 }
                 if m.has_type(field) {
                     return Err(error(
@@ -3297,7 +3879,18 @@ impl<'h, H: BopHost> Vm<'h, H> {
             chunk: Rc::clone(&fn_def.chunk),
             module_path: self.active_module_path().to_string(),
         });
-        self.functions.insert(name, entry);
+        self.functions.insert(name.clone(), Rc::clone(&entry));
+        if self.is_module_top_scope()
+            && self.current_module == bop::value::ROOT_MODULE_PATH
+        {
+            if let Some(visibility) = self.root_function_visibility.get(&idx.0).copied() {
+                self.abi_declarations
+                    .retain(|(existing, _)| existing != &name);
+                if visibility == Visibility::Public {
+                    self.abi_declarations.push((name, entry));
+                }
+            }
+        }
     }
 
     /// Materialise a lambda expression as a `Value::Fn`. Each
@@ -3311,15 +3904,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
         let captures = self.snapshot_captures_for(fn_def);
         let compiled_chunk = Rc::clone(&fn_def.chunk);
         let body: Rc<dyn core::any::Any + 'static> = compiled_chunk;
-        let value = Value::try_new_compiled_module_fn(
+        let value = BopFn::try_new_compiled_in_module_with_origin(
             fn_def.params.clone(),
             captures,
             body,
             None,
-            self.active_module_path().to_string(),
+            Some(self.active_module_path().to_string()),
+            self.function_origin.clone(),
             0,
             line,
-        )?;
+        ).map(Value::Fn)?;
         self.push_value(value);
         Ok(())
     }
@@ -3355,7 +3949,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 }
                 CaptureSource::ParentScope(look_name) => {
                     let mut found = None;
-                    for scope in frame.scopes.iter().rev() {
+                    let defining_environment_floor =
+                        usize::from(frame.defining_environment_module.is_some());
+                    for scope in frame
+                        .scopes
+                        .iter()
+                        .skip(defining_environment_floor)
+                        .rev()
+                    {
                         if let Some(v) = scope.get(look_name.as_str()) {
                             found = Some(v.clone());
                             break;
@@ -3380,6 +3981,12 @@ impl<'h, H: BopHost> Vm<'h, H> {
         args: Vec<Value>,
         line: u32,
     ) -> Result<Next, BopError> {
+        if !func.__is_allowed_by(&self.function_origin, "vm") {
+            return Err(error(
+                line,
+                "This function belongs to a different Bop engine instance",
+            ));
+        }
         // The body must be a VM-compiled chunk. Walker-created
         // `Value::Fn`s would carry `FnBody::Ast` and don't belong
         // in the VM.
@@ -3415,7 +4022,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
             ));
         }
 
-        if self.frames.len() >= MAX_CALL_DEPTH {
+        if self.frames.len().saturating_sub(1) >= MAX_CALL_DEPTH {
             return Err(error_with_hint(
                 line,
                 "Too many nested function calls (possible infinite recursion)",
@@ -3472,7 +4079,14 @@ impl<'h, H: BopHost> Vm<'h, H> {
         {
             return Ok(());
         }
-        let artifacts = self.load_module(path, line)?;
+        // A lazily evaluated dependency may import the module that is
+        // currently executing. Move that active environment into the shared
+        // registry for the duration of loading so the nested VM observes and
+        // updates the one authoritative handle rather than a cached snapshot.
+        self.park_active_defining_environment();
+        let loaded = self.load_module(path, line);
+        self.restore_active_defining_environment();
+        let artifacts = loaded?;
 
         // Types always register under their *full identity*
         // `(module_path, type_name)`. Two modules declaring the
@@ -3531,15 +4145,16 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
             let chunk_rc: Rc<Chunk> = entry.chunk.clone();
             let body: Rc<dyn core::any::Any + 'static> = chunk_rc;
-            let value = Value::try_new_compiled_module_fn(
+            let value = BopFn::try_new_compiled_in_module_with_origin(
                 entry.params.clone(),
                 Vec::new(),
                 body,
                 Some(name.clone()),
-                entry.module_path.clone(),
+                Some(entry.module_path.clone()),
+                self.function_origin.clone(),
                 0,
                 line,
-            )?;
+            ).map(Value::Fn)?;
             exports.push((name.clone(), value));
             fn_entries.push((name.clone(), entry.clone()));
         }
@@ -3617,10 +4232,23 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     ),
                 ));
             }
-            let module_rc = bop::value::BopModule::try_new_with_type_exports(
+            let live_bindings = exports
+                .iter()
+                .map(|(name, _)| {
+                    let origin = artifacts
+                        .binding_origins
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| (path.to_string(), name.clone()));
+                    (name.clone(), origin)
+                })
+                .collect();
+            let module_rc = bop::value::BopModule::__try_new_live_with_type_exports(
                 path.to_string(),
                 exports,
                 bop::value::BopTypeExports::from_origins(exposed_types),
+                live_bindings,
+                Rc::clone(&self.live_value_environments),
                 line,
             )?;
             // Bind the alias three ways:
@@ -3670,7 +4298,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     .expect("imported function scope")
                     .insert(name, entry);
             }
-            for (name, value) in exports {
+            for (name, mut value) in exports {
                 if skip_private && bop::naming::is_private(&name) {
                     continue;
                 }
@@ -3688,6 +4316,26 @@ impl<'h, H: BopHost> Vm<'h, H> {
                     continue;
                 }
                 let module = artifacts.module_exports.get(&name).cloned();
+                let origin = artifacts
+                    .binding_origins
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| (path.to_string(), name.clone()));
+                if module_top_scope {
+                    self.binding_origins.insert(name.clone(), origin.clone());
+                    if origin.0 != self.current_module || origin.1 != name {
+                        if let Some(authoritative) = self
+                            .live_value_environments
+                            .borrow_mut()
+                            .get_mut(&origin.0)
+                            .and_then(|environment| environment.remove(&origin.1))
+                        {
+                            value = authoritative;
+                        }
+                    }
+                } else if let Some(current) = self.live_origin_value(&origin) {
+                    value = current;
+                }
                 if let Some(frame) = self.frames.last_mut() {
                     if let Some(scope) = frame.scopes.last_mut() {
                         scope.insert(name.clone(), value);
@@ -3871,7 +4519,11 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
         }
 
-        let source = match self.host.resolve_module(path) {
+        let resolved = {
+            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
+            self.host.resolve_module(path)
+        };
+        let source = match resolved {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(e),
             None => {
@@ -3914,26 +4566,93 @@ impl<'h, H: BopHost> Vm<'h, H> {
     ) -> Result<ModuleArtifacts, BopError> {
         let stmts = bop::parse(source)?;
         let chunk = crate::compile(&stmts)?;
-        let imports = Rc::clone(&self.imports);
+        let module_runtime = ModuleRuntime {
+            imports: Rc::clone(&self.imports),
+            environments: Rc::clone(&self.live_value_environments),
+            origins: Rc::clone(&self.live_binding_origins),
+        };
         let limits = self.limits.clone();
         let mut sub = Vm::new_internal(
             chunk,
             self.host,
             limits,
-            imports,
+            module_runtime,
             module_path.to_string(),
+            BTreeMap::new(),
+            self.function_origin.clone(),
         );
-        sub.run_internal()?;
+        if let Err(module_error) = sub.run_internal() {
+            sub.restore_instance_baseline();
+            let failed_environment = sub
+                .frames
+                .first_mut()
+                .and_then(|frame| frame.scopes.first_mut())
+                .map(core::mem::take)
+                .unwrap_or_default();
+            put_live_environment(
+                &sub.live_value_environments,
+                module_path,
+                failed_environment,
+                &sub.binding_origins,
+            );
+            // Forwarded bindings have been returned to their declaration
+            // modules; the failed facade's partial state must not survive.
+            sub.live_value_environments.borrow_mut().remove(module_path);
+            sub.live_binding_origins.borrow_mut().remove(module_path);
+            return Err(module_error);
+        }
         // Collect top-level lets from the module frame's one
         // remaining scope…
-        let mut bindings: Vec<(String, Value)> = Vec::new();
-        if let Some(frame) = sub.frames.first() {
-            if let Some(scope) = frame.scopes.first() {
-                for (k, v) in scope {
-                    bindings.push((k.clone(), v.clone()));
-                }
+        let bindings = match sub
+            .frames
+            .first()
+            .and_then(|frame| frame.scopes.first())
+            .map(|scope| {
+                snapshot_module_bindings(
+                    scope,
+                    &sub.binding_origins,
+                    module_path,
+                    &sub.imports,
+                    0,
+                )
+            })
+            .transpose()
+        {
+            Ok(bindings) => bindings.unwrap_or_default(),
+            Err(snapshot_error) => {
+                let failed_environment = sub
+                    .frames
+                    .first_mut()
+                    .and_then(|frame| frame.scopes.first_mut())
+                    .map(core::mem::take)
+                    .unwrap_or_default();
+                put_live_environment(
+                    &sub.live_value_environments,
+                    module_path,
+                    failed_environment,
+                    &sub.binding_origins,
+                );
+                sub.live_value_environments.borrow_mut().remove(module_path);
+                sub.live_binding_origins.borrow_mut().remove(module_path);
+                return Err(snapshot_error);
             }
-        }
+        };
+        let live_environment = sub
+            .frames
+            .first_mut()
+            .and_then(|frame| frame.scopes.first_mut())
+            .map(core::mem::take)
+            .unwrap_or_default();
+        let binding_origins = sub.binding_origins.clone();
+        put_live_environment(
+            &sub.live_value_environments,
+            module_path,
+            live_environment,
+            &binding_origins,
+        );
+        sub.live_binding_origins
+            .borrow_mut()
+            .insert(module_path.to_string(), binding_origins.clone());
         // Named fn entries go out separately so the importer
         // can register them in `self.functions` for bare-ident
         // call resolution. Reified `Value::Fn`s for the same
@@ -3978,6 +4697,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
         });
         Ok(ModuleArtifacts {
             bindings,
+            binding_origins,
             fn_decls,
             struct_defs,
             enum_defs,
@@ -4009,9 +4729,23 @@ impl<'h, H: BopHost> Vm<'h, H> {
     }
 
     fn do_return(&mut self, value: Value) -> Result<Next, BopError> {
+        if self.frames.last().is_some_and(|frame| !frame.is_function) {
+            drop(value);
+            let frame = self.frames.last_mut().expect("frame present");
+            frame.ip = frame.chunk.code.len();
+            frame.scopes.truncate(frame.scope_base);
+            self.stack.clear();
+            self.type_bindings.truncate(frame.type_scope_base);
+            self.module_aliases.truncate(frame.alias_scope_base);
+            self.imported_functions.truncate(frame.alias_scope_base);
+            self.imported_here.truncate(frame.alias_scope_base);
+            return Ok(Next::Halt);
+        }
         // Pop the current frame, truncate any frame-local stack
         // residue, and push the return value for the caller.
-        let frame = self.frames.pop().expect("frame present");
+        let mut frame = self.frames.pop().expect("frame present");
+        self.store_frame_defining_environment(&mut frame);
+        self.restore_active_defining_environment();
         self.stack.truncate(frame.stack_base);
         // Drop the function's protected type-binding scope plus any runtime
         // scopes skipped by an early return. Top-level return preserves the
@@ -4143,7 +4877,13 @@ impl<'h, H: BopHost> Vm<'h, H> {
             }
         };
         drop(callable);
-        self.call_closure(&func, Vec::new(), line)?;
+        if let Err(err) = self.call_closure(&func, Vec::new(), line) {
+            if err.is_fatal {
+                return Err(err);
+            }
+            self.push_value(builtins::make_try_call_err(&err));
+            return Ok(Next::Continue);
+        }
         // The frame we just pushed is the one that should
         // participate in the try_call wrap/catch dance.
         if let Some(frame) = self.frames.last_mut() {
@@ -4210,7 +4950,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 ),
             ));
         }
-        if self.frames.len() >= MAX_CALL_DEPTH {
+        if self.frames.len().saturating_sub(1) >= MAX_CALL_DEPTH {
             return Err(error_with_hint(
                 line,
                 "Too many nested function calls (possible infinite recursion)",
@@ -4382,7 +5122,8 @@ impl<'h, H: BopHost> Vm<'h, H> {
         // Drain the unwound frames through the freelist instead
         // of `truncate`, so their slot vecs get recycled.
         while self.frames.len() > wrap_idx {
-            let frame = self.frames.pop().expect("frame present");
+            let mut frame = self.frames.pop().expect("frame present");
+            self.store_frame_defining_environment(&mut frame);
             self.type_bindings
                 .truncate(frame.caller_type_scope_depth());
             self.module_aliases.truncate(frame.alias_scope_base);
@@ -4392,6 +5133,7 @@ impl<'h, H: BopHost> Vm<'h, H> {
                 self.return_slots(frame.slots);
             }
         }
+        self.restore_active_defining_environment();
         self.stack.truncate(wrapper_stack_base);
         self.push_value(builtins::make_try_call_err(&err));
         Ok(())
@@ -4470,6 +5212,180 @@ where
     }
 }
 
+impl BopInstance {
+    /// Compile and execute a program once, retaining its VM state for calls.
+    pub fn load(
+        source: &str,
+        host: &mut dyn BopHost,
+        limits: &BopLimits,
+    ) -> Result<Self, BopError> {
+        let statements = bop::parse(source)?;
+        let compiled = crate::compiler::compile_program(&statements)?;
+        crate::validate_chunk(&compiled.chunk)?;
+        let memory = bop::memory::MemoryAccount::__new(limits.max_memory);
+        let mut vm = Vm::new_internal(
+            compiled.chunk,
+            host,
+            limits.clone(),
+            ModuleRuntime::empty(),
+            bop::value::ROOT_MODULE_PATH.to_string(),
+            compiled.root_function_visibility,
+            BopFnOrigin::__instance("vm"),
+        );
+        {
+            let _active = bop::memory::ActiveMemoryGuard::__activate(&memory);
+            vm.run_internal()?;
+            if memory.__exceeded() {
+                return Err(instance_memory_error());
+            }
+        }
+        let entries = vm
+            .abi_declarations
+            .iter()
+            .map(|(name, target)| EntryPoint::__new(name.clone(), target.params.len()))
+            .collect();
+        Ok(Self {
+            state: Some(vm.into_state()),
+            entries,
+            limits: limits.clone(),
+            in_operation: Cell::new(false),
+            memory,
+        })
+    }
+
+    pub fn entry_points(&self) -> &[EntryPoint] {
+        &self.entries
+    }
+
+    pub fn call(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        host: &mut dyn BopHost,
+    ) -> Result<Value, BopError> {
+        let _operation = VmOperationGuard::begin(&self.in_operation)?;
+        let state = self.state.as_ref().expect("instance state present");
+        let target = state
+            .abi_declarations
+            .iter()
+            .find(|(entry_name, _)| entry_name == name)
+            .map(|(_, target)| Rc::clone(target))
+            .ok_or_else(|| error(0, format!("Public entry point `{}` was not found", name)))?;
+        if args.len() != target.params.len() {
+            return Err(error(
+                0,
+                format!(
+                    "`{}` expects {} argument{}, but got {}",
+                    name,
+                    target.params.len(),
+                    if target.params.len() == 1 { "" } else { "s" },
+                    args.len(),
+                ),
+            ));
+        }
+        if self.memory.__exceeded() {
+            return Err(instance_memory_error());
+        }
+        let state = self.state.take().expect("instance state present");
+        let mut vm = Vm::from_state(state, host, self.limits.clone());
+        let result = {
+            let _active = bop::memory::ActiveMemoryGuard::__activate(&self.memory);
+            for argument in args {
+                vm.push_value(argument.clone());
+            }
+            let execution = vm
+                .enter_user_fn(target, args.len(), 0)
+                .and_then(|_| vm.run_internal());
+            let value = execution.and_then(|_| vm.pop_value(0));
+            vm.restore_instance_baseline();
+            if self.memory.__exceeded() {
+                Err(instance_memory_error())
+            } else {
+                value
+            }
+        };
+        self.state = Some(vm.into_state());
+        result
+    }
+
+    pub fn call_value(
+        &mut self,
+        callable: &Value,
+        args: &[Value],
+        host: &mut dyn BopHost,
+    ) -> Result<Value, BopError> {
+        let _operation = VmOperationGuard::begin(&self.in_operation)?;
+        let function = match callable {
+            Value::Fn(function) => Rc::clone(function),
+            other => {
+                return Err(error(
+                    0,
+                    format!("expected function, got {}", other.type_name()),
+                ));
+            }
+        };
+        let state = self.state.as_ref().expect("instance state present");
+        if !function.__is_allowed_by(&state.function_origin, "vm") {
+            return Err(error(
+                0,
+                "This function belongs to a different Bop engine instance",
+            ));
+        }
+        if args.len() != function.params.len() {
+            return Err(error(
+                0,
+                format!(
+                    "Function expects {} argument{}, but got {}",
+                    function.params.len(),
+                    if function.params.len() == 1 { "" } else { "s" },
+                    args.len(),
+                ),
+            ));
+        }
+        if self.memory.__exceeded() {
+            return Err(instance_memory_error());
+        }
+        let state = self.state.take().expect("instance state present");
+        let mut vm = Vm::from_state(state, host, self.limits.clone());
+        let result = {
+            let _active = bop::memory::ActiveMemoryGuard::__activate(&self.memory);
+            let execution = vm
+                .call_closure(&function, args.to_vec(), 0)
+                .and_then(|_| vm.run_internal());
+            let value = execution.and_then(|_| vm.pop_value(0));
+            vm.restore_instance_baseline();
+            if self.memory.__exceeded() {
+                Err(instance_memory_error())
+            } else {
+                value
+            }
+        };
+        self.state = Some(vm.into_state());
+        result
+    }
+}
+
+fn instance_memory_error() -> BopError {
+    BopError::fatal("Memory limit exceeded", 0)
+}
+
+struct VmOperationGuard<'a>(&'a Cell<bool>);
+
+impl<'a> VmOperationGuard<'a> {
+    fn begin(flag: &'a Cell<bool>) -> Result<Self, BopError> {
+        if flag.replace(true) {
+            return Err(error(0, "A Bop instance cannot be re-entered"));
+        }
+        Ok(Self(flag))
+    }
+}
+
+impl Drop for VmOperationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
 // ─── Public entry points ──────────────────────────────────────────
 
 /// Execute a pre-compiled [`Chunk`] against the supplied host.
@@ -4503,6 +5419,7 @@ pub fn run<H: BopHost>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     struct SilentHost;
 
@@ -4705,5 +5622,384 @@ let read = fn() { return [missing, present] }"#,
         assert_eq!(captures.len(), 1, "missing bindings must not be invented");
         assert_eq!(captures[0].0, "present");
         assert!(matches!(captures[0].1, Value::None));
+    }
+
+    struct RetainingHost {
+        retained: Option<Value>,
+    }
+
+    impl BopHost for RetainingHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            if name != "retain_large" {
+                return None;
+            }
+            self.retained = Some(Value::new_str("x".repeat(16 * 1024)));
+            Some(Ok(Value::None))
+        }
+    }
+
+    #[test]
+    fn instance_suspends_host_allocations_and_checks_final_returns() {
+        let limits = BopLimits { max_steps: 100, max_memory: 32 };
+        let mut host = RetainingHost { retained: None };
+        let mut instance = BopInstance::load(
+            "pub fn host_only() { retain_large() }\npub fn too_large() { return \"abcdefghijklmnopqrstuvwxyz0123456789\" }",
+            &mut host,
+            &limits,
+        )
+        .unwrap();
+        instance.call("host_only", &[], &mut host).unwrap();
+        assert!(host.retained.is_some());
+        assert_eq!(instance.memory.__used(), 0);
+        let error = instance.call("too_large", &[], &mut host).unwrap_err();
+        assert!(error.is_fatal);
+        assert!(error.message.contains("Memory limit"));
+    }
+
+    struct ExternalValueHost {
+        value: Option<Value>,
+    }
+
+    impl BopHost for ExternalValueHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            (name == "take_external").then(|| Ok(self.value.take().unwrap_or(Value::None)))
+        }
+    }
+
+    #[test]
+    fn external_values_are_free_until_detach_and_memory_poison_is_fail_fast() {
+        let external = {
+            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
+            Value::new_array((0..256).map(Value::Int).collect())
+        };
+        let limits = BopLimits { max_steps: 100, max_memory: 64 };
+        let mut host = ExternalValueHost { value: Some(external) };
+        let mut instance = BopInstance::load(
+            "let stored = none\npub fn keep() { stored = take_external() }\npub fn mutate() { stored.push(256) }\npub fn harmless() { return 1 }",
+            &mut host,
+            &limits,
+        )
+        .unwrap();
+
+        instance.call("keep", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.__used(), 0);
+        let mutation_error = instance.call("mutate", &[], &mut host).unwrap_err();
+        assert!(mutation_error.is_fatal);
+        assert!(instance.memory.__used() > limits.max_memory);
+        let poisoned = instance.call("harmless", &[], &mut host).unwrap_err();
+        assert!(poisoned.is_fatal);
+        assert!(poisoned.message.contains("Memory limit"));
+    }
+
+    #[test]
+    fn returned_receipts_release_on_last_drop_and_instances_do_not_cross_charge() {
+        let mut host = SilentHost;
+        let source = "pub fn make(x) { return [x, x, x, x] }\npub fn harmless() { return none }";
+        let limits = BopLimits::standard();
+        let mut first = BopInstance::load(source, &mut host, &limits).unwrap();
+        let mut second = BopInstance::load(source, &mut host, &limits).unwrap();
+
+        let first_value = first.call("make", &[Value::Int(1)], &mut host).unwrap();
+        let first_bytes = first.memory.__used();
+        assert!(first_bytes > 0);
+        assert_eq!(second.memory.__used(), 0);
+        first.call("harmless", &[], &mut host).unwrap();
+        assert_eq!(first.memory.__used(), first_bytes);
+
+        let first_clone = first_value.clone();
+        drop(first_value);
+        assert_eq!(first.memory.__used(), first_bytes);
+        let second_value = second.call("make", &[Value::Int(2)], &mut host).unwrap();
+        let second_bytes = second.memory.__used();
+        assert!(second_bytes > 0);
+        assert_eq!(first.memory.__used(), first_bytes);
+        drop(first_clone);
+        assert_eq!(first.memory.__used(), 0);
+        assert_eq!(second.memory.__used(), second_bytes);
+        drop(second_value);
+        assert_eq!(second.memory.__used(), 0);
+    }
+
+    struct HookAllocatingHost {
+        retained: RefCell<Vec<Value>>,
+    }
+
+    impl HookAllocatingHost {
+        fn retain_large(&self) {
+            self.retained
+                .borrow_mut()
+                .push(Value::new_str("x".repeat(16 * 1024)));
+        }
+    }
+
+    impl BopHost for HookAllocatingHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            self.retain_large();
+            (name == "host_value").then_some(Ok(Value::None))
+        }
+
+        fn on_print(&mut self, _message: &str) {
+            self.retain_large();
+        }
+
+        fn function_hint(&self) -> &str {
+            self.retain_large();
+            "host hint"
+        }
+
+        fn on_tick(&mut self) -> Result<(), BopError> {
+            self.retain_large();
+            Ok(())
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.retain_large();
+            (name == "hook").then(|| Ok(String::new()))
+        }
+    }
+
+    #[test]
+    fn every_instance_host_hook_runs_with_accounting_suspended() {
+        let limits = BopLimits { max_steps: 100, max_memory: 64 };
+        let mut host = HookAllocatingHost { retained: RefCell::new(Vec::new()) };
+        let mut instance = BopInstance::load(
+            "use hook\npub fn print_it() { print(\"ok\") }\npub fn host_it() { host_value() }\npub fn hint_it() { missing() }",
+            &mut host,
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(instance.memory.__used(), 0);
+        instance.call("print_it", &[], &mut host).unwrap();
+        instance.call("host_it", &[], &mut host).unwrap();
+        let error = instance.call("hint_it", &[], &mut host).unwrap_err();
+        assert!(!error.is_fatal);
+        assert!(error
+            .friendly_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("host hint")));
+        assert_eq!(instance.memory.__used(), 0);
+        assert!(host.retained.borrow().len() >= 8);
+    }
+
+    #[test]
+    fn same_instance_reentry_rejection_precedes_target_and_arity_checks() {
+        let mut host = SilentHost;
+        let mut instance = BopInstance::load(
+            "pub fn entry() {}",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        instance.in_operation.set(true);
+        let error = instance
+            .call("missing", &[Value::None], &mut host)
+            .unwrap_err();
+        instance.in_operation.set(false);
+        assert_eq!(error.line, Some(0));
+        assert!(error.message.contains("cannot be re-entered"));
+    }
+
+    struct MapModuleHost {
+        modules: BTreeMap<String, String>,
+    }
+
+    impl BopHost for MapModuleHost {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            None
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn module_compatibility_snapshots_do_not_force_named_cow_detaches() {
+        let mut host = MapModuleHost {
+            modules: BTreeMap::from([
+                (
+                    "leaf".to_string(),
+                    "let items = [1, 2, 3]\nfn pop() { items.pop() }".to_string(),
+                ),
+                (
+                    "facade".to_string(),
+                    "use leaf\nfn pop() { items.pop() }".to_string(),
+                ),
+            ]),
+        };
+        let mut instance = BopInstance::load(
+            "use leaf as leaf\nuse facade as facade\npub fn facade_pop() { facade.pop() }\npub fn direct_pop() { leaf.pop() }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        let loaded_bytes = instance.memory.__used();
+        assert!(loaded_bytes > 0);
+
+        instance.call("facade_pop", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.__used(), loaded_bytes);
+        instance.call("direct_pop", &[], &mut host).unwrap();
+        assert_eq!(instance.memory.__used(), loaded_bytes);
+    }
+
+    #[test]
+    fn facade_fanout_reuses_the_origin_compatibility_snapshot() {
+        const FACADES: usize = 8;
+        let items = (0..256)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut modules = BTreeMap::from([(
+            "leaf".to_string(),
+            format!("let items = [{items}]\nfn size() {{ return items.len() }}"),
+        )]);
+        let mut source = String::new();
+        for index in 0..FACADES {
+            modules.insert(format!("facade{index}"), "use leaf".to_string());
+            source.push_str(&format!("use facade{index} as f{index}\n"));
+            source.push_str(&format!("let size{index} = f{index}.size()\n"));
+        }
+        let mut host = MapModuleHost { modules };
+        let instance = BopInstance::load(&source, &mut host, &BopLimits::standard()).unwrap();
+
+        let imports = instance.state.as_ref().unwrap().imports.borrow();
+        let ImportSlot::Loaded(leaf) = imports.get("leaf").unwrap() else {
+            panic!("leaf should be loaded")
+        };
+        let leaf_items = &leaf
+            .bindings
+            .iter()
+            .find(|(name, _)| name == "items")
+            .unwrap()
+            .1;
+        for index in 0..FACADES {
+            let ImportSlot::Loaded(facade) = imports.get(&format!("facade{index}")).unwrap()
+            else {
+                panic!("facade should be loaded")
+            };
+            let facade_items = &facade
+                .bindings
+                .iter()
+                .find(|(name, _)| name == "items")
+                .unwrap()
+                .1;
+            assert!(leaf_items.__shares_backing_with(facade_items));
+        }
+    }
+
+    #[test]
+    fn recursive_module_snapshots_do_not_retain_replaced_instance_receipts() {
+        let mut host = MapModuleHost {
+            modules: BTreeMap::from([(
+                "leaf".to_string(),
+                "let items = [[\"abcdefghijklmnopqrstuvwxyz0123456789\"]]\nlet captured = \"zyxwvutsrqponmlkjihgfedcba9876543210\"\nlet callback = fn() { return captured }\nfn clear() { items = []; captured = none; callback = none }"
+                    .to_string(),
+            )]),
+        };
+        let mut instance = BopInstance::load(
+            "use leaf as leaf\npub fn clear() { leaf.clear() }",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        let loaded_bytes = instance.memory.__used();
+        assert!(loaded_bytes > 0);
+
+        instance.call("clear", &[], &mut host).unwrap();
+        let cleared_bytes = instance.memory.__used();
+        assert!(cleared_bytes < loaded_bytes);
+
+        let mut empty_host = MapModuleHost {
+            modules: BTreeMap::from([(
+                "leaf".to_string(),
+                "let items = []\nlet captured = none\nlet callback = none\nfn clear() { items = []; captured = none; callback = none }"
+                    .to_string(),
+            )]),
+        };
+        let empty = BopInstance::load(
+            "use leaf as leaf\npub fn clear() { leaf.clear() }",
+            &mut empty_host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(cleared_bytes, empty.memory.__used());
+    }
+
+    struct WrappingModuleHost {
+        modules: BTreeMap<String, String>,
+    }
+
+    impl BopHost for WrappingModuleHost {
+        fn call(
+            &mut self,
+            name: &str,
+            args: &[Value],
+            line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            if name != "wrap" {
+                return None;
+            }
+            Some(
+                bop::value::BopModule::try_new(
+                    "host.wrapper".to_string(),
+                    vec![("child".to_string(), args[0].clone())],
+                    Vec::new(),
+                    line,
+                )
+                .map(Value::Module),
+            )
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn module_snapshots_externalize_host_module_binding_graphs() {
+        let root = "use leaf as leaf\npub fn clear() { leaf.clear() }";
+        let mut host = WrappingModuleHost {
+            modules: BTreeMap::from([(
+                "leaf".to_string(),
+                "let child = [\"abcdefghijklmnopqrstuvwxyz0123456789\"]\nlet wrapped = wrap(child)\nfn clear() { child = none; wrapped = none }"
+                    .to_string(),
+            )]),
+        };
+        let mut instance = BopInstance::load(root, &mut host, &BopLimits::standard()).unwrap();
+        let loaded_bytes = instance.memory.__used();
+        assert!(loaded_bytes > 0);
+        instance.call("clear", &[], &mut host).unwrap();
+        let cleared_bytes = instance.memory.__used();
+        assert!(cleared_bytes < loaded_bytes);
+
+        let mut empty_host = WrappingModuleHost {
+            modules: BTreeMap::from([(
+                "leaf".to_string(),
+                "let child = none\nlet wrapped = none\nfn clear() { child = none; wrapped = none }"
+                    .to_string(),
+            )]),
+        };
+        let empty = BopInstance::load(root, &mut empty_host, &BopLimits::standard()).unwrap();
+        assert_eq!(cleared_bytes, empty.memory.__used());
     }
 }

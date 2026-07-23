@@ -8,7 +8,14 @@ use std::rc::Rc;
 
 use bop::error::BopError;
 use bop::methods;
-use bop::parser::{AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
+use bop::parser::{
+    AssignOp, AssignTarget, BinOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp, Visibility,
+};
+
+#[cfg(not(feature = "no_std"))]
+use std::collections::BTreeMap;
+#[cfg(feature = "no_std")]
+use alloc::collections::BTreeMap;
 
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, ConstructFieldsIdx, EnumConstructShape,
@@ -110,10 +117,19 @@ impl LocalResolver {
 
 /// Compile a parsed program into a top-level chunk.
 pub fn compile(program: &[Stmt]) -> Result<Chunk, BopError> {
+    Ok(compile_program(program)?.chunk)
+}
+
+pub(crate) struct CompiledProgram {
+    pub(crate) chunk: Chunk,
+    pub(crate) root_function_visibility: BTreeMap<u32, Visibility>,
+}
+
+pub(crate) fn compile_program(program: &[Stmt]) -> Result<CompiledProgram, BopError> {
     let mut compiler = Compiler::new();
     compiler.compile_block_no_scope(program)?;
     compiler.emit(Instr::Halt, 0);
-    Ok(compiler.finish())
+    Ok(compiler.finish_program())
 }
 
 // ─── Compiler state ────────────────────────────────────────────────
@@ -152,6 +168,7 @@ struct Compiler {
     /// prevents a nested lambda from propagating a pattern-local name into
     /// the enclosing lambda's capture list.
     runtime_bindings: Vec<Vec<String>>,
+    root_function_visibility: BTreeMap<u32, Visibility>,
 }
 
 struct LoopCtx {
@@ -181,6 +198,7 @@ impl Compiler {
             resolvers: Vec::new(),
             free_vars: None,
             runtime_bindings: Vec::new(),
+            root_function_visibility: BTreeMap::new(),
         }
     }
 
@@ -214,9 +232,12 @@ impl Compiler {
         }
     }
 
-    fn finish(self) -> Chunk {
+    fn finish_program(self) -> CompiledProgram {
         debug_assert_eq!(self.runtime_scope_depth, 0);
-        self.chunk
+        CompiledProgram {
+            chunk: self.chunk,
+            root_function_visibility: self.root_function_visibility,
+        }
     }
 
     // ─── Emission helpers ─────────────────────────────────────────
@@ -698,9 +719,17 @@ impl Compiler {
                 }
             }
 
-            StmtKind::FnDecl { name, params, body } => {
+            StmtKind::FnDecl {
+                name,
+                params,
+                body,
+                visibility,
+            } => {
                 let def = self.compile_function(name, params, body)?;
                 let idx = self.add_function(def);
+                if self.resolvers.is_empty() && self.runtime_scope_depth == 0 {
+                    self.root_function_visibility.insert(idx.0, *visibility);
+                }
                 self.emit(Instr::DefineFn(idx), line);
             }
 

@@ -1,127 +1,248 @@
-//! Memory tracking for Bop script execution.
-//!
-//! By default, uses thread-local counters so tracking is
-//! zero-cost and perfectly isolated between concurrent executions.
-//!
-//! With `no_std`, uses global statics. This is safe for single-threaded
-//! environments (e.g., wasm) but is NOT thread-safe.
-//!
-//! Tracking happens at the Value layer: Clone tracks new allocations, Drop tracks
-//! frees. The evaluator only needs to call `bop_memory_init()` at the start and
-//! check `bop_memory_exceeded()` in `tick()`.
-
-// ─── std: thread-local storage ──────────────────────────────────────────────
-
-#[cfg(not(feature = "no_std"))]
-mod imp {
-    use std::cell::Cell;
-
-    thread_local! {
-        static USED: Cell<usize> = const { Cell::new(0) };
-        static LIMIT: Cell<usize> = const { Cell::new(usize::MAX) };
-    }
-
-    pub fn init(limit: usize) {
-        USED.set(0);
-        LIMIT.set(limit);
-    }
-
-    pub fn alloc(bytes: usize) {
-        USED.with(|u| u.set(u.get().saturating_add(bytes)));
-    }
-
-    pub fn dealloc(bytes: usize) {
-        USED.with(|u| u.set(u.get().saturating_sub(bytes)));
-    }
-
-    pub fn exceeded() -> bool {
-        USED.with(|u| LIMIT.with(|l| u.get() > l.get()))
-    }
-
-    pub fn would_exceed(bytes: usize) -> bool {
-        USED.with(|u| LIMIT.with(|l| u.get().saturating_add(bytes) > l.get()))
-    }
-
-    #[cfg(test)]
-    pub fn used() -> usize {
-        USED.get()
-    }
-}
-
-// ─── no-std: global statics (single-threaded only) ──────────────────────────
+//! Allocation-owned memory accounting for Bop execution.
 
 #[cfg(feature = "no_std")]
-mod imp {
-    use core::cell::Cell;
+use alloc::rc::Rc;
+#[cfg(not(feature = "no_std"))]
+use std::rc::Rc;
 
-    // Safety: bop is single-threaded in no-std mode (e.g., wasm).
-    // SyncCell lets us put Cell in a static.
-    struct SyncCell(Cell<usize>);
-    unsafe impl Sync for SyncCell {}
+use core::cell::{Cell, RefCell};
 
-    static USED: SyncCell = SyncCell(Cell::new(0));
-    static LIMIT: SyncCell = SyncCell(Cell::new(usize::MAX));
+/// One sandbox's persistent memory account. Allocation receipts retain their
+/// owner, so values outliving an operation remain charged to the instance that
+/// created them and release that charge when their backing allocation drops.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct MemoryAccount {
+    used: Cell<usize>,
+    limit: usize,
+}
 
-    pub fn init(limit: usize) {
-        USED.0.set(0);
-        LIMIT.0.set(limit);
+impl MemoryAccount {
+    #[doc(hidden)]
+    pub fn __new(limit: usize) -> Rc<Self> {
+        Rc::new(Self {
+            used: Cell::new(0),
+            limit,
+        })
     }
 
-    pub fn alloc(bytes: usize) {
-        USED.0.set(USED.0.get().saturating_add(bytes));
+    fn alloc(&self, bytes: usize) {
+        self.used.set(self.used.get().saturating_add(bytes));
     }
 
-    pub fn dealloc(bytes: usize) {
-        USED.0.set(USED.0.get().saturating_sub(bytes));
+    fn dealloc(&self, bytes: usize) {
+        self.used.set(self.used.get().saturating_sub(bytes));
     }
 
-    pub fn exceeded() -> bool {
-        USED.0.get() > LIMIT.0.get()
+    #[doc(hidden)]
+    pub fn __exceeded(&self) -> bool {
+        self.used.get() > self.limit
     }
 
-    pub fn would_exceed(bytes: usize) -> bool {
-        USED.0.get().saturating_add(bytes) > LIMIT.0.get()
+    #[doc(hidden)]
+    pub fn __would_exceed(&self, bytes: usize) -> bool {
+        self.used.get().saturating_add(bytes) > self.limit
+    }
+
+    #[doc(hidden)]
+    pub fn __used(&self) -> usize {
+        self.used.get()
     }
 
     #[cfg(test)]
-    pub fn used() -> usize {
-        USED.0.get()
+    pub(crate) fn used(&self) -> usize {
+        self.__used()
     }
 }
 
-// ─── Public API (delegates to the active impl) ─────────────────────────────
+#[cfg(not(feature = "no_std"))]
+thread_local! {
+    static ACTIVE: RefCell<Option<Rc<MemoryAccount>>> = const { RefCell::new(None) };
+}
 
-/// Reset the counter and set the limit for this simulation.
+#[cfg(feature = "no_std")]
+struct SyncActive(RefCell<Option<Rc<MemoryAccount>>>);
+#[cfg(feature = "no_std")]
+unsafe impl Sync for SyncActive {}
+#[cfg(feature = "no_std")]
+static ACTIVE: SyncActive = SyncActive(RefCell::new(None));
+
+fn replace_active(next: Option<Rc<MemoryAccount>>) -> Option<Rc<MemoryAccount>> {
+    #[cfg(not(feature = "no_std"))]
+    {
+        ACTIVE.with(|active| core::mem::replace(&mut *active.borrow_mut(), next))
+    }
+    #[cfg(feature = "no_std")]
+    {
+        core::mem::replace(&mut *ACTIVE.0.borrow_mut(), next)
+    }
+}
+
+fn active() -> Option<Rc<MemoryAccount>> {
+    #[cfg(not(feature = "no_std"))]
+    {
+        ACTIVE.with(|active| active.borrow().clone())
+    }
+    #[cfg(feature = "no_std")]
+    {
+        ACTIVE.0.borrow().clone()
+    }
+}
+
+/// Panic-safe active-account stack entry.
+#[doc(hidden)]
+pub struct ActiveMemoryGuard(Option<Rc<MemoryAccount>>);
+
+impl ActiveMemoryGuard {
+    #[doc(hidden)]
+    pub fn __activate(account: &Rc<MemoryAccount>) -> Self {
+        Self(replace_active(Some(Rc::clone(account))))
+    }
+
+    #[doc(hidden)]
+    pub fn __suspend() -> Self {
+        Self(replace_active(None))
+    }
+
+    #[doc(hidden)]
+    pub fn __activate_new_if_none(limit: usize) -> Self {
+        let next = active().or_else(|| Some(MemoryAccount::__new(limit)));
+        Self(replace_active(next))
+    }
+}
+
+impl Drop for ActiveMemoryGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        replace_active(previous);
+    }
+}
+
+/// Owner receipt embedded in each tracked backing allocation.
+#[derive(Debug)]
+pub(crate) struct MemoryReceipt {
+    owner: Option<Rc<MemoryAccount>>,
+    bytes: usize,
+}
+
+impl MemoryReceipt {
+    pub(crate) fn new(bytes: usize) -> Self {
+        let owner = active();
+        if let Some(account) = &owner {
+            account.alloc(bytes);
+        }
+        Self { owner, bytes }
+    }
+
+    pub(crate) fn resize(&mut self, bytes: usize) {
+        if let Some(account) = &self.owner {
+            if bytes > self.bytes {
+                account.alloc(bytes - self.bytes);
+            } else {
+                account.dealloc(self.bytes - bytes);
+            }
+        }
+        self.bytes = bytes;
+    }
+
+    pub(crate) fn owner_matches_active(&self) -> bool {
+        match (&self.owner, active()) {
+            (None, None) => true,
+            (Some(owner), Some(active)) => Rc::ptr_eq(owner, &active),
+            _ => false,
+        }
+    }
+}
+
+impl Drop for MemoryReceipt {
+    fn drop(&mut self) {
+        if let Some(account) = &self.owner {
+            account.dealloc(self.bytes);
+        }
+    }
+}
+
+/// Legacy one-shot compatibility: install a fresh account until another
+/// one-shot run replaces it. Allocation receipts make later drops safe.
 pub fn bop_memory_init(limit: usize) {
-    imp::init(limit);
+    replace_active(Some(MemoryAccount::__new(limit)));
 }
 
-/// Track a new heap allocation. Does not check the limit.
-/// Called by Value's Clone impl and constructor helpers.
+/// Legacy mutation hook. New owned backings use [`MemoryReceipt`] directly.
 pub fn bop_alloc(bytes: usize) {
-    imp::alloc(bytes);
+    if let Some(account) = active() {
+        account.alloc(bytes);
+    }
 }
 
-/// Track a deallocation. Called by Value's Drop impl.
+/// Legacy mutation hook paired with [`bop_alloc`].
 pub fn bop_dealloc(bytes: usize) {
-    imp::dealloc(bytes);
+    if let Some(account) = active() {
+        account.dealloc(bytes);
+    }
 }
 
-/// Returns true if current usage exceeds the limit.
-/// Checked in `tick()` to catch allocations from clones.
 pub fn bop_memory_exceeded() -> bool {
-    imp::exceeded()
+    active().is_some_and(|account| account.__exceeded())
 }
 
-/// Pre-flight check: would allocating `bytes` more exceed the limit?
-/// Does NOT modify the counter. Use before creating large values
-/// (string repeat, range) to avoid allocating memory we'll immediately reject.
 pub fn bop_would_exceed(bytes: usize) -> bool {
-    imp::would_exceed(bytes)
+    active().is_some_and(|account| account.__would_exceed(bytes))
 }
 
-/// Current tracked usage for deterministic allocation-accounting tests.
 #[cfg(test)]
 pub(crate) fn bop_memory_used() -> usize {
-    imp::used()
+    active().map_or(0, |account| account.used())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Value;
+    #[cfg(feature = "no_std")]
+    use alloc::vec::Vec;
+    #[cfg(not(feature = "no_std"))]
+    use std::vec::Vec;
+
+    #[test]
+    fn value_layout_stays_compact_with_allocation_receipts() {
+        assert_eq!(core::mem::size_of::<crate::value::BopStr>(), core::mem::size_of::<usize>());
+        assert!(core::mem::size_of::<Value>() <= 32);
+    }
+
+    #[test]
+    fn mutation_detaches_to_the_active_allocation_owner() {
+        let external = {
+            let _suspended = ActiveMemoryGuard::__suspend();
+            Value::new_array(Vec::new())
+        };
+        let account = MemoryAccount::__new(1024 * 1024);
+        let mut external = external;
+        {
+            let _active = ActiveMemoryGuard::__activate(&account);
+            match &mut external {
+                Value::Array(array) => array.try_push(Value::Int(1), 0).unwrap(),
+                _ => unreachable!(),
+            }
+        }
+        assert!(account.used() > 0);
+        drop(external);
+        assert_eq!(account.used(), 0);
+
+        let first = MemoryAccount::__new(1024 * 1024);
+        let mut value = {
+            let _active = ActiveMemoryGuard::__activate(&first);
+            Value::new_array(Vec::new())
+        };
+        let second = MemoryAccount::__new(1024 * 1024);
+        {
+            let _active = ActiveMemoryGuard::__activate(&second);
+            match &mut value {
+                Value::Array(array) => array.try_push(Value::Int(2), 0).unwrap(),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(first.used(), 0);
+        assert!(second.used() > 0);
+    }
 }

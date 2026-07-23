@@ -89,6 +89,11 @@
 #[cfg(feature = "no_std")]
 extern crate alloc;
 
+// The standard test harness remains available when `--all-features` selects
+// the library's `no_std` surface; make that test-only dependency explicit.
+#[cfg(all(test, feature = "no_std"))]
+extern crate std;
+
 pub mod chunk;
 pub mod compiler;
 pub mod disasm;
@@ -103,4 +108,4 @@ pub use chunk::{
 pub use compiler::compile;
 pub use disasm::disassemble;
 pub use validate::validate_chunk;
-pub use vm::{Vm, execute, run};
+pub use vm::{BopInstance, Vm, execute, run};

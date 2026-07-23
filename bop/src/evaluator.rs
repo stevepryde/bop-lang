@@ -24,7 +24,7 @@ use crate::lexer::StringPart;
 use crate::methods;
 use crate::ops;
 use crate::parser::*;
-use crate::value::{BopFn, BopTypeExports, EnumPayload, FnBody, Value};
+use crate::value::{BopFn, BopFnOrigin, BopTypeExports, EnumPayload, FnBody, Value};
 use crate::{BopHost, BopLimits};
 
 /// What the tree-walker stores for each imported module once it
@@ -46,6 +46,7 @@ struct ModuleBindings {
     /// land in `self.functions` so cross-fn calls within the
     /// module resolve).
     bindings: Vec<(String, Value)>,
+    binding_origins: BTreeMap<String, (String, String)>,
     /// Top-level `fn` declarations, keyed by name. The importer
     /// registers each both in its `self.functions` table
     /// (for nested call resolution) and as a scope binding
@@ -87,6 +88,120 @@ struct ModuleLexicalContext {
 }
 
 type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
+type LiveValueEnvironments = Rc<RefCell<BTreeMap<String, BTreeMap<String, Value>>>>;
+type BindingOrigin = (String, String);
+type LiveBindingOrigins = Rc<RefCell<BTreeMap<String, BTreeMap<String, BindingOrigin>>>>;
+
+fn take_live_environment(
+    environments: &LiveValueEnvironments,
+    module_path: &str,
+    origins: &BTreeMap<String, BindingOrigin>,
+) -> BTreeMap<String, Value> {
+    let mut environments = environments.borrow_mut();
+    let mut environment = environments.remove(module_path).unwrap_or_default();
+    for (binding, (origin_module, origin_binding)) in origins {
+        if origin_module == module_path && origin_binding == binding {
+            continue;
+        }
+        let authoritative = environments
+            .get_mut(origin_module)
+            .and_then(|origin| origin.remove(origin_binding));
+        if let Some(value) = authoritative {
+            environment.insert(binding.clone(), value);
+        }
+    }
+    environment
+}
+
+fn put_live_environment(
+    environments: &LiveValueEnvironments,
+    module_path: &str,
+    mut environment: BTreeMap<String, Value>,
+    origins: &BTreeMap<String, BindingOrigin>,
+) {
+    let mut environments = environments.borrow_mut();
+    for (binding, (origin_module, origin_binding)) in origins {
+        if origin_module == module_path && origin_binding == binding {
+            continue;
+        }
+        if let Some(value) = environment.remove(binding) {
+            environments
+                .entry(origin_module.clone())
+                .or_default()
+                .insert(origin_binding.clone(), value);
+        }
+    }
+    environments.insert(module_path.to_string(), environment);
+}
+
+fn restore_failed_module_environment(
+    environments: &LiveValueEnvironments,
+    live_origins: &LiveBindingOrigins,
+    module_path: &str,
+    scopes: &mut [BTreeMap<String, Value>],
+    binding_origins: &BTreeMap<String, BindingOrigin>,
+) {
+    let failed_environment = scopes.first_mut().map(core::mem::take).unwrap_or_default();
+    put_live_environment(environments, module_path, failed_environment, binding_origins);
+    // Forwarded values have been returned to their authoritative origins. The
+    // failed module's own partial state must not become cacheable.
+    environments.borrow_mut().remove(module_path);
+    live_origins.borrow_mut().remove(module_path);
+}
+
+fn snapshot_module_bindings(
+    top_scope: &BTreeMap<String, Value>,
+    binding_origins: &BTreeMap<String, BindingOrigin>,
+    module_path: &str,
+    imports: &ImportCache,
+    line: u32,
+) -> Result<Vec<(String, Value)>, BopError> {
+    // Re-exported value bindings can reuse their origin's already-external
+    // snapshot. Named functions are intentionally absent from `bindings`
+    // (their callable metadata lives in `fn_decls`), so those are snapshot
+    // locally with the module's own values instead.
+    let forwarded: BTreeMap<String, Value> = {
+        let imports = imports.borrow();
+        top_scope
+            .keys()
+            .filter_map(|name| {
+                let origin = binding_origins.get(name)?;
+                if origin.0 == module_path && origin.1 == *name {
+                    return None;
+                }
+                let ImportSlot::Loaded(origin_module) = imports.get(&origin.0)? else {
+                    return None;
+                };
+                origin_module
+                    .bindings
+                    .iter()
+                    .find(|(origin_name, _)| origin_name == &origin.1)
+                    .map(|(_, value)| (name.clone(), value.clone()))
+            })
+            .collect()
+    };
+    let local: BTreeMap<String, Value> = top_scope
+        .iter()
+        .filter(|(name, _)| !forwarded.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let mut local_snapshots: BTreeMap<String, Value> =
+        Value::__compatibility_snapshot_bindings(&local, line)?
+            .into_iter()
+            .collect();
+
+    top_scope
+        .keys()
+        .map(|name| {
+            let value = forwarded
+                .get(name)
+                .cloned()
+                .or_else(|| local_snapshots.remove(name))
+                .ok_or_else(|| error(line, format!("Missing compatibility snapshot for `{name}`")))?;
+            Ok((name.clone(), value))
+        })
+        .collect()
+}
 
 const MAX_CALL_DEPTH: usize = 64;
 
@@ -362,9 +477,17 @@ impl FreeVariableCollector {
 
 // ─── Evaluator ─────────────────────────────────────────────────────────────
 
-pub struct Evaluator<'h, H: BopHost> {
+pub struct Evaluator<'h, H: BopHost + ?Sized> {
     scopes: Vec<BTreeMap<String, Value>>,
     functions: BTreeMap<String, FnDef>,
+    binding_origins: BTreeMap<String, (String, String)>,
+    /// Executed direct root declarations, with final-site replacement and an
+    /// immutable target separate from ordinary runtime function lookup.
+    abi_declarations: Vec<(String, Visibility, Rc<BopFn>)>,
+    live_value_environments: LiveValueEnvironments,
+    live_binding_origins: LiveBindingOrigins,
+    active_value_module: String,
+    function_origin: BopFnOrigin,
     /// Module this evaluator is running. Used to tag newly
     /// declared types with the module they live in, so two
     /// modules that declare `struct Color { ... }` produce
@@ -463,9 +586,8 @@ pub struct Evaluator<'h, H: BopHost> {
     runtime_warnings: Vec<crate::error::BopWarning>,
 }
 
-impl<'h, H: BopHost> Evaluator<'h, H> {
+impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     pub fn new(host: &'h mut H, limits: BopLimits) -> Self {
-        crate::memory::bop_memory_init(limits.max_memory);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
         let root_lexical_context = Rc::new(ModuleLexicalContext {
             type_bindings: builtin_bindings.clone(),
@@ -475,6 +597,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
+            binding_origins: BTreeMap::new(),
+            abi_declarations: Vec::new(),
+            live_value_environments: Rc::new(RefCell::new(BTreeMap::new())),
+            live_binding_origins: Rc::new(RefCell::new(BTreeMap::new())),
+            active_value_module: String::from(crate::value::ROOT_MODULE_PATH),
+            function_origin: BopFnOrigin::__instance("walker"),
             current_module: String::from(crate::value::ROOT_MODULE_PATH),
             struct_defs,
             enum_defs,
@@ -509,6 +637,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         host: &'h mut H,
         limits: BopLimits,
         imports: ImportCache,
+        live_value_environments: LiveValueEnvironments,
+        live_binding_origins: LiveBindingOrigins,
+        function_origin: BopFnOrigin,
         module_path: String,
     ) -> Self {
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
@@ -520,6 +651,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
+            binding_origins: BTreeMap::new(),
+            abi_declarations: Vec::new(),
+            live_value_environments,
+            live_binding_origins,
+            active_value_module: module_path.clone(),
+            function_origin,
             current_module: module_path,
             struct_defs,
             enum_defs,
@@ -545,6 +682,9 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     }
 
     pub fn run(mut self, stmts: &[Stmt]) -> Result<(), BopError> {
+        let _memory = crate::memory::ActiveMemoryGuard::__activate_new_if_none(
+            self.limits.max_memory,
+        );
         let result = self.exec_block(stmts);
         #[cfg(not(feature = "no_std"))]
         {
@@ -589,6 +729,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 "Your code is using too much memory. Check for large strings or arrays growing in loops.",
             ));
         }
+        let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
         self.host.on_tick()?;
         Ok(())
     }
@@ -722,6 +863,73 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         self.get_var(name)
             .cloned()
             .or_else(|| self.module_alias(name).map(|module| Value::Module(Rc::clone(module))))
+    }
+
+    fn live_origin_value(&self, origin: &BindingOrigin) -> Option<Value> {
+        if self.active_value_module == origin.0 {
+            if let Some(value) = self
+                .scopes
+                .first()
+                .and_then(|environment| environment.get(&origin.1))
+            {
+                return Some(value.clone());
+            }
+        }
+        if let Some(binding) = self.binding_origins.iter().find_map(|(binding, candidate)| {
+            (candidate == origin).then_some(binding)
+        }) {
+            if let Some(value) = self
+                .scopes
+                .first()
+                .and_then(|environment| environment.get(binding))
+            {
+                return Some(value.clone());
+            }
+        }
+        self.live_value_environments
+            .borrow()
+            .get(&origin.0)
+            .and_then(|environment| environment.get(&origin.1))
+            .cloned()
+    }
+
+    fn module_binding(&self, module: &crate::value::BopModule, name: &str) -> Option<Value> {
+        if module.path == self.active_value_module {
+            if let Some(value) = self
+                .scopes
+                .first()
+                .and_then(|scope| scope.get(name))
+                .cloned()
+            {
+                return Some(value);
+            }
+        }
+        let (origin_module, origin_binding) = module.__binding_origin(name);
+        if origin_module == self.active_value_module {
+            if let Some(value) = self
+                .scopes
+                .first()
+                .and_then(|scope| scope.get(&origin_binding))
+                .cloned()
+            {
+                return Some(value);
+            }
+        }
+        if let Some(active_binding) = self.binding_origins.iter().find_map(
+            |(active_binding, active_origin)| {
+                (active_origin.0 == origin_module && active_origin.1 == origin_binding)
+                    .then_some(active_binding)
+            },
+        ) {
+            if let Some(value) = self
+                .scopes
+                .first()
+                .and_then(|scope| scope.get(active_binding))
+            {
+                return Some(value.clone());
+            }
+        }
+        module.__binding(name)
     }
 
     fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
@@ -859,7 +1067,30 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     Value::Module(module) => Some(Rc::clone(module)),
                     _ => None,
                 };
+                if self.is_module_top_scope() {
+                    if let Some(origin) = self.binding_origins.get(name).cloned() {
+                        if origin.0 != self.current_module || origin.1 != name.as_str() {
+                            if let Some(previous) = self
+                                .scopes
+                                .last_mut()
+                                .and_then(|scope| scope.remove(name))
+                            {
+                                self.live_value_environments
+                                    .borrow_mut()
+                                    .entry(origin.0)
+                                    .or_default()
+                                    .insert(origin.1, previous);
+                            }
+                        }
+                    }
+                }
                 self.define(name.clone(), val);
+                if self.is_module_top_scope() {
+                    self.binding_origins.insert(
+                        name.clone(),
+                        (self.current_module.clone(), name.clone()),
+                    );
+                }
                 let aliases = self.module_aliases.last_mut().expect("module alias scope");
                 if let Some(module) = module {
                     aliases.insert(name.clone(), module);
@@ -1052,20 +1283,37 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 Ok(Signal::None)
             }
 
-            StmtKind::FnDecl { name, params, body } => {
+            StmtKind::FnDecl { name, params, body, visibility } => {
+                let is_direct_root = self.is_module_top_scope()
+                    && self.current_module == crate::value::ROOT_MODULE_PATH;
                 let module_path = self
                     .function_modules
                     .last()
                     .cloned()
                     .unwrap_or_else(|| self.current_module.clone());
+                let definition = FnDef {
+                    params: params.clone(),
+                    body: body.clone(),
+                    module_path,
+                };
                 self.functions.insert(
                     name.clone(),
-                    FnDef {
-                        params: params.clone(),
-                        body: body.clone(),
-                        module_path,
-                    },
+                    definition.clone(),
                 );
+                if is_direct_root {
+                    let entry_target = BopFn::try_new_ast_in_module_with_origin(
+                        definition.params.clone(),
+                        Vec::new(),
+                        definition.body.clone(),
+                        Some(name.clone()),
+                        Some(definition.module_path.clone()),
+                        self.function_origin.clone(),
+                        stmt.line,
+                    )?;
+                    self.abi_declarations.retain(|(existing, _, _)| existing != name);
+                    self.abi_declarations
+                        .push((name.clone(), *visibility, entry_target));
+                }
                 Ok(Signal::None)
             }
 
@@ -1258,7 +1506,38 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             return Ok(());
         }
 
-        let bindings = self.load_module(path, line)?;
+        // A lazily evaluated dependency may import the module currently
+        // executing this `use`. Park that active environment in the shared
+        // registry so the nested evaluator moves the one authoritative value
+        // set instead of consulting cached compatibility snapshots.
+        let active_module = self.active_value_module.clone();
+        let active_origins = self.binding_origins.clone();
+        let active_environment = self
+            .scopes
+            .first_mut()
+            .map(core::mem::take)
+            .unwrap_or_default();
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(active_module.clone(), active_origins.clone());
+        put_live_environment(
+            &self.live_value_environments,
+            &active_module,
+            active_environment,
+            &active_origins,
+        );
+        let loaded = self.load_module(path, line);
+        let restored_environment = take_live_environment(
+            &self.live_value_environments,
+            &active_module,
+            &active_origins,
+        );
+        if let Some(scope) = self.scopes.first_mut() {
+            *scope = restored_environment;
+        } else {
+            self.scopes.push(restored_environment);
+        }
+        let bindings = loaded?;
 
         // Types always register under their *full identity*
         // `(module_path, type_name)`. That means two modules
@@ -1315,14 +1594,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             if bindings.bindings.iter().any(|(binding, _)| binding == name) {
                 continue;
             }
-            let value = Value::try_new_module_fn(
+            let value = BopFn::try_new_ast_in_module_with_origin(
                 fn_def.params.clone(),
                 Vec::new(),
                 fn_def.body.clone(),
                 Some(name.clone()),
-                fn_def.module_path.clone(),
+                Some(fn_def.module_path.clone()),
+                self.function_origin.clone(),
                 line,
-            )?;
+            ).map(Value::Fn)?;
             exports.push((name.clone(), value));
             fn_entries.push((name.clone(), fn_def.clone()));
         }
@@ -1405,10 +1685,22 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             // calls resolve through that module's cached bindings. Publishing
             // these entries in `self.functions` would make `helper()` visible
             // after `use module as alias`, violating the alias-only surface.
-            let module_rc = crate::value::BopModule::try_new_with_type_exports(
+            let live_bindings = exports
+                .iter()
+                .map(|(name, _)| {
+                    let origin = bindings.binding_origins
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| (path.to_string(), name.clone()));
+                    (name.clone(), origin)
+                })
+                .collect();
+            let module_rc = crate::value::BopModule::__try_new_live_with_type_exports(
                 path.to_string(),
                 exports,
                 BopTypeExports::from_origins(exposed_types),
+                live_bindings,
+                Rc::clone(&self.live_value_environments),
                 line,
             )?;
             // Bind the alias three ways:
@@ -1468,7 +1760,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     .expect("imported function scope")
                     .insert(name, fn_def);
             }
-            for (name, value) in exports {
+            for (name, mut value) in exports {
                 if skip_private && crate::naming::is_private(&name) {
                     continue;
                 }
@@ -1492,6 +1784,31 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     continue;
                 }
                 let module = bindings.module_exports.get(&name).cloned();
+                if module_top_scope {
+                    let origin = bindings.binding_origins
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| (path.to_string(), name.clone()));
+                    self.binding_origins.insert(name.clone(), origin.clone());
+                    if origin.0 != self.active_value_module || origin.1 != name {
+                        if let Some(authoritative) = self
+                            .live_value_environments
+                            .borrow_mut()
+                            .get_mut(&origin.0)
+                            .and_then(|environment| environment.remove(&origin.1))
+                        {
+                            value = authoritative;
+                        }
+                    }
+                } else {
+                    let origin = bindings.binding_origins
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| (path.to_string(), name.clone()));
+                    if let Some(current) = self.live_origin_value(&origin) {
+                        value = current;
+                    }
+                }
                 self.define(name.clone(), value);
                 if let Some(module) = module {
                     self.module_aliases
@@ -1557,7 +1874,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         }
 
         // Ask the host for source.
-        let source = match self.host.resolve_module(path) {
+        let resolved = {
+            let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
+            self.host.resolve_module(path)
+        };
+        let source = match resolved {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(e),
             None => {
@@ -1608,20 +1929,57 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         let _ = line;
         let stmts = crate::parse(source)?;
         let imports = Rc::clone(&self.imports);
+        let live_value_environments = Rc::clone(&self.live_value_environments);
+        let live_binding_origins = Rc::clone(&self.live_binding_origins);
         let limits = self.limits.clone();
         let mut sub = Evaluator::new_for_module(
             self.host,
             limits,
             imports,
+            Rc::clone(&live_value_environments),
+            Rc::clone(&live_binding_origins),
+            self.function_origin.clone(),
             module_path.to_string(),
         );
+        sub.steps = self.steps;
+        sub.rand_state = self.rand_state;
         // Run the module body to top — errors propagate as-is.
-        match sub.exec_block(&stmts)? {
+        let module_result = sub.exec_block(&stmts);
+        self.steps = sub.steps;
+        self.rand_state = sub.rand_state;
+        let module_signal = match module_result {
+            Ok(signal) => signal,
+            Err(module_error) => {
+                restore_failed_module_environment(
+                    &live_value_environments,
+                    &live_binding_origins,
+                    module_path,
+                    &mut sub.scopes,
+                    &sub.binding_origins,
+                );
+                return Err(module_error);
+            }
+        };
+        match module_signal {
             Signal::Return(_) | Signal::None => {}
             Signal::Break => {
+                restore_failed_module_environment(
+                    &live_value_environments,
+                    &live_binding_origins,
+                    module_path,
+                    &mut sub.scopes,
+                    &sub.binding_origins,
+                );
                 return Err(error(0, "break used outside of a loop"));
             }
             Signal::Continue => {
+                restore_failed_module_environment(
+                    &live_value_environments,
+                    &live_binding_origins,
+                    module_path,
+                    &mut sub.scopes,
+                    &sub.binding_origins,
+                );
                 return Err(error(0, "continue used outside of a loop"));
             }
         }
@@ -1629,12 +1987,41 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         // one remaining scope. Fns are handled separately so
         // the importer can register them in `self.functions`
         // as well as in the scope (see `exec_import`).
-        let mut bindings: Vec<(String, Value)> = Vec::new();
-        if let Some(top_scope) = sub.scopes.into_iter().next() {
-            for (k, v) in top_scope {
-                bindings.push((k, v));
+        let top_scope = sub
+            .scopes
+            .first_mut()
+            .map(core::mem::take)
+            .unwrap_or_default();
+        let bindings = match snapshot_module_bindings(
+            &top_scope,
+            &sub.binding_origins,
+            module_path,
+            &self.imports,
+            0,
+        ) {
+            Ok(bindings) => bindings,
+            Err(snapshot_error) => {
+                put_live_environment(
+                    &self.live_value_environments,
+                    module_path,
+                    top_scope,
+                    &sub.binding_origins,
+                );
+                self.live_value_environments.borrow_mut().remove(module_path);
+                self.live_binding_origins.borrow_mut().remove(module_path);
+                return Err(snapshot_error);
             }
-        }
+        };
+        let binding_origins = sub.binding_origins;
+        put_live_environment(
+            &self.live_value_environments,
+            module_path,
+            top_scope,
+            &binding_origins,
+        );
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(module_path.to_string(), binding_origins.clone());
         let fn_decls: Vec<(String, FnDef)> =
             sub.functions.into_iter().collect();
         // Type decls and methods transfer with their full
@@ -1673,6 +2060,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         });
         Ok(ModuleBindings {
             bindings,
+            binding_origins,
             fn_decls,
             struct_defs,
             enum_defs,
@@ -2128,14 +2516,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 // recursive lookups inside the body still resolve
                 // through `self.functions` (see `call_bop_fn`).
                 if let Some(f) = self.lookup_function(name) {
-                    return Value::try_new_module_fn(
+                    return BopFn::try_new_ast_in_module_with_origin(
                         f.params.clone(),
                         Vec::new(),
                         f.body.clone(),
                         Some(name.to_string()),
-                        f.module_path.clone(),
+                        Some(f.module_path.clone()),
+                        self.function_origin.clone(),
                         expr.line,
-                    );
+                    ).map(Value::Fn);
                 }
                 // Typo? Offer a "did you mean" hint if something
                 // close is visible in the current scope / fn
@@ -2235,14 +2624,15 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     .last()
                     .cloned()
                     .unwrap_or_else(|| self.current_module.clone());
-                Value::try_new_module_fn(
+                BopFn::try_new_ast_in_module_with_origin(
                     params.clone(),
                     captures,
                     body.clone(),
                     None,
-                    module_path,
+                    Some(module_path),
+                    self.function_origin.clone(),
                     expr.line,
-                )
+                ).map(Value::Fn)
             }
 
             ExprKind::MethodCall {
@@ -2290,8 +2680,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     {
                         return Ok(result.0);
                     }
-                    if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == method) {
-                        let callee = v.clone();
+                    if let Some(callee) = self.module_binding(m, method) {
                         return self.call_value(callee, eval_args, expr.line, Some(method));
                     }
                     return Err(error(
@@ -2348,12 +2737,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                         let mut full_args = Vec::with_capacity(eval_args.len() + 1);
                         full_args.push(obj_val);
                         full_args.extend(eval_args);
-                        let bop_fn = BopFn::try_new_ast_in_module(
+                        let bop_fn = BopFn::try_new_ast_in_module_with_origin(
                             m.params,
                             Vec::new(),
                             m.body,
                             None,
                             Some(m.module_path),
+                            self.function_origin.clone(),
                             expr.line,
                         )?;
                         return self.call_bop_fn(&bop_fn, full_args, expr.line);
@@ -2440,8 +2830,8 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     Value::Module(m) => {
                         // `alias.name` — look up an export in the
                         // aliased module.
-                        if let Some((_, v)) = m.bindings.iter().find(|(k, _)| k == field) {
-                            return Ok(v.clone());
+                        if let Some(v) = self.module_binding(m, field) {
+                            return Ok(v);
                         }
                         if m.has_type(field) {
                             // Types aren't first-class values; the
@@ -2763,7 +3153,20 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
     ) -> Vec<(String, Value)> {
         free_variables
             .iter()
-            .filter_map(|name| self.get_var(name).cloned().map(|value| (name.clone(), value)))
+            .filter_map(|name| {
+                // During a function call scope zero is the injected live
+                // defining-module environment. Capturing it would freeze
+                // globals inside a returned closure. At top level it remains a
+                // genuine lexical scope and keeps the language's established
+                // snapshot-capture semantics.
+                self.scopes
+                    .iter()
+                    .skip(usize::from(self.call_depth > 0))
+                    .rev()
+                    .find_map(|scope| scope.get(name))
+                    .cloned()
+                    .map(|value| (name.clone(), value))
+            })
             .collect()
     }
 
@@ -2813,6 +3216,12 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         args: Vec<Value>,
         line: u32,
     ) -> Result<Value, BopError> {
+        if !func.__is_allowed_by(&self.function_origin, "walker") {
+            return Err(error(
+                line,
+                "This function belongs to a different Bop engine instance",
+            ));
+        }
         let body = match &func.body {
             FnBody::Ast(stmts) => stmts,
             FnBody::Compiled(_) => {
@@ -2861,9 +3270,45 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             .clone()
             .unwrap_or_else(|| crate::value::ROOT_MODULE_PATH.to_string());
         let lexical_context = self.module_lexical_context(&function_module);
-        self.function_modules.push(function_module);
+        self.function_modules.push(function_module.clone());
         self.active_lexical_contexts.push(lexical_context);
-        let saved_scopes = core::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
+        let mut saved_scopes = core::mem::take(&mut self.scopes);
+        let caller_environment = if let Some(scope) = saved_scopes.first_mut() {
+            core::mem::take(scope)
+        } else {
+            BTreeMap::new()
+        };
+        let caller_binding_origins = core::mem::take(&mut self.binding_origins);
+        let caller_value_module = core::mem::replace(
+            &mut self.active_value_module,
+            function_module.clone(),
+        );
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(caller_value_module.clone(), caller_binding_origins.clone());
+        put_live_environment(
+            &self.live_value_environments,
+            &caller_value_module,
+            caller_environment,
+            &caller_binding_origins,
+        );
+        let defining_binding_origins = self
+            .live_binding_origins
+            .borrow()
+            .get(&function_module)
+            .cloned()
+            .unwrap_or_default();
+        let defining_environment = take_live_environment(
+            &self.live_value_environments,
+            &function_module,
+            &defining_binding_origins,
+        );
+        self.binding_origins = defining_binding_origins;
+        // Keep the live root environment below the call-local frame. This is
+        // intentionally moved, not cloned: reads and writes observe retained
+        // instance state, and named in-place mutation keeps a refcount-1
+        // receiver instead of defeating collection CoW.
+        self.scopes = vec![defining_environment, BTreeMap::new()];
         let type_scope_floor = self.type_bindings.len();
         self.type_bindings.push(BTreeMap::new());
         let alias_scope_floor = self.module_aliases.len();
@@ -2889,7 +3334,33 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         }
 
         let result = self.exec_block(body);
+        let updated_defining_environment = self.scopes
+            .first_mut()
+            .map(core::mem::take)
+            .unwrap_or_default();
+        let updated_defining_origins = core::mem::take(&mut self.binding_origins);
+        put_live_environment(
+            &self.live_value_environments,
+            &function_module,
+            updated_defining_environment,
+            &updated_defining_origins,
+        );
+        self.live_binding_origins
+            .borrow_mut()
+            .insert(function_module, updated_defining_origins);
+        let restored_caller_environment = take_live_environment(
+            &self.live_value_environments,
+            &caller_value_module,
+            &caller_binding_origins,
+        );
+        if let Some(scope) = saved_scopes.first_mut() {
+            *scope = restored_caller_environment;
+        } else {
+            saved_scopes.push(restored_caller_environment);
+        }
         self.scopes = saved_scopes;
+        self.binding_origins = caller_binding_origins;
+        self.active_value_module = caller_value_module;
         self.type_bindings.truncate(type_scope_floor);
         self.module_aliases.truncate(alias_scope_floor);
         self.imported_functions.truncate(alias_scope_floor);
@@ -3001,6 +3472,7 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     .map(|a| format!("{}", a))
                     .collect::<Vec<_>>()
                     .join(" ");
+                let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
                 self.host.on_print(&message);
                 return Ok(Value::None);
             }
@@ -3010,7 +3482,11 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
         }
 
         // 2. Host-provided builtins
-        if let Some(result) = self.host.call(name, &args, line) {
+        let host_result = {
+            let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
+            self.host.call(name, &args, line)
+        };
+        if let Some(result) = host_result {
             return result;
         }
 
@@ -3031,7 +3507,10 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                     hint,
                 )
             } else {
-                let host_hint = self.host.function_hint();
+                let host_hint = {
+                    let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
+                    self.host.function_hint().to_string()
+                };
                 if host_hint.is_empty() {
                     error(line, crate::error_messages::function_not_found(name))
                 } else {
@@ -3044,12 +3523,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
             }
         })?;
 
-        let bop_fn = BopFn::try_new_ast_in_module(
+        let bop_fn = BopFn::try_new_ast_in_module_with_origin(
             func.params,
             Vec::new(),
             func.body,
             Some(name.to_string()),
             Some(func.module_path),
+            self.function_origin.clone(),
             line,
         )?;
         self.call_bop_fn(&bop_fn, args, line)
@@ -3106,12 +3586,13 @@ impl<'h, H: BopHost> Evaluator<'h, H> {
                 let mut full_args = Vec::with_capacity(args.len() + 1);
                 full_args.push(obj.clone());
                 full_args.extend(args);
-                let bop_fn = BopFn::try_new_ast_in_module(
+                let bop_fn = BopFn::try_new_ast_in_module_with_origin(
                     m.params,
                     Vec::new(),
                     m.body,
                     None,
                     Some(m.module_path),
+                    self.function_origin.clone(),
                     line,
                 )?;
                 return self.call_bop_fn(&bop_fn, full_args, line);
@@ -3708,6 +4189,12 @@ fn match_struct_fields(
 pub struct ReplSession {
     scopes: Vec<BTreeMap<String, Value>>,
     functions: BTreeMap<String, FnDef>,
+    binding_origins: BTreeMap<String, (String, String)>,
+    abi_declarations: Vec<(String, Visibility, Rc<BopFn>)>,
+    live_value_environments: LiveValueEnvironments,
+    live_binding_origins: LiveBindingOrigins,
+    active_value_module: String,
+    function_origin: BopFnOrigin,
     current_module: String,
     struct_defs: BTreeMap<(String, String), Vec<String>>,
     enum_defs: BTreeMap<(String, String), Vec<VariantDecl>>,
@@ -3728,6 +4215,40 @@ impl Default for ReplSession {
 }
 
 impl ReplSession {
+    pub(crate) fn validate_instance_callable(
+        &self,
+        callable: &Value,
+        arg_count: usize,
+    ) -> Result<(), BopError> {
+        let function = match callable {
+            Value::Fn(function) => function,
+            other => {
+                return Err(error(
+                    0,
+                    format!("expected function, got {}", other.type_name()),
+                ));
+            }
+        };
+        if !function.__is_allowed_by(&self.function_origin, "walker") {
+            return Err(error(
+                0,
+                "This function belongs to a different Bop engine instance",
+            ));
+        }
+        if arg_count != function.params.len() {
+            return Err(error(
+                0,
+                format!(
+                    "Function expects {} argument{}, but got {}",
+                    function.params.len(),
+                    if function.params.len() == 1 { "" } else { "s" },
+                    arg_count,
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Build a fresh session. Type tables are pre-seeded with
     /// the engine builtins (`Result`, `RuntimeError`) so
     /// `Result::Ok(...)` resolves without an explicit `use`.
@@ -3736,6 +4257,12 @@ impl ReplSession {
         Self {
             scopes: vec![BTreeMap::new()],
             functions: BTreeMap::new(),
+            binding_origins: BTreeMap::new(),
+            abi_declarations: Vec::new(),
+            live_value_environments: Rc::new(RefCell::new(BTreeMap::new())),
+            live_binding_origins: Rc::new(RefCell::new(BTreeMap::new())),
+            active_value_module: String::from(crate::value::ROOT_MODULE_PATH),
+            function_origin: BopFnOrigin::__instance("walker"),
             current_module: String::from(crate::value::ROOT_MODULE_PATH),
             struct_defs,
             enum_defs,
@@ -3797,7 +4324,7 @@ impl ReplSession {
     /// errors, the session's state reflects whatever ran
     /// before the failure. That matches what a user would
     /// expect from an interactive prompt.
-    pub fn eval<H: BopHost>(
+    pub fn eval<H: BopHost + ?Sized>(
         &mut self,
         source: &str,
         host: &mut H,
@@ -3811,12 +4338,15 @@ impl ReplSession {
     /// Useful when the caller has already run a
     /// `parse_with_warnings` pass and wants to surface
     /// warnings before executing.
-    pub fn run_stmts<H: BopHost>(
+    pub fn run_stmts<H: BopHost + ?Sized>(
         &mut self,
         stmts: &[Stmt],
         host: &mut H,
         limits: &BopLimits,
     ) -> Result<Option<Value>, BopError> {
+        let _memory = crate::memory::ActiveMemoryGuard::__activate_new_if_none(
+            limits.max_memory,
+        );
         // If the last stmt is a bare expression we strip it
         // off, run the rest, and then evaluate it as an
         // expression so we can return its value. Anything
@@ -3844,15 +4374,13 @@ impl ReplSession {
         let result: Result<Option<Value>, BopError> = (|| {
             let sig = eval.exec_block(body)?;
             match sig {
-                Signal::Break => return Err(error(0, "break used outside of a loop")),
-                Signal::Continue => {
-                    return Err(error(0, "continue used outside of a loop"));
-                }
-                _ => {}
-            }
-            match tail_expr {
-                Some(expr) => Ok(Some(eval.eval_expr(&expr)?)),
-                None => Ok(None),
+                Signal::Break => Err(error(0, "break used outside of a loop")),
+                Signal::Continue => Err(error(0, "continue used outside of a loop")),
+                Signal::Return(_) => Ok(None),
+                Signal::None => match tail_expr {
+                    Some(expr) => Ok(Some(eval.eval_expr(&expr)?)),
+                    None => Ok(None),
+                },
             }
         })();
         // Surface any warnings accumulated on this run
@@ -3875,13 +4403,16 @@ impl ReplSession {
     /// Embedders that retain closure values from an earlier evaluation can use
     /// this to invoke them later while preserving the same functions, imports,
     /// type bindings, and module aliases that normal in-language calls see.
-    pub fn call_fn<H: BopHost>(
+    pub fn call_fn<H: BopHost + ?Sized>(
         &mut self,
         func: Value,
         args: Vec<Value>,
         host: &mut H,
         limits: &BopLimits,
     ) -> Result<Value, BopError> {
+        let _memory = crate::memory::ActiveMemoryGuard::__activate_new_if_none(
+            limits.max_memory,
+        );
         let func = match &func {
             Value::Fn(f) => Rc::clone(f),
             other => {
@@ -3898,10 +4429,54 @@ impl ReplSession {
         result
     }
 
+    pub(crate) fn instance_entries(&self) -> Vec<crate::EntryPoint> {
+        self.abi_declarations
+            .iter()
+            .filter(|(_, visibility, _)| *visibility == Visibility::Public)
+            .map(|(name, _, target)| {
+                crate::EntryPoint::__new(name.clone(), target.params.len())
+            })
+            .collect()
+    }
+
+    pub(crate) fn call_named<H: BopHost + ?Sized>(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        host: &mut H,
+        limits: &BopLimits,
+    ) -> Result<Value, BopError> {
+        let target = self.abi_declarations
+            .iter()
+            .find(|(entry_name, visibility, _)| {
+                entry_name == name && *visibility == Visibility::Public
+            })
+            .map(|(_, _, target)| Rc::clone(target))
+            .ok_or_else(|| {
+            error(0, format!("Entry point `{}` is not available", name))
+        })?;
+        if args.len() != target.params.len() {
+            return Err(error(
+                0,
+                format!(
+                    "`{}` expects {} argument{}, but got {}",
+                    name,
+                    target.params.len(),
+                    if target.params.len() == 1 { "" } else { "s" },
+                    args.len(),
+                ),
+            ));
+        }
+        let mut eval = self.take_evaluator(host, limits.clone());
+        let result = eval.call_bop_fn(&target, args.to_vec(), 0);
+        self.put_evaluator(eval);
+        result
+    }
+
     /// Internal: move the session's state into a fresh
     /// Evaluator. `host` and `limits` are the ephemeral
     /// per-run bits.
-    fn take_evaluator<'h, H: BopHost>(
+    fn take_evaluator<'h, H: BopHost + ?Sized>(
         &mut self,
         host: &'h mut H,
         limits: BopLimits,
@@ -3914,6 +4489,12 @@ impl ReplSession {
         Evaluator {
             scopes: core::mem::take(&mut self.scopes),
             functions: core::mem::take(&mut self.functions),
+            binding_origins: core::mem::take(&mut self.binding_origins),
+            abi_declarations: core::mem::take(&mut self.abi_declarations),
+            live_value_environments: Rc::clone(&self.live_value_environments),
+            live_binding_origins: Rc::clone(&self.live_binding_origins),
+            active_value_module: core::mem::take(&mut self.active_value_module),
+            function_origin: self.function_origin.clone(),
             current_module: core::mem::take(&mut self.current_module),
             struct_defs: core::mem::take(&mut self.struct_defs),
             enum_defs: core::mem::take(&mut self.enum_defs),
@@ -3942,7 +4523,7 @@ impl ReplSession {
     /// session. Also normalises scope depth back to the root
     /// so a mid-block error doesn't leave leftover pushed
     /// scopes hanging around for the next input.
-    fn put_evaluator<'h, H: BopHost>(&mut self, eval: Evaluator<'h, H>) {
+    fn put_evaluator<'h, H: BopHost + ?Sized>(&mut self, eval: Evaluator<'h, H>) {
         let mut scopes = eval.scopes;
         if scopes.len() > 1 {
             scopes.truncate(1);
@@ -3961,6 +4542,9 @@ impl ReplSession {
         }
         self.scopes = scopes;
         self.functions = eval.functions;
+        self.binding_origins = eval.binding_origins;
+        self.abi_declarations = eval.abi_declarations;
+        self.active_value_module = eval.active_value_module;
         self.current_module = eval.current_module;
         self.struct_defs = eval.struct_defs;
         self.enum_defs = eval.enum_defs;
@@ -4039,6 +4623,78 @@ mod array_mutation_tests {
 
         assert!(Rc::ptr_eq(&context, &evaluator.root_lexical_context));
         assert_eq!(Rc::strong_count(&context), 2);
+    }
+
+    struct FanoutHost {
+        modules: BTreeMap<String, String>,
+    }
+
+    impl BopHost for FanoutHost {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            None
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn facade_fanout_reuses_the_origin_compatibility_snapshot() {
+        const FACADES: usize = 8;
+        let items = (0..256)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut modules = BTreeMap::from([(
+            "leaf".to_string(),
+            format!("let items = [{items}]\nfn size() {{ return items.len() }}"),
+        )]);
+        let mut source = String::new();
+        for index in 0..FACADES {
+            modules.insert(format!("facade{index}"), "use leaf".to_string());
+            source.push_str(&format!("use facade{index} as f{index}\n"));
+            source.push_str(&format!("let size{index} = f{index}.size()\n"));
+        }
+        let statements = crate::parse(&source).unwrap();
+        let mut host = FanoutHost { modules };
+        let mut evaluator = Evaluator::new(&mut host, crate::BopLimits::standard());
+        evaluator.exec_block(&statements).unwrap();
+        for index in 0..FACADES {
+            assert!(matches!(
+                evaluator.scopes[0].get(&format!("size{index}")),
+                Some(Value::Int(256))
+            ));
+        }
+
+        let imports = evaluator.imports.borrow();
+        let ImportSlot::Loaded(leaf) = imports.get("leaf").unwrap() else {
+            panic!("leaf should be loaded")
+        };
+        let leaf_items = &leaf
+            .bindings
+            .iter()
+            .find(|(name, _)| name == "items")
+            .unwrap()
+            .1;
+        for index in 0..FACADES {
+            let ImportSlot::Loaded(facade) = imports.get(&format!("facade{index}")).unwrap()
+            else {
+                panic!("facade should be loaded")
+            };
+            let facade_items = &facade
+                .bindings
+                .iter()
+                .find(|(name, _)| name == "items")
+                .unwrap()
+                .1;
+            assert!(leaf_items.__shares_backing_with(facade_items));
+        }
     }
 
     #[test]
