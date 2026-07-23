@@ -407,6 +407,22 @@ pub enum LoopStateKind {
     Repeat,
 }
 
+/// Instruction span of one compiled source loop (`while` / `repeat`
+/// / `for`), recorded so a step-limit error can be attributed to the
+/// loop's header line no matter which instruction the budget happens
+/// to trip on. `start` covers the per-iteration entry point (the
+/// `while` condition, `RepeatNext`, or `IterNext`); one-time setup
+/// like a `repeat` count or `for` iterable stays outside the span,
+/// matching where the tree-walker enters its loop context. `end` is
+/// exclusive: the first instruction after the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopRange {
+    pub start: CodeOffset,
+    pub end: CodeOffset,
+    /// Source line of the loop header.
+    pub line: u32,
+}
+
 /// Index into a chunk's struct-definition pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StructIdx(pub u32);
@@ -630,6 +646,10 @@ pub struct Chunk {
     /// `Instr::Use`. Holds variable-length fields (path, items,
     /// alias) so the instruction payload stays `Copy`.
     pub use_specs: Vec<UseSpec>,
+    /// Instruction spans of every source loop in this chunk, used to
+    /// attribute step-limit errors to the innermost enclosing loop
+    /// header. Passive metadata — never consulted on the hot path.
+    pub loop_ranges: Vec<LoopRange>,
     /// Slot count for this chunk when it serves as a function /
     /// lambda body. Zero at the top-level program chunk (where
     /// bindings live in the BTreeMap scope). The VM uses this
@@ -716,6 +736,23 @@ impl Chunk {
 
     pub fn use_spec(&self, idx: UseIdx) -> &UseSpec {
         &self.use_specs[idx.0 as usize]
+    }
+
+    /// Header line of the outermost source loop whose instruction
+    /// span contains `offset`, if any. Loop spans nest properly, so
+    /// the outermost match is the one that starts earliest.
+    ///
+    /// Outermost (not innermost) keeps step-limit error lines stable
+    /// across engines: an infinite outer loop with a finite inner
+    /// loop trips the budget at an engine-dependent phase, sometimes
+    /// inside the inner loop and sometimes between passes, but the
+    /// outermost active loop is the same either way.
+    pub fn outermost_loop_line(&self, offset: CodeOffset) -> Option<u32> {
+        self.loop_ranges
+            .iter()
+            .filter(|range| range.start.0 <= offset.0 && offset.0 < range.end.0)
+            .min_by_key(|range| range.start.0)
+            .map(|range| range.line)
     }
 }
 

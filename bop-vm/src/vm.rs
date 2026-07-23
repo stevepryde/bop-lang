@@ -936,8 +936,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         if self.steps > self.step_budget {
             // Fatal — `try_call` can't catch this or the
             // step-limit sandbox invariant would break.
+            //
+            // Which instruction the budget trips on is an accident
+            // of step-count phase (and differs from the walker's
+            // per-statement accounting), so report the outermost
+            // active source loop's header instead — the walker does
+            // the same, keeping the two engines' error lines
+            // aligned.
             return Err(error_fatal_with_hint(
-                line,
+                self.active_loop_line().unwrap_or(line),
                 "Your code took too many steps (possible infinite loop)",
                 "Check your loops — make sure they have a condition that eventually stops them.",
             ));
@@ -963,6 +970,21 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
         self.host.on_tick()?;
         Ok(())
+    }
+
+    /// Header line of the outermost source loop the VM is currently
+    /// executing, scanning call frames outermost-first. For the
+    /// active frame `ip - 1` is the instruction being ticked; for a
+    /// caller frame it is the `Call` that entered the callee, so a
+    /// budget trip inside a loop-free callee still resolves to the
+    /// calling loop. `None` when no frame is inside a loop (e.g.
+    /// branching recursion exhausting the budget). See
+    /// [`Chunk::outermost_loop_line`] for why outermost.
+    fn active_loop_line(&self) -> Option<u32> {
+        self.frames.iter().find_map(|frame| {
+            let offset = CodeOffset(frame.ip.saturating_sub(1) as u32);
+            frame.chunk.outermost_loop_line(offset)
+        })
     }
 
     // ─── Stack helpers ───────────────────────────────────────────

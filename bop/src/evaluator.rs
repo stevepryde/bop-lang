@@ -552,6 +552,15 @@ pub struct Evaluator<'h, H: BopHost + ?Sized> {
     active_lexical_contexts: Vec<Rc<ModuleLexicalContext>>,
     host: &'h mut H,
     steps: u64,
+    /// Header lines of the source loops currently executing,
+    /// outermost first. Spans function calls (a callee runs on the
+    /// same evaluator) but not module imports (those get a fresh
+    /// sub-evaluator, mirroring the VM's nested module VM). Read
+    /// only when the step budget trips, so the error points at the
+    /// outermost active loop's header rather than whichever
+    /// statement the counter happened to cross the limit on — see
+    /// `tick`.
+    loop_lines: Vec<u32>,
     call_depth: usize,
     /// Defining module for each active function call. This keeps module-owned
     /// sibling lookup private to that function instead of leaking aliased
@@ -624,6 +633,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             active_lexical_contexts: Vec::new(),
             host,
             steps: 0,
+            loop_lines: Vec::new(),
             call_depth: 0,
             function_modules: Vec::new(),
             alias_scope_floors: Vec::new(),
@@ -678,6 +688,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             active_lexical_contexts: Vec::new(),
             host,
             steps: 0,
+            loop_lines: Vec::new(),
             call_depth: 0,
             function_modules: Vec::new(),
             alias_scope_floors: Vec::new(),
@@ -715,8 +726,19 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         if self.steps > self.limits.max_steps {
             // Fatal — `try_call` must not swallow this, or the
             // sandbox invariant breaks.
+            //
+            // Which statement the budget trips on is an accident of
+            // step-count phase (and differs from the VM's
+            // per-instruction accounting), so report the outermost
+            // active source loop's header instead — the VM does the
+            // same, keeping the two engines' error lines aligned.
+            // Outermost, not innermost: a finite inner loop inside
+            // an infinite outer loop trips at an engine-dependent
+            // phase (sometimes inside the inner loop, sometimes
+            // between passes), but the outermost active loop is the
+            // same either way.
             return Err(error_fatal_with_hint(
-                line,
+                self.loop_lines.first().copied().unwrap_or(line),
                 "Your code took too many steps (possible infinite loop)",
                 "Check your loops — make sure they have a condition that eventually stops them.",
             ));
@@ -1138,22 +1160,30 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
 
             StmtKind::While { condition, body } => {
-                loop {
-                    self.tick(stmt.line)?;
-                    if !self.eval_expr(condition)?.is_truthy() {
-                        break;
+                // The loop-line entry must come off on every exit —
+                // including caught errors — so the body runs inside
+                // a closure and the pop is unconditional.
+                self.loop_lines.push(stmt.line);
+                let result = (|| {
+                    loop {
+                        self.tick(stmt.line)?;
+                        if !self.eval_expr(condition)?.is_truthy() {
+                            break;
+                        }
+                        self.push_scope();
+                        let sig = self.exec_block(body)?;
+                        self.pop_scope();
+                        match sig {
+                            Signal::Break => break,
+                            Signal::Continue => continue,
+                            Signal::Return(v) => return Ok(Signal::Return(v)),
+                            Signal::None => {}
+                        }
                     }
-                    self.push_scope();
-                    let sig = self.exec_block(body)?;
-                    self.pop_scope();
-                    match sig {
-                        Signal::Break => break,
-                        Signal::Continue => continue,
-                        Signal::Return(v) => return Ok(Signal::Return(v)),
-                        Signal::None => {}
-                    }
-                }
-                Ok(Signal::None)
+                    Ok(Signal::None)
+                })();
+                self.loop_lines.pop();
+                result
             }
 
             StmtKind::Repeat { count, body } => {
@@ -1167,19 +1197,26 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         ));
                     }
                 };
-                for _ in 0..n.max(0) {
-                    self.tick(stmt.line)?;
-                    self.push_scope();
-                    let sig = self.exec_block(body)?;
-                    self.pop_scope();
-                    match sig {
-                        Signal::Break => break,
-                        Signal::Continue => continue,
-                        Signal::Return(v) => return Ok(Signal::Return(v)),
-                        Signal::None => {}
+                // Count evaluation stays outside the loop context —
+                // it runs once, like the VM's `MakeRepeatCount`.
+                self.loop_lines.push(stmt.line);
+                let result = (|| {
+                    for _ in 0..n.max(0) {
+                        self.tick(stmt.line)?;
+                        self.push_scope();
+                        let sig = self.exec_block(body)?;
+                        self.pop_scope();
+                        match sig {
+                            Signal::Break => break,
+                            Signal::Continue => continue,
+                            Signal::Return(v) => return Ok(Signal::Return(v)),
+                            Signal::None => {}
+                        }
                     }
-                }
-                Ok(Signal::None)
+                    Ok(Signal::None)
+                })();
+                self.loop_lines.pop();
+                result
             }
 
             StmtKind::ForIn {
@@ -1210,20 +1247,25 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             .collect(),
                         _ => unreachable!(),
                     };
-                    for item in items {
-                        self.tick(stmt.line)?;
-                        self.push_scope();
-                        self.define(var.clone(), item);
-                        let sig = self.exec_block(body)?;
-                        self.pop_scope();
-                        match sig {
-                            Signal::Break => break,
-                            Signal::Continue => continue,
-                            Signal::Return(v) => return Ok(Signal::Return(v)),
-                            Signal::None => {}
+                    self.loop_lines.push(stmt.line);
+                    let result = (|| {
+                        for item in items {
+                            self.tick(stmt.line)?;
+                            self.push_scope();
+                            self.define(var.clone(), item);
+                            let sig = self.exec_block(body)?;
+                            self.pop_scope();
+                            match sig {
+                                Signal::Break => break,
+                                Signal::Continue => continue,
+                                Signal::Return(v) => return Ok(Signal::Return(v)),
+                                Signal::None => {}
+                            }
                         }
-                    }
-                    return Ok(Signal::None);
+                        Ok(Signal::None)
+                    })();
+                    self.loop_lines.pop();
+                    return result;
                 }
                 // Protocol path: anything else must either be an
                 // iterator already (Value::Iter, or a user value
@@ -1251,35 +1293,42 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         ));
                     }
                 };
-                loop {
-                    self.tick(stmt.line)?;
-                    let next_val =
-                        self.call_method_full(&iterator, "next", Vec::new(), stmt.line)?;
-                    let item = match unwrap_iter_result(&next_val) {
-                        Some(IterStep::Next(v)) => v,
-                        Some(IterStep::Done) => break,
-                        None => {
-                            return Err(error(
-                                stmt.line,
-                                format!(
-                                    "`.next()` on a `for` iterator must return `Iter::Next(v)` or `Iter::Done`, got {}",
-                                    next_val.inspect()
-                                ),
-                            ));
+                // Iterator acquisition above stays outside the loop
+                // context — it runs once, like the VM's `MakeIter`.
+                self.loop_lines.push(stmt.line);
+                let result = (|| {
+                    loop {
+                        self.tick(stmt.line)?;
+                        let next_val =
+                            self.call_method_full(&iterator, "next", Vec::new(), stmt.line)?;
+                        let item = match unwrap_iter_result(&next_val) {
+                            Some(IterStep::Next(v)) => v,
+                            Some(IterStep::Done) => break,
+                            None => {
+                                return Err(error(
+                                    stmt.line,
+                                    format!(
+                                        "`.next()` on a `for` iterator must return `Iter::Next(v)` or `Iter::Done`, got {}",
+                                        next_val.inspect()
+                                    ),
+                                ));
+                            }
+                        };
+                        self.push_scope();
+                        self.define(var.clone(), item);
+                        let sig = self.exec_block(body)?;
+                        self.pop_scope();
+                        match sig {
+                            Signal::Break => break,
+                            Signal::Continue => continue,
+                            Signal::Return(v) => return Ok(Signal::Return(v)),
+                            Signal::None => {}
                         }
-                    };
-                    self.push_scope();
-                    self.define(var.clone(), item);
-                    let sig = self.exec_block(body)?;
-                    self.pop_scope();
-                    match sig {
-                        Signal::Break => break,
-                        Signal::Continue => continue,
-                        Signal::Return(v) => return Ok(Signal::Return(v)),
-                        Signal::None => {}
                     }
-                }
-                Ok(Signal::None)
+                    Ok(Signal::None)
+                })();
+                self.loop_lines.pop();
+                result
             }
 
             StmtKind::FnDecl { name, params, body, visibility } => {
@@ -4496,6 +4545,7 @@ impl ReplSession {
             rand_state: self.rand_state,
             host,
             steps: 0,
+            loop_lines: Vec::new(),
             call_depth: 0,
             function_modules: Vec::new(),
             alias_scope_floors: Vec::new(),

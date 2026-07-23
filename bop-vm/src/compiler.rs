@@ -20,7 +20,8 @@ use alloc::collections::BTreeMap;
 use crate::chunk::{
     CaptureSource, Chunk, CodeOffset, ConstIdx, Constant, ConstructFieldsIdx, EnumConstructShape,
     EnumDef, EnumIdx, EnumVariantDef, EnumVariantShape, FnDef, FnIdx, InPlaceAssignOp, Instr,
-    InterpIdx, InterpPart, InterpRecipe, LoopStateKind, NameIdx, NamespaceIdx, NamespaceRef,
+    InterpIdx, InterpPart, InterpRecipe, LoopRange, LoopStateKind, NameIdx, NamespaceIdx,
+    NamespaceRef,
     PatternIdx, PatternRecipe, SlotIdx, StructDef, StructIdx,
 };
 use bop::parser::{MatchArm, Pattern, VariantKind};
@@ -660,6 +661,11 @@ impl Compiler {
                 for patch in ctx.break_patches {
                     self.patch_jump(patch, end);
                 }
+                self.chunk.loop_ranges.push(LoopRange {
+                    start: loop_start,
+                    end,
+                    line,
+                });
             }
 
             StmtKind::Repeat { count, body } => {
@@ -684,6 +690,11 @@ impl Compiler {
                 for patch in ctx.break_patches {
                     self.patch_jump(patch, end);
                 }
+                self.chunk.loop_ranges.push(LoopRange {
+                    start: loop_start,
+                    end,
+                    line,
+                });
             }
 
             StmtKind::ForIn {
@@ -736,6 +747,11 @@ impl Compiler {
                 for patch in ctx.break_patches {
                     self.patch_jump(patch, end);
                 }
+                self.chunk.loop_ranges.push(LoopRange {
+                    start: loop_start,
+                    end,
+                    line,
+                });
             }
 
             StmtKind::FnDecl {
