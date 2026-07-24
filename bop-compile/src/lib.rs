@@ -66,6 +66,8 @@
 //! error rollback, forwarding, and mutating receiver behavior. See the
 //! [reference-parameters
 //! guide](https://bop-lang.com/docs/functions/reference-parameters/).
+//! Generated user methods also preserve `ref self` receiver write-back and
+//! rollback; ordinary `self` receivers are read-only.
 //!
 //! Unsandboxed library output exposes the one-shot `run` API and deliberately
 //! omits accounting overhead. Do not run untrusted programs through that

@@ -355,6 +355,64 @@ print(value)
 
 #[test]
 #[ignore]
+fn e2e_ref_method_receiver_commit_order_and_rollback() {
+    let source = r#"
+struct Counter { amount }
+fn Counter.add(ref self, amount) {
+  self.amount = self.amount + amount
+  return self.amount
+}
+fn Counter.fail(ref self) {
+  self.amount = 99
+  panic("stop")
+}
+fn Counter.add_from(ref self, ref other, extra) {
+  self.amount = self.amount + other + extra
+  other = other + 1
+  return self.amount
+}
+fn Counter.push(ref self, amount) {
+  self.amount += amount
+}
+let counter = Counter { amount: 1 }
+fn side() {
+  counter.amount = 10
+  return 2
+}
+print(counter.add(side()), counter.amount)
+fn attempt() { counter.fail() }
+print(try_call(attempt), counter.amount)
+let other = 3
+print(counter.add_from(ref other, 1), counter.amount, other)
+counter.push(1)
+print(counter.amount)
+"#;
+    assert_eq!(
+        run_aot(source, "method_receiver_ref_native"),
+        "12 12\nResult::Err(RuntimeError { message: \"stop\", line: 9 }) 12\n16 16 4\n17"
+    );
+    let sandbox = run_aot_with_opts(
+        source,
+        "method_receiver_ref_sandbox",
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        sandbox.status,
+        Some(0),
+        "sandbox stderr:\n{}",
+        sandbox.stderr
+    );
+    assert_eq!(
+        sandbox.stdout,
+        "12 12\nResult::Err(RuntimeError { message: \"stop\", line: 9 }) 12\n16 16 4\n17"
+    );
+}
+
+#[test]
+#[ignore]
 fn e2e_module_export_ref_parameters_preflight_commit_and_rollback() {
     let source = r#"
 use dep as api

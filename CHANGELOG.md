@@ -17,10 +17,12 @@ embedding APIs across all three execution engines.
   origin tracking, live module bindings, and transitive re-exports.
 - Add `const` and enforce lowercase value names, ALL_CAPS constants, and
   UpperCamel-style type/variant names at parse time.
-- Add explicit second-class `ref` parameters to user-defined functions and
-  non-receiver method parameters. Calls use transactional copy-in/copy-out:
-  distinct mutable plain-variable targets commit together after a normal
-  return and roll back together on runtime or resource errors.
+- Add explicit second-class `ref` parameters to user-defined functions,
+  method parameters, and method receivers. `ref self` updates a mutable
+  plain-variable receiver; ordinary `self` is read-only and mutation through it
+  is a parse error. Calls use transactional copy-in/copy-out: distinct mutable
+  targets commit together after a normal return and roll back together on
+  runtime or resource errors.
 - Restore `//` line comments. Integer division now uses
   `(left / right).to_int()` because `/` always returns `number`.
 - Move introspection, conversion, collection, string, and math operations to

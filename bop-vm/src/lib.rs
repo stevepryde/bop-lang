@@ -102,6 +102,9 @@
 //! [reference-parameters
 //! guide](https://bop-lang.com/docs/functions/reference-parameters/) for the
 //! complete target, forwarding, evaluation-order, and method rules.
+//! User-defined `ref self` receivers use the same transactional commit and
+//! rollback path as explicit reference arguments; ordinary `self` is
+//! read-only.
 //!
 //! # Features
 //!

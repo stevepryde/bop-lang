@@ -114,8 +114,12 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   True temporary receivers mutate and discard their owned value while
   preserving the method's ordinary result. Index and field receivers raise the
   canonical catchable unsupported-place diagnostic instead of silently losing
-  mutation. User-defined method receivers remain value parameters, though
-  their non-receiver parameters may be explicit refs.
+  mutation. A user-defined method opts into the same transactional receiver
+  model with `ref self`; method syntax supplies the call-site reference
+  implicitly. Its receiver must be a mutable plain variable, joins explicit ref
+  arguments in one atomic transaction, and is snapshotted after ordinary
+  arguments. An ordinary value receiver is read-only, and mutation through it
+  is rejected during parsing with a `ref self` hint.
 
 ## Acceptance criteria
 
@@ -191,7 +195,9 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
 - **AC-RUN-017:** Cross-engine tests cover named and grouped implicit-ref
   mutating receivers, argument-before-snapshot order, true-temporary method
   results, the line-aware unsupported index/field receiver diagnostic, and
-  value-receiver behaviour for user-defined methods.
+  user-defined `ref self` commit/rollback, invalid and duplicate receiver
+  fences, receiver-plus-ref-argument atomicity, and value-receiver mutation
+  diagnostics.
 
 ## Design notes
 

@@ -953,6 +953,12 @@ fn __bop_declaration_alias_mut<'v>(
     /*__BOP_RUNTIME_VIS__*/args: ::std::vec::Vec<::bop::value::Value>,
 }
 
+/*__BOP_RUNTIME_VIS__*/struct __BopMethodOutcome {
+    /*__BOP_RUNTIME_VIS__*/value: ::bop::value::Value,
+    /*__BOP_RUNTIME_VIS__*/receiver: ::bop::value::Value,
+    /*__BOP_RUNTIME_VIS__*/args: ::std::vec::Vec<::bop::value::Value>,
+}
+
 /*__BOP_RUNTIME_VIS__*/struct AotClosure {
     /*__BOP_RUNTIME_VIS__*/callable: ::std::rc::Rc<
         dyn for<'__a> Fn(

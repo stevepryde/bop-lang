@@ -109,13 +109,19 @@ behaviour.
   proposal owns the behavior. A future extension may admit those places for
   both explicit `ref` arguments and implicit-ref method receivers as one
   coherent feature.
-- **REF-011 — Existing method dispatch.** The implicit-ref rules apply only to
-  built-in methods designated as mutating. User-defined methods, including ones
-  with the same name as a built-in, retain a value receiver. Their non-receiver
-  parameters may be declared and called with explicit `ref` under REF-001; the
-  receiver itself may not. Built-in functions, built-in method arguments, and
-  host functions are value-only in the initial feature. An explicit `ref`
-  marker supplied to any of them must fail mode preflight before invocation or
+- **REF-011 — User-defined method receivers.** A user-defined method may
+  declare its first parameter as `ref self`. Method-call syntax supplies that
+  receiver reference implicitly: `value.update()`, not a call-site `ref`
+  marker. The receiver must be a mutable plain-variable binding and joins any
+  explicit ref arguments in the same ordered snapshot/atomic commit. Constants,
+  temporaries, indexes, fields, captures, and duplicate receiver/argument
+  identities fail preflight before ordinary argument evaluation. An ordinary
+  value receiver is read-only: assigning to it or through one of its
+  fields/indexes is a parse error with a `ref self` hint. User-defined dispatch
+  still wins over same-named built-ins.
+- **REF-012 — Value-only boundaries.** Built-in functions, built-in method
+  arguments, and host functions are value-only. An explicit `ref` marker
+  supplied to any of them must fail mode preflight before invocation or
   argument-expression evaluation.
 
 ## Implementation acceptance criteria
@@ -155,8 +161,10 @@ behaviour.
   `items`; `[1, 2].push(3)` returns `none` and discards its temporary mutation;
   `([1, 2]).pop()` returns `2` and discards its temporary mutation; and grouped
   or ungrouped index/field receivers produce the REF-010 diagnostic and hint.
-  User-defined methods keep a value receiver while allowing explicit `ref` on
-  declared non-receiver parameters.
+  A user-defined `ref self` receiver updates a mutable variable transactionally
+  without a call-site marker, joins explicit ref arguments in the same
+  transaction, and rejects invalid or duplicate targets before argument side
+  effects. Mutation through an ordinary value receiver is a parse error.
 - **AC-REF-008 — Cross-engine evidence:** Differential coverage proves result,
   mutation, evaluation order, diagnostics, normal-return commit, resource-limit
   rollback, and every other rollback path agree across walker, VM, and AOT.

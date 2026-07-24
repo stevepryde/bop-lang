@@ -15,8 +15,9 @@ A small, dynamically-typed, **embeddable** programming language for Rust hosts â
 - **One-shot or persistent.** Run isolated scripts, or load a `BopInstance`
   whose `pub fn` entries, globals, modules, callbacks, types, methods, and RNG
   state remain live across host calls.
-- **Explicit in-place APIs.** Second-class `ref` parameters make caller
-  mutation visible at both sites and commit transactionally on normal return.
+- **Explicit in-place APIs.** Second-class `ref` parameters and `ref self`
+  method receivers make caller mutation visible in declarations and commit
+  transactionally on normal return. Ordinary `self` receivers are read-only.
   Read the [reference-parameters
   guide](https://bop-lang.com/docs/functions/reference-parameters/).
 - **`no_std` + WASM.** Core crate builds clean for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade.
@@ -73,6 +74,14 @@ fn add_score(ref score, amount) {
 }
 let score = 10
 add_score(ref score, 5)
+
+// Mutable method receivers (the call site stays natural)
+struct Counter { value }
+fn Counter.increment(ref self) {
+    self.value += 1
+}
+let counter = Counter { value: 0 }
+counter.increment()
 
 // Stdlib
 use std.math

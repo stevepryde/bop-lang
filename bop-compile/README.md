@@ -77,6 +77,8 @@ copy-in/copy-out staging, multi-target commit, error rollback, forwarding, and
 mutating receiver behavior match the walker and VM. Generated persistent
 `BopInstance` calls remain value-only. See the [reference-parameters
 guide](https://bop-lang.com/docs/functions/reference-parameters/).
+User-defined `ref self` receivers share that transaction with any explicit ref
+arguments, while ordinary `self` receivers are read-only.
 
 ## Selling points
 

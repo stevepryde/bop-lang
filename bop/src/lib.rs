@@ -85,6 +85,12 @@
 //! errors. Reference parameters may be forwarded but not captured. Built-in
 //! and host functions are value-only.
 //!
+//! User-defined methods may declare `ref self` to update a mutable
+//! plain-variable receiver. Method-call syntax supplies that reference
+//! implicitly (`counter.increment()`); the receiver joins explicit reference
+//! arguments in the same transaction. Ordinary `self` receivers are read-only,
+//! and assigning through one is a parse error with a `ref self` hint.
+//!
 //! [`BopInstance::call`] and [`BopInstance::call_value`] also accept values,
 //! not Bop bindings, and reject ref-bearing callables before execution. Keep
 //! host-facing `pub fn` entries value-only and perform ref calls inside Bop.
@@ -1126,8 +1132,16 @@ print([items, hits, result.is_err()])"#,
             ),
             "[[], [], true]"
         );
-        assert!(parse_err("struct Box { value }\nfn Box.set(ref self) { }")
-            .contains("receiver can't be declared with `ref`"));
+        assert_eq!(
+            say(
+                r#"struct Box { value }
+fn Box.set(ref self, value) { self.value = value }
+let item = Box { value: 1 }
+item.set(4)
+print(item.value)"#
+            ),
+            "4"
+        );
     }
 
     #[test]
@@ -4102,18 +4116,12 @@ print(c.n)"#),
     }
 
     #[test]
-    fn method_does_not_mutate_receiver() {
-        // Mutating `self` inside a method doesn't propagate —
-        // Bop passes self by value like any other parameter.
-        // Users who want mutation rebind the result.
-        assert_eq!(
-            say(r#"struct Counter { n }
-fn Counter.bump(self) { self.n = self.n + 1 }
-let c = Counter { n: 5 }
-c.bump()
-print(c.n)"#),
-            "5"
+    fn value_method_receiver_cannot_be_mutated() {
+        let error = parse_err(
+            r#"struct Counter { n }
+fn Counter.bump(self) { self.n = self.n + 1 }"#,
         );
+        assert!(error.contains("can't mutate value receiver `self`"));
     }
 
     #[test]

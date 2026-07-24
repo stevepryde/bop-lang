@@ -93,6 +93,8 @@ as the walker and AOT engine. Rust `BopInstance::call` and `call_value`
 arguments remain value-only; expose a value-only `pub fn` that performs any
 ref call inside Bop. See the [reference-parameters
 guide](https://bop-lang.com/docs/functions/reference-parameters/).
+User-defined methods may declare `ref self` for a transactional mutable
+receiver; ordinary `self` receivers are read-only.
 
 ## Bytecode tooling
 

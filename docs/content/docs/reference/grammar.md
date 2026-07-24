@@ -140,10 +140,14 @@ Note: `pub` is accepted only on a named `fn` at the direct program root; it
 marks an entry for the stateful embedding ABI. It is not valid on methods,
 function expressions, or declarations nested in a block or callable.
 
-`ref` marks copy-in/copy-out parameters and must appear at the same positional
-argument at the call site. Although the grammar accepts an expression after an
-argument marker so parsing stays independent of the dynamic callee, semantic
-validation requires a mutable, uncaptured plain variable. See
+`ref` marks copy-in/copy-out parameters and normally appears at the same
+positional argument at the call site. A method's first parameter is the
+exception: `fn Point.move(ref self, dx) { ... }` is called as `point.move(dx)`
+because method syntax supplies the receiver reference implicitly. Although the
+grammar accepts an expression after an argument marker so parsing stays
+independent of the dynamic callee, semantic validation requires a mutable,
+uncaptured plain variable. Ordinary method receivers are read-only, and
+assigning through one is a parse error. See
 [Reference Parameters](/docs/functions/reference-parameters/).
 
 `methodDecl`, enum variant `IDENT`s, and `struct` names must start with an

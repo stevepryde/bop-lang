@@ -178,21 +178,48 @@ with the callable.
 
 ## Methods and mutating receivers
 
-User-defined method receivers always use ordinary value passing. A method may
-declare explicit reference parameters after `self`:
+User-defined methods can use either a read-only value receiver or a mutable
+reference receiver. An ordinary `self` is a value snapshot. Assigning to
+`self`, one of its fields, or one of its indexes is a parse error instead of a
+silent mutation of a discarded copy.
+
+Declare `ref self` when a method should update its caller:
 
 ```bop
 struct Counter { amount }
 
-fn Counter.add_to(self, ref total) {
+fn Counter.add(ref self, amount) {
+  self.amount += amount
+}
+
+let counter = Counter { amount: 3 }
+counter.add(4)
+print(counter.amount)    // 7
+```
+
+Method-call syntax supplies the receiver reference implicitly, so the call is
+`counter.add(4)`, not `ref counter.add(4)`. The receiver must be a mutable
+plain-variable binding. Constants, temporaries, indexes, fields, and captured
+bindings are rejected before ordinary argument side effects.
+
+A method may also declare explicit reference parameters after the receiver:
+
+```bop
+fn Counter.transfer(ref self, ref total) {
   total += self.amount
+  self.amount = 0
 }
 
 let counter = Counter { amount: 3 }
 let total = 4
-counter.add_to(ref total)
-print(total)    // 7
+counter.transfer(ref total)
+print(counter.amount, total)    // 0 7
 ```
+
+The mutable receiver and explicit targets are snapshotted in parameter order
+after ordinary arguments run. They must identify distinct bindings and commit
+together on a normal return; any runtime or resource error rolls all of them
+back.
 
 Built-in mutating array methods use the same transaction model implicitly for
 a mutable plain-variable receiver. You do not write `ref` before the receiver:

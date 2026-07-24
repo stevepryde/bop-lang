@@ -194,9 +194,10 @@ pub enum Instr {
         site: CallSiteIdx,
         nested_place: bool,
     },
-    /// Preflight a named method receiver without snapshotting a built-in
-    /// mutator. The VM snapshots value receivers immediately, but defers an
-    /// implicit-ref array receiver until ordinary arguments have run.
+    /// Preflight a named method receiver without snapshotting a mutable
+    /// receiver. The VM snapshots value receivers immediately, but defers a
+    /// built-in mutator or user-defined `ref self` receiver until ordinary
+    /// arguments have run.
     PrepareMethodNamed {
         target: NamespaceRef,
         method: NameIdx,

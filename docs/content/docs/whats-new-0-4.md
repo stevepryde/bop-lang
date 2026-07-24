@@ -147,9 +147,11 @@ and fatal sandbox errors roll the call back, including errors caught by
 Reference parameters work through first-class function aliases, may be
 forwarded into another ref call, and are supported by the walker, VM, and AOT
 engines. Built-in and host functions remain value-only, as do Rust
-`BopInstance::call` and `call_value` arguments. User-defined methods can place
-explicit refs after their value receiver, while built-in array mutators use the
-same transaction model implicitly for a named receiver.
+`BopInstance::call` and `call_value` arguments. User-defined methods can declare
+`ref self` to update a mutable plain-variable receiver and can place explicit
+refs after it. Ordinary `self` receivers are read-only, so attempting to mutate
+one is a parse error rather than a silently discarded change. Built-in array
+mutators use the same transaction model implicitly for a named receiver.
 
 Read [Reference Parameters](/docs/functions/reference-parameters/) for target
 rules, evaluation order, forwarding, rollback, methods, and embedding
