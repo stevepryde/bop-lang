@@ -166,7 +166,6 @@ impl DictKeyIndex {
         self.rehash_moves.get()
     }
 
-    #[cfg(test)]
     pub(super) fn entry_count(&self) -> usize {
         self.len
     }
