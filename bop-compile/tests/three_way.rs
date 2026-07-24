@@ -3527,6 +3527,13 @@ print(2.pow(10))"#,
         &[],
     ),
     (
+        "rounding_methods_respect_i64_boundaries",
+        r#"print(9223372036854775808.0.floor().type(), 9223372036854775808.0.ceil().type(), 9223372036854775808.0.round().type())
+print((-9223372036854775808.0).floor(), (-9223372036854775808.0).ceil(), (-9223372036854775808.0).round())
+print(9223372036854774784.0.floor(), 9223372036854774784.0.ceil(), 9223372036854774784.0.round())"#,
+        &[],
+    ),
+    (
         "imported_fn_calls_sibling_fn",
         r#"use helpers
 print(quadruple(3))"#,
@@ -3760,6 +3767,22 @@ fn three_way_diff() {
             modules,
         });
     }
+    assert_three_way(&entries);
+}
+
+#[test]
+#[ignore]
+fn three_way_rounding_methods_respect_i64_boundaries() {
+    let entries = IMPORTS_CORPUS
+        .iter()
+        .filter(|(name, _, _)| *name == "rounding_methods_respect_i64_boundaries")
+        .map(|(name, source, modules)| CorpusEntry {
+            name,
+            source,
+            modules,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
     assert_three_way(&entries);
 }
 

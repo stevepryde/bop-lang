@@ -481,6 +481,9 @@ pub fn string_method_in(
 mod tests {
     use super::*;
 
+    const TWO_TO_63: f64 = 9_223_372_036_854_775_808.0;
+    const LARGEST_IN_RANGE_F64: f64 = 9_223_372_036_854_774_784.0;
+
     fn ints(value: &Value) -> Vec<i64> {
         let Value::Array(items) = value else {
             panic!("expected an array");
@@ -594,6 +597,35 @@ mod tests {
             err.message,
             format!("Remove index {} is out of bounds", i64::MIN)
         );
+    }
+
+    #[test]
+    fn rounding_methods_preserve_values_at_i64_boundaries() {
+        for method in ["floor", "ceil", "round"] {
+            let (above, update) =
+                numeric_method(&Value::Number(TWO_TO_63), method, &[], 9).unwrap();
+            assert!(update.is_none());
+            assert!(
+                matches!(above, Value::Number(value) if value == TWO_TO_63),
+                ".{method}() converted 2^63 to an Int"
+            );
+
+            let (minimum, update) =
+                numeric_method(&Value::Number(i64::MIN as f64), method, &[], 9).unwrap();
+            assert!(update.is_none());
+            assert!(
+                matches!(minimum, Value::Int(i64::MIN)),
+                ".{method}() did not preserve i64::MIN"
+            );
+
+            let (largest, update) =
+                numeric_method(&Value::Number(LARGEST_IN_RANGE_F64), method, &[], 9).unwrap();
+            assert!(update.is_none());
+            assert!(
+                matches!(largest, Value::Int(value) if value == LARGEST_IN_RANGE_F64 as i64),
+                ".{method}() did not convert the largest in-range f64"
+            );
+        }
     }
 }
 

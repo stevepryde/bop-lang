@@ -2554,6 +2554,26 @@ fn core_math_builtins_no_import_diff() {
 }
 
 #[test]
+fn rounding_methods_respect_i64_boundaries_diff() {
+    set_modules(&[]);
+    let outcome = run_both(
+        r#"print(9223372036854775808.0.floor().type(), 9223372036854775808.0.ceil().type(), 9223372036854775808.0.round().type())
+print((-9223372036854775808.0).floor(), (-9223372036854775808.0).ceil(), (-9223372036854775808.0).round())
+print(9223372036854774784.0.floor(), 9223372036854774784.0.ceil(), 9223372036854774784.0.round())"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "program errored: {:?}", outcome.error);
+    assert_eq!(
+        outcome.prints,
+        [
+            "number number number",
+            "-9223372036854775808 -9223372036854775808 -9223372036854775808",
+            "9223372036854774784 9223372036854774784 9223372036854774784",
+        ]
+    );
+}
+
+#[test]
 fn imported_fn_can_call_sibling_fn_diff() {
     // Regression for the phase-7 use path: an imported fn
     // whose body references another imported sibling needs to
