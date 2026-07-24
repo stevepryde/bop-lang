@@ -48,10 +48,7 @@ pub fn compile_file(input: &str, output: Option<&str>, emit_rs: bool, keep: bool
     // in `bop-std` first for canonical stdlib names, then fall
     // back to a filesystem search rooted at the input's parent
     // directory so `use ./helpers` keeps working.
-    let input_dir = input_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let input_dir = crate::entry_path::module_root(&input_path);
     let resolver = make_resolver(input_dir);
 
     let opts = Options {
@@ -174,17 +171,14 @@ fn build_native(
         return Err(ExitCode::from(1));
     }
 
-    // `cargo build --release` — stdout goes through, stderr
-    // prints cargo's own diagnostics if the build fails. We
-    // don't try to suppress or reformat them; they're
-    // generally the right thing for a user to see.
-    let status = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .current_dir(&scratch)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
+    // Keep Cargo's artifact location independent of ambient
+    // `CARGO_TARGET_DIR` and global Cargo configuration. The
+    // explicit target dir makes the copy path below authoritative.
+    //
+    // Stdout goes through and stderr prints cargo's own diagnostics
+    // if the build fails. We don't try to suppress or reformat them;
+    // they're generally the right thing for a user to see.
+    let status = cargo_build_command(&scratch).status();
     let status = match status {
         Ok(s) => s,
         Err(e) => {
@@ -200,11 +194,21 @@ fn build_native(
         return Err(ExitCode::from(1));
     }
 
-    // Copy the produced binary to the user-facing output.
-    let mut built = scratch.join("target/release").join(&target_name);
-    if cfg!(windows) {
-        built.set_extension("exe");
-    }
+    // Copy the produced binary to the user-facing output. Cargo uses
+    // `target/release` by default and `target/<triple>/release` when a build
+    // target is configured. The scratch root is private and fresh, so a
+    // narrowly bounded scan can require exactly one regular-file candidate
+    // without trusting an ambient target string as a path.
+    let built = match find_built_binary(&scratch.join("target"), &target_name) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!(
+                "error locating built binary `{target_name}` under `{}`: {e}",
+                scratch.join("target").display()
+            );
+            return Err(ExitCode::from(1));
+        }
+    };
     if let Err(e) = std::fs::copy(&built, output_path) {
         eprintln!(
             "error copying built binary `{}` → `{}`: {e}",
@@ -228,6 +232,83 @@ fn build_native(
     }
 
     Ok(scratch)
+}
+
+fn cargo_build_command(scratch: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .arg("build")
+        .arg("--release")
+        .arg("--target-dir")
+        .arg(scratch.join("target"))
+        .current_dir(scratch)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    command
+}
+
+fn find_built_binary(target_dir: &Path, target_name: &str) -> std::io::Result<PathBuf> {
+    let mut candidates = Vec::new();
+    collect_binary_candidates(&target_dir.join("release"), target_name, &mut candidates)?;
+
+    // A configured Cargo target inserts exactly one directory between the
+    // target root and profile. Do not recurse or construct a path from
+    // `CARGO_BUILD_TARGET`: only direct, real directories inside the private
+    // scratch target root are eligible.
+    for entry in std::fs::read_dir(target_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        collect_binary_candidates(&entry.path().join("release"), target_name, &mut candidates)?;
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [built] => Ok(built.clone()),
+        [] => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no executable found in a release artifact directory",
+        )),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "multiple executable candidates found: {}",
+                candidates
+                    .iter()
+                    .map(|path| format!("`{}`", path.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
+    }
+}
+
+fn collect_binary_candidates(
+    profile_dir: &Path,
+    target_name: &str,
+    candidates: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    // Cargo names executables for the build target, not the host running this
+    // CLI. Consider both native desktop forms so Unix → Windows and Windows →
+    // Unix cross-target configurations work without deriving behavior from an
+    // ambient target string.
+    for file_name in [target_name.to_string(), format!("{target_name}.exe")] {
+        let candidate = profile_dir.join(file_name);
+        if is_regular_file(&candidate)? {
+            candidates.push(candidate);
+        }
+    }
+    Ok(())
+}
+
+fn is_regular_file(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn cargo_available() -> bool {
@@ -371,15 +452,27 @@ fn cargo_target_name(stem: &str) -> String {
 /// library code. Published builds leave the env var unset and
 /// resolve against crates.io.
 fn manifest_for_output(stem: &str) -> String {
+    let dev_workspace = std::env::var("BOP_DEV_WORKSPACE")
+        .ok()
+        .filter(|root| !root.is_empty());
+    manifest_for_output_with_workspace(stem, dev_workspace.as_deref())
+}
+
+fn manifest_for_output_with_workspace(stem: &str, dev_workspace: Option<&str>) -> String {
     let version = env!("CARGO_PKG_VERSION");
-    let deps = match std::env::var("BOP_DEV_WORKSPACE") {
-        Ok(root) if !root.is_empty() => format!(
-            r#"bop = {{ path = "{root}/bop", package = "bop-lang" }}
-bop-sys = {{ path = "{root}/bop-sys" }}"#,
-        ),
+    let exact_version = format!("={version}");
+    let deps = match dev_workspace {
+        Some(root) => {
+            let bop_path = toml_basic_string_contents(&format!("{root}/bop"));
+            let bop_sys_path = toml_basic_string_contents(&format!("{root}/bop-sys"));
+            format!(
+                r#"bop = {{ path = "{bop_path}", version = "{exact_version}", package = "bop-lang" }}
+bop-sys = {{ path = "{bop_sys_path}", version = "{exact_version}" }}"#,
+            )
+        }
         _ => format!(
-            r#"bop = {{ version = "{version}", package = "bop-lang" }}
-bop-sys = "{version}""#,
+            r#"bop = {{ version = "{exact_version}", package = "bop-lang" }}
+bop-sys = "{exact_version}""#,
         ),
     };
     format!(
@@ -406,6 +499,33 @@ opt-level = 3
 lto = "thin"
 "#
     )
+}
+
+/// Encode string contents for a TOML basic string.
+///
+/// Generated development manifests place filesystem paths between `"` quotes,
+/// so Windows separators, quotes, and TOML-forbidden control characters must
+/// be escaped without changing ordinary Unicode path text.
+fn toml_basic_string_contents(value: &str) -> String {
+    use std::fmt::Write;
+
+    let mut encoded = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\u{0008}' => encoded.push_str("\\b"),
+            '\t' => encoded.push_str("\\t"),
+            '\n' => encoded.push_str("\\n"),
+            '\u{000C}' => encoded.push_str("\\f"),
+            '\r' => encoded.push_str("\\r"),
+            '\u{0000}'..='\u{001F}' | '\u{007F}' => {
+                write!(encoded, "\\u{:04X}", ch as u32).expect("writing into a String cannot fail");
+            }
+            _ => encoded.push(ch),
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -455,6 +575,181 @@ mod tests {
 
         assert!(manifest.contains("name = \"bop_my_program\""));
         assert!(!manifest.contains(unsafe_stem));
+    }
+
+    #[test]
+    fn cargo_build_command_uses_the_scratch_target_directory() {
+        let scratch = PathBuf::from("scratch-project");
+        let command = cargo_build_command(&scratch);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            vec![
+                "build".to_string(),
+                "--release".to_string(),
+                "--target-dir".to_string(),
+                scratch.join("target").to_string_lossy().into_owned(),
+            ]
+        );
+        assert_eq!(command.get_current_dir(), Some(scratch.as_path()));
+    }
+
+    fn write_test_binary(profile_dir: &Path, file_name: &str) -> PathBuf {
+        std::fs::create_dir_all(profile_dir).unwrap();
+        let binary = profile_dir.join(file_name);
+        std::fs::write(&binary, "test executable").unwrap();
+        binary
+    }
+
+    #[test]
+    fn built_binary_locator_accepts_default_release_layout() {
+        let root = resolver_test_root("default_artifact");
+        let target_dir = root.join("target");
+        let expected = write_test_binary(&target_dir.join("release"), "bop_script");
+
+        assert_eq!(
+            find_built_binary(&target_dir, "bop_script").unwrap(),
+            expected
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn built_binary_locator_accepts_target_triple_release_layout() {
+        let root = resolver_test_root("triple_artifact");
+        let target_dir = root.join("target");
+        let expected = write_test_binary(
+            &target_dir.join("test-target-triple").join("release"),
+            "bop_script",
+        );
+
+        assert_eq!(
+            find_built_binary(&target_dir, "bop_script").unwrap(),
+            expected
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn built_binary_locator_accepts_cross_target_windows_executable() {
+        let root = resolver_test_root("windows_cross_target_artifact");
+        let target_dir = root.join("target");
+        let expected = write_test_binary(
+            &target_dir.join("x86_64-pc-windows-msvc").join("release"),
+            "bop_script.exe",
+        );
+
+        assert_eq!(
+            find_built_binary(&target_dir, "bop_script").unwrap(),
+            expected
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn built_binary_locator_rejects_ambiguous_candidates() {
+        let root = resolver_test_root("ambiguous_artifact");
+        let target_dir = root.join("target");
+        write_test_binary(&target_dir.join("release"), "bop_script");
+        write_test_binary(
+            &target_dir.join("test-target-triple").join("release"),
+            "bop_script",
+        );
+
+        let error = find_built_binary(&target_dir, "bop_script")
+            .expect_err("multiple candidates must not be selected arbitrarily");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("multiple executable candidates"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn built_binary_locator_does_not_follow_symlink_candidates() {
+        use std::os::unix::fs::symlink;
+
+        let root = resolver_test_root("symlink_artifact");
+        let target_dir = root.join("target");
+        let outside = write_test_binary(&root.join("outside"), "outside");
+        let candidate = target_dir.join("release").join("bop_script");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        symlink(outside, candidate).unwrap();
+
+        let error = find_built_binary(&target_dir, "bop_script")
+            .expect_err("symlinks must not qualify as Cargo-produced executables");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registry_manifest_exactly_pins_lockstep_runtime_crates() {
+        let exact_version = format!("={}", env!("CARGO_PKG_VERSION"));
+        let manifest = manifest_for_output_with_workspace("bop_script", None);
+
+        assert!(manifest.contains(&format!(
+            r#"bop = {{ version = "{exact_version}", package = "bop-lang" }}"#
+        )));
+        assert!(manifest.contains(&format!(r#"bop-sys = "{exact_version}""#)));
+    }
+
+    #[test]
+    fn development_manifest_keeps_paths_and_exact_version_guards() {
+        let exact_version = format!("={}", env!("CARGO_PKG_VERSION"));
+        let manifest =
+            manifest_for_output_with_workspace("bop_script", Some("/workspace/bop-lang"));
+
+        assert!(manifest.contains(&format!(
+            r#"bop = {{ path = "/workspace/bop-lang/bop", version = "{exact_version}", package = "bop-lang" }}"#
+        )));
+        assert!(manifest.contains(&format!(
+            r#"bop-sys = {{ path = "/workspace/bop-lang/bop-sys", version = "{exact_version}" }}"#
+        )));
+    }
+
+    #[test]
+    fn toml_path_encoder_escapes_windows_separators_and_quotes() {
+        assert_eq!(
+            toml_basic_string_contents(r#"C:\Users\Steve "Bop""#),
+            "C:\\\\Users\\\\Steve \\\"Bop\\\""
+        );
+        assert_eq!(
+            toml_basic_string_contents("D:/Böp 🚀"),
+            "D:/Böp 🚀",
+            "ordinary Unicode path text should be preserved"
+        );
+    }
+
+    #[test]
+    fn toml_path_encoder_escapes_forbidden_control_characters() {
+        let controls = "\0\u{0001}\u{0008}\t\n\u{000C}\r\u{001F}\u{007F}";
+        assert_eq!(
+            toml_basic_string_contents(controls),
+            r"\u0000\u0001\b\t\n\f\r\u001F\u007F"
+        );
+    }
+
+    #[test]
+    fn development_manifest_serializes_windows_shaped_paths() {
+        let manifest =
+            manifest_for_output_with_workspace("bop_script", Some(r#"C:\Users\Steve "Bop""#));
+
+        assert!(
+            manifest.contains(r##"path = "C:\\Users\\Steve \"Bop\"/bop""##),
+            "bop path was not encoded as a TOML basic string:\n{manifest}"
+        );
+        assert!(
+            manifest.contains(r##"path = "C:\\Users\\Steve \"Bop\"/bop-sys""##),
+            "bop-sys path was not encoded as a TOML basic string:\n{manifest}"
+        );
     }
 
     #[test]
