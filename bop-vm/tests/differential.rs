@@ -4319,6 +4319,38 @@ print(label(p.Color::Blue))"#),
 // walker's snapshot-and-invoke model.
 
 #[test]
+fn shared_named_function_definitions_preserve_semantics_diff() {
+    set_modules(&[(
+        "funcs",
+        "fn twice(n) { return n * 2 }\nfn call(n) { return twice(n) + 1 }",
+    )]);
+    let outcome = run_both(
+        r#"fn recurse(n) {
+    if n == 0 { return 0 }
+    return recurse(n - 1) + 1
+}
+let original = recurse
+fn recurse(n) { return n + 10 }
+fn bump(ref value) { value += 2 }
+let bump_alias = bump
+let value = 1
+bump(ref value)
+bump_alias(ref value)
+struct Box { value }
+fn Box.add(self, amount) { return self.value + amount }
+use funcs as funcs
+let callback = funcs.call
+print(original(4), recurse(4), value)
+print(Box { value: 2 }.add(3))
+print(funcs.call(5), callback(6))"#,
+        &standard(),
+    );
+
+    assert!(outcome.is_ok(), "outcome: {outcome:?}");
+    assert_eq!(outcome.prints, ["4 14 5", "5", "11 13"]);
+}
+
+#[test]
 fn closure_lambda_basic() {
     assert_eq!(
         say(r#"let double = fn(x) { return x * 2 }

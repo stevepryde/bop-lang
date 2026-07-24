@@ -1889,6 +1889,16 @@ type ImportCase = (
 
 const IMPORTS_CORPUS: &[ImportCase] = &[
     (
+        "shared_imported_named_functions",
+        r#"use funcs as funcs
+let callback = funcs.call
+print(funcs.call(5), callback(6))"#,
+        &[(
+            "funcs",
+            "fn twice(n) { return n * 2 }\nfn call(n) { return twice(n) + 1 }",
+        )],
+    ),
+    (
         "optional_import_capture_explicit_and_implicit_ref_fences",
         r#"fn side() { print("arg"); return 1 }
 fn take(ref value) { value = 9 }

@@ -56,7 +56,7 @@ struct ModuleBindings {
     /// registers each both in its `self.functions` table
     /// (for nested call resolution) and as a scope binding
     /// (so the fn is also usable as a first-class value).
-    fn_decls: Vec<(String, FnDef)>,
+    fn_decls: Vec<(String, FunctionDefinition)>,
     /// Struct type declarations the module introduces, already
     /// qualified with their full identity `(module_path,
     /// type_name)`. The importer copies these into its own
@@ -71,7 +71,7 @@ struct ModuleBindings {
     /// type identity* of the receiver. `((module_path,
     /// type_name), method_name, fn_def)` — the importer merges
     /// these directly into its own `methods` table.
-    methods: Vec<((String, String), String, FnDef)>,
+    methods: Vec<((String, String), String, FunctionDefinition)>,
     /// Public type names exposed by this module, retaining each type's
     /// declaration module across facade re-exports.
     type_exports: BTreeMap<String, String>,
@@ -89,7 +89,7 @@ struct ModuleBindings {
 struct ModuleLexicalContext {
     type_bindings: BTreeMap<String, String>,
     module_aliases: BTreeMap<String, Rc<crate::value::BopModule>>,
-    imported_functions: BTreeMap<String, FnDef>,
+    imported_functions: BTreeMap<String, FunctionDefinition>,
 }
 
 type ImportCache = Rc<RefCell<alloc_import::collections::BTreeMap<String, ImportSlot>>>;
@@ -233,17 +233,40 @@ enum Signal {
     Return(Value),
 }
 
-#[derive(Clone)]
-struct FnDef {
-    params: Vec<Parameter>,
-    body: Vec<Stmt>,
-    module_path: String,
-}
+/// An executed declaration's canonical callable.
+///
+/// Named functions and methods are immutable after their declaration site is
+/// reached. Sharing the same callable through every registry, import, and
+/// first-class value keeps the AST owned once instead of rebuilding it on each
+/// lookup or call.
+type FunctionDefinition = Rc<BopFn>;
 
 fn parameter_metadata(params: &[Parameter]) -> (Vec<String>, Vec<ParamMode>) {
     (
         params.iter().map(|param| param.name.clone()).collect(),
         params.iter().map(|param| param.mode).collect(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn function_definition(
+    params: &[Parameter],
+    body: &[Stmt],
+    self_name: Option<String>,
+    module_path: String,
+    origin: BopFnOrigin,
+    line: u32,
+) -> Result<FunctionDefinition, BopError> {
+    let (param_names, param_modes) = parameter_metadata(params);
+    BopFn::try_new_ast_in_module_with_origin_and_modes(
+        param_names,
+        param_modes,
+        Vec::new(),
+        body.to_vec(),
+        self_name,
+        Some(module_path),
+        origin,
+        line,
     )
 }
 
@@ -505,7 +528,7 @@ impl FreeVariableCollector {
 
 pub struct Evaluator<'h, H: BopHost + ?Sized> {
     scopes: Vec<BTreeMap<String, Value>>,
-    functions: BTreeMap<String, FnDef>,
+    functions: BTreeMap<String, FunctionDefinition>,
     binding_origins: BTreeMap<String, (String, String)>,
     /// Executed direct root declarations, with final-site replacement and an
     /// immutable target separate from ordinary runtime function lookup.
@@ -537,7 +560,7 @@ pub struct Evaluator<'h, H: BopHost + ?Sized> {
     /// receiver's own `(module_path, type_name)` so a method
     /// declared for `paint.Color` isn't accidentally called on
     /// `other.Color`.
-    methods: BTreeMap<(String, String), BTreeMap<String, FnDef>>,
+    methods: BTreeMap<(String, String), BTreeMap<String, FunctionDefinition>>,
     /// Public type projection for the module currently being evaluated.
     /// Unlike `type_bindings`, this excludes builtins, aliases, and nested
     /// declarations and is therefore safe to cache as the module's exports.
@@ -570,7 +593,7 @@ pub struct Evaluator<'h, H: BopHost + ?Sized> {
     /// Callable exports introduced by non-aliased `use`, paired with lexical
     /// value scopes. This keeps direct calls fast without publishing a local
     /// import in the evaluator-wide named-function registry.
-    imported_functions: Vec<BTreeMap<String, FnDef>>,
+    imported_functions: Vec<BTreeMap<String, FunctionDefinition>>,
     /// Current module namespace, refreshed only by top-level declarations and
     /// imports. Calls clone this one Rc and keep mutable locals in ordinary
     /// per-call maps.
@@ -837,7 +860,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             })
     }
 
-    fn imported_function(&self, name: &str) -> Option<&FnDef> {
+    fn imported_function(&self, name: &str) -> Option<&FunctionDefinition> {
         let floor = self.alias_scope_floors.last().copied();
         self.imported_functions
             .iter()
@@ -1166,36 +1189,34 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     /// before falling back to caller-visible bindings. Loaded module artifacts
     /// are the module-scope environment: aliases therefore keep sibling calls
     /// working without exposing those siblings as bare names to the importer.
-    fn lookup_function(&self, name: &str) -> Option<FnDef> {
-        if let Some(module_path) = self.function_modules.last() {
-            if module_path != crate::value::ROOT_MODULE_PATH {
-                let cache = self.imports.borrow();
-                if let Some(ImportSlot::Loaded(bindings)) = cache.get(module_path) {
-                    if let Some((_, function)) = bindings
-                        .fn_decls
-                        .iter()
-                        .find(|(candidate, _)| candidate == name)
-                    {
-                        return Some(function.clone());
-                    }
-                }
+    fn lookup_function(&self, name: &str) -> Option<FunctionDefinition> {
+        if let Some(module_path) = self.function_modules.last()
+            && module_path != crate::value::ROOT_MODULE_PATH
+        {
+            let cache = self.imports.borrow();
+            if let Some(ImportSlot::Loaded(bindings)) = cache.get(module_path)
+                && let Some((_, function)) = bindings
+                    .fn_decls
+                    .iter()
+                    .find(|(candidate, _)| candidate == name)
+            {
+                return Some(Rc::clone(function));
             }
         }
         if let Some(function) = self.imported_function(name) {
-            return Some(function.clone());
+            return Some(Rc::clone(function));
         }
         let defining_module = self.function_modules.last().map(String::as_str);
-        if let Some(module_path) = defining_module {
-            if let Some(function) = self
+        if let Some(module_path) = defining_module
+            && let Some(function) = self
                 .functions
                 .get(name)
-                .filter(|function| function.module_path == module_path)
-            {
-                return Some(function.clone());
-            }
+                .filter(|function| function.module_path.as_deref() == Some(module_path))
+        {
+            return Some(Rc::clone(function));
         }
         if defining_module.is_none_or(|path| path == self.current_module) {
-            self.functions.get(name).cloned()
+            self.functions.get(name).map(Rc::clone)
         } else {
             None
         }
@@ -1475,28 +1496,20 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     .last()
                     .cloned()
                     .unwrap_or_else(|| self.current_module.clone());
-                let definition = FnDef {
-                    params: params.clone(),
-                    body: body.clone(),
+                let definition = function_definition(
+                    params,
+                    body,
+                    Some(name.clone()),
                     module_path,
-                };
-                self.functions.insert(name.clone(), definition.clone());
+                    self.function_origin.clone(),
+                    stmt.line,
+                )?;
+                self.functions.insert(name.clone(), Rc::clone(&definition));
                 if is_direct_root {
-                    let (param_names, param_modes) = parameter_metadata(&definition.params);
-                    let entry_target = BopFn::try_new_ast_in_module_with_origin_and_modes(
-                        param_names,
-                        param_modes,
-                        Vec::new(),
-                        definition.body.clone(),
-                        Some(name.clone()),
-                        Some(definition.module_path.clone()),
-                        self.function_origin.clone(),
-                        stmt.line,
-                    )?;
                     self.abi_declarations
                         .retain(|(existing, _, _)| existing != name);
                     self.abi_declarations
-                        .push((name.clone(), *visibility, entry_target));
+                        .push((name.clone(), *visibility, definition));
                 }
                 Ok(Signal::None)
             }
@@ -1515,14 +1528,18 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 // parse/emit consistency — fall back to the
                 // current module as the owner.
                 let type_key = (self.current_module.clone(), type_name.clone());
-                self.methods.entry(type_key).or_default().insert(
-                    method_name.clone(),
-                    FnDef {
-                        params: params.clone(),
-                        body: body.clone(),
-                        module_path: self.current_module.clone(),
-                    },
-                );
+                let definition = function_definition(
+                    params,
+                    body,
+                    None,
+                    self.current_module.clone(),
+                    self.function_origin.clone(),
+                    stmt.line,
+                )?;
+                self.methods
+                    .entry(type_key)
+                    .or_default()
+                    .insert(method_name.clone(), definition);
                 Ok(Signal::None)
             }
 
@@ -1759,25 +1776,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // order.
         let mut exports: Vec<(String, Value)> =
             Vec::with_capacity(bindings.fn_decls.len() + bindings.bindings.len());
-        let mut fn_entries: BTreeMap<String, FnDef> = BTreeMap::new();
+        let mut fn_entries: BTreeMap<String, FunctionDefinition> = BTreeMap::new();
         for (name, fn_def) in &bindings.fn_decls {
             if bindings.bindings.iter().any(|(binding, _)| binding == name) {
                 continue;
             }
-            let (param_names, param_modes) = parameter_metadata(&fn_def.params);
-            let value = BopFn::try_new_ast_in_module_with_origin_and_modes(
-                param_names,
-                param_modes,
-                Vec::new(),
-                fn_def.body.clone(),
-                Some(name.clone()),
-                Some(fn_def.module_path.clone()),
-                self.function_origin.clone(),
-                line,
-            )
-            .map(Value::Fn)?;
-            exports.push((name.clone(), value));
-            fn_entries.insert(name.clone(), fn_def.clone());
+            exports.push((name.clone(), Value::Fn(Rc::clone(fn_def))));
+            fn_entries.insert(name.clone(), Rc::clone(fn_def));
         }
         for (name, value) in &bindings.bindings {
             exports.push((name.clone(), value.clone()));
@@ -2176,7 +2181,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         self.live_binding_origins
             .borrow_mut()
             .insert(module_path.to_string(), binding_origins.clone());
-        let fn_decls: Vec<(String, FnDef)> = sub.functions.into_iter().collect();
+        let fn_decls: Vec<(String, FunctionDefinition)> = sub.functions.into_iter().collect();
         // Type decls and methods transfer with their full
         // identity. Engine builtins (`<builtin>` module path)
         // are seeded into every evaluator anyway, so we filter
@@ -2193,7 +2198,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             .into_iter()
             .filter(|((mp, _), _)| mp != builtin_mp)
             .collect();
-        let mut methods: Vec<((String, String), String, FnDef)> = Vec::new();
+        let mut methods: Vec<((String, String), String, FunctionDefinition)> = Vec::new();
         for (type_key, by_method) in sub.methods {
             for (method_name, fn_def) in by_method {
                 methods.push((type_key.clone(), method_name, fn_def));
@@ -2665,24 +2670,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 if let Some(v) = self.get_var_value(name) {
                     return Ok(v);
                 }
-                // Fall back to named `fn` declarations so they can
-                // be passed around as first-class values. The
-                // synthesised `Value::Fn` carries `self_name` so
-                // recursive lookups inside the body still resolve
-                // through `self.functions` (see `call_bop_fn`).
+                // Fall back to the canonical callable created when the named
+                // declaration was reached. First-class access only clones the
+                // `Rc`; it never clones or reconstructs the function AST.
                 if let Some(f) = self.lookup_function(name) {
-                    let (param_names, param_modes) = parameter_metadata(&f.params);
-                    return BopFn::try_new_ast_in_module_with_origin_and_modes(
-                        param_names,
-                        param_modes,
-                        Vec::new(),
-                        f.body.clone(),
-                        Some(name.to_string()),
-                        Some(f.module_path.clone()),
-                        self.function_origin.clone(),
-                        expr.line,
-                    )
-                    .map(Value::Fn);
+                    return Ok(Value::Fn(f));
                 }
                 // Typo? Offer a "did you mean" hint if something
                 // close is visible in the current scope / fn
@@ -2764,35 +2756,24 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         ));
                     }
                     if let Some(function) = self.lookup_function(name) {
-                        let (param_names, param_modes) = parameter_metadata(&function.params);
-                        let func = BopFn::try_new_ast_in_module_with_origin_and_modes(
-                            param_names,
-                            param_modes,
-                            Vec::new(),
-                            function.body,
-                            Some(name.clone()),
-                            Some(function.module_path),
-                            self.function_origin.clone(),
-                            expr.line,
-                        )?;
                         // Preserve the established host-before-named-function
                         // dispatch for legacy value-only calls. Ref-aware
                         // calls must use the retained Bop callable metadata so
                         // their staged targets can be committed transactionally.
-                        if func
+                        if function
                             .param_modes
                             .iter()
                             .all(|mode| *mode == ParamMode::Value)
                             && args.iter().all(|arg| arg.mode == ParamMode::Value)
                         {
-                            if args.len() != func.params.len() {
+                            if args.len() != function.params.len() {
                                 return Err(error(
                                     expr.line,
                                     format!(
                                         "`{}` expects {} argument{}, but got {}",
                                         name,
-                                        func.params.len(),
-                                        if func.params.len() == 1 { "" } else { "s" },
+                                        function.params.len(),
+                                        if function.params.len() == 1 { "" } else { "s" },
                                         args.len()
                                     ),
                                 ));
@@ -2801,9 +2782,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             for arg in args {
                                 eval_args.push(self.eval_expr(&arg.value)?);
                             }
-                            return self.call_function(name, eval_args, expr.line);
+                            return self.call_function(name, eval_args, expr.line, Some(function));
                         }
-                        return self.eval_bop_call(func, args, expr.line, name);
+                        return self.eval_bop_call(function, args, expr.line, name);
                     }
 
                     let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
@@ -2813,7 +2794,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     for arg in args {
                         eval_args.push(self.eval_expr(&arg.value)?);
                     }
-                    return self.call_function(name, eval_args, expr.line);
+                    return self.call_function(name, eval_args, expr.line, None);
                 }
 
                 // The callee expression is always resolved exactly once before
@@ -2943,9 +2924,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         .cloned();
                     if let Some(m) = user {
                         let receiver_target = if m
-                            .params
+                            .param_modes
                             .first()
-                            .is_some_and(|param| param.mode == ParamMode::Ref)
+                            .is_some_and(|mode| *mode == ParamMode::Ref)
                         {
                             let ExprKind::Ident(name) = &object.kind else {
                                 let mut error = BopError::runtime(
@@ -3516,7 +3497,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         receiver: MethodReceiver,
         receiver_type: &str,
         method: &str,
-        definition: FnDef,
+        definition: FunctionDefinition,
         args: &[CallArg],
         line: u32,
     ) -> Result<Value, BopError> {
@@ -3541,10 +3522,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // The exact total-arity check above guarantees the implicit receiver
         // has a corresponding first parameter before we inspect ordinary
         // argument modes or evaluate any ordinary argument expressions.
-        let non_receiver = &definition.params[1..];
-        let expected_modes: Vec<ParamMode> = non_receiver.iter().map(|param| param.mode).collect();
+        let expected_modes = &definition.param_modes[1..];
         let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
-        crate::validate_call_modes(method, &expected_modes, &actual_modes, line)?;
+        crate::validate_call_modes(method, expected_modes, &actual_modes, line)?;
         let explicit_targets = self.preflight_ref_targets(args, line)?;
         if let Some(receiver_target) = &receiver.target {
             if explicit_targets.contains(receiver_target) {
@@ -3587,18 +3567,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 }
             }
         }
-        let (param_names, param_modes) = parameter_metadata(&definition.params);
-        let func = BopFn::try_new_ast_in_module_with_origin_and_modes(
-            param_names,
-            param_modes,
-            Vec::new(),
-            definition.body,
-            None,
-            Some(definition.module_path),
-            self.function_origin.clone(),
-            line,
-        )?;
-        let (value, staged) = self.call_bop_fn_with_refs(&func, full_args, &ref_positions, line)?;
+        let (value, staged) =
+            self.call_bop_fn_with_refs(&definition, full_args, &ref_positions, line)?;
         let mut targets =
             Vec::with_capacity(explicit_targets.len() + usize::from(receiver.target.is_some()));
         if let Some(target) = receiver.target {
@@ -3987,6 +3957,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         name: &str,
         args: Vec<Value>,
         line: u32,
+        resolved_function: Option<FunctionDefinition>,
     ) -> Result<Value, BopError> {
         // 1. Global builtins. The short list: anything variadic
         // (`print`), a collection constructor (`range`), session-
@@ -4019,44 +3990,34 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             return result;
         }
 
-        // 3. User-defined functions — synthesise a transient
-        // `BopFn` and delegate to the shared call path. This keeps
-        // the behaviour of `fn name` declarations and `Value::Fn`
-        // values identical, including self-reference semantics.
-        let func = self.lookup_function(name).ok_or_else(|| {
-            // Preference order: "did you mean" suggestion first
-            // (most specific to the user's typo), then the
-            // host's generic function hint (embedder-specific
-            // tips like "available host functions: …"), then a
-            // bare error.
-            if let Some(hint) = self.callable_candidates_hint(name) {
-                error_with_hint(line, crate::error_messages::function_not_found(name), hint)
-            } else {
-                let host_hint = self.host.function_hint().to_string();
-                if host_hint.is_empty() {
-                    error(line, crate::error_messages::function_not_found(name))
+        // 3. User-defined functions. Direct-call classification passes its
+        // already-resolved canonical callable here, avoiding a second lookup.
+        // Builtin-only paths resolve lazily after host dispatch.
+        let func = resolved_function
+            .or_else(|| self.lookup_function(name))
+            .ok_or_else(|| {
+                // Preference order: "did you mean" suggestion first
+                // (most specific to the user's typo), then the
+                // host's generic function hint (embedder-specific
+                // tips like "available host functions: …"), then a
+                // bare error.
+                if let Some(hint) = self.callable_candidates_hint(name) {
+                    error_with_hint(line, crate::error_messages::function_not_found(name), hint)
                 } else {
-                    error_with_hint(
-                        line,
-                        crate::error_messages::function_not_found(name),
-                        host_hint,
-                    )
+                    let host_hint = self.host.function_hint().to_string();
+                    if host_hint.is_empty() {
+                        error(line, crate::error_messages::function_not_found(name))
+                    } else {
+                        error_with_hint(
+                            line,
+                            crate::error_messages::function_not_found(name),
+                            host_hint,
+                        )
+                    }
                 }
-            }
-        })?;
+            })?;
 
-        let (param_names, param_modes) = parameter_metadata(&func.params);
-        let bop_fn = BopFn::try_new_ast_in_module_with_origin_and_modes(
-            param_names,
-            param_modes,
-            Vec::new(),
-            func.body,
-            Some(name.to_string()),
-            Some(func.module_path),
-            self.function_origin.clone(),
-            line,
-        )?;
-        self.call_bop_fn(&bop_fn, args, line)
+        self.call_bop_fn(&func, args, line)
     }
 
     // ─── Methods ───────────────────────────────────────────────────
@@ -4104,18 +4065,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 let mut full_args = Vec::with_capacity(args.len() + 1);
                 full_args.push(obj.clone());
                 full_args.extend(args);
-                let (param_names, param_modes) = parameter_metadata(&m.params);
-                let bop_fn = BopFn::try_new_ast_in_module_with_origin_and_modes(
-                    param_names,
-                    param_modes,
-                    Vec::new(),
-                    m.body,
-                    None,
-                    Some(m.module_path),
-                    self.function_origin.clone(),
-                    line,
-                )?;
-                return self.call_bop_fn(&bop_fn, full_args, line);
+                return self.call_bop_fn(&m, full_args, line);
             }
         }
         // Fall through to the built-in dispatch.
@@ -4720,7 +4670,7 @@ fn match_struct_fields(
 /// per `eval` call since they reset each time.
 pub struct ReplSession {
     scopes: Vec<BTreeMap<String, Value>>,
-    functions: BTreeMap<String, FnDef>,
+    functions: BTreeMap<String, FunctionDefinition>,
     binding_origins: BTreeMap<String, (String, String)>,
     abi_declarations: Vec<(String, Visibility, Rc<BopFn>)>,
     live_value_environments: LiveValueEnvironments,
@@ -4730,11 +4680,11 @@ pub struct ReplSession {
     current_module: String,
     struct_defs: BTreeMap<(String, String), Vec<String>>,
     enum_defs: BTreeMap<(String, String), Vec<VariantDecl>>,
-    methods: BTreeMap<(String, String), BTreeMap<String, FnDef>>,
+    methods: BTreeMap<(String, String), BTreeMap<String, FunctionDefinition>>,
     type_exports: BTreeMap<String, String>,
     type_bindings: Vec<BTreeMap<String, String>>,
     module_aliases: Vec<BTreeMap<String, Rc<crate::value::BopModule>>>,
-    imported_functions: Vec<BTreeMap<String, FnDef>>,
+    imported_functions: Vec<BTreeMap<String, FunctionDefinition>>,
     imports: ImportCache,
     imported_here: Vec<alloc_import::collections::BTreeSet<String>>,
     rand_state: u64,
@@ -5137,7 +5087,7 @@ impl ReplSession {
 }
 
 #[cfg(test)]
-mod array_mutation_tests {
+mod tests {
     use super::*;
 
     #[derive(Default)]
@@ -5179,6 +5129,42 @@ mod array_mutation_tests {
         assert_eq!(Rc::strong_count(&context), 2);
     }
 
+    #[test]
+    fn named_lookups_and_first_class_values_share_one_large_function_ast() {
+        const UNREACHABLE_STATEMENTS: usize = 4_096;
+
+        let mut source = String::from("fn large() { return 7\n");
+        for _ in 0..UNREACHABLE_STATEMENTS {
+            source.push_str("none\n");
+        }
+        source.push_str("}\n");
+
+        let statements = crate::parse(&source).expect("large function should parse");
+        let mut host = TestHost::default();
+        let mut evaluator = Evaluator::new(&mut host, crate::BopLimits::standard());
+        evaluator
+            .exec_block(&statements)
+            .expect("declaration should execute");
+
+        let stored = Rc::clone(evaluator.functions.get("large").unwrap());
+        let first_lookup = evaluator.lookup_function("large").unwrap();
+        let second_lookup = evaluator.lookup_function("large").unwrap();
+        assert!(Rc::ptr_eq(&stored, &first_lookup));
+        assert!(Rc::ptr_eq(&stored, &second_lookup));
+        assert!(matches!(
+            &stored.body,
+            FnBody::Ast(body) if body.len() == UNREACHABLE_STATEMENTS + 1
+        ));
+
+        let calls = crate::parse("let alias = large\nprint(large())\nprint(alias())").unwrap();
+        evaluator.exec_block(&calls).expect("calls should execute");
+        let Value::Fn(alias) = evaluator.scopes[0].get("alias").unwrap() else {
+            panic!("alias should retain the declared function")
+        };
+        assert!(Rc::ptr_eq(&stored, alias));
+        assert_eq!(host.prints, ["7", "7"]);
+    }
+
     struct FanoutHost {
         modules: BTreeMap<String, String>,
     }
@@ -5196,6 +5182,73 @@ mod array_mutation_tests {
         fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
             self.modules.get(name).cloned().map(Ok)
         }
+    }
+
+    #[derive(Default)]
+    struct DispatchHost {
+        prints: Vec<String>,
+        modules: BTreeMap<String, String>,
+    }
+
+    impl BopHost for DispatchHost {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
+            (name == "pick").then_some(Ok(Value::Int(99)))
+        }
+
+        fn on_print(&mut self, message: &str) {
+            self.prints.push(message.to_string());
+        }
+
+        fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
+            self.modules.get(name).cloned().map(Ok)
+        }
+    }
+
+    #[test]
+    fn shared_definitions_preserve_named_call_semantics() {
+        let source = r#"
+fn recurse(n) {
+    if n == 0 { return 0 }
+    return recurse(n - 1) + 1
+}
+let original = recurse
+fn recurse(n) { return n + 10 }
+
+fn bump(ref value) { value += 2 }
+let bump_alias = bump
+let value = 1
+bump(ref value)
+bump_alias(ref value)
+
+fn pick() { return 1 }
+let local_pick = pick
+
+struct Box { value }
+fn Box.add(self, amount) { return self.value + amount }
+
+use funcs as funcs
+print(original(4), recurse(4), value)
+print(pick(), local_pick(), funcs.call(5))
+print(Box { value: 2 }.add(3))
+"#;
+        let mut host = DispatchHost {
+            modules: BTreeMap::from([(
+                "funcs".to_string(),
+                "fn twice(n) { return n * 2 }\nfn call(n) { return twice(n) + 1 }".to_string(),
+            )]),
+            ..DispatchHost::default()
+        };
+        let statements = crate::parse(source).expect("program should parse");
+        Evaluator::new(&mut host, crate::BopLimits::standard())
+            .run(&statements)
+            .expect("program should run");
+
+        assert_eq!(host.prints, ["4 14 5", "99 1 11", "5"]);
     }
 
     #[test]
