@@ -14,7 +14,8 @@
 //!    project under the OS temp dir, declare `bop-lang` /
 //!    `bop-sys` / `bop-std` as deps at the current `bop`
 //!    version, run `cargo build --release`, and copy the
-//!    produced binary to `-o OUT` (or the input file's stem).
+//!    produced binary to `-o OUT` (or the input file's stem;
+//!    extensionless inputs use a `-bin` suffix).
 //!
 //! Errors:
 //!
@@ -42,6 +43,15 @@ pub fn compile_file(input: &str, output: Option<&str>, emit_rs: bool, keep: bool
             return ExitCode::from(1);
         }
     };
+    let output_path = match output {
+        Some(path) => PathBuf::from(path),
+        None if emit_rs => default_rs_path(&input_path),
+        None => default_binary_path(&input_path),
+    };
+    if let Err(message) = ensure_distinct_source_and_output(&input_path, &output_path) {
+        eprintln!("{message}");
+        return ExitCode::from(1);
+    }
 
     // Build the resolver the transpiler feeds every `use`
     // through. Mirrors `bop-sys::StdHost::resolve_module`: look
@@ -68,15 +78,17 @@ pub fn compile_file(input: &str, output: Option<&str>, emit_rs: bool, keep: bool
     };
 
     if emit_rs {
-        let out_path = match output {
-            Some(p) => PathBuf::from(p),
-            None => default_rs_path(&input_path),
-        };
-        if let Err(e) = std::fs::write(&out_path, &rust_src) {
-            eprintln!("error writing `{}`: {e}", out_path.display());
+        // Transpilation can take long enough for an existing output path to
+        // be replaced, so repeat the source-preservation guard at write-out.
+        if let Err(message) = ensure_distinct_source_and_output(&input_path, &output_path) {
+            eprintln!("{message}");
             return ExitCode::from(1);
         }
-        eprintln!("wrote {}", out_path.display());
+        if let Err(e) = std::fs::write(&output_path, &rust_src) {
+            eprintln!("error writing `{}`: {e}", output_path.display());
+            return ExitCode::from(1);
+        }
+        eprintln!("wrote {}", output_path.display());
         return ExitCode::SUCCESS;
     }
 
@@ -93,11 +105,6 @@ pub fn compile_file(input: &str, output: Option<&str>, emit_rs: bool, keep: bool
         );
         return ExitCode::from(1);
     }
-
-    let output_path = match output {
-        Some(p) => PathBuf::from(p),
-        None => default_binary_path(&input_path),
-    };
 
     let scratch = match build_native(&rust_src, &input_path, &output_path) {
         Ok(s) => s,
@@ -209,6 +216,13 @@ fn build_native(
             return Err(ExitCode::from(1));
         }
     };
+    // Re-check immediately before copy-out. The early preflight prevents
+    // wasting a build on an invalid output path; this second guard also
+    // protects the source if the output path was replaced while Cargo ran.
+    if let Err(message) = ensure_distinct_source_and_output(input_path, output_path) {
+        eprintln!("{message}");
+        return Err(ExitCode::from(1));
+    }
     if let Err(e) = std::fs::copy(&built, output_path) {
         eprintln!(
             "error copying built binary `{}` → `{}`: {e}",
@@ -330,13 +344,48 @@ fn default_rs_path(input: &Path) -> PathBuf {
 fn default_binary_path(input: &Path) -> PathBuf {
     let stem = input
         .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("script");
-    let mut p = PathBuf::from(stem);
+        .unwrap_or_else(|| std::ffi::OsStr::new("script"));
+    let mut file_name = stem.to_os_string();
+    if input.extension().is_none() {
+        file_name.push("-bin");
+    }
+    let mut p = PathBuf::from(file_name);
     if cfg!(windows) {
         p.set_extension("exe");
     }
     p
+}
+
+/// Reject output paths that identify the source itself.
+///
+/// Canonical paths catch relative aliases and symlinks. Existing-file
+/// identities additionally catch hard links, whose canonical path text is
+/// different even though copying over them would truncate the source inode.
+fn ensure_distinct_source_and_output(input: &Path, output: &Path) -> Result<(), String> {
+    match paths_resolve_to_same_file(input, output) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(format!(
+            "error: output path `{}` resolves to the input file `{}`; refusing to overwrite the source\n\
+             choose a different output path with `-o <path>`",
+            output.display(),
+            input.display()
+        )),
+        Err(error) => Err(format!(
+            "error checking output path `{}` against input `{}`: {error}",
+            output.display(),
+            input.display()
+        )),
+    }
+}
+
+fn paths_resolve_to_same_file(input: &Path, output: &Path) -> std::io::Result<bool> {
+    match same_file::is_same_file(input, output) {
+        Ok(is_same) => Ok(is_same),
+        // A missing output is the normal pre-build state and cannot yet
+        // identify the existing source.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Atomically claim a fresh, private scratch project root.
@@ -762,6 +811,54 @@ mod tests {
                 "my program"
             })
         );
+    }
+
+    #[test]
+    fn extensionless_source_gets_a_distinct_default_output_path() {
+        assert_eq!(
+            default_binary_path(Path::new("my program")),
+            PathBuf::from(if cfg!(windows) {
+                "my program-bin.exe"
+            } else {
+                "my program-bin"
+            })
+        );
+    }
+
+    #[test]
+    fn output_collision_detects_path_aliases() {
+        let root = resolver_test_root("output_alias");
+        let input = root.join("program");
+        std::fs::write(&input, "print(\"preserved\")").unwrap();
+        let output_alias = root.join(".").join("program");
+
+        assert!(paths_resolve_to_same_file(&input, &output_alias).unwrap());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_output_does_not_collide_with_the_source() {
+        let root = resolver_test_root("missing_output");
+        let input = root.join("program");
+        std::fs::write(&input, "print(\"preserved\")").unwrap();
+
+        assert!(!paths_resolve_to_same_file(&input, &root.join("program-bin")).unwrap());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn output_collision_detects_hard_links() {
+        let root = resolver_test_root("output_hard_link");
+        let input = root.join("program");
+        let output = root.join("program-link");
+        std::fs::write(&input, "print(\"preserved\")").unwrap();
+        std::fs::hard_link(&input, &output).unwrap();
+
+        assert!(paths_resolve_to_same_file(&input, &output).unwrap());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

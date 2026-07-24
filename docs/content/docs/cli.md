@@ -50,7 +50,13 @@ bop compile app.bop -o my-app
 
 The command transpiles Bop to Rust, creates a temporary Cargo project, builds a
 release binary, and copies it to the requested output path. `cargo` and a Rust
-toolchain must be available for this step.
+toolchain must be available for this step. By default, `app.bop` builds
+`./app`; an extensionless source such as `app` builds `./app-bin` so the source
+can never be mistaken for its output. On Windows, native outputs also receive
+the `.exe` suffix.
+
+An explicit output path that resolves to the source itself is rejected before
+the build starts. Use `-o` with a distinct path instead.
 
 Use `--emit-rs` to stop after transpilation:
 
