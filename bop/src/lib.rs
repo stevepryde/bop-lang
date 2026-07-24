@@ -173,6 +173,8 @@ pub mod builtins;
 pub mod check;
 pub mod error;
 pub mod error_messages;
+#[doc(hidden)]
+pub mod formatting;
 pub mod host;
 mod instance;
 pub mod lexer;

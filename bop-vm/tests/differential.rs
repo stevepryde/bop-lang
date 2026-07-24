@@ -6181,6 +6181,54 @@ fn safety_range_memory_preflight() {
     }
 }
 
+#[test]
+fn amplified_string_methods_preflight_without_partial_output() {
+    let cases = [
+        (
+            "join",
+            r#"let shared = "x" * 256
+let values = [shared, shared, shared, shared, shared, shared, shared, shared]
+let result = values.join("")"#,
+        ),
+        (
+            "replace",
+            r#"let shared = "x" * 256
+let result = shared.replace("x", "abcdefgh")"#,
+        ),
+        (
+            "split",
+            r#"let shared = "x," * 128
+let result = shared.split(",")"#,
+        ),
+    ];
+    let limits = BopLimits {
+        max_steps: 1_000,
+        max_memory: 1_200,
+    };
+
+    for (name, code) in cases {
+        for engine in ["tree-walker", "bytecode vm"] {
+            let mut host = RecordHost::new();
+            let result = if engine == "tree-walker" {
+                bop::run(code, &mut host, &limits)
+            } else {
+                bop_vm::run(code, &mut host, &limits)
+            };
+
+            assert!(
+                host.prints.borrow().is_empty(),
+                "{engine} exposed output while preflighting {name}"
+            );
+            let error = result.unwrap_err();
+            assert!(error.is_fatal, "{engine} returned a catchable {name} error");
+            assert_eq!(
+                error.message, "Memory limit exceeded",
+                "{engine} returned the wrong {name} error"
+            );
+        }
+    }
+}
+
 // ─── BopHost extension ────────────────────────────────────────────
 //
 // Custom hosts can't share state across the walker / VM calls, so

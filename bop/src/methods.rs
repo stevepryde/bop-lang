@@ -139,12 +139,10 @@ pub fn array_method_in(
                 Value::Str(s) => s.as_str(),
                 _ => return Err(error(line, ".join() separator must be a string")),
             };
-            let result = arr
-                .iter()
-                .map(|v| format!("{v}"))
-                .collect::<Vec<_>>()
-                .join(sep);
-            Ok((Value::__new_str_in(result, memory), None))
+            let result = crate::formatting::__format_values_in(arr, sep, line, memory)?;
+            let value = Value::__new_str_in(result, memory);
+            crate::formatting::__preflight_in(0, line, memory)?;
+            Ok((value, None))
         }
         "iter" => {
             crate::builtins::expect_args("iter", args, 0, line)?;
@@ -392,11 +390,10 @@ pub fn string_method_in(
                 Value::Str(s) => s.as_str(),
                 _ => return Err(error(line, ".split() needs a string")),
             };
-            let parts: Vec<Value> = s
-                .split(sep)
-                .map(|p| Value::__new_str_in(p.to_string(), memory))
-                .collect();
-            Ok((Value::__try_new_array_in(parts, line, memory)?, None))
+            let parts = crate::formatting::__split_values_in(s, sep, line, memory)?;
+            let value = Value::__try_new_array_in(parts, line, memory)?;
+            crate::formatting::__preflight_in(0, line, memory)?;
+            Ok((value, None))
         }
         "replace" => {
             if args.len() != 2 {
@@ -410,8 +407,10 @@ pub fn string_method_in(
                 Value::Str(s) => s.as_str(),
                 _ => return Err(error(line, ".replace() arguments must be strings")),
             };
-            let result = s.replace(old, new);
-            Ok((Value::__new_str_in(result, memory), None))
+            let result = crate::formatting::__replace_in(s, old, new, line, memory)?;
+            let value = Value::__new_str_in(result, memory);
+            crate::formatting::__preflight_in(0, line, memory)?;
+            Ok((value, None))
         }
         "upper" => {
             let result = s.to_uppercase();
@@ -1277,5 +1276,64 @@ pub fn iter_method_in(
             line,
             crate::error_messages::no_such_method("iter", method),
         )),
+    }
+}
+
+#[cfg(test)]
+mod memory_preflight_tests {
+    use super::*;
+
+    fn assert_memory_limit(error: BopError) {
+        assert!(error.is_fatal);
+        assert_eq!(error.message, "Memory limit exceeded");
+    }
+
+    #[test]
+    fn amplified_join_fails_without_charging_a_partial_result() {
+        let memory = MemoryContext::__new(1_200);
+        let shared = Value::__new_str_in("x".repeat(256), &memory);
+        let values = vec![shared; 8];
+        let separator = Value::__new_str_in(String::new(), &memory);
+        let baseline = memory.__used();
+
+        let error = array_method_in(&values, "join", &[separator], 3, &memory).unwrap_err();
+
+        assert_memory_limit(error);
+        assert_eq!(memory.__used(), baseline);
+    }
+
+    #[test]
+    fn amplified_replace_fails_without_charging_a_partial_result() {
+        let memory = MemoryContext::__new(1_200);
+        let input = Value::__new_str_in("x".repeat(256), &memory);
+        let old = Value::__new_str_in(String::from("x"), &memory);
+        let new = Value::__new_str_in(String::from("abcdefgh"), &memory);
+        let args = [old, new];
+        let baseline = memory.__used();
+        let Value::Str(input) = &input else {
+            unreachable!("constructed a string")
+        };
+
+        let error = string_method_in(input.as_str(), "replace", &args, 4, &memory).unwrap_err();
+
+        assert_memory_limit(error);
+        assert_eq!(memory.__used(), baseline);
+    }
+
+    #[test]
+    fn high_cardinality_split_fails_without_charging_partial_parts() {
+        let memory = MemoryContext::__new(1_200);
+        let input = Value::__new_str_in("x,".repeat(128), &memory);
+        let separator = Value::__new_str_in(String::from(","), &memory);
+        let args = [separator];
+        let baseline = memory.__used();
+        let Value::Str(input) = &input else {
+            unreachable!("constructed a string")
+        };
+
+        let error = string_method_in(input.as_str(), "split", &args, 5, &memory).unwrap_err();
+
+        assert_memory_limit(error);
+        assert_eq!(memory.__used(), baseline);
     }
 }

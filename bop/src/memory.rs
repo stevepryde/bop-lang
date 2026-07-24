@@ -125,6 +125,15 @@ impl MemoryContext {
     pub fn __used(&self) -> usize {
         self.account.as_ref().map_or(0, |account| account.__used())
     }
+
+    /// Bytes still available at this instant, or `None` for an untracked
+    /// context. A tracked account already over budget reports zero.
+    #[doc(hidden)]
+    pub fn __available(&self) -> Option<usize> {
+        self.account
+            .as_ref()
+            .map(|account| account.limit.saturating_sub(account.__used()))
+    }
 }
 
 #[cfg(any(feature = "std", not(feature = "no_std")))]
