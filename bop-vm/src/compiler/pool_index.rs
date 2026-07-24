@@ -88,6 +88,10 @@ fn pool_index(len: usize, pool_name: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
+    use alloc::format;
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
+    use std::format;
 
     #[test]
     fn constants_keep_exact_keys_and_first_seen_indices() {

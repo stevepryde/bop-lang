@@ -31,8 +31,10 @@ use crate::chunk::{
 };
 use bop::parser::{MatchArm, Pattern, VariantKind};
 
+mod free_variables;
 mod pool_index;
 
+use free_variables::FreeVariables;
 use pool_index::{ConstantPoolIndex, NamePoolIndex};
 
 // ─── Local slot resolver ───────────────────────────────────────────
@@ -204,7 +206,7 @@ struct Compiler {
     /// name's index is its capture slot in the final `FnDef`.
     /// `None` at module top-level where there's nothing to
     /// capture into.
-    free_vars: Option<Vec<String>>,
+    free_vars: Option<FreeVariables>,
     /// Names installed dynamically in the frame's scope rather than in local
     /// slots. Match-pattern bindings use this path. Keeping them separate
     /// prevents a nested lambda from propagating a pattern-local name into
@@ -288,10 +290,8 @@ impl Compiler {
         if self.has_runtime_binding(name) {
             return;
         }
-        if let Some(list) = self.free_vars.as_mut() {
-            if !list.iter().any(|n| n == name) {
-                list.push(name.to_string());
-            }
+        if let Some(free_vars) = self.free_vars.as_mut() {
+            free_vars.record(name);
         }
     }
 
@@ -1674,7 +1674,7 @@ impl Compiler {
         // Enter the new function: push a resolver + start a
         // fresh free-var collector.
         self.resolvers.push(LocalResolver::new(params));
-        self.free_vars = Some(Vec::new());
+        self.free_vars = Some(FreeVariables::default());
 
         // Compile the body into the new chunk. Catch errors so we
         // still restore state on the way out.
@@ -1687,7 +1687,11 @@ impl Compiler {
         // Snapshot what we need from the function's compile
         // state before restoring the outer one.
         let resolver = self.resolvers.pop().expect("resolver pushed above");
-        let free = self.free_vars.take().expect("free-vars set above");
+        let free = self
+            .free_vars
+            .take()
+            .expect("free-vars set above")
+            .into_ordered();
         let mut chunk = core::mem::replace(&mut self.chunk, saved_chunk);
         let function_constant_index =
             core::mem::replace(&mut self.constant_index, saved_constant_index);
