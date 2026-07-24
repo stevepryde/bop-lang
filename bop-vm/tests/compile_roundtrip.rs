@@ -8,7 +8,7 @@
 //! diff.
 
 use bop::parse;
-use bop_vm::chunk::SlotIdx;
+use bop_vm::chunk::{RefArgTarget, SlotIdx};
 use bop_vm::{Constant, Instr, LoopStateKind, compile, disassemble};
 use std::rc::Rc;
 
@@ -420,6 +420,91 @@ print(double(5))"#,
     assert!(d.contains("LoadLocal @0"), "body body missing:\n{}", d);
     assert!(d.contains("Mul"), "body op missing:\n{}", d);
     assert!(d.contains("Return"), "body return missing:\n{}", d);
+}
+
+#[test]
+fn function_local_index_preserves_shadowing_scope_exit_and_unresolved_fallback() {
+    let ast = parse(
+        r#"fn inspect(ref value) {
+    let local = 1
+    let local = 2
+    print(local)
+    if true {
+        let value = 3
+        print(value)
+    }
+    print(value)
+    print(missing)
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let function = &chunk.functions[0];
+    let local_loads: Vec<SlotIdx> = function
+        .chunk
+        .code
+        .iter()
+        .filter_map(|instr| match instr {
+            Instr::LoadLocal(slot) => Some(*slot),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(function.param_modes, [bop::parser::ParamMode::Ref]);
+    assert_eq!(local_loads, [SlotIdx(2), SlotIdx(3), SlotIdx(0)]);
+    assert!(function.chunk.code.iter().any(|instr| {
+        matches!(
+            instr,
+            Instr::LoadVar(name) if function.chunk.names[name.0 as usize] == "missing"
+        )
+    }));
+}
+
+#[test]
+fn ref_arguments_keep_parameter_and_local_slot_targets() {
+    let ast = parse(
+        r#"fn sink(ref value) {}
+fn caller(ref parameter) {
+    let local = 1
+    sink(ref parameter)
+    sink(ref local)
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let caller = chunk
+        .functions
+        .iter()
+        .find(|function| function.name == "caller")
+        .expect("caller function");
+    let slots: Vec<SlotIdx> = caller
+        .chunk
+        .call_sites
+        .iter()
+        .filter_map(|site| match site.ref_targets.as_slice() {
+            [Some(RefArgTarget::Binding(target))] => target.slot_idx(),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(slots, [SlotIdx(0), SlotIdx(1)]);
+}
+
+#[test]
+fn import_clash_metadata_stays_sorted_and_deduplicated() {
+    let ast = parse(
+        r#"fn metadata(zebra) {
+    let beta = 1
+    let alpha = 2
+    let beta = 3
+    use dep
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let metadata = &chunk.functions[0].chunk.use_specs[0].shadowed_locals;
+
+    assert_eq!(metadata, &["alpha", "beta", "zebra"]);
 }
 
 #[test]

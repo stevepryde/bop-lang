@@ -528,6 +528,26 @@ print(greet("outer"))"#),
 }
 
 #[test]
+fn indexed_locals_preserve_redeclaration_scope_exit_and_ref_updates_diff() {
+    assert_eq!(
+        say(r#"fn update(ref value) {
+    let local = value
+    let local = local + 1
+    if true {
+        let value = 40
+        let value = value + 2
+        print(value)
+    }
+    value = local
+}
+let value = 3
+update(ref value)
+print(value)"#),
+        "4"
+    );
+}
+
+#[test]
 fn string_interpolation_missing_binding_error_matches_walker() {
     let out = run_both(r#"print("missing: {unknown}")"#, &standard());
     assert_eq!(out.error.as_deref(), Some("Variable `unknown` not found"));
