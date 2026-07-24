@@ -113,14 +113,19 @@ macro to construct nested values while retaining Bop's depth checks.
 
 | feature | default | what it does |
 |---|---|---|
+| `std` | yes | enables Rust standard-library integration, including stderr diagnostics and thread-local execution state. If Cargo unifies `std` and `no_std`, this feature wins. |
 | `bop-std` | yes | bundles the Bop stdlib (`use std.math`, `std.json`, `std.collections`, `std.iter`, `std.string`, `std.test`) as `&'static str` constants reachable via [`bop::stdlib::resolve`] |
 | `no_std` | no | opt in for bare-metal / embedded / edge wasm targets. Pulls in `libm` for float math. Enable with `default-features = false, features = ["no_std"]` (add `"bop-std"` too if you want the bundled stdlib on those targets). |
 
-A truly minimal build — core language only, no bundled stdlib:
+A minimal std build — core language only, no bundled Bop stdlib:
 
 ```toml
-bop-lang = { version = "0.4", default-features = false }
+bop-lang = { version = "0.4", default-features = false, features = ["std"] }
 ```
+
+For compatibility, omitting both `std` and `no_std` also retains std behavior;
+genuine no_std builds must explicitly select `no_std` with default features
+disabled.
 
 ## WASM example
 

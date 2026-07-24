@@ -19,8 +19,9 @@ name = "bop_compile"
 [dependencies]
 # AOT transpilation always runs on a std host, so we explicitly
 # drop `default-features` only to avoid pulling the `bop-std`
-# stdlib blob when the transpiler doesn't need it.
-bop = { version = "0.4.0", path = "../bop", package = "bop-lang", default-features = false }
+# stdlib blob when the transpiler doesn't need it. Keep the
+# Rust `std` integration explicit.
+bop = { version = "0.4.0", path = "../bop", package = "bop-lang", default-features = false, features = ["std"] }
 
 [features]
 default = ["bop-std"]

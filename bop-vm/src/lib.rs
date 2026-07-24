@@ -108,24 +108,27 @@
 //!
 //! # Features
 //!
+//! - `std` (default) retains Rust standard-library host behavior and forwards
+//!   to `bop-lang/std`.
 //! - `bop-std` (default) forwards to `bop-lang/bop-std` so hosts can
 //!   resolve the bundled `std.*` modules.
 //! - `no_std` forwards to `bop-lang/no_std`; combine it with
 //!   `default-features = false` for bare-metal or
 //!   `wasm32-unknown-unknown` builds.
+//!   If Cargo unifies `std` and `no_std`, `std` wins.
 //!
 //! See the [embedding guide](https://bop-lang.com/docs/embedding/) and
 //! [stateful instance guide](https://bop-lang.com/docs/embedding/instances/)
 //! for lifecycle, limits, callback affinity, and engine-selection details.
 
-#![cfg_attr(feature = "no_std", no_std)]
+#![cfg_attr(all(feature = "no_std", not(feature = "std")), no_std)]
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 extern crate alloc;
 
-// The standard test harness remains available when `--all-features` selects
-// the library's `no_std` surface; make that test-only dependency explicit.
-#[cfg(all(test, feature = "no_std"))]
+// A genuine no_std unit-test build still uses Rust's standard test harness;
+// make that test-only dependency explicit.
+#[cfg(all(test, feature = "no_std", not(feature = "std")))]
 extern crate std;
 
 pub mod chunk;

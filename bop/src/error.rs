@@ -1,6 +1,6 @@
 //! Error type for the Bop interpreter.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{boxed::Box, format, string::String};
 
 /// Identifies the non-root source that produced a diagnostic.
@@ -399,12 +399,19 @@ impl BopWarning {
     }
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 impl std::error::Error for BopError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "std", feature = "no_std"))]
+    #[test]
+    fn unified_std_and_no_std_features_keep_std_error_integration() {
+        fn assert_std_error<T: std::error::Error>() {}
+        assert_std_error::<BopError>();
+    }
 
     #[test]
     fn runtime_error_sets_message_and_line() {

@@ -9,6 +9,9 @@
 - **Core dependency policy:** `bop-lang` remains zero third-party Rust
   dependencies in its standard configuration; `alloc`/`core` support the
   portable core and the existing `libm` feature supports `no_std` math.
+  Rust `std` is an explicit default feature and takes precedence when Cargo
+  unifies it with `no_std`; genuine no_std builds use
+  `--no-default-features --features no_std`.
 - **Workspace:** Cargo workspace containing `bop`, `bop-vm`, `bop-compile`,
   `bop-sys`, and `bop-cli`; manifests and `Cargo.lock` own exact versions.
 - **Testing:** Cargo unit/integration tests plus VM differential and AOT

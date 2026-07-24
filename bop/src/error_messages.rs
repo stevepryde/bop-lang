@@ -21,7 +21,7 @@
 //! off per-engine messages (e.g. `"VM: stack underflow"`) stay
 //! with their engine — there's nothing to deduplicate.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::String};
 
 /// Format the diagnostic for an unknown variable.

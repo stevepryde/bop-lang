@@ -79,7 +79,9 @@ fn walker_and_vm_warn_for_glob_shadows_of_slot_locals_and_params() {
     // Issue #117 gap 2: a fn-body glob import clashing with a
     // slot-allocated local or parameter must warn in the VM exactly
     // as it does in the walker — once per executed `use`, plus the
-    // module-top warning for the fn declared before its import.
+    // module-top warning for the fn declared before its import. This is also
+    // the additive-feature regression gate: under `--all-features`, the
+    // unified `std` + `no_std` dependency features must retain stderr delivery.
     let files = &[
         (
             "main.bop",

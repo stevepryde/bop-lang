@@ -108,6 +108,7 @@ including hand-built or deserialized bytecode.
 
 | feature | default | what it does |
 |---|---|---|
+| `std` | yes | retains Rust standard-library host behavior and forwards to `bop-lang/std`. If Cargo unifies `std` and `no_std`, this feature wins. |
 | `bop-std` | yes | forwards to `bop-lang`'s `bop-std` feature (bundles the Bop stdlib so `use std.math` etc. resolve through any host that calls `bop::stdlib::resolve`) |
 | `no_std` | no | forwards to `bop-lang`'s `no_std` feature, which pulls in `libm`. Enable with `default-features = false, features = ["no_std"]` (add `"bop-std"` too if you want the bundled stdlib on bare-metal targets). |
 

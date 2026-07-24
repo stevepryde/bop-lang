@@ -8,7 +8,7 @@ use crate::parser::{
     AssignTarget, Expr, ExprKind, Parameter, Stmt, StmtKind, VariantDecl, VariantPayload,
 };
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::string::String;
 
 /// Callback surface for every declaration statement found by

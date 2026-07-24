@@ -176,6 +176,10 @@ Bop's value-depth checks and nested error paths.
 ## WASM / no_std
 
 Bop builds clean for `wasm32-unknown-unknown`. Walker + VM + libm + `lol_alloc` as `#[global_allocator]` ships at ~355 KB stripped.
+The Rust `std` feature is enabled by default and takes precedence if Cargo
+unifies it with `no_std`, so transitive feature additions cannot silently
+disable stderr diagnostics or thread-local runtime state. A genuine no_std
+build therefore disables defaults and explicitly selects `no_std`:
 
 ```toml
 [dependencies]

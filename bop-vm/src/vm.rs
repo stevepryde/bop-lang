@@ -40,7 +40,7 @@
 //!   still fits under the tree-walker's calibration of
 //!   `BopLimits::standard()` / `BopLimits::demo()`.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{
     format,
     rc::Rc,
@@ -49,14 +49,14 @@ use alloc::{
     vec::Vec,
 };
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::rc::Rc;
 
 use core::cell::{Cell, RefCell};
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::{BTreeMap, BTreeSet};
 
 use bop::builtins::{self, error, error_fatal_with_hint, error_with_hint};
@@ -975,11 +975,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     /// boundary. The Vec exists in no_std builds too; only stderr delivery is
     /// unavailable there.
     fn write_runtime_warnings(&mut self) {
-        #[cfg(not(feature = "no_std"))]
+        #[cfg(any(feature = "std", not(feature = "no_std")))]
         for warning in self.runtime_warnings.drain(..) {
             eprintln!("warning: {}", warning.message);
         }
-        #[cfg(feature = "no_std")]
+        #[cfg(all(feature = "no_std", not(feature = "std")))]
         self.runtime_warnings.clear();
     }
 

@@ -49,6 +49,9 @@ embedding APIs across all three execution engines.
 - Add in-memory module helpers in `bop::host`.
 - Move the Bop standard library into `bop-lang` behind the default `bop-std`
   feature. The old standalone `bop-std` crate is no longer needed.
+- Make Rust standard-library integration an additive-safe default `std`
+  feature. Genuine no_std builds use `default-features = false` with
+  `features = ["no_std"]`; if Cargo unifies both features, `std` wins.
 - Improve imported-module diagnostics so parse and runtime failures render
   against the source and module that owns the error.
 

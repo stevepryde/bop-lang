@@ -8,7 +8,7 @@
 //! Wagner–Fischer Levenshtein with a per-target edit budget,
 //! which is plenty for scope sizes we ever see in a Bop program.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 
 /// Every core builtin callable by name, in a single canonical

@@ -5,7 +5,7 @@
 //! `fn` bindings, but leaves all other lexical and syntax validation to the
 //! parser. New integrations should generally call [`crate::parse`] directly.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::format;
 
 use crate::error::BopError;

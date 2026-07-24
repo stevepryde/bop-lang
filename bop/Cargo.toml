@@ -17,7 +17,13 @@ categories = ["compilers"]
 name = "bop"
 
 [features]
-default = ["bop-std"]
+default = ["std", "bop-std"]
+# Keeps the Rust standard-library integration enabled. This is separate from
+# `bop-std`, which controls whether Bop's own bundled `std.*` modules are
+# included. When Cargo unifies `std` and `no_std`, `std` wins so enabling an
+# additional dependency cannot silently remove host diagnostics or thread-local
+# runtime state.
+std = []
 # Bundle the Bop standard library (`use std.math`, `std.json`,
 # `std.collections`, `std.iter`, `std.string`, `std.test`) as
 # `&'static str` constants the engine can resolve at runtime
@@ -27,15 +33,16 @@ default = ["bop-std"]
 # `bop-std` crate — consumers who used to depend on that flip
 # `features = ["bop-std"]` on `bop-lang`.
 bop-std = []
-# Opt in when building for bare-metal / embedded / edge wasm
+# Opt in, with default features disabled, when building for bare-metal /
+# embedded / edge wasm
 # targets where Rust's `std` crate isn't available. Pulls in
 # the tiny pure-Rust `libm` crate internally so the math
 # builtins (`sqrt`, `sin`, `cos`, …) still work — those `f64`
 # methods live in `std`, not `core`. Named `no_std` rather
 # than `libm` because the *intent* is "I'm targeting a no_std
-# environment"; the libm dep is an implementation detail the
-# user shouldn't have to know about. Default (std) users never
-# see libm in their dep graph.
+# environment"; the libm dep is an implementation detail the user shouldn't
+# have to know about. If both `std` and `no_std` are selected through Cargo
+# feature unification, the crate keeps its std behavior.
 no_std = ["dep:libm"]
 
 [dependencies]

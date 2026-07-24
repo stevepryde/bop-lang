@@ -5,7 +5,7 @@
 //! operand resolved inline (constants, names, jump targets). Nested
 //! functions are recursively rendered after the main body.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
 use crate::chunk::{Chunk, Constant, Instr, InterpPart, LoopStateKind, NamespaceIdx};

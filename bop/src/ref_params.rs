@@ -1,8 +1,8 @@
 //! Shared `ref`-parameter mode checks and diagnostics.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::String, vec};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::{format, string::String, vec};
 
 use crate::error::BopError;

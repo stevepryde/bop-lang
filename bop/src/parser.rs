@@ -1,9 +1,9 @@
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::{BTreeMap, BTreeSet};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::BopError;

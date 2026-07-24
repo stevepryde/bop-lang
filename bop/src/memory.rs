@@ -1,8 +1,8 @@
 //! Allocation-owned memory accounting for Bop execution.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::rc::Rc;
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::rc::Rc;
 
 use core::cell::{Cell, RefCell};
@@ -55,35 +55,35 @@ impl MemoryAccount {
     }
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 thread_local! {
     static ACTIVE: RefCell<Option<Rc<MemoryAccount>>> = const { RefCell::new(None) };
 }
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 struct SyncActive(RefCell<Option<Rc<MemoryAccount>>>);
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 unsafe impl Sync for SyncActive {}
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 static ACTIVE: SyncActive = SyncActive(RefCell::new(None));
 
 fn replace_active(next: Option<Rc<MemoryAccount>>) -> Option<Rc<MemoryAccount>> {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         ACTIVE.with(|active| core::mem::replace(&mut *active.borrow_mut(), next))
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         core::mem::replace(&mut *ACTIVE.0.borrow_mut(), next)
     }
 }
 
 fn active() -> Option<Rc<MemoryAccount>> {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         ACTIVE.with(|active| active.borrow().clone())
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         ACTIVE.0.borrow().clone()
     }
@@ -200,9 +200,9 @@ pub(crate) fn bop_memory_used() -> usize {
 mod tests {
     use super::*;
     use crate::Value;
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     use alloc::vec::Vec;
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     use std::vec::Vec;
 
     #[test]
@@ -245,5 +245,31 @@ mod tests {
         }
         assert_eq!(first.used(), 0);
         assert!(second.used() > 0);
+    }
+
+    #[cfg(all(feature = "std", feature = "no_std"))]
+    #[test]
+    fn unified_std_and_no_std_features_keep_memory_accounts_thread_local() {
+        use std::sync::{Arc, Barrier};
+
+        let ready = Arc::new(Barrier::new(2));
+        let finish = Arc::new(Barrier::new(2));
+        let handles = [17, 29].map(|bytes| {
+            let ready = Arc::clone(&ready);
+            let finish = Arc::clone(&finish);
+            std::thread::spawn(move || {
+                bop_memory_init(1024);
+                ready.wait();
+                bop_alloc(bytes);
+                finish.wait();
+                assert_eq!(bop_memory_used(), bytes);
+                bop_dealloc(bytes);
+                assert_eq!(bop_memory_used(), 0);
+            })
+        });
+
+        for handle in handles {
+            handle.join().expect("memory-account worker panicked");
+        }
     }
 }

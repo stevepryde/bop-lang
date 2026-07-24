@@ -40,7 +40,7 @@ That's a complete Bop program — no imports, no boilerplate, no semicolons. The
   - **AOT Rust transpiler** — emits plain Rust source that links against `bop-lang`'s runtime. Closest to native speed; useful when you want compiled artifacts or you're already shipping a Rust build pipeline.
 
   All three are wire-compatible on `Value` and `BopError`, and the test suite pins them to byte-for-byte output agreement via a three-way differential harness.
-- **`no_std` and wasm.** The core crate compiles unchanged for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade; the rest of the language is already `#![cfg_attr(no_std)]`.
+- **`no_std` and wasm.** The core crate compiles for `wasm32-unknown-unknown` and bare-metal targets. Disable default features and enable `no_std` for a `libm`-backed math facade. The default Rust `std` feature wins if Cargo unifies both modes, preserving host diagnostics.
 - **Friendly errors.** Parse and runtime errors both include the source snippet, a caret under the offending column, and a `hint:` line when the parser or runtime can guess what you meant (`"I don't know what 'pritn' is — did you mean 'print'?"`). Imported-module failures retain their owning module and source. Designed to be read by humans *and* by automated callers that need to correct themselves.
 - **Explicit mutation.** [`ref` parameters](/docs/functions/reference-parameters/)
   make caller updates visible at both the declaration and call, then commit all

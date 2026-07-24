@@ -46,9 +46,9 @@ pub use error::{ValueConversionError, ValuePathSegment};
 
 use crate::Value;
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::string::String;
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::string::String;
 
 /// Fallibly convert an owned Rust value into a Bop [`Value`].

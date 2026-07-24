@@ -13,22 +13,22 @@
 //!
 //! ## Feature
 //!
-//! The only math-related feature is `no_std`. Leave it off (the
-//! default) to get `std::f64`'s native math with no external
-//! deps. Enable it — with `default-features = false, features =
-//! ["no_std"]` — when targeting bare-metal / embedded / edge
-//! wasm. `no_std` pulls in the tiny pure-Rust `libm` crate.
+//! The `std` feature uses `std::f64`'s native math. Enable
+//! `no_std` with `default-features = false` when targeting
+//! bare-metal / embedded / edge wasm; that pulls in the tiny
+//! pure-Rust `libm` crate. If Cargo unifies both features, the
+//! std implementation wins.
 
 #![allow(dead_code)]
 
 /// `√x`.
 #[inline]
 pub fn sqrt(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.sqrt()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::sqrt(x)
     }
@@ -37,11 +37,11 @@ pub fn sqrt(x: f64) -> f64 {
 /// `sin(x)` (radians).
 #[inline]
 pub fn sin(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.sin()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::sin(x)
     }
@@ -50,11 +50,11 @@ pub fn sin(x: f64) -> f64 {
 /// `cos(x)` (radians).
 #[inline]
 pub fn cos(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.cos()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::cos(x)
     }
@@ -63,11 +63,11 @@ pub fn cos(x: f64) -> f64 {
 /// `tan(x)` (radians).
 #[inline]
 pub fn tan(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.tan()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::tan(x)
     }
@@ -76,11 +76,11 @@ pub fn tan(x: f64) -> f64 {
 /// `⌊x⌋` — largest integer ≤ x, as a float.
 #[inline]
 pub fn floor(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.floor()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::floor(x)
     }
@@ -89,11 +89,11 @@ pub fn floor(x: f64) -> f64 {
 /// `⌈x⌉` — smallest integer ≥ x, as a float.
 #[inline]
 pub fn ceil(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.ceil()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::ceil(x)
     }
@@ -102,11 +102,11 @@ pub fn ceil(x: f64) -> f64 {
 /// Round half-away-from-zero (matches `f64::round`).
 #[inline]
 pub fn round(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.round()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::round(x)
     }
@@ -115,11 +115,11 @@ pub fn round(x: f64) -> f64 {
 /// Truncate toward zero — drop the fractional part.
 #[inline]
 pub fn trunc(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.trunc()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::trunc(x)
     }
@@ -128,11 +128,11 @@ pub fn trunc(x: f64) -> f64 {
 /// `base ** exp` for floats.
 #[inline]
 pub fn powf(base: f64, exp: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         base.powf(exp)
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::pow(base, exp)
     }
@@ -141,11 +141,11 @@ pub fn powf(base: f64, exp: f64) -> f64 {
 /// Natural log.
 #[inline]
 pub fn ln(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.ln()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::log(x)
     }
@@ -154,11 +154,11 @@ pub fn ln(x: f64) -> f64 {
 /// `e^x`.
 #[inline]
 pub fn exp(x: f64) -> f64 {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     {
         x.exp()
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     {
         libm::exp(x)
     }

@@ -8,11 +8,11 @@ use crate::parser::{
 };
 use model::*;
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{string::{String, ToString}, vec::Vec};
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::{BTreeMap, BTreeSet};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn check_program<R>(stmts: &[Stmt], resolver: &mut R) -> Vec<BopWarning>

@@ -1,17 +1,17 @@
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 
 use alloc_import::collections::BTreeMap;
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std as alloc_import;
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc as alloc_import;
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::rc::Rc;
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::rc::Rc;
 
 use core::cell::RefCell;
@@ -621,11 +621,11 @@ pub struct Evaluator<'h, H: BopHost + ?Sized> {
 }
 
 fn write_runtime_warnings(warnings: &mut Vec<crate::error::BopWarning>) {
-    #[cfg(not(feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     for warning in warnings.drain(..) {
         eprintln!("warning: {}", warning.message);
     }
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     warnings.clear();
 }
 
