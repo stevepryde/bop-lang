@@ -570,6 +570,10 @@ mod instruction_layout_tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UseIdx(pub u32);
 
+/// Index into a chunk's function-local lexical-scope metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalScopeIdx(pub u32);
+
 /// Index into a chunk's construction field-name recipe pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConstructFieldsIdx(pub u32);
@@ -669,6 +673,36 @@ pub struct InterpRecipe {
     pub parts: Rc<[InterpPart]>,
 }
 
+/// One unique slot-backed name declared in a lexical scope.
+///
+/// `first_binding` is the zero-based declaration position at which the name
+/// first became visible. Repeated declarations do not need another entry:
+/// every later snapshot includes the name once the first declaration is in
+/// its binding frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalScopeName {
+    pub name: NameIdx,
+    pub first_binding: u32,
+}
+
+/// Function-local names declared in one lexical scope.
+///
+/// Entries are sorted strictly by their referenced name strings so import
+/// clash checks can use binary search. The table is retained once per scope;
+/// individual `use` statements only retain a [`LocalScopeSnapshot`].
+#[derive(Debug, Clone, Default)]
+pub struct LocalScopeNames {
+    pub binding_count: u32,
+    pub entries: Vec<LocalScopeName>,
+}
+
+/// Prefix of a lexical scope that was visible at one `use` statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalScopeSnapshot {
+    pub scope: LocalScopeIdx,
+    pub binding_count: u32,
+}
+
 /// Compiled descriptor for a `use` statement. Parallel to the
 /// parser's `StmtKind::Use` fields — the VM's `Use` opcode picks
 /// this up by [`UseIdx`] at runtime so the hot-path instruction
@@ -678,13 +712,10 @@ pub struct UseSpec {
     pub path: String,
     pub items: Option<Vec<String>>,
     pub alias: Option<String>,
-    /// Slot-allocated locals / parameters visible in the innermost
-    /// compile-time scope at the `use` site. These bindings live in
-    /// frame slots — not in the runtime scope maps the VM's import
-    /// clash check walks — so the compiler records them here to keep
-    /// the first-definition-wins shadow warning in parity with the
-    /// walker (which sees every binding in its dynamic scope).
-    pub shadowed_locals: Vec<String>,
+    /// Slot-allocated locals / parameters visible in the innermost lexical
+    /// scope at this site. The referenced scope table is shared by every use
+    /// in that scope; the frontier makes source-order visibility exact.
+    pub local_scope: Option<LocalScopeSnapshot>,
 }
 
 // ─── Chunk ─────────────────────────────────────────────────────────
@@ -717,6 +748,10 @@ pub struct Chunk {
     /// `Instr::Use`. Holds variable-length fields (path, items,
     /// alias) so the instruction payload stays `Copy`.
     pub use_specs: Vec<UseSpec>,
+    /// Shared function-local name indexes referenced by `UseSpec` snapshots.
+    /// Empty for top-level chunks, whose bindings already live in runtime
+    /// scope maps.
+    pub local_scopes: Vec<LocalScopeNames>,
     /// Instruction spans of every source loop in this chunk, used to
     /// attribute step-limit errors to the innermost enclosing loop
     /// header. Passive metadata — never consulted on the hot path.

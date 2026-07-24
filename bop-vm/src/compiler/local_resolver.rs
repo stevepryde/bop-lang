@@ -11,7 +11,7 @@
 use alloc::{
     collections::{BTreeMap as VisibilityMap, BTreeSet as RefParameterSlots},
     rc::Rc,
-    string::{String, ToString},
+    string::String,
     vec,
     vec::Vec,
 };
@@ -21,14 +21,16 @@ use core::cell::Cell;
 use std::{
     collections::{HashMap as VisibilityMap, HashSet as RefParameterSlots},
     rc::Rc,
-    string::{String, ToString},
+    string::String,
     vec,
     vec::Vec,
 };
 
 use bop::parser::{ParamMode, Parameter};
 
-use crate::chunk::SlotIdx;
+use crate::chunk::{
+    LocalScopeIdx, LocalScopeName, LocalScopeNames, LocalScopeSnapshot, NameIdx, SlotIdx,
+};
 
 #[derive(Default)]
 struct VisibleSlots {
@@ -69,11 +71,13 @@ struct ScopeBinding {
     previous: Option<SlotIdx>,
 }
 
-#[derive(Default)]
 struct LocalScope {
     /// Replaying these entries in reverse restores outer bindings, including
     /// repeated declarations at one lexical depth.
     bindings: Vec<ScopeBinding>,
+    metadata: Option<LocalScopeIdx>,
+    /// Name -> (first declaration position, interned chunk name).
+    first_bindings: VisibilityMap<Rc<str>, (u32, NameIdx)>,
 }
 
 pub(super) struct LocalResolver {
@@ -87,27 +91,32 @@ pub(super) struct LocalResolver {
     /// Positional ABI parameter -> canonical language binding slot.
     pub(super) parameter_slots: Vec<SlotIdx>,
     ref_param_slots: RefParameterSlots<u32>,
+    local_scopes: Vec<LocalScopeNames>,
 }
 
 impl LocalResolver {
-    pub(super) fn new(params: &[Parameter]) -> Self {
+    pub(super) fn new(params: &[Parameter], parameter_names: &[NameIdx]) -> Self {
+        assert_eq!(params.len(), parameter_names.len());
         let mut resolver = Self {
             scopes: vec![LocalScope {
                 bindings: Vec::with_capacity(params.len()),
+                metadata: None,
+                first_bindings: VisibilityMap::default(),
             }],
             visible: VisibleSlots::default(),
             next_slot: 0,
             max_slot: 0,
             parameter_slots: Vec::with_capacity(params.len()),
             ref_param_slots: RefParameterSlots::new(),
+            local_scopes: Vec::new(),
         };
-        for parameter in params {
+        for (parameter, name) in params.iter().zip(parameter_names.iter().copied()) {
             let slot = match resolver.visible.get(&parameter.name) {
                 Some(slot) => slot,
                 None => {
                     let slot = SlotIdx(resolver.next_slot);
                     resolver.next_slot += 1;
-                    resolver.bind_slot(&parameter.name, slot);
+                    resolver.bind_slot(&parameter.name, name, slot);
                     slot
                 }
             };
@@ -124,27 +133,41 @@ impl LocalResolver {
         self.ref_param_slots.contains(&slot.0)
     }
 
-    fn bind_slot(&mut self, name: &str, slot: SlotIdx) {
+    fn bind_slot(&mut self, name: &str, name_idx: NameIdx, slot: SlotIdx) {
         let name: Rc<str> = Rc::from(name);
         let previous = self.visible.insert(Rc::clone(&name), slot);
-        self.scopes
-            .last_mut()
-            .expect("resolver always has a scope")
-            .bindings
-            .push(ScopeBinding {
-                name,
-                slot,
-                previous,
-            });
+        let scope = self.scopes.last_mut().expect("resolver always has a scope");
+        let binding = scope.bindings.len() as u32;
+        if !scope.first_bindings.contains_key(name.as_ref()) {
+            scope
+                .first_bindings
+                .insert(Rc::clone(&name), (binding, name_idx));
+            if let Some(metadata) = scope.metadata {
+                self.local_scopes[metadata.0 as usize]
+                    .entries
+                    .push(LocalScopeName {
+                        name: name_idx,
+                        first_binding: binding,
+                    });
+            }
+        }
+        scope.bindings.push(ScopeBinding {
+            name,
+            slot,
+            previous,
+        });
+        if let Some(metadata) = scope.metadata {
+            self.local_scopes[metadata.0 as usize].binding_count = binding + 1;
+        }
     }
 
     /// Allocate a fresh slot in the innermost scope. A repeated declaration
     /// receives a fresh slot and becomes the visible same-scope winner.
-    pub(super) fn declare(&mut self, name: &str) -> SlotIdx {
+    pub(super) fn declare(&mut self, name: &str, name_idx: NameIdx) -> SlotIdx {
         let slot = SlotIdx(self.next_slot);
         self.next_slot += 1;
         self.max_slot = self.max_slot.max(self.next_slot);
-        self.bind_slot(name, slot);
+        self.bind_slot(name, name_idx, slot);
         slot
     }
 
@@ -154,27 +177,36 @@ impl LocalResolver {
         self.visible.get(name)
     }
 
-    /// Return only this scope's names, sorted and deduplicated for deterministic
-    /// import-clash metadata.
-    pub(super) fn innermost_scope_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .scopes
-            .last()
-            .map(|scope| {
-                scope
-                    .bindings
-                    .iter()
-                    .map(|binding| binding.name.to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        names.sort();
-        names.dedup();
-        names
+    /// Capture the shared scope and source-order frontier visible at one use.
+    pub(super) fn innermost_scope_snapshot(&mut self) -> LocalScopeSnapshot {
+        let scope = self.scopes.last_mut().expect("resolver always has a scope");
+        let metadata = *scope.metadata.get_or_insert_with(|| {
+            let metadata = LocalScopeIdx(self.local_scopes.len() as u32);
+            self.local_scopes.push(LocalScopeNames {
+                binding_count: scope.bindings.len() as u32,
+                entries: scope
+                    .first_bindings
+                    .values()
+                    .map(|(first_binding, name)| LocalScopeName {
+                        name: *name,
+                        first_binding: *first_binding,
+                    })
+                    .collect(),
+            });
+            metadata
+        });
+        LocalScopeSnapshot {
+            scope: metadata,
+            binding_count: scope.bindings.len() as u32,
+        }
     }
 
     pub(super) fn push_scope(&mut self) {
-        self.scopes.push(LocalScope::default());
+        self.scopes.push(LocalScope {
+            bindings: Vec::new(),
+            metadata: None,
+            first_bindings: VisibilityMap::default(),
+        });
     }
 
     pub(super) fn pop_scope(&mut self) {
@@ -194,6 +226,25 @@ impl LocalResolver {
         // Reusing a popped slot would require liveness tracking across control
         // flow. Retaining it keeps every local access a direct frame Vec read.
     }
+
+    pub(super) fn finish(mut self, names: &[String]) -> LocalResolverOutput {
+        for scope in &mut self.local_scopes {
+            scope.entries.sort_by(|left, right| {
+                names[left.name.0 as usize].cmp(&names[right.name.0 as usize])
+            });
+        }
+        LocalResolverOutput {
+            max_slot: self.max_slot,
+            parameter_slots: self.parameter_slots,
+            local_scopes: self.local_scopes,
+        }
+    }
+}
+
+pub(super) struct LocalResolverOutput {
+    pub(super) max_slot: u32,
+    pub(super) parameter_slots: Vec<SlotIdx>,
+    pub(super) local_scopes: Vec<LocalScopeNames>,
 }
 
 #[cfg(test)]
@@ -206,7 +257,7 @@ mod tests {
 
     fn parameter(name: &str, mode: ParamMode) -> Parameter {
         Parameter {
-            name: name.to_string(),
+            name: String::from(name),
             mode,
         }
     }
@@ -217,27 +268,30 @@ mod tests {
             parameter("outer", ParamMode::Value),
             parameter("by_ref", ParamMode::Ref),
         ];
-        let mut resolver = LocalResolver::new(&params);
+        let mut resolver = LocalResolver::new(&params, &[NameIdx(0), NameIdx(1)]);
 
         assert_eq!(resolver.resolve("outer"), Some(SlotIdx(0)));
         assert_eq!(resolver.resolve("by_ref"), Some(SlotIdx(1)));
         assert_eq!(resolver.parameter_slots, [SlotIdx(0), SlotIdx(1)]);
         assert!(resolver.is_ref_parameter_binding(SlotIdx(1)));
 
-        let first = resolver.declare("same_scope");
-        let second = resolver.declare("same_scope");
+        let first = resolver.declare("same_scope", NameIdx(2));
+        let second = resolver.declare("same_scope", NameIdx(2));
         assert_eq!((first, second), (SlotIdx(2), SlotIdx(3)));
         assert_eq!(resolver.resolve("same_scope"), Some(second));
 
         resolver.push_scope();
-        let inner_outer = resolver.declare("outer");
-        resolver.declare("zebra");
-        resolver.declare("alpha");
-        resolver.declare("zebra");
+        let inner_outer = resolver.declare("outer", NameIdx(0));
+        resolver.declare("zebra", NameIdx(3));
+        resolver.declare("alpha", NameIdx(4));
+        resolver.declare("zebra", NameIdx(3));
         assert_eq!(resolver.resolve("outer"), Some(inner_outer));
         assert_eq!(
-            resolver.innermost_scope_names(),
-            ["alpha", "outer", "zebra"]
+            resolver.innermost_scope_snapshot(),
+            LocalScopeSnapshot {
+                scope: LocalScopeIdx(0),
+                binding_count: 4,
+            }
         );
 
         resolver.pop_scope();
@@ -255,7 +309,8 @@ mod tests {
             parameter("other", ParamMode::Ref),
             parameter("same", ParamMode::Value),
         ];
-        let resolver = LocalResolver::new(&params);
+        let resolver =
+            LocalResolver::new(&params, &[NameIdx(0), NameIdx(0), NameIdx(1), NameIdx(0)]);
 
         assert_eq!(
             resolver.parameter_slots,
@@ -269,9 +324,9 @@ mod tests {
     }
 
     fn indexed_lookup_count(binding_count: usize) -> usize {
-        let mut resolver = LocalResolver::new(&[]);
+        let mut resolver = LocalResolver::new(&[], &[]);
         for index in 0..binding_count {
-            resolver.declare(&format!("binding_{index}"));
+            resolver.declare(&format!("binding_{index}"), NameIdx(index as u32));
         }
 
         resolver.visible.reset_lookup_count();

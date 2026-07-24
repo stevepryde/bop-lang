@@ -3010,6 +3010,41 @@ print(x)"#),
 }
 
 #[test]
+fn function_local_use_frontiers_preserve_shadowing_and_duplicate_parameters_diff() {
+    set_modules(&[
+        (
+            "parameters",
+            "let parameter = 10\nlet first = 20\nlet from_parameters = 30",
+        ),
+        ("future", "let future = 40"),
+        ("nested", "let inner = 45\nlet nested_value = 50"),
+    ]);
+    let outcome = run_both(
+        r#"fn inspect(parameter, parameter) {
+    let first = 1
+    let first = 2
+    use parameters
+    print(parameter, first, from_parameters)
+    use future
+    print(future)
+    let future = 3
+    print(future)
+    if true {
+        let inner = 4
+        let inner = 5
+        use nested
+        print(inner, nested_value)
+    }
+}
+inspect(6, 7)"#,
+        &standard(),
+    );
+
+    assert!(outcome.is_ok(), "unexpected error: {:?}", outcome.error);
+    assert_eq!(outcome.prints, ["7 2 30", "40", "3", "5 50"]);
+}
+
+#[test]
 fn block_local_module_alias_does_not_leak_diff() {
     set_modules(&[("types", "struct Point { value }")]);
     let error = run_err(

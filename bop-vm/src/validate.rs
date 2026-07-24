@@ -119,6 +119,64 @@ impl<'a> Validator<'a> {
             }
         }
 
+        for (index, scope) in self.chunk.local_scopes.iter().enumerate() {
+            let detail = format!("local scope {index}");
+            let mut previous_name: Option<&str> = None;
+            let mut declaration_positions = BTreeSet::new();
+            for entry in &scope.entries {
+                self.pool(entry.name.0, self.chunk.names.len(), 0, "name", &detail)?;
+                if entry.first_binding >= scope.binding_count {
+                    return Err(self.invalid(
+                        0,
+                        format!(
+                            "{detail} introduces `{}` at binding {} but records only {} bindings",
+                            self.chunk.name(entry.name),
+                            entry.first_binding,
+                            scope.binding_count
+                        ),
+                    ));
+                }
+                if !declaration_positions.insert(entry.first_binding) {
+                    return Err(self.invalid(
+                        0,
+                        format!(
+                            "{detail} assigns binding {} to more than one name",
+                            entry.first_binding
+                        ),
+                    ));
+                }
+                let name = self.chunk.name(entry.name);
+                if previous_name.is_some_and(|previous| previous >= name) {
+                    return Err(self.invalid(0, format!("{detail} names are not strictly sorted")));
+                }
+                previous_name = Some(name);
+            }
+        }
+
+        for (index, spec) in self.chunk.use_specs.iter().enumerate() {
+            let Some(snapshot) = spec.local_scope else {
+                continue;
+            };
+            let detail = format!("use specification {index}");
+            self.pool(
+                snapshot.scope.0,
+                self.chunk.local_scopes.len(),
+                0,
+                "local scope",
+                &detail,
+            )?;
+            let scope = &self.chunk.local_scopes[snapshot.scope.0 as usize];
+            if snapshot.binding_count > scope.binding_count {
+                return Err(self.invalid(
+                    0,
+                    format!(
+                        "{detail} sees {} local bindings but local scope {} records only {}",
+                        snapshot.binding_count, snapshot.scope.0, scope.binding_count
+                    ),
+                ));
+            }
+        }
+
         for (index, function) in self.chunk.functions.iter().enumerate() {
             let detail = format!("function {index} `{}`", function.name);
             if function.capture_names.len() != function.capture_sources.len() {
