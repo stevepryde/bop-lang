@@ -5106,11 +5106,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .map(|s| s.contains_key(&name))
                     .unwrap_or(false)
                     || (module_top_scope && self.functions.contains_key(&name))
-                    // Slot-allocated locals / params visible at the
-                    // `use` site never appear in the dynamic scope
-                    // maps above; the compiler records them in the
-                    // spec (sorted) so this check sees them too.
-                    || spec.shadowed_locals.binary_search(&name).is_ok();
+                    // Slot-allocated locals / params never appear in
+                    // dynamic scope maps. Their shared lexical-scope
+                    // index plus this use site's binding frontier keeps
+                    // the same first-definition-wins check logarithmic.
+                    || self.local_scope_shadows(spec.local_scope, &name);
                 if clashes {
                     if is_plain_glob {
                         self.runtime_warnings.push(BopWarning::at(
@@ -5192,6 +5192,22 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             self.refresh_root_lexical_context();
         }
         Ok(())
+    }
+
+    fn local_scope_shadows(
+        &self,
+        snapshot: Option<crate::chunk::LocalScopeSnapshot>,
+        name: &str,
+    ) -> bool {
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+        let chunk = self.current_chunk();
+        let scope = &chunk.local_scopes[snapshot.scope.0 as usize];
+        scope
+            .entries
+            .binary_search_by(|entry| chunk.name(entry.name).cmp(name))
+            .is_ok_and(|index| scope.entries[index].first_binding < snapshot.binding_count)
     }
 
     /// Validate `ns.Type` — confirm `ns` binds a `Value::Module`

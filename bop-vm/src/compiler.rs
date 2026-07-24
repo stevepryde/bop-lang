@@ -520,10 +520,14 @@ impl Compiler {
                 is_const: _,
             } => {
                 self.compile_expr(value)?;
-                if let Some(resolver) = self.current_resolver_mut() {
+                if self.current_resolver().is_some() {
                     // Inside a function body: bind to a slot so
                     // subsequent reads compile to `LoadLocal`.
-                    let slot = resolver.declare(name);
+                    let name_idx = self.add_name(name);
+                    let slot = self
+                        .current_resolver_mut()
+                        .expect("resolver presence checked above")
+                        .declare(name, name_idx);
                     self.emit(Instr::StoreLocal(slot), line);
                 } else {
                     // Module top-level: stay on the named-scope
@@ -631,9 +635,10 @@ impl Compiler {
                 let fast = self.current_resolver().is_some();
                 let runtime_scope_base = self.runtime_scope_depth;
                 if fast {
+                    let name_idx = self.add_name(var);
                     let resolver = self.current_resolver_mut().unwrap();
                     resolver.push_scope();
-                    let slot = resolver.declare(var);
+                    let slot = resolver.declare(var, name_idx);
                     self.emit(Instr::StoreLocal(slot), line);
                 } else {
                     self.push_runtime_scope(line);
@@ -727,15 +732,14 @@ impl Compiler {
                 // discover them dynamically. Record the ones visible
                 // at this `use` site (statically known) so the shadow
                 // warning stays in parity with the walker.
-                let shadowed_locals = self
-                    .current_resolver()
-                    .map(LocalResolver::innermost_scope_names)
-                    .unwrap_or_default();
+                let local_scope = self
+                    .current_resolver_mut()
+                    .map(LocalResolver::innermost_scope_snapshot);
                 let spec = crate::chunk::UseSpec {
                     path: path.clone(),
                     items: items.clone(),
                     alias: alias.clone(),
-                    shadowed_locals,
+                    local_scope,
                 };
                 let idx = crate::chunk::UseIdx(self.chunk.use_specs.len() as u32);
                 self.chunk.use_specs.push(spec);
@@ -1546,7 +1550,12 @@ impl Compiler {
 
         // Enter the new function: push a resolver + start a
         // fresh free-var collector.
-        self.resolvers.push(LocalResolver::new(params));
+        let parameter_names: Vec<NameIdx> = params
+            .iter()
+            .map(|parameter| self.add_name(&parameter.name))
+            .collect();
+        self.resolvers
+            .push(LocalResolver::new(params, &parameter_names));
         self.free_vars = Some(FreeVariables::default());
 
         // Compile the body into the new chunk. Catch errors so we
@@ -1634,9 +1643,11 @@ impl Compiler {
             capture_sources.push(source);
         }
 
+        let resolver = resolver.finish(&chunk.names);
         let slot_count = resolver.max_slot;
         chunk.slot_count = slot_count;
         chunk.parameter_slots = resolver.parameter_slots;
+        chunk.local_scopes = resolver.local_scopes;
         Ok(FnDef {
             name: name.to_string(),
             params: params.iter().map(|param| param.name.clone()).collect(),

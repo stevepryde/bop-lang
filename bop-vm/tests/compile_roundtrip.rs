@@ -8,7 +8,7 @@
 //! diff.
 
 use bop::parse;
-use bop_vm::chunk::{RefArgTarget, SlotIdx};
+use bop_vm::chunk::{LocalScopeIdx, LocalScopeSnapshot, RefArgTarget, SlotIdx};
 use bop_vm::{Constant, Instr, LoopStateKind, compile, disassemble, validate_chunk};
 use std::rc::Rc;
 
@@ -519,20 +519,62 @@ fn caller(ref parameter) {
 }
 
 #[test]
-fn import_clash_metadata_stays_sorted_and_deduplicated() {
+fn import_clash_metadata_shares_one_sorted_scope_with_exact_frontiers() {
     let ast = parse(
         r#"fn metadata(zebra) {
     let beta = 1
+    use first
     let alpha = 2
     let beta = 3
-    use dep
+    use second
 }"#,
     )
     .expect("parse");
     let chunk = compile(&ast).expect("compile");
-    let metadata = &chunk.functions[0].chunk.use_specs[0].shadowed_locals;
+    let body = &chunk.functions[0].chunk;
+    let names = &body.local_scopes[0];
+    let resolved: Vec<(&str, u32)> = names
+        .entries
+        .iter()
+        .map(|entry| (body.name(entry.name), entry.first_binding))
+        .collect();
 
-    assert_eq!(metadata, &["alpha", "beta", "zebra"]);
+    assert_eq!(body.local_scopes.len(), 1);
+    assert_eq!(names.binding_count, 4);
+    assert_eq!(resolved, [("alpha", 2), ("beta", 1), ("zebra", 0)]);
+    assert_eq!(
+        body.use_specs
+            .iter()
+            .map(|spec| spec.local_scope)
+            .collect::<Vec<_>>(),
+        [
+            Some(LocalScopeSnapshot {
+                scope: LocalScopeIdx(0),
+                binding_count: 2,
+            }),
+            Some(LocalScopeSnapshot {
+                scope: LocalScopeIdx(0),
+                binding_count: 4,
+            }),
+        ]
+    );
+}
+
+#[test]
+fn functions_without_local_uses_retain_no_scope_metadata() {
+    let ast = parse(
+        r#"fn no_import(parameter) {
+    let local = parameter
+    if true {
+        let nested = local
+        print(nested)
+    }
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+
+    assert!(chunk.functions[0].chunk.local_scopes.is_empty());
 }
 
 #[test]

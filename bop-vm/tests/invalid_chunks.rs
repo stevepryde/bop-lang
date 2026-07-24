@@ -4,8 +4,9 @@ use bop::parser::ParamMode;
 use bop::{BopHost, BopLimits, Value};
 use bop_vm::chunk::{
     CallSite, CallSiteIdx, Chunk, CodeOffset, ConstIdx, ConstructFieldsIdx, EnumConstructShape,
-    EnumIdx, FnDef, FnIdx, Instr, InterpIdx, InterpPart, InterpRecipe, NameIdx, NamespaceIdx,
-    NamespaceRef, PatternIdx, PatternRecipe, RefArgTarget, SlotIdx, StructIdx, UseIdx,
+    EnumIdx, FnDef, FnIdx, Instr, InterpIdx, InterpPart, InterpRecipe, LocalScopeIdx,
+    LocalScopeName, LocalScopeNames, LocalScopeSnapshot, NameIdx, NamespaceIdx, NamespaceRef,
+    PatternIdx, PatternRecipe, RefArgTarget, SlotIdx, StructIdx, UseIdx, UseSpec,
 };
 use bop_vm::{Vm, execute};
 
@@ -160,6 +161,178 @@ fn execute_rejects_invalid_interpolation_parts() {
 
     let error = execution_error(chunk);
     assert!(error.message.contains("interpolation 0 references name 0"));
+}
+
+fn chunk_with_local_scope(
+    names: Vec<&str>,
+    scope: LocalScopeNames,
+    snapshot: LocalScopeSnapshot,
+) -> Chunk {
+    Chunk {
+        code: vec![Instr::Use(UseIdx(0)), Instr::Halt],
+        lines: vec![7, 0],
+        names: names.into_iter().map(str::to_string).collect(),
+        local_scopes: vec![scope],
+        use_specs: vec![UseSpec {
+            path: "dep".into(),
+            items: None,
+            alias: None,
+            local_scope: Some(snapshot),
+        }],
+        ..Chunk::new()
+    }
+}
+
+#[test]
+fn execute_rejects_malformed_local_scope_snapshots() {
+    let missing_scope = execution_error(Chunk {
+        code: vec![Instr::Use(UseIdx(0)), Instr::Halt],
+        lines: vec![7, 0],
+        use_specs: vec![UseSpec {
+            path: "dep".into(),
+            items: None,
+            alias: None,
+            local_scope: Some(LocalScopeSnapshot {
+                scope: LocalScopeIdx(0),
+                binding_count: 0,
+            }),
+        }],
+        ..Chunk::new()
+    });
+    assert!(
+        missing_scope
+            .message
+            .contains("use specification 0 references local scope 0")
+    );
+
+    let excessive_frontier = execution_error(chunk_with_local_scope(
+        vec![],
+        LocalScopeNames::default(),
+        LocalScopeSnapshot {
+            scope: LocalScopeIdx(0),
+            binding_count: 1,
+        },
+    ));
+    assert!(
+        excessive_frontier
+            .message
+            .contains("sees 1 local bindings but local scope 0 records only 0")
+    );
+}
+
+#[test]
+fn execute_rejects_malformed_local_scope_name_indexes() {
+    let invalid_name = execution_error(chunk_with_local_scope(
+        vec![],
+        LocalScopeNames {
+            binding_count: 1,
+            entries: vec![LocalScopeName {
+                name: NameIdx(0),
+                first_binding: 0,
+            }],
+        },
+        LocalScopeSnapshot {
+            scope: LocalScopeIdx(0),
+            binding_count: 1,
+        },
+    ));
+    assert!(
+        invalid_name
+            .message
+            .contains("local scope 0 references name 0")
+    );
+
+    let invalid_binding = execution_error(chunk_with_local_scope(
+        vec!["name"],
+        LocalScopeNames {
+            binding_count: 1,
+            entries: vec![LocalScopeName {
+                name: NameIdx(0),
+                first_binding: 1,
+            }],
+        },
+        LocalScopeSnapshot {
+            scope: LocalScopeIdx(0),
+            binding_count: 1,
+        },
+    ));
+    assert!(
+        invalid_binding
+            .message
+            .contains("introduces `name` at binding 1 but records only 1 bindings")
+    );
+}
+
+#[test]
+fn execute_rejects_unsorted_or_duplicate_local_scope_names() {
+    for entries in [
+        vec![
+            LocalScopeName {
+                name: NameIdx(1),
+                first_binding: 0,
+            },
+            LocalScopeName {
+                name: NameIdx(0),
+                first_binding: 1,
+            },
+        ],
+        vec![
+            LocalScopeName {
+                name: NameIdx(0),
+                first_binding: 0,
+            },
+            LocalScopeName {
+                name: NameIdx(0),
+                first_binding: 1,
+            },
+        ],
+    ] {
+        let error = execution_error(chunk_with_local_scope(
+            vec!["alpha", "beta"],
+            LocalScopeNames {
+                binding_count: 2,
+                entries,
+            },
+            LocalScopeSnapshot {
+                scope: LocalScopeIdx(0),
+                binding_count: 2,
+            },
+        ));
+        assert!(
+            error.message.contains("names are not strictly sorted"),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn execute_rejects_duplicate_local_scope_binding_positions() {
+    let error = execution_error(chunk_with_local_scope(
+        vec!["alpha", "beta"],
+        LocalScopeNames {
+            binding_count: 2,
+            entries: vec![
+                LocalScopeName {
+                    name: NameIdx(0),
+                    first_binding: 0,
+                },
+                LocalScopeName {
+                    name: NameIdx(1),
+                    first_binding: 0,
+                },
+            ],
+        },
+        LocalScopeSnapshot {
+            scope: LocalScopeIdx(0),
+            binding_count: 2,
+        },
+    ));
+    assert!(
+        error
+            .message
+            .contains("assigns binding 0 to more than one name")
+    );
 }
 
 #[test]
