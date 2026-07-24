@@ -6774,7 +6774,7 @@ fn __bop_function_site_value(
             "print" => {
                 let args_expr = build_arg_array(&arg_names);
                 format!(
-                    "__bop_host_print(ctx, &__bop_format_print(&{args_expr}), {line})?; ::bop::value::Value::None"
+                    "{{ let __bop_message = ::bop::formatting::__format_values_in(&{args_expr}, \" \", {line}, &ctx.memory)?; __bop_host_print(ctx, &__bop_message, {line})?; ::bop::value::Value::None }}"
                 )
             }
             "range" => format!(

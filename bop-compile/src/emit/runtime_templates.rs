@@ -1605,16 +1605,6 @@ fn __bop_call_method(
     }
 }
 
-/// Format the argument list the way Bop's built-in `print` does:
-/// values space-separated via their Display impls.
-#[inline]
-fn __bop_format_print(args: &[::bop::value::Value]) -> String {
-    args.iter()
-        .map(|v| format!("{}", v))
-        .collect::<::std::vec::Vec<_>>()
-        .join(" ")
-}
-
 /// Runtime state for a `for x in v` loop. Fast path for the
 /// three built-in iterables (eager materialisation into a Vec
 /// with a cursor); protocol path for `Value::Iter` or user

@@ -2407,6 +2407,94 @@ print(s.len())"#,
 
 #[test]
 #[ignore]
+fn e2e_bounded_string_operations_preserve_native_and_sandbox_output() {
+    assert_aot_modes_match_walker(
+        r#"let nested = ["x", ["y"]]
+print(nested, nested)
+print([nested, nested].join("|"))
+print("ab".replace("", "-"))
+print("a,,b".split(","))"#,
+        "bounded_string_operation_parity",
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_sandbox_amplified_strings_fail_before_host_output() {
+    let source = r#"
+pub fn print_amplified() {
+  let shared = "x" * 256
+  let values = [shared, shared, shared, shared, shared, shared, shared, shared]
+  print(values)
+}
+pub fn join_amplified() {
+  let shared = "x" * 256
+  let values = [shared, shared, shared, shared, shared, shared, shared, shared]
+  return values.join("")
+}
+pub fn replace_amplified() {
+  let shared = "x" * 256
+  return shared.replace("x", "abcdefgh")
+}
+pub fn split_amplified() {
+  let shared = "x," * 128
+  return shared.split(",")
+}
+"#;
+    let mut rust_src = transpile(
+        source,
+        &Options {
+            emit_main: false,
+            use_bop_sys: false,
+            sandbox: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    rust_src.push_str(
+        r#"
+struct Host {
+    prints: usize,
+}
+impl ::bop::BopHost for Host {
+    fn call(&mut self, _name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+        None
+    }
+    fn on_print(&mut self, _message: &str) {
+        self.prints += 1;
+    }
+}
+fn assert_memory_error(result: Result<::bop::value::Value, ::bop::error::BopError>) {
+    let error = result.unwrap_err();
+    assert!(error.is_fatal);
+    assert_eq!(error.message, "Memory limit exceeded");
+}
+fn main() {
+    let limits = ::bop::BopLimits { max_steps: 1_000, max_memory: 1_200 };
+    let mut host = Host { prints: 0 };
+    let mut instance = BopInstance::load(&mut host, &limits).unwrap();
+
+    for entry in ["print_amplified", "join_amplified", "replace_amplified", "split_amplified"] {
+        assert_memory_error(instance.call(entry, &[], &mut host));
+        assert_eq!(host.prints, 0, "{entry} exposed host output before failing");
+    }
+    println!("ok");
+}
+"#,
+    );
+
+    let run = run_generated_source("sandbox_amplified_string_preflight", rust_src);
+    assert_eq!(
+        run.status,
+        Some(0),
+        "generated program failed:\n{}",
+        run.stderr
+    );
+    assert_eq!(run.stdout, "ok");
+}
+
+#[test]
+#[ignore]
 fn e2e_sandbox_recursion_halts() {
     // Generated AOT now shares the walker/VM MAX_CALL_DEPTH = 64
     // boundary and reports the canonical recoverable depth error

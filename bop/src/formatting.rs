@@ -207,6 +207,19 @@ pub fn __split_values_in(
 mod tests {
     use super::*;
 
+    struct FragmentWriter {
+        bytes: usize,
+        max_fragment: usize,
+    }
+
+    impl fmt::Write for FragmentWriter {
+        fn write_str(&mut self, value: &str) -> fmt::Result {
+            self.bytes += value.len();
+            self.max_fragment = self.max_fragment.max(value.len());
+            Ok(())
+        }
+    }
+
     #[test]
     fn replacement_length_handles_empty_matches_and_overflow() {
         assert_eq!(checked_replacement_len(2, 3, 0, 1), Some(5));
@@ -251,5 +264,32 @@ mod tests {
             __format_values_in(&[nested.clone(), nested], " ", 1, &memory).unwrap(),
             r#"["x"] ["x"]"#
         );
+    }
+
+    #[test]
+    fn nested_shared_dag_streams_children_before_top_level_preflight() {
+        let memory = MemoryContext::__new(2_000);
+        let shared = Value::__new_str_in("x".repeat(128), &memory);
+        let leaf = Value::__try_new_array_in(vec![shared; 4], 1, &memory).unwrap();
+        let branch = Value::__try_new_array_in(vec![leaf; 4], 1, &memory).unwrap();
+        let root = Value::__try_new_array_in(vec![branch; 4], 1, &memory).unwrap();
+        let baseline = memory.__used();
+
+        let mut fragments = FragmentWriter {
+            bytes: 0,
+            max_fragment: 0,
+        };
+        write!(&mut fragments, "{root}").unwrap();
+        assert!(fragments.bytes > 8_000);
+        assert_eq!(
+            fragments.max_fragment, 128,
+            "a nested child was materialized before reaching the writer"
+        );
+
+        let values = [root];
+        let error = __format_values_in(&values, " ", 9, &memory).unwrap_err();
+        assert!(error.is_fatal);
+        assert_eq!(error.message, "Memory limit exceeded");
+        assert_eq!(memory.__used(), baseline);
     }
 }

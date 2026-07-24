@@ -6182,8 +6182,14 @@ fn safety_range_memory_preflight() {
 }
 
 #[test]
-fn amplified_string_methods_preflight_without_partial_output() {
+fn amplified_string_operations_preflight_without_partial_output() {
     let cases = [
+        (
+            "print",
+            r#"let shared = "x" * 256
+let values = [shared, shared, shared, shared, shared, shared, shared, shared]
+print(values)"#,
+        ),
         (
             "join",
             r#"let shared = "x" * 256
