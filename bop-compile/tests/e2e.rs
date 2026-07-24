@@ -1843,8 +1843,7 @@ fn assert_aot_matches(test_name: &str, code: &str) {
     let actual = run_aot(code, test_name);
     assert_eq!(
         actual, expected,
-        "aot output diverged from tree-walker on {}:\n--- tree-walker ---\n{}\n--- aot ---\n{}",
-        test_name, expected, actual,
+        "aot output diverged from tree-walker on {test_name}:\n--- tree-walker ---\n{expected}\n--- aot ---\n{actual}",
     );
 }
 
@@ -2170,10 +2169,7 @@ print(dynamic["item"].push(3))"#,
     let message = bop::error_messages::NESTED_MUTATION_ERROR_MESSAGE;
     assert_eq!(
         output,
-        format!(
-            "true\n{}\n5\ntrue\n{}\n8\nnone\n7\n12\n23",
-            message, message
-        )
+        format!("true\n{message}\n5\ntrue\n{message}\n8\nnone\n7\n12\n23")
     );
 }
 
@@ -2509,8 +2505,7 @@ fn assert_aot_matches_with_modules(test_name: &str, code: &str, modules: &[(&str
         .to_string();
     assert_eq!(
         actual, expected,
-        "AOT output diverged from walker for {}:\n--- walker ---\n{}\n--- aot ---\n{}",
-        test_name, expected, actual,
+        "AOT output diverged from walker for {test_name}:\n--- walker ---\n{expected}\n--- aot ---\n{actual}",
     );
 }
 

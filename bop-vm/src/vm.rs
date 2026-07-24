@@ -1335,16 +1335,16 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 .or_else(|| (!frame.is_function).then_some(self.current_module.as_str()))?;
             Some((active_module, frame.scopes.first()?))
         }) {
-            if module.path == active_module {
-                if let Some(value) = environment.get(name) {
-                    return Some(value.clone());
-                }
+            if module.path == active_module
+                && let Some(value) = environment.get(name)
+            {
+                return Some(value.clone());
             }
             let (origin_module, origin_binding) = module.__binding_origin(name);
-            if origin_module == active_module {
-                if let Some(value) = environment.get(&origin_binding) {
-                    return Some(value.clone());
-                }
+            if origin_module == active_module
+                && let Some(value) = environment.get(&origin_binding)
+            {
+                return Some(value.clone());
             }
             let active_origins = self.binding_origins_for(active_module);
             if let Some(active_binding) =
@@ -1354,10 +1354,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         (active_origin.0 == origin_module && active_origin.1 == origin_binding)
                             .then_some(active_binding)
                     })
+                && let Some(value) = environment.get(active_binding)
             {
-                if let Some(value) = environment.get(active_binding) {
-                    return Some(value.clone());
-                }
+                return Some(value.clone());
             }
         }
         module.__binding(name)
@@ -1382,19 +1381,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 .or_else(|| (!frame.is_function).then_some(self.current_module.as_str()))?;
             Some((active_module, frame.scopes.first()?))
         }) {
-            if active_module == origin.0 {
-                if let Some(value) = environment.get(&origin.1) {
-                    return Some(value.clone());
-                }
+            if active_module == origin.0
+                && let Some(value) = environment.get(&origin.1)
+            {
+                return Some(value.clone());
             }
             let active_origins = self.binding_origins_for(active_module);
             if let Some(binding) = active_origins
                 .iter()
                 .find_map(|(binding, candidate)| (candidate == origin).then_some(binding))
+                && let Some(value) = environment.get(binding)
             {
-                if let Some(value) = environment.get(binding) {
-                    return Some(value.clone());
-                }
+                return Some(value.clone());
             }
         }
         self.live_value_environments
@@ -1525,16 +1523,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         if self.frames.last().is_some_and(|frame| {
             frame.is_function
                 && frame.function_module.as_deref() == Some(bop::value::ROOT_MODULE_PATH)
+        }) && let Some(slot) = self.frames.first_mut().and_then(|root| {
+            root.scopes
+                .iter_mut()
+                .rev()
+                .find_map(|scope| scope.get_mut(name))
         }) {
-            if let Some(slot) = self.frames.first_mut().and_then(|root| {
-                root.scopes
-                    .iter_mut()
-                    .rev()
-                    .find_map(|scope| scope.get_mut(name))
-            }) {
-                *slot = value;
-                return true;
-            }
+            *slot = value;
+            return true;
         }
         false
     }
@@ -1578,16 +1574,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 .insert(name, value);
             return true;
         }
-        if uses_root {
-            if let Some(slot) = self.frames[0]
+        if uses_root
+            && let Some(slot) = self.frames[0]
                 .scopes
                 .iter_mut()
                 .rev()
                 .find_map(|scope| scope.get_mut(&name))
-            {
-                *slot = value;
-                return true;
-            }
+        {
+            *slot = value;
+            return true;
         }
         false
     }
@@ -1663,18 +1658,17 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     fn lookup_function_entry(&self, name: &str) -> Option<Rc<FnEntry>> {
         let frame = self.frames.last()?;
         let defining_module = frame.function_module.as_deref();
-        if let Some(module_path) = defining_module {
-            if module_path != bop::value::ROOT_MODULE_PATH {
-                let cache = self.imports.borrow();
-                if let Some(ImportSlot::Loaded(artifacts)) = cache.get(module_path) {
-                    if let Some((_, entry)) = artifacts
-                        .fn_decls
-                        .iter()
-                        .find(|(candidate, _)| candidate == name)
-                    {
-                        return Some(entry.clone());
-                    }
-                }
+        if let Some(module_path) = defining_module
+            && module_path != bop::value::ROOT_MODULE_PATH
+        {
+            let cache = self.imports.borrow();
+            if let Some(ImportSlot::Loaded(artifacts)) = cache.get(module_path)
+                && let Some((_, entry)) = artifacts
+                    .fn_decls
+                    .iter()
+                    .find(|(candidate, _)| candidate == name)
+            {
+                return Some(entry.clone());
             }
         }
 
@@ -1705,14 +1699,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         if let Some(entry) = self.imported_function(name) {
             return Some(entry.clone());
         }
-        if let Some(module_path) = defining_module {
-            if let Some(entry) = self
+        if let Some(module_path) = defining_module
+            && let Some(entry) = self
                 .functions
                 .get(name)
                 .filter(|entry| entry.module_path == module_path)
-            {
-                return Some(entry.clone());
-            }
+        {
+            return Some(entry.clone());
         }
         if defining_module.is_none_or(|path| path == self.current_module) {
             self.functions.get(name).cloned()
@@ -1803,22 +1796,19 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     Value::Module(module) => Some(Rc::clone(module)),
                     _ => None,
                 };
-                if self.is_module_top_scope() {
-                    if let Some(origin) = self.binding_origins.get(&name).cloned() {
-                        if origin.0 != self.current_module || origin.1 != name {
-                            if let Some(previous) = self
-                                .current_scopes_mut()
-                                .last_mut()
-                                .and_then(|scope| scope.remove(&name))
-                            {
-                                self.live_value_environments
-                                    .borrow_mut()
-                                    .entry(origin.0)
-                                    .or_default()
-                                    .insert(origin.1, previous);
-                            }
-                        }
-                    }
+                if self.is_module_top_scope()
+                    && let Some(origin) = self.binding_origins.get(&name).cloned()
+                    && (origin.0 != self.current_module || origin.1 != name)
+                    && let Some(previous) = self
+                        .current_scopes_mut()
+                        .last_mut()
+                        .and_then(|scope| scope.remove(&name))
+                {
+                    self.live_value_environments
+                        .borrow_mut()
+                        .entry(origin.0)
+                        .or_default()
+                        .insert(origin.1, previous);
                 }
                 self.define_local(name.clone(), v);
                 if self.is_module_top_scope() {
@@ -1855,8 +1845,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     let name = chunk.name(n);
                     return Err(error_with_hint(
                         line,
-                        format!("Variable `{}` doesn't exist yet", name),
-                        format!("Use `let` to create a new variable: let {} = ...", name),
+                        format!("Variable `{name}` doesn't exist yet"),
+                        format!("Use `let` to create a new variable: let {name} = ..."),
                     ));
                 }
                 if let Some(name) = top_level_name {
@@ -2663,12 +2653,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         .last()
                         .and_then(|frame| frame.slots.get(slot.0 as usize))
                         .ok_or_else(|| error(line, "VM: local slot out of range"))?;
-                    result.push_str(&format!("{}", v));
+                    result.push_str(&format!("{v}"));
                 }
                 InterpPart::Name(name_idx) => {
                     let name = self.current_chunk().name(*name_idx);
                     if let Some(value) = self.lookup_var_by_idx(*name_idx) {
-                        result.push_str(&format!("{}", value));
+                        result.push_str(&format!("{value}"));
                     } else if let Some(module) = self.module_alias(name) {
                         result.push_str(&format!("{}", Value::Module(Rc::clone(module))));
                     } else {
@@ -2827,24 +2817,23 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             )),
             _ => None,
         };
-        if let Some(type_key) = type_key {
-            if let Some(entry) = self
+        if let Some(type_key) = type_key
+            && let Some(entry) = self
                 .user_methods
                 .get(&type_key)
                 .and_then(|methods| methods.get(&method))
                 .cloned()
-            {
-                return self.preflight_call(
-                    PreparedCallable::UserMethod {
-                        entry,
-                        receiver,
-                        receiver_target,
-                    },
-                    format!("{}.{}", type_key.1, method),
-                    site,
-                    line,
-                );
-            }
+        {
+            return self.preflight_call(
+                PreparedCallable::UserMethod {
+                    entry,
+                    receiver,
+                    receiver_target,
+                },
+                format!("{}.{}", type_key.1, method),
+                site,
+                line,
+            );
         }
         if nested_place {
             methods::reject_nested_array_mutation(&receiver, &method, line)?;
@@ -3560,7 +3549,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             "print" => {
                 let message = args
                     .iter()
-                    .map(|a| format!("{}", a))
+                    .map(|a| format!("{a}"))
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.host.on_print(&message);
@@ -3978,25 +3967,25 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
         };
 
-        if methods::is_mutating_method(method) {
-            if let (Some(target), Some(new_obj)) = (assign_back_to, mutated) {
-                match target {
-                    crate::chunk::AssignBack::Slot(slot) => {
-                        let frame = self.frames.last_mut().expect("frame present");
-                        let i = slot.0 as usize;
-                        if i < frame.slots.len() {
-                            frame.slots[i] = new_obj;
-                        }
-                        // Out-of-range slot: silently drop the
-                        // mutation. The compiler only emits
-                        // `Slot(i)` for a slot it knows exists,
-                        // so this branch is effectively a
-                        // miscompile guard.
+        if methods::is_mutating_method(method)
+            && let (Some(target), Some(new_obj)) = (assign_back_to, mutated)
+        {
+            match target {
+                crate::chunk::AssignBack::Slot(slot) => {
+                    let frame = self.frames.last_mut().expect("frame present");
+                    let i = slot.0 as usize;
+                    if i < frame.slots.len() {
+                        frame.slots[i] = new_obj;
                     }
-                    crate::chunk::AssignBack::Name(var_idx) => {
-                        let var_name = self.current_chunk().name(var_idx).to_string();
-                        self.set_existing(&var_name, new_obj);
-                    }
+                    // Out-of-range slot: silently drop the
+                    // mutation. The compiler only emits
+                    // `Slot(i)` for a slot it knows exists,
+                    // so this branch is effectively a
+                    // miscompile guard.
+                }
+                crate::chunk::AssignBack::Name(var_idx) => {
+                    let var_name = self.current_chunk().name(var_idx).to_string();
+                    self.set_existing(&var_name, new_obj);
                 }
             }
         }
@@ -4173,10 +4162,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if provided.contains_key(&key_str) {
                 return Err(error(
                     line,
-                    format!(
-                        "Field `{}` specified twice in `{}` construction",
-                        key_str, type_name_s
-                    ),
+                    format!("Field `{key_str}` specified twice in `{type_name_s}` construction"),
                 ));
             }
             if !decl.iter().any(|d| d == &key_str) {
@@ -4197,7 +4183,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 None => {
                     return Err(error(
                         line,
-                        format!("Missing field `{}` in `{}` construction", d, type_name_s),
+                        format!("Missing field `{d}` in `{type_name_s}` construction"),
                     ));
                 }
             }
@@ -4233,10 +4219,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if provided[..index].contains(field) {
                 return Err(error(
                     line,
-                    format!(
-                        "Field `{}` specified twice in `{}` construction",
-                        field, type_name
-                    ),
+                    format!("Field `{field}` specified twice in `{type_name}` construction"),
                 ));
             }
             if !declared.contains(field) {
@@ -4254,7 +4237,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if !provided.contains(field) {
                 return Err(error(
                     line,
-                    format!("Missing field `{}` in `{}` construction", field, type_name),
+                    format!("Missing field `{field}` in `{type_name}` construction"),
                 ));
             }
         }
@@ -4318,10 +4301,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     if provided[..index].contains(field) {
                         return Err(error(
                             line,
-                            format!(
-                                "Field `{}` specified twice in `{}::{}`",
-                                field, type_name, variant
-                            ),
+                            format!("Field `{field}` specified twice in `{type_name}::{variant}`"),
                         ));
                     }
                     if !fields.contains(field) {
@@ -4336,8 +4316,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         return Err(error(
                             line,
                             format!(
-                                "Missing field `{}` in `{}::{}` construction",
-                                field, type_name, variant
+                                "Missing field `{field}` in `{type_name}::{variant}` construction"
                             ),
                         ));
                     }
@@ -4346,21 +4325,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
             (EnumVariantShape::Unit, _) => Err(error(
                 line,
-                format!("Variant `{}::{}` takes no payload", type_name, variant),
+                format!("Variant `{type_name}::{variant}` takes no payload"),
             )),
             (EnumVariantShape::Tuple(_), _) => Err(error(
                 line,
-                format!(
-                    "Variant `{}::{}` expects positional arguments `(…)`",
-                    type_name, variant
-                ),
+                format!("Variant `{type_name}::{variant}` expects positional arguments `(…)`"),
             )),
             (EnumVariantShape::Struct(_), _) => Err(error(
                 line,
-                format!(
-                    "Variant `{}::{}` expects named fields `{{ … }}`",
-                    type_name, variant
-                ),
+                format!("Variant `{type_name}::{variant}` expects named fields `{{ … }}`"),
             )),
         }
     }
@@ -4450,8 +4423,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         return Err(error(
                             line,
                             format!(
-                                "Field `{}` specified twice in `{}::{}`",
-                                key_str, type_name_s, variant_s
+                                "Field `{key_str}` specified twice in `{type_name_s}::{variant_s}`"
                             ),
                         ));
                     }
@@ -4475,8 +4447,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             return Err(error(
                                 line,
                                 format!(
-                                    "Missing field `{}` in `{}::{}` construction",
-                                    d, type_name_s, variant_s
+                                    "Missing field `{d}` in `{type_name_s}::{variant_s}` construction"
                                 ),
                             ));
                         }
@@ -4494,25 +4465,21 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             (EnumVariantShape::Unit, _) => {
                 return Err(error(
                     line,
-                    format!("Variant `{}::{}` takes no payload", type_name_s, variant_s),
+                    format!("Variant `{type_name_s}::{variant_s}` takes no payload"),
                 ));
             }
             (EnumVariantShape::Tuple(_), _) => {
                 return Err(error(
                     line,
                     format!(
-                        "Variant `{}::{}` expects positional arguments `(…)`",
-                        type_name_s, variant_s
+                        "Variant `{type_name_s}::{variant_s}` expects positional arguments `(…)`"
                     ),
                 ));
             }
             (EnumVariantShape::Struct(_), _) => {
                 return Err(error(
                     line,
-                    format!(
-                        "Variant `{}::{}` expects named fields `{{ … }}`",
-                        type_name_s, variant_s
-                    ),
+                    format!("Variant `{type_name_s}::{variant_s}` expects named fields `{{ … }}`"),
                 ));
             }
         }
@@ -4614,19 +4581,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let type_bindings = &self.type_bindings;
         let module_aliases = &self.module_aliases;
         let resolver = |ns: Option<&str>, tn: &str| -> Option<String> {
-            if let Some(ns) = ns {
-                if let Some(slot) = recipe
+            if let Some(ns) = ns
+                && let Some(slot) = recipe
                     .namespaces
                     .iter()
                     .find(|(name, _)| name == ns)
                     .map(|(_, namespace)| namespace)
                     .and_then(|namespace| namespace.slot_idx())
-                {
-                    return match frame.slots.get(slot.0 as usize) {
-                        Some(Value::Module(module)) => module.type_origin(tn).map(str::to_string),
-                        _ => None,
-                    };
-                }
+            {
+                return match frame.slots.get(slot.0 as usize) {
+                    Some(Value::Module(module)) => module.type_origin(tn).map(str::to_string),
+                    _ => None,
+                };
             }
             resolve_type_in_frame(frame, frame_scopes, type_bindings, module_aliases, ns, tn)
         };
@@ -4727,13 +4693,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 .collect(),
         });
         self.functions.insert(name.clone(), Rc::clone(&entry));
-        if self.is_module_top_scope() && self.current_module == bop::value::ROOT_MODULE_PATH {
-            if let Some(visibility) = self.root_function_visibility.get(&idx.0).copied() {
-                self.abi_declarations
-                    .retain(|(existing, _)| existing != &name);
-                if visibility == Visibility::Public {
-                    self.abi_declarations.push((name, entry));
-                }
+        if self.is_module_top_scope()
+            && self.current_module == bop::value::ROOT_MODULE_PATH
+            && let Some(visibility) = self.root_function_visibility.get(&idx.0).copied()
+        {
+            self.abi_declarations
+                .retain(|(existing, _)| existing != &name);
+            if visibility == Visibility::Public {
+                self.abi_declarations.push((name, entry));
             }
         }
     }
@@ -5033,10 +5000,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 {
                     return Err(error(
                         line,
-                        format!(
-                            "`{}` isn't exported from `{}` (selective import)",
-                            wanted, path
-                        ),
+                        format!("`{wanted}` isn't exported from `{path}` (selective import)"),
                     ));
                 }
             }
@@ -5085,10 +5049,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if frame_has || self.functions.contains_key(alias_name) || imported_function_has {
                 return Err(error(
                     line,
-                    format!(
-                        "`{}` is already bound — can't use it as a module alias",
-                        alias_name
-                    ),
+                    format!("`{alias_name}` is already bound — can't use it as a module alias"),
                 ));
             }
             let live_bindings = exports
@@ -5118,10 +5079,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             //   3. in `type_bindings` so patterns + construction
             //      resolve `m.Type` inside fn bodies.
             let module_value = Value::Module(Rc::clone(&module_rc));
-            if let Some(frame) = self.frames.last_mut() {
-                if let Some(scope) = frame.scopes.last_mut() {
-                    scope.insert(alias_name.to_string(), module_value);
-                }
+            if let Some(frame) = self.frames.last_mut()
+                && let Some(scope) = frame.scopes.last_mut()
+            {
+                scope.insert(alias_name.to_string(), module_value);
             }
             self.module_aliases
                 .last_mut()
@@ -5175,23 +5136,22 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .unwrap_or_else(|| (path.to_string(), name.clone()));
                 if module_top_scope {
                     self.binding_origins.insert(name.clone(), origin.clone());
-                    if origin.0 != self.current_module || origin.1 != name {
-                        if let Some(authoritative) = self
+                    if (origin.0 != self.current_module || origin.1 != name)
+                        && let Some(authoritative) = self
                             .live_value_environments
                             .borrow_mut()
                             .get_mut(&origin.0)
                             .and_then(|environment| environment.remove(&origin.1))
-                        {
-                            value = authoritative;
-                        }
+                    {
+                        value = authoritative;
                     }
                 } else if let Some(current) = self.live_origin_value(&origin) {
                     value = current;
                 }
-                if let Some(frame) = self.frames.last_mut() {
-                    if let Some(scope) = frame.scopes.last_mut() {
-                        scope.insert(name.clone(), value);
-                    }
+                if let Some(frame) = self.frames.last_mut()
+                    && let Some(scope) = frame.scopes.last_mut()
+                {
+                    scope.insert(name.clone(), value);
                 }
                 if let Some(module) = module {
                     self.module_aliases
@@ -5338,10 +5298,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
             return Ok(());
         }
-        Err(error(
-            line,
-            format!("`{}` isn't a module alias in scope", ns),
-        ))
+        Err(error(line, format!("`{ns}` isn't a module alias in scope")))
     }
 
     /// Resolve a source-level type reference to its declaring
@@ -5369,7 +5326,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if let Some(ImportSlot::Loading) = cache.get(path) {
                 return Err(error(
                     line,
-                    format!("Circular import: module `{}` is still loading", path),
+                    format!("Circular import: module `{path}` is still loading"),
                 ));
             }
         }
@@ -5379,7 +5336,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(e),
             None => {
-                return Err(error(line, format!("Module `{}` not found", path)));
+                return Err(error(line, format!("Module `{path}` not found")));
             }
         };
 
@@ -6250,7 +6207,7 @@ impl BopInstance {
             .iter()
             .find(|(entry_name, _)| entry_name == name)
             .map(|(_, target)| Rc::clone(target))
-            .ok_or_else(|| error(0, format!("Public entry point `{}` was not found", name)))?;
+            .ok_or_else(|| error(0, format!("Public entry point `{name}` was not found")))?;
         if args.len() != target.params.len() {
             return Err(error(
                 0,
@@ -6409,18 +6366,18 @@ fn validate_named_builtin_arity(name: &str, count: usize, line: u32) -> Result<(
         "print" => None,
         _ => return Ok(()),
     };
-    if let Some((min, max)) = expected {
-        if count < min || count > max {
-            let expectation = if min == max {
-                format!("{} argument{}", min, if min == 1 { "" } else { "s" })
-            } else {
-                format!("{min} to {max} arguments")
-            };
-            return Err(error(
-                line,
-                format!("`{name}` expects {expectation}, but got {count}"),
-            ));
-        }
+    if let Some((min, max)) = expected
+        && (count < min || count > max)
+    {
+        let expectation = if min == max {
+            format!("{} argument{}", min, if min == 1 { "" } else { "s" })
+        } else {
+            format!("{min} to {max} arguments")
+        };
+        return Err(error(
+            line,
+            format!("`{name}` expects {expectation}, but got {count}"),
+        ));
     }
     Ok(())
 }

@@ -41,7 +41,7 @@ fn to_f64(v: &Value) -> Option<f64> {
 }
 
 fn int_overflow(op: &str, line: u32) -> BopError {
-    error(line, format!("Integer overflow in `{}`", op))
+    error(line, format!("Integer overflow in `{op}`"))
 }
 
 pub fn add(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
@@ -65,17 +65,17 @@ pub fn add_in(
         (Value::Number(a), Value::Int(b)) => Ok(Value::Number(a + *b as f64)),
         (Value::Str(a), Value::Str(b)) => {
             check_string_concat_memory_in(a.len(), b.len(), line, memory)?;
-            Ok(Value::__new_str_in(format!("{}{}", a, b), memory))
+            Ok(Value::__new_str_in(format!("{a}{b}"), memory))
         }
         (Value::Str(a), b) => {
-            let b_display = format!("{}", b);
+            let b_display = format!("{b}");
             check_string_concat_memory_in(a.len(), b_display.len(), line, memory)?;
-            Ok(Value::__new_str_in(format!("{}{}", a, b_display), memory))
+            Ok(Value::__new_str_in(format!("{a}{b_display}"), memory))
         }
         (a, Value::Str(b)) => {
-            let a_display = format!("{}", a);
+            let a_display = format!("{a}");
             check_string_concat_memory_in(a_display.len(), b.len(), line, memory)?;
-            Ok(Value::__new_str_in(format!("{}{}", a_display, b), memory))
+            Ok(Value::__new_str_in(format!("{a_display}{b}"), memory))
         }
         (Value::Array(a), Value::Array(b)) => {
             check_array_concat_memory_in(a.len(), b.len(), line, memory)?;
@@ -145,7 +145,7 @@ pub fn mul_in(
         // the pre-phase-6 behaviour).
         (Value::Str(s), Value::Int(n)) | (Value::Int(n), Value::Str(s)) => {
             if *n < 0 {
-                return Err(error(line, format!("Can't repeat a string {} times", n)));
+                return Err(error(line, format!("Can't repeat a string {n} times")));
             }
             let count = *n as usize;
             check_string_repeat_memory_in(s.len(), count, line, memory)?;
@@ -154,7 +154,7 @@ pub fn mul_in(
         (Value::Str(s), Value::Number(n)) | (Value::Number(n), Value::Str(s)) => {
             let nf = *n;
             if nf < 0.0 || !nf.is_finite() {
-                return Err(error(line, format!("Can't repeat a string {} times", nf)));
+                return Err(error(line, format!("Can't repeat a string {nf} times")));
             }
             let count = nf as usize;
             check_string_repeat_memory_in(s.len(), count, line, memory)?;
@@ -495,7 +495,7 @@ pub fn index_set_in(
             let actual = normalize_element_index(i, len).ok_or_else(|| {
                 error(
                     line,
-                    format!("Index {} is out of bounds (array has {} items)", i, len),
+                    format!("Index {i} is out of bounds (array has {len} items)"),
                 )
             })?;
             arr.__try_set_in(actual, val, line, memory)

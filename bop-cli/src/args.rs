@@ -64,8 +64,7 @@ fn parse_run(rest: &[String]) -> Result<Command, String> {
             other => {
                 if let Some(previous) = file.as_ref() {
                     return Err(format!(
-                        "`run`: only one script file accepted (got `{}` after `{}`)",
-                        other, previous
+                        "`run`: only one script file accepted (got `{other}` after `{previous}`)"
                     ));
                 }
                 file = Some(other.to_string());
@@ -100,8 +99,7 @@ fn parse_compile(rest: &[String]) -> Result<Command, String> {
             other => {
                 if let Some(previous) = file.as_ref() {
                     return Err(format!(
-                        "`compile`: only one script file accepted (got `{}` after `{}`)",
-                        other, previous
+                        "`compile`: only one script file accepted (got `{other}` after `{previous}`)"
                     ));
                 }
                 file = Some(other.to_string());

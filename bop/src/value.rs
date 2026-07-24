@@ -2005,16 +2005,16 @@ impl Value {
 impl core::fmt::Display for Value {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Value::Int(n) => write!(f, "{}", n),
+            Value::Int(n) => write!(f, "{n}"),
             Value::Number(n) => {
                 if n.is_finite() && *n == (*n as i64 as f64) {
                     write!(f, "{}", *n as i64)
                 } else {
-                    write!(f, "{}", n)
+                    write!(f, "{n}")
                 }
             }
             Value::Str(s) => write!(f, "{}", s.0.text),
-            Value::Bool(b) => write!(f, "{}", b),
+            Value::Bool(b) => write!(f, "{b}"),
             Value::None => write!(f, "none"),
             Value::Array(items) => {
                 write!(f, "[")?;
@@ -2037,7 +2037,7 @@ impl core::fmt::Display for Value {
                 write!(f, "}}")
             }
             Value::Fn(func) => match &func.self_name {
-                Some(name) => write!(f, "<fn {}>", name),
+                Some(name) => write!(f, "<fn {name}>"),
                 None => write!(f, "<fn>"),
             },
             Value::Module(m) => write!(f, "<module {}>", m.path),
@@ -2117,7 +2117,7 @@ impl Value {
     pub fn inspect(&self) -> String {
         match self {
             Value::Str(s) => format!("\"{}\"", s.0.text),
-            other => format!("{}", other),
+            other => format!("{other}"),
         }
     }
 

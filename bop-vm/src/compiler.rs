@@ -256,14 +256,12 @@ impl Compiler {
                     // small integer literals such as `array[i + 1]`.
                     if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
                         (code[code.len() - 2], code[code.len() - 1])
+                        && let crate::chunk::Constant::Int(k) = self.chunk.constants[c.0 as usize]
+                        && let Ok(k32) = i32::try_from(k)
                     {
-                        if let crate::chunk::Constant::Int(k) = self.chunk.constants[c.0 as usize] {
-                            if let Ok(k32) = i32::try_from(k) {
-                                self.chunk.code.truncate(code.len() - 2);
-                                self.chunk.lines.truncate(self.chunk.lines.len() - 2);
-                                return Some(Instr::LoadLocalAddInt(s, k32));
-                            }
-                        }
+                        self.chunk.code.truncate(code.len() - 2);
+                        self.chunk.lines.truncate(self.chunk.lines.len() - 2);
+                        return Some(Instr::LoadLocalAddInt(s, k32));
                     }
                 }
                 None
@@ -283,14 +281,12 @@ impl Compiler {
                     // case in recursion lands here.
                     if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
                         (code[code.len() - 2], code[code.len() - 1])
+                        && let crate::chunk::Constant::Int(k) = self.chunk.constants[c.0 as usize]
+                        && let Ok(k32) = i32::try_from(k)
                     {
-                        if let crate::chunk::Constant::Int(k) = self.chunk.constants[c.0 as usize] {
-                            if let Ok(k32) = i32::try_from(k) {
-                                self.chunk.code.truncate(code.len() - 2);
-                                self.chunk.lines.truncate(self.chunk.lines.len() - 2);
-                                return Some(Instr::LtLocalInt(s, k32));
-                            }
-                        }
+                        self.chunk.code.truncate(code.len() - 2);
+                        self.chunk.lines.truncate(self.chunk.lines.len() - 2);
+                        return Some(Instr::LtLocalInt(s, k32));
                     }
                 }
                 None
@@ -303,12 +299,12 @@ impl Compiler {
                 // the safe side of every control-flow landing point.
                 if self.can_fuse_tail(1) {
                     let n = code.len();
-                    if let Instr::LoadLocalAddInt(load_slot, k) = code[n - 1] {
-                        if load_slot == *store_slot {
-                            self.chunk.code.truncate(n - 1);
-                            self.chunk.lines.truncate(self.chunk.lines.len() - 1);
-                            return Some(Instr::IncLocalInt(*store_slot, k));
-                        }
+                    if let Instr::LoadLocalAddInt(load_slot, k) = code[n - 1]
+                        && load_slot == *store_slot
+                    {
+                        self.chunk.code.truncate(n - 1);
+                        self.chunk.lines.truncate(self.chunk.lines.len() - 1);
+                        return Some(Instr::IncLocalInt(*store_slot, k));
                     }
                 }
 
@@ -319,18 +315,13 @@ impl Compiler {
                     let n = code.len();
                     if let (Instr::LoadLocal(ls), Instr::LoadConst(c), Instr::Add) =
                         (code[n - 3], code[n - 2], code[n - 1])
+                        && ls == *store_slot
+                        && let crate::chunk::Constant::Int(k) = self.chunk.constants[c.0 as usize]
+                        && let Ok(k32) = i32::try_from(k)
                     {
-                        if ls == *store_slot {
-                            if let crate::chunk::Constant::Int(k) =
-                                self.chunk.constants[c.0 as usize]
-                            {
-                                if let Ok(k32) = i32::try_from(k) {
-                                    self.chunk.code.truncate(n - 3);
-                                    self.chunk.lines.truncate(self.chunk.lines.len() - 3);
-                                    return Some(Instr::IncLocalInt(*store_slot, k32));
-                                }
-                            }
-                        }
+                        self.chunk.code.truncate(n - 3);
+                        self.chunk.lines.truncate(self.chunk.lines.len() - 3);
+                        return Some(Instr::IncLocalInt(*store_slot, k32));
                     }
                 }
                 None
@@ -371,7 +362,7 @@ impl Compiler {
             Instr::JumpIfTruePeek(_) => Instr::JumpIfTruePeek(target),
             Instr::IterNext { .. } => Instr::IterNext { target },
             Instr::RepeatNext { .. } => Instr::RepeatNext { target },
-            other => panic!("patch_jump on non-jump instruction: {:?}", other),
+            other => panic!("patch_jump on non-jump instruction: {other:?}"),
         };
     }
 
@@ -1467,7 +1458,7 @@ impl Compiler {
                 pattern,
                 on_fail: target,
             },
-            other => panic!("patch_match_fail on non-MatchFail instruction: {:?}", other),
+            other => panic!("patch_match_fail on non-MatchFail instruction: {other:?}"),
         };
     }
 

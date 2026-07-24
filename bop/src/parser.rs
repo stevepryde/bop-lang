@@ -36,8 +36,7 @@ fn ident_shape_error_at(
 ) -> BopError {
     let actual_label = naming::kind_label(naming::classify(actual));
     let message = format!(
-        "{} `{}` looks like a {}, but a {} name is required here",
-        site, actual, actual_label, expected
+        "{site} `{actual}` looks like a {actual_label}, but a {expected} name is required here"
     );
     let mut err = BopError::runtime_at(message, line, column);
     err.friendly_hint = Some(if site.starts_with("`match` pattern") {
@@ -99,7 +98,7 @@ fn format_pattern_binding_names(names: &BTreeSet<String>) -> String {
     } else {
         names
             .iter()
-            .map(|name| format!("`{}`", name))
+            .map(|name| format!("`{name}`"))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -1837,31 +1836,31 @@ impl Parser {
                     // `Ident` (the alias) and the field is a
                     // type-shape name. Anything else (method
                     // call, plain field read) falls through.
-                    if let ExprKind::Ident(ns) = &expr.kind {
-                        if naming::is_type_name(&name) {
-                            match self.peek() {
-                                Token::ColonColon => {
-                                    let ns_owned = ns.clone();
-                                    expr = self.parse_enum_variant_tail(
-                                        name,
-                                        Some(ns_owned),
-                                        line,
-                                        expr.column,
-                                    )?;
-                                    continue;
-                                }
-                                Token::LBrace if self.allow_struct_literal => {
-                                    let ns_owned = ns.clone();
-                                    expr = self.parse_struct_literal(
-                                        name,
-                                        Some(ns_owned),
-                                        line,
-                                        expr.column,
-                                    )?;
-                                    continue;
-                                }
-                                _ => {}
+                    if let ExprKind::Ident(ns) = &expr.kind
+                        && naming::is_type_name(&name)
+                    {
+                        match self.peek() {
+                            Token::ColonColon => {
+                                let ns_owned = ns.clone();
+                                expr = self.parse_enum_variant_tail(
+                                    name,
+                                    Some(ns_owned),
+                                    line,
+                                    expr.column,
+                                )?;
+                                continue;
                             }
+                            Token::LBrace if self.allow_struct_literal => {
+                                let ns_owned = ns.clone();
+                                expr = self.parse_struct_literal(
+                                    name,
+                                    Some(ns_owned),
+                                    line,
+                                    expr.column,
+                                )?;
+                                continue;
+                            }
+                            _ => {}
                         }
                     }
 
@@ -2418,7 +2417,7 @@ impl Parser {
                             Some(neg) => Ok(Pattern::Literal(LiteralPattern::Int(neg))),
                             None => Err(self.error(
                                 line,
-                                format!("Integer literal `-{}` is out of range for i64", n),
+                                format!("Integer literal `-{n}` is out of range for i64"),
                             )),
                         }
                     }
@@ -2473,8 +2472,7 @@ impl Parser {
                         return Err(self.error(
                             type_line,
                             format!(
-                                "Expected a type name after `{}.` in pattern, got `{}`",
-                                name, type_name
+                                "Expected a type name after `{name}.` in pattern, got `{type_name}`"
                             ),
                         ));
                     }
@@ -2486,8 +2484,7 @@ impl Parser {
                         Err(self.error(
                             type_line,
                             format!(
-                                "Expected `::Variant(...)` or `{{...}}` after `{}.{}` in pattern",
-                                name, type_name
+                                "Expected `::Variant(...)` or `{{...}}` after `{name}.{type_name}` in pattern"
                             ),
                         ))
                     }
@@ -2780,10 +2777,10 @@ fn expr_to_assign_target(expr: Expr, line: u32) -> Result<AssignTarget, BopError
     // separate case because the parser deliberately erases them.
     // Check the complete place before lowering it so every engine
     // receives an AST in which const mutation is unrepresentable.
-    if let Some(name) = assignable_root_name(&expr) {
-        if naming::is_constant_name(name) {
-            return Err(crate::error_messages::constant_mutation_error(name, line));
-        }
+    if let Some(name) = assignable_root_name(&expr)
+        && naming::is_constant_name(name)
+    {
+        return Err(crate::error_messages::constant_mutation_error(name, line));
     }
 
     match expr.kind {

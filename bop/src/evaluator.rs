@@ -1041,27 +1041,24 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     }
 
     fn live_origin_value(&self, origin: &BindingOrigin) -> Option<Value> {
-        if self.active_value_module == origin.0 {
-            if let Some(value) = self
+        if self.active_value_module == origin.0
+            && let Some(value) = self
                 .scopes
                 .first()
                 .and_then(|environment| environment.get(&origin.1))
-            {
-                return Some(value.clone());
-            }
+        {
+            return Some(value.clone());
         }
         if let Some(binding) = self
             .binding_origins
             .iter()
             .find_map(|(binding, candidate)| (candidate == origin).then_some(binding))
-        {
-            if let Some(value) = self
+            && let Some(value) = self
                 .scopes
                 .first()
                 .and_then(|environment| environment.get(binding))
-            {
-                return Some(value.clone());
-            }
+        {
+            return Some(value.clone());
         }
         self.live_value_environments
             .borrow()
@@ -1071,26 +1068,24 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     }
 
     fn module_binding(&self, module: &crate::value::BopModule, name: &str) -> Option<Value> {
-        if module.path == self.active_value_module {
-            if let Some(value) = self
+        if module.path == self.active_value_module
+            && let Some(value) = self
                 .scopes
                 .first()
                 .and_then(|scope| scope.get(name))
                 .cloned()
-            {
-                return Some(value);
-            }
+        {
+            return Some(value);
         }
         let (origin_module, origin_binding) = module.__binding_origin(name);
-        if origin_module == self.active_value_module {
-            if let Some(value) = self
+        if origin_module == self.active_value_module
+            && let Some(value) = self
                 .scopes
                 .first()
                 .and_then(|scope| scope.get(&origin_binding))
                 .cloned()
-            {
-                return Some(value);
-            }
+        {
+            return Some(value);
         }
         if let Some(active_binding) =
             self.binding_origins
@@ -1099,14 +1094,12 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     (active_origin.0 == origin_module && active_origin.1 == origin_binding)
                         .then_some(active_binding)
                 })
-        {
-            if let Some(value) = self
+            && let Some(value) = self
                 .scopes
                 .first()
                 .and_then(|scope| scope.get(active_binding))
-            {
-                return Some(value.clone());
-            }
+        {
+            return Some(value.clone());
         }
         module.__binding(name)
     }
@@ -1249,20 +1242,17 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     Value::Module(module) => Some(Rc::clone(module)),
                     _ => None,
                 };
-                if self.is_module_top_scope() {
-                    if let Some(origin) = self.binding_origins.get(name).cloned() {
-                        if origin.0 != self.current_module || origin.1 != name.as_str() {
-                            if let Some(previous) =
-                                self.scopes.last_mut().and_then(|scope| scope.remove(name))
-                            {
-                                self.live_value_environments
-                                    .borrow_mut()
-                                    .entry(origin.0)
-                                    .or_default()
-                                    .insert(origin.1, previous);
-                            }
-                        }
-                    }
+                if self.is_module_top_scope()
+                    && let Some(origin) = self.binding_origins.get(name).cloned()
+                    && (origin.0 != self.current_module || origin.1 != name.as_str())
+                    && let Some(previous) =
+                        self.scopes.last_mut().and_then(|scope| scope.remove(name))
+                {
+                    self.live_value_environments
+                        .borrow_mut()
+                        .entry(origin.0)
+                        .or_default()
+                        .insert(origin.1, previous);
                 }
                 self.define(name.clone(), val);
                 if self.is_module_top_scope() {
@@ -1568,7 +1558,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if !seen.insert(f.clone()) {
                         return Err(error(
                             stmt.line,
-                            format!("Struct `{}` has duplicate field `{}`", name, f),
+                            format!("Struct `{name}` has duplicate field `{f}`"),
                         ));
                     }
                 }
@@ -1586,7 +1576,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     }
                     return Err(error(
                         stmt.line,
-                        format!("Struct `{}` is already declared", name),
+                        format!("Struct `{name}` is already declared"),
                     ));
                 }
                 self.struct_defs.insert(key, fields.clone());
@@ -1606,7 +1596,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     }
                     return Err(error(
                         stmt.line,
-                        format!("Enum `{}` is already declared", name),
+                        format!("Enum `{name}` is already declared"),
                     ));
                 }
                 let mut seen_variants = alloc_import::collections::BTreeSet::new();
@@ -1804,10 +1794,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 {
                     return Err(error(
                         line,
-                        format!(
-                            "`{}` isn't exported from `{}` (selective import)",
-                            wanted, path
-                        ),
+                        format!("`{wanted}` isn't exported from `{path}` (selective import)"),
                     ));
                 }
             }
@@ -1857,10 +1844,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             {
                 return Err(error(
                     line,
-                    format!(
-                        "`{}` is already bound — can't use it as a module alias",
-                        alias_name
-                    ),
+                    format!("`{alias_name}` is already bound — can't use it as a module alias"),
                 ));
             }
             // The callable values retain their defining module, so sibling
@@ -1945,15 +1929,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         .cloned()
                         .unwrap_or_else(|| (path.to_string(), name.clone()));
                     self.binding_origins.insert(name.clone(), origin.clone());
-                    if origin.0 != self.active_value_module || origin.1 != name {
-                        if let Some(authoritative) = self
+                    if (origin.0 != self.active_value_module || origin.1 != name)
+                        && let Some(authoritative) = self
                             .live_value_environments
                             .borrow_mut()
                             .get_mut(&origin.0)
                             .and_then(|environment| environment.remove(&origin.1))
-                        {
-                            value = authoritative;
-                        }
+                    {
+                        value = authoritative;
                     }
                 } else {
                     let origin = bindings
@@ -2024,7 +2007,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             if let Some(ImportSlot::Loading) = cache.get(path) {
                 return Err(error(
                     line,
-                    format!("Circular import: module `{}` is still loading", path),
+                    format!("Circular import: module `{path}` is still loading"),
                 ));
             }
         }
@@ -2035,7 +2018,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(e),
             None => {
-                return Err(error(line, format!("Module `{}` not found", path)));
+                return Err(error(line, format!("Module `{path}` not found")));
             }
         };
 
@@ -2287,10 +2270,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
             return Ok(());
         }
-        Err(error(
-            line,
-            format!("`{}` isn't a module alias in scope", ns),
-        ))
+        Err(error(line, format!("`{ns}` isn't a module alias in scope")))
     }
 
     fn eval_enum_construct(
@@ -2378,10 +2358,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if !seen.insert(fname.clone()) {
                         return Err(error(
                             line,
-                            format!(
-                                "Field `{}` specified twice in `{}::{}`",
-                                fname, type_name, variant
-                            ),
+                            format!("Field `{fname}` specified twice in `{type_name}::{variant}`"),
                         ));
                     }
                     if !decl_fields.iter().any(|d| d == fname) {
@@ -2396,8 +2373,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         return Err(error(
                             line,
                             format!(
-                                "Missing field `{}` in `{}::{}` construction",
-                                decl_field, type_name, variant
+                                "Missing field `{decl_field}` in `{type_name}::{variant}` construction"
                             ),
                         ));
                     }
@@ -2426,21 +2402,15 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
             (VariantKind::Unit, _) => Err(error(
                 line,
-                format!("Variant `{}::{}` takes no payload", type_name, variant),
+                format!("Variant `{type_name}::{variant}` takes no payload"),
             )),
             (VariantKind::Tuple(_), _) => Err(error(
                 line,
-                format!(
-                    "Variant `{}::{}` expects positional arguments `(…)`",
-                    type_name, variant
-                ),
+                format!("Variant `{type_name}::{variant}` expects positional arguments `(…)`"),
             )),
             (VariantKind::Struct(_), _) => Err(error(
                 line,
-                format!(
-                    "Variant `{}::{}` expects named fields `{{ … }}`",
-                    type_name, variant
-                ),
+                format!("Variant `{type_name}::{variant}` expects named fields `{{ … }}`"),
             )),
         }
     }
@@ -2466,8 +2436,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 if !self.set_var(name, final_val) {
                     return Err(error_with_hint(
                         line,
-                        format!("Variable `{}` doesn't exist yet", name),
-                        format!("Use `let` to create a new variable: let {} = ...", name),
+                        format!("Variable `{name}` doesn't exist yet"),
+                        format!("Use `let` to create a new variable: let {name} = ..."),
                     ));
                 }
                 if self.is_module_top_scope() {
@@ -2523,7 +2493,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         if declaration_alias {
                             error(line, crate::error_messages::variable_not_found(name))
                         } else {
-                            error(line, format!("Variable `{}` doesn't exist", name))
+                            error(line, format!("Variable `{name}` doesn't exist"))
                         }
                     })?;
                     // Mutate through the live binding. Cloning the receiver
@@ -2562,7 +2532,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             if declaration_alias {
                                 error(line, crate::error_messages::variable_not_found(&name))
                             } else {
-                                error(line, format!("Variable `{}` doesn't exist", name))
+                                error(line, format!("Variable `{name}` doesn't exist"))
                             }
                         })?;
                         let current = match obj {
@@ -2592,7 +2562,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if declaration_alias {
                         error(line, crate::error_messages::variable_not_found(&name))
                     } else {
-                        error(line, format!("Variable `{}` doesn't exist", name))
+                        error(line, format!("Variable `{name}` doesn't exist"))
                     }
                 })?;
                 match obj {
@@ -2657,7 +2627,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                                     crate::error_messages::variable_not_found(name),
                                 )
                             })?;
-                            result.push_str(&format!("{}", val));
+                            result.push_str(&format!("{val}"));
                         }
                     }
                 }
@@ -2752,7 +2722,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if declaration_alias.is_some() {
                         return Err(error(
                             expr.line,
-                            format!("`{}` is a module, not a function", name),
+                            format!("`{name}` is a module, not a function"),
                         ));
                     }
                     if let Some(function) = self.lookup_function(name) {
@@ -2851,57 +2821,50 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 // place. Classify it without cloning its value; ordinary
                 // arguments run first, then copy-in observes their side
                 // effects, and only a successful method result writes back.
-                if methods::is_mutating_method(method) {
-                    if let ExprKind::Ident(name) = &object.kind {
-                        if matches!(self.get_var(name), Some(Value::Array(_))) {
-                            crate::validate_value_only_call_modes(
+                if methods::is_mutating_method(method)
+                    && let ExprKind::Ident(name) = &object.kind
+                    && matches!(self.get_var(name), Some(Value::Array(_)))
+                {
+                    crate::validate_value_only_call_modes(method, &actual_modes, expr.line)?;
+                    let expected = methods::builtin_method_arity(method)
+                        .expect("mutating built-in has arity metadata");
+                    if args.len() != expected {
+                        return Err(error(
+                            expr.line,
+                            format!(
+                                "`.{}()` needs {} argument{}",
                                 method,
-                                &actual_modes,
-                                expr.line,
-                            )?;
-                            let expected = methods::builtin_method_arity(method)
-                                .expect("mutating built-in has arity metadata");
-                            if args.len() != expected {
-                                return Err(error(
-                                    expr.line,
-                                    format!(
-                                        "`.{}()` needs {} argument{}",
-                                        method,
-                                        expected,
-                                        if expected == 1 { "" } else { "s" }
-                                    ),
-                                ));
-                            }
-                            methods::reject_constant_array_mutation(name, method, expr.line)?;
-                            let target = self.resolve_binding_identity(name).ok_or_else(|| {
-                                crate::ref_params::invalid_ref_target(1, expr.line)
-                            })?;
-                            if self.active_capture_bindings.contains(&target) {
-                                return Err(crate::ref_params::captured_ref_target(1, expr.line));
-                            }
-                            let mut eval_args = Vec::with_capacity(args.len());
-                            for arg in args {
-                                eval_args.push(self.eval_expr(&arg.value)?);
-                            }
-                            if let Some(error) = self.pending_memory_error(expr.line) {
-                                return Err(error);
-                            }
-                            let binding = self
-                                .scopes
-                                .get_mut(target.scope)
-                                .and_then(|scope| scope.get_mut(&target.name))
-                                .ok_or_else(|| {
-                                    crate::ref_params::invalid_ref_target(1, expr.line)
-                                })?;
-                            return methods::transactional_array_method_in(
-                                binding,
-                                method,
-                                eval_args,
-                                expr.line,
-                                &self.memory,
-                            );
-                        }
+                                expected,
+                                if expected == 1 { "" } else { "s" }
+                            ),
+                        ));
                     }
+                    methods::reject_constant_array_mutation(name, method, expr.line)?;
+                    let target = self
+                        .resolve_binding_identity(name)
+                        .ok_or_else(|| crate::ref_params::invalid_ref_target(1, expr.line))?;
+                    if self.active_capture_bindings.contains(&target) {
+                        return Err(crate::ref_params::captured_ref_target(1, expr.line));
+                    }
+                    let mut eval_args = Vec::with_capacity(args.len());
+                    for arg in args {
+                        eval_args.push(self.eval_expr(&arg.value)?);
+                    }
+                    if let Some(error) = self.pending_memory_error(expr.line) {
+                        return Err(error);
+                    }
+                    let binding = self
+                        .scopes
+                        .get_mut(target.scope)
+                        .and_then(|scope| scope.get_mut(&target.name))
+                        .ok_or_else(|| crate::ref_params::invalid_ref_target(1, expr.line))?;
+                    return methods::transactional_array_method_in(
+                        binding,
+                        method,
+                        eval_args,
+                        expr.line,
+                        &self.memory,
+                    );
                 }
 
                 // Every other receiver expression is the callee expression:
@@ -2980,22 +2943,22 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
 
                 // Module export calls retain callable metadata too. Common
                 // value methods still win over an export with the same name.
-                if let Value::Module(module) = &obj_val {
-                    if !matches!(method.as_str(), "type" | "to_str" | "inspect") {
-                        let callee = self.module_binding(module, method).ok_or_else(|| {
-                            error(
-                                expr.line,
-                                format!("`{}` isn't exported from `{}`", method, module.path),
-                            )
-                        })?;
-                        return match callee {
-                            Value::Fn(func) => self.eval_bop_call(func, args, expr.line, method),
-                            other => Err(error(
-                                expr.line,
-                                format!("`{}` is a {}, not a function", method, other.type_name()),
-                            )),
-                        };
-                    }
+                if let Value::Module(module) = &obj_val
+                    && !matches!(method.as_str(), "type" | "to_str" | "inspect")
+                {
+                    let callee = self.module_binding(module, method).ok_or_else(|| {
+                        error(
+                            expr.line,
+                            format!("`{}` isn't exported from `{}`", method, module.path),
+                        )
+                    })?;
+                    return match callee {
+                        Value::Fn(func) => self.eval_bop_call(func, args, expr.line, method),
+                        other => Err(error(
+                            expr.line,
+                            format!("`{}` is a {}, not a function", method, other.type_name()),
+                        )),
+                    };
                 }
 
                 // Index and field reads currently produce values,
@@ -3013,18 +2976,18 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 }
 
                 crate::validate_value_only_call_modes(method, &actual_modes, expr.line)?;
-                if let Some(expected) = methods::builtin_method_arity(method) {
-                    if args.len() != expected {
-                        return Err(error(
-                            expr.line,
-                            format!(
-                                "`.{}()` needs {} argument{}",
-                                method,
-                                expected,
-                                if expected == 1 { "" } else { "s" }
-                            ),
-                        ));
-                    }
+                if let Some(expected) = methods::builtin_method_arity(method)
+                    && args.len() != expected
+                {
+                    return Err(error(
+                        expr.line,
+                        format!(
+                            "`.{}()` needs {} argument{}",
+                            method,
+                            expected,
+                            if expected == 1 { "" } else { "s" }
+                        ),
+                    ));
                 }
                 let mut eval_args = Vec::with_capacity(args.len());
                 for arg in args {
@@ -3038,12 +3001,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 // dispatch inline before the pure `call_method`
                 // fall-through. Receiver must be the built-in
                 // Result; user enums named `Result` don't qualify.
-                if methods::is_builtin_result(&obj_val) {
-                    if let Some(kind) = methods::is_result_callable_method(method) {
-                        return self.call_result_callable_method(
-                            &obj_val, kind, method, eval_args, expr.line,
-                        );
-                    }
+                if methods::is_builtin_result(&obj_val)
+                    && let Some(kind) = methods::is_result_callable_method(method)
+                {
+                    return self
+                        .call_result_callable_method(&obj_val, kind, method, eval_args, expr.line);
                 }
 
                 let (ret, mutated) = self.call_method(&obj_val, method, &eval_args, expr.line)?;
@@ -3103,8 +3065,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                                 expr.line,
                                 format!("`{}` in `{}` is a type, not a value", field, m.path),
                                 format!(
-                                    "construct through the alias: `{}.{} {{ ... }}` or `{}.{}::Variant(...)`",
-                                    alias, field, alias, field,
+                                    "construct through the alias: `{alias}.{field} {{ ... }}` or `{alias}.{field}::Variant(...)`",
                                 ),
                             ));
                         }
@@ -3172,8 +3133,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         return Err(error(
                             expr.line,
                             format!(
-                                "Field `{}` specified twice in `{}` construction",
-                                fname, type_name
+                                "Field `{fname}` specified twice in `{type_name}` construction"
                             ),
                         ));
                     }
@@ -3193,7 +3153,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if !seen.contains(decl) {
                         return Err(error(
                             expr.line,
-                            format!("Missing field `{}` in `{}` construction", decl, type_name),
+                            format!("Missing field `{decl}` in `{type_name}` construction"),
                         ));
                     }
                 }
@@ -3526,10 +3486,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
         crate::validate_call_modes(method, expected_modes, &actual_modes, line)?;
         let explicit_targets = self.preflight_ref_targets(args, line)?;
-        if let Some(receiver_target) = &receiver.target {
-            if explicit_targets.contains(receiver_target) {
-                return Err(crate::ref_params::duplicate_ref_target(line));
-            }
+        if let Some(receiver_target) = &receiver.target
+            && explicit_targets.contains(receiver_target)
+        {
+            return Err(crate::ref_params::duplicate_ref_target(line));
         }
 
         let mut evaluated = Vec::with_capacity(args.len());
@@ -3586,18 +3546,18 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             "print" => None,
             _ => return Ok(()),
         };
-        if let Some((min, max)) = expected {
-            if count < min || count > max {
-                let expectation = if min == max {
-                    format!("{} argument{}", min, if min == 1 { "" } else { "s" })
-                } else {
-                    format!("{} to {} arguments", min, max)
-                };
-                return Err(error(
-                    line,
-                    format!("`{}` expects {}, but got {}", name, expectation, count),
-                ));
-            }
+        if let Some((min, max)) = expected
+            && (count < min || count > max)
+        {
+            let expectation = if min == max {
+                format!("{} argument{}", min, if min == 1 { "" } else { "s" })
+            } else {
+                format!("{min} to {max} arguments")
+            };
+            return Err(error(
+                line,
+                format!("`{name}` expects {expectation}, but got {count}"),
+            ));
         }
         Ok(())
     }
@@ -3825,7 +3785,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         .and_then(|scope| scope.get(name))
                         .cloned()
                         .ok_or_else(|| {
-                            error(line, format!("`ref` parameter `{}` is unavailable", name))
+                            error(line, format!("`ref` parameter `{name}` is unavailable"))
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -3973,7 +3933,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             "print" => {
                 let message = args
                     .iter()
-                    .map(|a| format!("{}", a))
+                    .map(|a| format!("{a}"))
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.host.on_print(&message);
@@ -4092,10 +4052,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // variants (`map`, `map_err`, `and_then`) are dispatched
         // one level up in the MethodCall arm so they can invoke
         // the user callable via `call_value`.
-        if methods::is_builtin_result(obj) {
-            if let Some(v) = methods::result_method(obj, method, args, line)? {
-                return Ok((v, None));
-            }
+        if methods::is_builtin_result(obj)
+            && let Some(v) = methods::result_method(obj, method, args, line)?
+        {
+            return Ok((v, None));
         }
         match obj {
             Value::Array(arr) => methods::array_method_in(arr, method, args, line, &self.memory),
@@ -4952,7 +4912,7 @@ impl ReplSession {
                 entry_name == name && *visibility == Visibility::Public
             })
             .map(|(_, _, target)| Rc::clone(target))
-            .ok_or_else(|| error(0, format!("Entry point `{}` is not available", name)))?;
+            .ok_or_else(|| error(0, format!("Entry point `{name}` is not available")))?;
         if args.len() != target.params.len() {
             return Err(error(
                 0,

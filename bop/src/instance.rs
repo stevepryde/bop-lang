@@ -92,7 +92,7 @@ impl BopInstance {
             .entries
             .iter()
             .find(|entry| entry.name == name)
-            .ok_or_else(|| error(0, format!("Public entry point `{}` was not found", name)))?;
+            .ok_or_else(|| error(0, format!("Public entry point `{name}` was not found")))?;
         if args.len() != entry.arity {
             return Err(error(
                 0,

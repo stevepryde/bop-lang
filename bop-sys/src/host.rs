@@ -41,7 +41,7 @@ fn resolve_validated_module_from_root(root: &Path, name: &str) -> Option<Result<
         Ok(source) => Some(Ok(source)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => Some(Err(crate::error::io_error(
-            &format!("couldn't read module `{}`: {}", name, err),
+            &format!("couldn't read module `{name}`: {err}"),
             None,
         ))),
     }
@@ -78,7 +78,7 @@ impl BopHost for StandardHost {
     }
 
     fn on_print(&mut self, message: &str) {
-        println!("{}", message);
+        println!("{message}");
     }
 
     fn function_hint(&self) -> &str {
@@ -116,7 +116,7 @@ impl BopHost for StandardHost {
                 Ok(d) => d,
                 Err(e) => {
                     return Some(Err(crate::error::io_error(
-                        &format!("couldn't read current directory: {}", e),
+                        &format!("couldn't read current directory: {e}"),
                         None,
                     )));
                 }
@@ -143,7 +143,7 @@ fn validate_module_name(name: &str) -> Result<(), BopError> {
         Ok(())
     } else {
         Err(crate::error::io_error(
-            &format!("Invalid module name `{}`", name),
+            &format!("Invalid module name `{name}`"),
             None,
         ))
     }

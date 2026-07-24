@@ -88,10 +88,9 @@ impl BopError {
         Self {
             line: Some(line),
             column: Some(column),
-            message: format!("`{}` is a reserved word in Bop", keyword),
+            message: format!("`{keyword}` is a reserved word in Bop"),
             friendly_hint: Some(format!(
-                "`{}` is part of Bop syntax and can't be used as an identifier. Choose a different name.",
-                keyword
+                "`{keyword}` is part of Bop syntax and can't be used as an identifier. Choose a different name."
             )),
             source_context: None,
             is_fatal: false,
@@ -263,22 +262,22 @@ impl BopError {
             Some(line) if line > 0 => {
                 out.push_str(&format!("error: {}\n", self.message));
                 let line_str = match module_path {
-                    Some(path) => format!("  --> in module `{}` at line {}", path, line),
-                    None => format!("  --> line {}", line),
+                    Some(path) => format!("  --> in module `{path}` at line {line}"),
+                    None => format!("  --> line {line}"),
                 };
                 if let Some(col) = self.column {
-                    out.push_str(&format!("{}:{}\n", line_str, col));
+                    out.push_str(&format!("{line_str}:{col}\n"));
                 } else {
-                    out.push_str(&format!("{}\n", line_str));
+                    out.push_str(&format!("{line_str}\n"));
                 }
                 if let Some(src_line) =
                     source.and_then(|source| source.lines().nth((line - 1) as usize))
                 {
                     let gutter_width = digits_of(line);
                     let gutter_pad = " ".repeat(gutter_width);
-                    out.push_str(&format!("{} |\n", gutter_pad));
-                    out.push_str(&format!("{} | {}\n", line, src_line));
-                    out.push_str(&format!("{} | ", gutter_pad));
+                    out.push_str(&format!("{gutter_pad} |\n"));
+                    out.push_str(&format!("{line} | {src_line}\n"));
+                    out.push_str(&format!("{gutter_pad} | "));
                     if let Some(col) = self.column {
                         // `column` is 1-indexed; characters up to
                         // `col - 1` get a padding space each.
@@ -303,12 +302,12 @@ impl BopError {
             _ => {
                 out.push_str(&format!("error: {}\n", self.message));
                 if let Some(path) = module_path {
-                    out.push_str(&format!("  --> in module `{}`\n", path));
+                    out.push_str(&format!("  --> in module `{path}`\n"));
                 }
             }
         }
         if let Some(hint) = &self.friendly_hint {
-            out.push_str(&format!("hint: {}\n", hint));
+            out.push_str(&format!("hint: {hint}\n"));
         }
         out
     }
@@ -478,8 +477,7 @@ mod tests {
         // Carat at column 11 → 10 spaces of padding before `^`.
         assert!(
             rendered.contains(&format!("{}^", " ".repeat(10))),
-            "rendered:\n{}",
-            rendered
+            "rendered:\n{rendered}"
         );
         assert!(rendered.contains("hint: did you mean `bar`?"));
     }
@@ -522,7 +520,7 @@ mod tests {
         let rendered = err.render(src);
         // The caret line has one tab (from column 1's tab in
         // source) plus 8 spaces for columns 2–9, then `^`.
-        assert!(rendered.contains("\t        ^"), "rendered:\n{}", rendered);
+        assert!(rendered.contains("\t        ^"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -606,7 +604,7 @@ mod tests {
         assert!(rendered.contains("--> line 3"));
         assert!(rendered.contains("3 | let b = a / zero"));
         assert!(!rendered.contains("in module"));
-        assert_eq!(format!("{}", err), "[line 3] Division by zero");
+        assert_eq!(format!("{err}"), "[line 3] Division by zero");
     }
 
     #[test]

@@ -85,7 +85,7 @@ let _ = match s {
     Shape::Square(s) => s,
 }"#;
         let ws = warnings(src);
-        assert_eq!(ws.len(), 1, "expected exactly one warning, got {:?}", ws);
+        assert_eq!(ws.len(), 1, "expected exactly one warning, got {ws:?}");
         assert!(
             ws[0].message.contains("non-exhaustive"),
             "msg: {}",
@@ -107,7 +107,7 @@ let _ = match l {
     Light::Green => "go",
 }"#;
         let ws = warnings(src);
-        assert_eq!(ws.len(), 1, "expected a warning, got {:?}", ws);
+        assert_eq!(ws.len(), 1, "expected a warning, got {ws:?}");
         assert!(ws[0].message.contains("`Light::Red`"));
     }
 
@@ -265,8 +265,7 @@ let _ = match s {
         );
         assert!(
             ws.is_empty(),
-            "expected no warnings when all variants covered, got: {:?}",
-            ws
+            "expected no warnings when all variants covered, got: {ws:?}"
         );
     }
 
@@ -326,8 +325,7 @@ let _ = match c {
         );
         assert!(
             ws.is_empty(),
-            "expected no warning: root's Color is fully covered, got: {:?}",
-            ws
+            "expected no warning: root's Color is fully covered, got: {ws:?}"
         );
     }
 

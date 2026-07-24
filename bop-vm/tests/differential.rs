@@ -149,10 +149,9 @@ fn run_both(code: &str, limits: &BopLimits) -> Outcome {
     match (&tw.error, &vm.error) {
         (None, None) => {}
         (Some(a), Some(b)) if a == b => {}
-        (Some(a), Some(b)) => panic!(
-            "error messages diverged on:\n{}\n\ntree-walker: {}\nbytecode vm: {}",
-            code, a, b
-        ),
+        (Some(a), Some(b)) => {
+            panic!("error messages diverged on:\n{code}\n\ntree-walker: {a}\nbytecode vm: {b}")
+        }
         (Some(a), None) => panic!(
             "tree-walker errored but VM succeeded on:\n{}\n\ntree-walker error: {}\nvm prints: {:?}",
             code, a, vm.prints
@@ -189,20 +188,20 @@ fn say(code: &str) -> String {
     out.prints
         .last()
         .cloned()
-        .unwrap_or_else(|| panic!("no print output for: {}", code))
+        .unwrap_or_else(|| panic!("no print output for: {code}"))
 }
 
 /// Run both engines, assert failure, return error message.
 fn run_err(code: &str) -> String {
     let out = run_both(code, &standard());
     out.error
-        .unwrap_or_else(|| panic!("expected an error, but program succeeded: {}", code))
+        .unwrap_or_else(|| panic!("expected an error, but program succeeded: {code}"))
 }
 
 fn run_err_with_limits(code: &str, limits: BopLimits) -> String {
     let out = run_both(code, &limits);
     out.error
-        .unwrap_or_else(|| panic!("expected an error, but program succeeded: {}", code))
+        .unwrap_or_else(|| panic!("expected an error, but program succeeded: {code}"))
 }
 
 /// Run both engines with the given limits, assert both errored, and
@@ -228,9 +227,9 @@ fn run_err_loose(code: &str, limits: BopLimits) -> (String, String) {
     };
     match (tw, vm) {
         (Some(a), Some(b)) => (a, b),
-        (None, Some(_)) => panic!("tree-walker succeeded on:\n{}", code),
-        (Some(_), None) => panic!("bytecode vm succeeded on:\n{}", code),
-        (None, None) => panic!("both engines succeeded on:\n{}", code),
+        (None, Some(_)) => panic!("tree-walker succeeded on:\n{code}"),
+        (Some(_), None) => panic!("bytecode vm succeeded on:\n{code}"),
+        (None, None) => panic!("both engines succeeded on:\n{code}"),
     }
 }
 
@@ -241,9 +240,7 @@ fn assert_both_resource_limit(tw: &str, vm: &str) {
     for (engine, msg) in [("tree-walker", tw), ("bytecode vm", vm)] {
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "{} did not hit a resource limit; got: {}",
-            engine,
-            msg
+            "{engine} did not hit a resource limit; got: {msg}"
         );
     }
 }
@@ -265,9 +262,9 @@ fn assert_both_step_limit_at_line(code: &str, limits: &BopLimits, expected_line:
         };
         let err = match result {
             Err(err) => err,
-            Ok(()) => panic!("{} did not error on:\n{}", engine, code),
+            Ok(()) => panic!("{engine} did not error on:\n{code}"),
         };
-        assert!(err.is_fatal, "{} returned non-fatal error: {}", engine, err);
+        assert!(err.is_fatal, "{engine} returned non-fatal error: {err}");
         assert!(
             err.message.contains("too many steps"),
             "{} errored with `{}` instead of the step limit on:\n{}",
@@ -278,9 +275,7 @@ fn assert_both_step_limit_at_line(code: &str, limits: &BopLimits, expected_line:
         assert_eq!(
             err.line,
             Some(expected_line),
-            "{} reported the step limit at the wrong line on:\n{}",
-            engine,
-            code
+            "{engine} reported the step limit at the wrong line on:\n{code}"
         );
     }
 }
@@ -294,9 +289,9 @@ fn assert_both_value_depth_errors(code: &str, expected_line: u32) {
         } else {
             bop_vm::run(code, &mut host, &BopLimits::standard())
         };
-        assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+        assert!(host.prints.borrow().is_empty(), "{engine} printed");
         let err = result.unwrap_err();
-        assert!(err.is_fatal, "{} returned non-fatal error: {}", engine, err);
+        assert!(err.is_fatal, "{engine} returned non-fatal error: {err}");
         assert_eq!(err.message, bop::value::VALUE_DEPTH_ERROR_MESSAGE);
         assert_eq!(err.line, Some(expected_line));
     }
@@ -782,7 +777,7 @@ print(values)"#),
         r#"let values = [0, 1]
 values[values.pop()] = 9"#,
     );
-    assert!(message.contains("out of bounds"), "got: {}", message);
+    assert!(message.contains("out of bounds"), "got: {message}");
 }
 
 #[test]
@@ -1259,7 +1254,7 @@ fn break_and_continue_do_not_leak_top_level_bindings_diff() {
 }
 print(item)"#,
     );
-    assert!(break_error.contains("not found"), "got: {}", break_error);
+    assert!(break_error.contains("not found"), "got: {break_error}");
 
     let continue_error = run_err(
         r#"let n = 0
@@ -1274,8 +1269,7 @@ print(inner)"#,
     );
     assert!(
         continue_error.contains("not found"),
-        "got: {}",
-        continue_error
+        "got: {continue_error}"
     );
 }
 
@@ -1461,7 +1455,7 @@ fn struct_missing_field_error_diff() {
         r#"struct P { x, y }
 let p = P { x: 1 }"#,
     );
-    assert!(msg.contains("Missing field"), "got: {}", msg);
+    assert!(msg.contains("Missing field"), "got: {msg}");
 }
 
 #[test]
@@ -1558,7 +1552,7 @@ fn enum_variant_arity_mismatch_diff() {
         r#"enum E { P(a, b) }
 let x = E::P(1)"#,
     );
-    assert!(msg.contains("expects 2"), "got: {}", msg);
+    assert!(msg.contains("expects 2"), "got: {msg}");
 }
 
 // ─── User-defined methods ─────────────────────────────────────────
@@ -1997,8 +1991,7 @@ match x {
     );
     assert!(
         msg.contains("No match arm matched the scrutinee"),
-        "got: {}",
-        msg
+        "got: {msg}"
     );
 }
 
@@ -2030,8 +2023,7 @@ print(n)"#,
     );
     assert!(
         msg.contains("not found") || msg.contains("Variable"),
-        "got: {}",
-        msg
+        "got: {msg}"
     );
 }
 
@@ -2048,8 +2040,7 @@ print(read())"#,
     );
     assert!(
         msg.contains("not found") || msg.contains("Variable"),
-        "got: {}",
-        msg
+        "got: {msg}"
     );
 }
 
@@ -2088,8 +2079,7 @@ print(Box { value: 3 }.read())"#,
     );
     assert!(
         msg.contains("not found") || msg.contains("Variable"),
-        "got: {}",
-        msg
+        "got: {msg}"
     );
 }
 
@@ -2208,7 +2198,7 @@ fn try_on_non_result_errors_diff() {
 }
 doit()"#,
     );
-    assert!(msg.contains("Result-shaped"), "got: {}", msg);
+    assert!(msg.contains("Result-shaped"), "got: {msg}");
 }
 
 #[test]
@@ -2216,7 +2206,7 @@ fn try_at_top_level_on_err_errors_diff() {
     let source = r#"enum Result { Ok(v), Err(e) }
 let r = try Result::Err("boom")"#;
     let msg = run_err(source);
-    assert!(msg.contains("top-level"), "got: {}", msg);
+    assert!(msg.contains("top-level"), "got: {msg}");
 
     let mut host = RecordHost::new();
     let vm_error = bop_vm::run(source, &mut host, &standard())
@@ -2308,13 +2298,13 @@ fn int_number_equality_is_numeric_diff() {
 #[test]
 fn division_by_zero_errors_diff() {
     let msg = run_err("print(10 / 0)");
-    assert!(msg.contains("Division by zero"), "got: {}", msg);
+    assert!(msg.contains("Division by zero"), "got: {msg}");
 }
 
 #[test]
 fn int_overflow_errors_diff() {
     let msg = run_err("print(9223372036854775807 + 1)");
-    assert!(msg.contains("Integer overflow"), "got: {}", msg);
+    assert!(msg.contains("Integer overflow"), "got: {msg}");
 }
 
 #[test]
@@ -2460,7 +2450,7 @@ fn std_math_constants_diff() {
 print(PI)
 print(E)"#);
     // Both engines should yield the same string for `E`.
-    assert!(out.starts_with("2.71828"), "got: {}", out);
+    assert!(out.starts_with("2.71828"), "got: {out}");
 }
 
 #[test]
@@ -2742,13 +2732,13 @@ print(match r {
 #[test]
 fn try_call_wrong_arg_count_errors_diff() {
     let msg = run_err("try_call()");
-    assert!(msg.contains("try_call` expects 1"), "got: {}", msg);
+    assert!(msg.contains("try_call` expects 1"), "got: {msg}");
 }
 
 #[test]
 fn try_call_non_function_errors_diff() {
     let msg = run_err("try_call(42)");
-    assert!(msg.contains("try_call` expects a function"), "got: {}", msg);
+    assert!(msg.contains("try_call` expects a function"), "got: {msg}");
 }
 
 #[test]
@@ -2801,10 +2791,10 @@ print("should never run")"#;
     assert!(vm.0.is_empty(), "vm printed: {:?}", vm.0);
     let (tw_msg, tw_fatal) = tw.1.expect("walker should error");
     let (vm_msg, vm_fatal) = vm.1.expect("vm should error");
-    assert!(tw_fatal, "walker non-fatal: {}", tw_msg);
-    assert!(vm_fatal, "vm non-fatal: {}", vm_msg);
-    assert!(tw_msg.contains("too many steps"), "walker msg: {}", tw_msg);
-    assert!(vm_msg.contains("too many steps"), "vm msg: {}", vm_msg);
+    assert!(tw_fatal, "walker non-fatal: {tw_msg}");
+    assert!(vm_fatal, "vm non-fatal: {vm_msg}");
+    assert!(tw_msg.contains("too many steps"), "walker msg: {tw_msg}");
+    assert!(vm_msg.contains("too many steps"), "vm msg: {vm_msg}");
 }
 
 // ─── Step-limit error lines ────────────────────────────────────────
@@ -2824,7 +2814,7 @@ fn step_limit_line_is_the_loop_header_on_both_engines() {
     for pad in 0u32..4 {
         let mut code = String::new();
         for i in 0..pad {
-            code.push_str(&format!("let pad{} = {}\n", i, i));
+            code.push_str(&format!("let pad{i} = {i}\n"));
         }
         code.push_str("let n = 0\nwhile true {\n    n = n + 1\n}");
         assert_both_step_limit_at_line(&code, &tight(), pad + 2);
@@ -2965,7 +2955,7 @@ print(pi)"#),
 fn import_missing_module_errors() {
     set_modules(&[]);
     let msg = run_err("use nope");
-    assert!(msg.contains("Module `nope` not found"), "got: {}", msg);
+    assert!(msg.contains("Module `nope` not found"), "got: {msg}");
 }
 
 #[test]
@@ -2985,7 +2975,7 @@ print(doubled_pi)"#),
 fn import_circular_detected() {
     set_modules(&[("a", "use b\nlet x = 1"), ("b", "use a\nlet y = 2")]);
     let msg = run_err("use a");
-    assert!(msg.contains("Circular import"), "got: {}", msg);
+    assert!(msg.contains("Circular import"), "got: {msg}");
 }
 
 #[test]
@@ -5138,12 +5128,11 @@ fn every_array_mutator_rejects_nested_places_diff() {
         "reverse()",
         "sort()",
     ] {
-        let source = format!("let d = {{\"items\": [2, 1]}}\nd[\"items\"].{}", call);
+        let source = format!("let d = {{\"items\": [2, 1]}}\nd[\"items\"].{call}");
         assert_eq!(
             run_err(&source),
             bop::error_messages::NESTED_MUTATION_ERROR_MESSAGE,
-            "call: {}",
-            call
+            "call: {call}"
         );
     }
 }
@@ -5183,22 +5172,20 @@ let holder = Holder { items: [1] }
             } else {
                 bop_vm::run(source, &mut host, &standard())
             };
-            assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+            assert!(host.prints.borrow().is_empty(), "{engine} printed");
             let err = result.unwrap_err();
             assert_eq!(
                 err.message,
                 bop::error_messages::NESTED_MUTATION_ERROR_MESSAGE,
-                "{} message",
-                engine
+                "{engine} message"
             );
             assert_eq!(
                 err.friendly_hint.as_deref(),
                 Some(bop::error_messages::NESTED_MUTATION_HINT),
-                "{} hint",
-                engine
+                "{engine} hint"
             );
-            assert_eq!(err.line, Some(expected_line), "{} line", engine);
-            assert!(!err.is_fatal, "{} returned a fatal error", engine);
+            assert_eq!(err.line, Some(expected_line), "{engine} line");
+            assert!(!err.is_fatal, "{engine} returned a fatal error");
         }
     }
 }
@@ -5308,8 +5295,8 @@ fn signed_index_failures_keep_the_call_site_line_diff() {
             bop_vm::run(code, &mut host, &standard())
         };
         let err = result.unwrap_err();
-        assert_eq!(err.line, Some(2), "{} line", engine);
-        assert!(!err.is_fatal, "{} returned a fatal error", engine);
+        assert_eq!(err.line, Some(2), "{engine} line");
+        assert!(!err.is_fatal, "{engine} returned a fatal error");
         assert_eq!(err.message, "Remove index -3 is out of bounds");
     }
 }
@@ -5526,11 +5513,11 @@ fn builtin_range_zero_step_remains_non_fatal_diff() {
         } else {
             bop_vm::run("let values = range(0, 10, 0)", &mut host, &standard())
         };
-        assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+        assert!(host.prints.borrow().is_empty(), "{engine} printed");
         let err = result.unwrap_err();
-        assert_eq!(err.message, "range step can't be 0", "{} message", engine);
-        assert_eq!(err.line, Some(1), "{} line", engine);
-        assert!(!err.is_fatal, "{} returned a fatal error", engine);
+        assert_eq!(err.message, "range step can't be 0", "{engine} message");
+        assert_eq!(err.line, Some(1), "{engine} line");
+        assert!(!err.is_fatal, "{engine} returned a fatal error");
     }
 
     let code = r#"let result = try_call(fn() { return range(0, 10, 0) })
@@ -5551,22 +5538,20 @@ print("unreachable")"#;
         } else {
             bop_vm::run(code, &mut host, &standard())
         };
-        assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+        assert!(host.prints.borrow().is_empty(), "{engine} printed");
         let err = result.unwrap_err();
         assert_eq!(
             err.message,
             bop::builtins::RANGE_LIMIT_ERROR_MESSAGE,
-            "{} message",
-            engine
+            "{engine} message"
         );
         assert_eq!(
             err.friendly_hint.as_deref(),
             Some(bop::builtins::RANGE_LIMIT_HINT),
-            "{} hint",
-            engine
+            "{engine} hint"
         );
-        assert_eq!(err.line, Some(2), "{} line", engine);
-        assert!(err.is_fatal, "{} returned a catchable error", engine);
+        assert_eq!(err.line, Some(2), "{engine} line");
+        assert!(err.is_fatal, "{engine} returned a catchable error");
     }
 }
 
@@ -5841,8 +5826,7 @@ fn panic_builtin_raises_with_message() {
     let msg = run_err(r#"panic("deliberate")"#);
     assert!(
         msg.contains("deliberate"),
-        "expected panic message to appear in error surface: {}",
-        msg
+        "expected panic message to appear in error surface: {msg}"
     );
 }
 
@@ -6047,7 +6031,7 @@ fn display_float_with_decimals() {
 #[test]
 fn safety_infinite_loop_halts() {
     let msg = run_err_with_limits("while true { }", tight());
-    assert!(msg.contains("too many steps"), "got: {}", msg);
+    assert!(msg.contains("too many steps"), "got: {msg}");
 }
 
 #[test]
@@ -6057,7 +6041,7 @@ fn safety_memory_bomb_string_doubling() {
 repeat 100 { s = s + s }"#,
         tight(),
     );
-    assert!(msg.contains("Memory limit"), "got: {}", msg);
+    assert!(msg.contains("Memory limit"), "got: {msg}");
 }
 
 #[test]
@@ -6088,8 +6072,7 @@ fn safety_deep_recursion_halts() {
     let msg = handle.join().expect("recursion test thread panicked");
     assert!(
         msg.contains("nested function calls") || msg.contains("recursion"),
-        "got: {}",
-        msg
+        "got: {msg}"
     );
 }
 
@@ -6105,7 +6088,7 @@ repeat 128 { a = [a] }"#,
 #[test]
 fn safety_string_repeat_bomb() {
     let msg = run_err_with_limits(r#"let s = "x" * 999999"#, tight());
-    assert!(msg.contains("Memory limit"), "got: {}", msg);
+    assert!(msg.contains("Memory limit"), "got: {msg}");
 }
 
 #[test]
@@ -6115,7 +6098,7 @@ fn safety_string_concat_bomb() {
 repeat 100 { s = s + s }"#,
         tight(),
     );
-    assert!(msg.contains("Memory limit"), "got: {}", msg);
+    assert!(msg.contains("Memory limit"), "got: {msg}");
 }
 
 #[test]
@@ -6141,7 +6124,7 @@ for c in s { }"#,
 #[test]
 fn safety_demo_limits_step_bound() {
     let msg = run_err_with_limits("let i = 0\nwhile true { i = i + 1 }", BopLimits::demo());
-    assert!(msg.contains("too many steps"), "got: {}", msg);
+    assert!(msg.contains("too many steps"), "got: {msg}");
 }
 
 #[test]
@@ -6151,13 +6134,13 @@ fn safety_demo_limits_memory_bound() {
 print(s)"#,
         BopLimits::demo(),
     );
-    assert!(msg.contains("Memory limit"), "got: {}", msg);
+    assert!(msg.contains("Memory limit"), "got: {msg}");
 }
 
 #[test]
 fn safety_nested_loop_step_bound() {
     let msg = run_err_with_limits("repeat 100 { repeat 100 { let x = 1 } }", tight());
-    assert!(msg.contains("too many steps"), "got: {}", msg);
+    assert!(msg.contains("too many steps"), "got: {msg}");
 }
 
 #[test]
@@ -6170,11 +6153,11 @@ fn safety_range_memory_preflight() {
         } else {
             bop_vm::run(code, &mut host, &tight())
         };
-        assert!(host.prints.borrow().is_empty(), "{} printed", engine);
+        assert!(host.prints.borrow().is_empty(), "{engine} printed");
         let err = result.unwrap_err();
-        assert_eq!(err.message, "Memory limit exceeded", "{} message", engine);
-        assert_eq!(err.line, Some(1), "{} line", engine);
-        assert!(err.is_fatal, "{} returned a catchable error", engine);
+        assert_eq!(err.message, "Memory limit exceeded", "{engine} message");
+        assert_eq!(err.line, Some(1), "{engine} line");
+        assert!(err.is_fatal, "{engine} returned a catchable error");
     }
 }
 
@@ -6304,19 +6287,19 @@ impl Generator {
         if pick < 2 || (pick == 2 && self.vars.is_empty()) {
             let name = format!("v{}", self.vars.len());
             let expr = self.gen_expr(3);
-            out.push_str(&format!("let {} = {}\n", name, expr));
+            out.push_str(&format!("let {name} = {expr}\n"));
             self.vars.push(name);
         } else if pick == 2 {
             let idx = self.rng.pick(self.vars.len() as u32) as usize;
             let name = self.vars[idx].clone();
             let expr = self.gen_expr(3);
-            out.push_str(&format!("{} = {}\n", name, expr));
+            out.push_str(&format!("{name} = {expr}\n"));
         } else if pick == 3 || pick == 4 {
             let expr = self.gen_expr(3);
-            out.push_str(&format!("print({})\n", expr));
+            out.push_str(&format!("print({expr})\n"));
         } else if pick == 5 && nest < 2 {
             let cond = self.gen_expr(2);
-            out.push_str(&format!("if {} {{\n", cond));
+            out.push_str(&format!("if {cond} {{\n"));
             self.gen_stmt(out, nest + 1);
             out.push_str("} else {\n");
             self.gen_stmt(out, nest + 1);
@@ -6325,7 +6308,7 @@ impl Generator {
             // `repeat n { ... }` with n clamped to 0..=8 so nested
             // loops can't blow the step budget.
             let n = self.rng.pick(9);
-            out.push_str(&format!("repeat {} {{\n", n));
+            out.push_str(&format!("repeat {n} {{\n"));
             self.gen_stmt(out, nest + 1);
             out.push_str("}\n");
         } else {
@@ -6333,7 +6316,7 @@ impl Generator {
             // more idents to pick from.
             let expr = self.gen_expr(2);
             let name = format!("t{}", self.vars.len());
-            out.push_str(&format!("let {} = {}\n", name, expr));
+            out.push_str(&format!("let {name} = {expr}\n"));
             self.vars.push(name);
         }
     }
@@ -6358,14 +6341,14 @@ impl Generator {
                     8 => "&&",
                     _ => "||",
                 };
-                format!("({} {} {})", l, op, r)
+                format!("({l} {op} {r})")
             }
             1 => {
                 let e = self.gen_expr(depth - 1);
                 if self.rng.pick(2) == 0 {
-                    format!("(-{})", e)
+                    format!("(-{e})")
                 } else {
-                    format!("(!{})", e)
+                    format!("(!{e})")
                 }
             }
             2 => {
@@ -6380,7 +6363,7 @@ impl Generator {
                 let c = self.gen_expr(depth - 1);
                 let t = self.gen_expr(depth - 1);
                 let e = self.gen_expr(depth - 1);
-                format!("(if {} {{ {} }} else {{ {} }})", c, t, e)
+                format!("(if {c} {{ {t} }} else {{ {e} }})")
             }
         }
     }

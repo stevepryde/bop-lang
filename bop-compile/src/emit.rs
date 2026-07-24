@@ -498,7 +498,7 @@ fn resolve_module_tree(
             Some(Err(e)) => return Err(e.with_module(name)),
             None => {
                 return Err(BopError::runtime(
-                    format!("Module `{}` not found", name),
+                    format!("Module `{name}` not found"),
                     line,
                 ));
             }
@@ -546,7 +546,7 @@ fn analyze_module(
 ) -> Result<(), BopError> {
     if visiting.contains(name) {
         return Err(BopError::runtime(
-            format!("Circular import: module `{}`", name),
+            format!("Circular import: module `{name}`"),
             line,
         ));
     }
@@ -1307,10 +1307,10 @@ fn callable_assignment_names(stmts: &[Stmt]) -> HashSet<String> {
             ExprKind::Call { callee, args } => {
                 visit_expr(callee, names);
                 for arg in args {
-                    if arg.mode == ParamMode::Ref {
-                        if let ExprKind::Ident(name) = &arg.value.kind {
-                            names.insert(name.clone());
-                        }
+                    if arg.mode == ParamMode::Ref
+                        && let ExprKind::Ident(name) = &arg.value.kind
+                    {
+                        names.insert(name.clone());
                     }
                     visit_expr(&arg.value, names);
                 }
@@ -1318,10 +1318,10 @@ fn callable_assignment_names(stmts: &[Stmt]) -> HashSet<String> {
             ExprKind::MethodCall { object, args, .. } => {
                 visit_expr(object, names);
                 for arg in args {
-                    if arg.mode == ParamMode::Ref {
-                        if let ExprKind::Ident(name) = &arg.value.kind {
-                            names.insert(name.clone());
-                        }
+                    if arg.mode == ParamMode::Ref
+                        && let ExprKind::Ident(name) = &arg.value.kind
+                    {
+                        names.insert(name.clone());
                     }
                     visit_expr(&arg.value, names);
                 }
@@ -1696,10 +1696,10 @@ impl Emitter {
         if let Some(ns) = namespace {
             for frame in self.module_aliases.iter().rev() {
                 if let Some(binding) = frame.get(ns) {
-                    if let Some(origin) = binding.exposed_types.get(type_name) {
-                        if self.types.has_type(origin, type_name) {
-                            return Some(origin.clone());
-                        }
+                    if let Some(origin) = binding.exposed_types.get(type_name)
+                        && self.types.has_type(origin, type_name)
+                    {
+                        return Some(origin.clone());
                     }
                     return None;
                 }
@@ -1855,14 +1855,11 @@ impl Emitter {
             ""
         };
         format!(
-            "{prelude}            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
+            "{alias_prelude}            let __resolver = |__ns: ::std::option::Option<&str>, __tn: &str| -> ::std::option::Option<String> {{\n\
              \x20                   match (__ns, __tn) {{\n\
-             {alias}{bare}                        _ => ::std::option::Option::None,\n\
+             {alias_arms}{bare_arm}                        _ => ::std::option::Option::None,\n\
              \x20                   }}\n\
              \x20           }};\n",
-            alias = alias_arms,
-            bare = bare_arm,
-            prelude = alias_prelude,
         )
     }
 
@@ -1968,22 +1965,21 @@ impl Emitter {
         if !self.is_module_top_scope() && !authoritative_alias {
             return;
         }
-        if self.opts.sandbox {
-            if let Some(storage @ BindingStorage::OptionalImport { .. }) =
+        if self.opts.sandbox
+            && let Some(storage @ BindingStorage::OptionalImport { .. }) =
                 self.binding_storage(name)
-            {
-                let value = self
-                    .storage_optional_value_src(&storage, 0)
-                    .expect("optional import storage");
-                let value_tmp = self.fresh_tmp();
-                self.line(&format!("let {value_tmp} = {value};"));
-                self.line(&format!(
+        {
+            let value = self
+                .storage_optional_value_src(&storage, 0)
+                .expect("optional import storage");
+            let value_tmp = self.fresh_tmp();
+            self.line(&format!("let {value_tmp} = {value};"));
+            self.line(&format!(
                     "match {value_tmp} {{ ::std::option::Option::Some(__value @ ::bop::value::Value::Module(_)) => {{ ctx.module_aliases.insert(({module}.to_string(), {name}.to_string()), __value); }}, ::std::option::Option::Some(_) | ::std::option::Option::None => {{ ctx.module_aliases.remove(&({module}.to_string(), {name}.to_string())); }}, }}",
                     module = rust_string_literal(&self.current_module),
                     name = rust_string_literal(name),
                 ));
-                return;
-            }
+            return;
         }
         let value = if self.is_local(name) {
             format!("{}.clone()", rust_user_ident(name))
@@ -2240,7 +2236,7 @@ impl Emitter {
         ))
     }
 
-    fn storage_mut_option_sources(&self, storage: &BindingStorage) -> Vec<String> {
+    fn storage_mut_option_sources(storage: &BindingStorage) -> Vec<String> {
         match storage {
             BindingStorage::RustLocal { ident } => {
                 vec![format!("::std::option::Option::Some(&mut {ident})")]
@@ -2270,7 +2266,7 @@ impl Emitter {
                     })
                     .collect::<Vec<_>>();
                 if let Some(fallback) = fallback {
-                    sources.extend(self.storage_mut_option_sources(fallback));
+                    sources.extend(Self::storage_mut_option_sources(fallback));
                 }
                 sources
             }
@@ -2278,7 +2274,7 @@ impl Emitter {
     }
 
     fn storage_mut_src(&self, storage: &BindingStorage, name: &str, line: u32) -> String {
-        let sources = self.storage_mut_option_sources(storage);
+        let sources = Self::storage_mut_option_sources(storage);
         let mut body = String::from("{");
         for (index, source) in sources.iter().enumerate() {
             if index == 0 {
@@ -2647,10 +2643,7 @@ impl Emitter {
         } else if let Some(storage) = self.binding_storage(name) {
             Ok(self.storage_read_src(&storage, line))
         } else if let Some(site) = self.local_function_site(name) {
-            Ok(format!(
-                "__bop_function_site_value(ctx, {}, {})?",
-                site, line
-            ))
+            Ok(format!("__bop_function_site_value(ctx, {site}, {line})?"))
         } else if self.fn_info.top_level_fns.contains(name)
             || self.fn_info.all_fns.contains(name)
             || self.has_declaration_alias_overlay(name)
@@ -2966,7 +2959,7 @@ impl Emitter {
     fn emit_program(&mut self, stmts: &[Stmt]) -> Result<(), BopError> {
         let module_name = self.opts.module_name.clone();
         if let Some(ref name) = module_name {
-            writeln!(self.out, "pub mod {} {{", name).unwrap();
+            writeln!(self.out, "pub mod {name} {{").unwrap();
         }
         self.emit_header();
         self.emit_runtime_preamble();
@@ -3166,7 +3159,7 @@ impl Emitter {
             return Ok(());
         }
         let entry = self.modules.modules.get(path).cloned().ok_or_else(|| {
-            BopError::runtime(format!("Module `{}` not found (bop-compile)", path), line)
+            BopError::runtime(format!("Module `{path}` not found (bop-compile)"), line)
         })?;
 
         // Load once, regardless of form — the exports struct is
@@ -3187,7 +3180,7 @@ impl Emitter {
                 let is_type = entry.effective_types.contains_key(item);
                 if !is_binding && !is_type {
                     return Err(BopError::runtime(
-                        format!("Module `{}` has no export `{}`", path, item),
+                        format!("Module `{path}` has no export `{item}`"),
                         line,
                     ));
                 }
@@ -3282,8 +3275,7 @@ impl Emitter {
                 {
                     return Err(BopError::runtime(
                         format!(
-                            "Alias `{}` in `use {} as {}` would shadow an existing binding",
-                            alias_name, path, alias_name
+                            "Alias `{alias_name}` in `use {path} as {alias_name}` would shadow an existing binding"
                         ),
                         line,
                     ));
@@ -3534,8 +3526,6 @@ impl Emitter {
         writeln!(
             self.out,
             "fn {load}(ctx: &mut Ctx<'_>) -> Result<{exports}, ::bop::error::BopError> {{",
-            load = load,
-            exports = exports,
         )
         .unwrap();
         self.indent = 1;
@@ -3545,18 +3535,15 @@ impl Emitter {
         // In progress? error with cycle message. Miss? mark
         // loading and fall through to evaluate the body.
         self.line(&format!(
-            r#"if let Some(entry) = ctx.module_cache.get("{key}") {{"#,
-            key = name
+            r#"if let Some(entry) = ctx.module_cache.get("{name}") {{"#
         ));
         self.line("    if entry.is::<__ModuleLoading>() {");
         self.line(&format!(
-            "        return Err(::bop::error::BopError::runtime(\"Circular import: module `{key}`\", 0));",
-            key = name
+            "        return Err(::bop::error::BopError::runtime(\"Circular import: module `{name}`\", 0));"
         ));
         self.line("    }");
         self.line(&format!(
-            "    if let Some(loaded) = entry.downcast_ref::<{exports}>() {{",
-            exports = exports
+            "    if let Some(loaded) = entry.downcast_ref::<{exports}>() {{"
         ));
         self.line("        return Ok(loaded.clone());");
         self.line("    }");
@@ -3612,8 +3599,7 @@ impl Emitter {
             rust_string_literal(name),
         ));
         self.line(&format!(
-            r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__ModuleLoading));"#,
-            key = name
+            r#"ctx.module_cache.insert("{name}".to_string(), ::std::boxed::Box::new(__ModuleLoading));"#
         ));
         self.line(&format!(
             "ctx.module_aliases.retain(|(module, _), _| module != {});",
@@ -3629,8 +3615,7 @@ impl Emitter {
             rust_string_literal(name)
         ));
         self.line(&format!(
-            "let __load_result = (|| -> Result<{exports}, ::bop::error::BopError> {{",
-            exports = exports
+            "let __load_result = (|| -> Result<{exports}, ::bop::error::BopError> {{"
         ));
         self.indent += 1;
 
@@ -3681,7 +3666,7 @@ impl Emitter {
         // a `Value::Fn`.
         writeln!(self.out).unwrap();
         self.pad();
-        writeln!(self.out, "let __exports = {exports} {{", exports = exports).unwrap();
+        writeln!(self.out, "let __exports = {exports} {{").unwrap();
         for export in &entry.effective_exports {
             self.pad();
             if self.opts.sandbox {
@@ -3721,8 +3706,7 @@ impl Emitter {
         self.pad();
         writeln!(
             self.out,
-            r#"ctx.module_cache.insert("{key}".to_string(), ::std::boxed::Box::new(__exports.clone()));"#,
-            key = name
+            r#"ctx.module_cache.insert("{name}".to_string(), ::std::boxed::Box::new(__exports.clone()));"#
         )
         .unwrap();
         self.pad();
@@ -5340,7 +5324,7 @@ fn __bop_function_site_value(
     /// gate.
     fn emit_tick(&mut self, line: u32) {
         if self.opts.sandbox {
-            self.line(&format!("__bop_tick(ctx, {})?;", line));
+            self.line(&format!("__bop_tick(ctx, {line})?;"));
         }
     }
 
@@ -5404,10 +5388,7 @@ fn __bop_function_site_value(
                     return Ok(());
                 }
                 let ident = rust_user_ident(name);
-                self.line(&format!(
-                    "let mut {}: ::bop::value::Value = {};",
-                    ident, rhs
-                ));
+                self.line(&format!("let mut {ident}: ::bop::value::Value = {rhs};"));
                 self.bind_local(name);
                 if *is_const {
                     self.mark_constant(name);
@@ -5436,7 +5417,7 @@ fn __bop_function_site_value(
 
             StmtKind::While { condition, body } => {
                 let cond_src = self.expr_src(condition)?;
-                self.open_block(&format!("while ({}).is_truthy()", cond_src));
+                self.open_block(&format!("while ({cond_src}).is_truthy()"));
                 self.emit_tick(line);
                 self.emit_runtime_type_scope_for(body);
                 self.push_scope();
@@ -5451,18 +5432,17 @@ fn __bop_function_site_value(
                 let count_src = self.expr_src(count)?;
                 let count_tmp = self.fresh_tmp();
                 let n_tmp = self.fresh_tmp();
-                self.line(&format!("let {} = {};", count_tmp, count_src));
-                self.open_block(&format!("let {}: i64 = match {}", n_tmp, count_tmp));
+                self.line(&format!("let {count_tmp} = {count_src};"));
+                self.open_block(&format!("let {n_tmp}: i64 = match {count_tmp}"));
                 self.line("::bop::value::Value::Int(n) => n,");
                 self.line("::bop::value::Value::Number(n) => n as i64,");
                 self.line(&format!(
-                    "other => return Err(::bop::error::BopError::runtime(format!(\"repeat needs a number, but got {{}}\", other.type_name()), {})),",
-                    line
+                    "other => return Err(::bop::error::BopError::runtime(format!(\"repeat needs a number, but got {{}}\", other.type_name()), {line})),"
                 ));
                 self.indent -= 1;
                 self.pad();
                 self.out.push_str("};\n");
-                self.open_block(&format!("for _ in 0..({}.max(0))", n_tmp));
+                self.open_block(&format!("for _ in 0..({n_tmp}.max(0))"));
                 self.emit_tick(line);
                 self.emit_runtime_type_scope_for(body);
                 self.push_scope();
@@ -5486,8 +5466,7 @@ fn __bop_function_site_value(
                 let iter_src = self.expr_src(iterable)?;
                 let iter_tmp = self.fresh_tmp();
                 self.line(&format!(
-                    "let {}: ::bop::value::Value = {};",
-                    iter_tmp, iter_src
+                    "let {iter_tmp}: ::bop::value::Value = {iter_src};"
                 ));
                 let state_tmp = self.fresh_tmp();
                 // `__bop_iter_start` chooses between the eager
@@ -5497,15 +5476,13 @@ fn __bop_function_site_value(
                 // whichever shape got picked, so the emitted
                 // loop body stays uniform.
                 self.line(&format!(
-                    "let mut {}: __BopIterState = __bop_iter_start(ctx, {}, {})?;",
-                    state_tmp, iter_tmp, line
+                    "let mut {state_tmp}: __BopIterState = __bop_iter_start(ctx, {iter_tmp}, {line})?;"
                 ));
                 let ident = rust_user_ident(var);
                 self.open_block("loop");
                 self.emit_tick(line);
                 self.line(&format!(
-                    "let mut {}: ::bop::value::Value = match __bop_iter_step(ctx, &mut {}, {})? {{ Some(__v) => __v, None => break, }};",
-                    ident, state_tmp, line
+                    "let mut {ident}: ::bop::value::Value = match __bop_iter_step(ctx, &mut {state_tmp}, {line})? {{ Some(__v) => __v, None => break, }};"
                 ));
                 self.emit_runtime_type_scope_for(body);
                 self.push_scope();
@@ -5529,7 +5506,7 @@ fn __bop_function_site_value(
                 if self.in_top_level && self.opts.sandbox {
                     if let Some(value) = value {
                         let src = self.expr_src(value)?;
-                        self.line(&format!("let _ = {};", src));
+                        self.line(&format!("let _ = {src};"));
                     }
                     self.line("return Ok(());");
                     return Ok(());
@@ -5537,7 +5514,7 @@ fn __bop_function_site_value(
                 match value {
                     Some(v) => {
                         let src = self.expr_src(v)?;
-                        self.line(&format!("return Ok({});", src));
+                        self.line(&format!("return Ok({src});"));
                     }
                     None => {
                         self.line("return Ok(::bop::value::Value::None);");
@@ -5654,7 +5631,7 @@ fn __bop_function_site_value(
 
             StmtKind::ExprStmt(expr) => {
                 let src = self.expr_src(expr)?;
-                self.line(&format!("let _ = {};", src));
+                self.line(&format!("let _ = {src};"));
             }
         }
         Ok(())
@@ -5668,7 +5645,7 @@ fn __bop_function_site_value(
         else_body: &Option<Vec<Stmt>>,
     ) -> Result<(), BopError> {
         let cond_src = self.expr_src(cond)?;
-        self.open_block(&format!("if ({}).is_truthy()", cond_src));
+        self.open_block(&format!("if ({cond_src}).is_truthy()"));
         self.emit_runtime_type_scope_for(body);
         self.push_scope();
         for s in body {
@@ -5680,7 +5657,7 @@ fn __bop_function_site_value(
             let c = self.expr_src(elif_cond)?;
             self.pad();
             self.out
-                .push_str(&format!("}} else if ({}).is_truthy() {{\n", c));
+                .push_str(&format!("}} else if ({c}).is_truthy() {{\n"));
             self.indent += 1;
             self.emit_runtime_type_scope_for(elif_body);
             self.push_scope();
@@ -5723,7 +5700,7 @@ fn __bop_function_site_value(
                     && self.declaration_alias_overlay(name).is_some()
                 {
                     let rhs_tmp = self.fresh_tmp();
-                    self.line(&format!("let {} = {};", rhs_tmp, rhs_src));
+                    self.line(&format!("let {rhs_tmp} = {rhs_src};"));
                     match op {
                         AssignOp::Eq => {
                             let assign = self
@@ -5737,7 +5714,7 @@ fn __bop_function_site_value(
                             let current = self
                                 .declaration_alias_read_src(name, line)
                                 .expect("overlay checked above");
-                            self.line(&format!("let {} = {};", current_tmp, current));
+                            self.line(&format!("let {current_tmp} = {current};"));
                             self.line(&format!(
                                 "let {} = {}(&{}, &{}, {}, &ctx.memory)?;",
                                 next_tmp,
@@ -5805,15 +5782,14 @@ fn __bop_function_site_value(
                 }
                 match op {
                     AssignOp::Eq => {
-                        self.line(&format!("{} = {};", ident, rhs_src));
+                        self.line(&format!("{ident} = {rhs_src};"));
                     }
                     compound => {
                         let op_path = compound_op_path(*compound);
                         let rhs_tmp = self.fresh_tmp();
-                        self.line(&format!("let {} = {};", rhs_tmp, rhs_src));
+                        self.line(&format!("let {rhs_tmp} = {rhs_src};"));
                         self.line(&format!(
-                            "{} = {}(&{}, &{}, {}, &ctx.memory)?;",
-                            ident, op_path, ident, rhs_tmp, line
+                            "{ident} = {op_path}(&{ident}, &{rhs_tmp}, {line}, &ctx.memory)?;"
                         ));
                     }
                 }
@@ -5841,8 +5817,8 @@ fn __bop_function_site_value(
                 let idx_tmp = self.fresh_tmp();
                 let target_is_local = self.is_local(target_name);
                 let memory_tmp = (!target_is_local).then(|| self.fresh_tmp());
-                self.line(&format!("let {} = {};", val_tmp, val_src));
-                self.line(&format!("let {} = {};", idx_tmp, idx_src));
+                self.line(&format!("let {val_tmp} = {val_src};"));
+                self.line(&format!("let {idx_tmp} = {idx_src};"));
                 if let Some(memory_tmp) = &memory_tmp {
                     self.line(&format!("let {memory_tmp} = ctx.memory.clone();"));
                 }
@@ -5871,8 +5847,7 @@ fn __bop_function_site_value(
                 match op {
                     AssignOp::Eq => {
                         self.line(&format!(
-                            "::bop::ops::index_set_in({}, &{}, {}, {}, {})?;",
-                            target_tmp, idx_tmp, val_tmp, line, memory_ref
+                            "::bop::ops::index_set_in({target_tmp}, &{idx_tmp}, {val_tmp}, {line}, {memory_ref})?;"
                         ));
                     }
                     compound => {
@@ -5880,16 +5855,13 @@ fn __bop_function_site_value(
                         let cur_tmp = self.fresh_tmp();
                         let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "let {} = ::bop::ops::index_get_in({}, &{}, {}, {})?;",
-                            cur_tmp, target_tmp, idx_tmp, line, memory_ref
+                            "let {cur_tmp} = ::bop::ops::index_get_in({target_tmp}, &{idx_tmp}, {line}, {memory_ref})?;"
                         ));
                         self.line(&format!(
-                            "let {} = {}(&{}, &{}, {}, {})?;",
-                            new_tmp, op_path, cur_tmp, val_tmp, line, memory_ref
+                            "let {new_tmp} = {op_path}(&{cur_tmp}, &{val_tmp}, {line}, {memory_ref})?;"
                         ));
                         self.line(&format!(
-                            "::bop::ops::index_set_in({}, &{}, {}, {}, {})?;",
-                            target_tmp, idx_tmp, new_tmp, line, memory_ref
+                            "::bop::ops::index_set_in({target_tmp}, &{idx_tmp}, {new_tmp}, {line}, {memory_ref})?;"
                         ));
                     }
                 }
@@ -5910,7 +5882,7 @@ fn __bop_function_site_value(
                 let val_tmp = self.fresh_tmp();
                 let target_is_local = self.is_local(target_name);
                 let memory_tmp = (!target_is_local).then(|| self.fresh_tmp());
-                self.line(&format!("let {} = {};", val_tmp, val_src));
+                self.line(&format!("let {val_tmp} = {val_src};"));
                 if let Some(memory_tmp) = &memory_tmp {
                     self.line(&format!("let {memory_tmp} = ctx.memory.clone();"));
                 }
@@ -5930,8 +5902,7 @@ fn __bop_function_site_value(
                         })
                 };
                 self.line(&format!(
-                    "let {}: &mut ::bop::value::Value = {};",
-                    target_tmp, target_src
+                    "let {target_tmp}: &mut ::bop::value::Value = {target_src};"
                 ));
                 let memory_ref = memory_tmp
                     .as_ref()
@@ -5941,8 +5912,7 @@ fn __bop_function_site_value(
                         let old_tmp = self.fresh_tmp();
                         let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "let {} = ::core::mem::replace(&mut *{}, ::bop::value::Value::None);",
-                            old_tmp, target_tmp
+                            "let {old_tmp} = ::core::mem::replace(&mut *{target_tmp}, ::bop::value::Value::None);"
                         ));
                         self.line(&format!(
                             "let {} = __bop_field_set({}, {}, {}, {}, {})?;",
@@ -5953,7 +5923,7 @@ fn __bop_function_site_value(
                             val_tmp,
                             line
                         ));
-                        self.line(&format!("*{} = {};", target_tmp, new_tmp));
+                        self.line(&format!("*{target_tmp} = {new_tmp};"));
                     }
                     compound => {
                         let op_path = compound_op_path(*compound);
@@ -5967,14 +5937,12 @@ fn __bop_function_site_value(
                             line
                         ));
                         self.line(&format!(
-                            "let {} = {}(&{}, &{}, {}, {})?;",
-                            new_tmp, op_path, cur_tmp, val_tmp, line, memory_ref
+                            "let {new_tmp} = {op_path}(&{cur_tmp}, &{val_tmp}, {line}, {memory_ref})?;"
                         ));
                         let old_tmp = self.fresh_tmp();
                         let replaced_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "let {} = ::core::mem::replace(&mut *{}, ::bop::value::Value::None);",
-                            old_tmp, target_tmp
+                            "let {old_tmp} = ::core::mem::replace(&mut *{target_tmp}, ::bop::value::Value::None);"
                         ));
                         self.line(&format!(
                             "let {} = __bop_field_set({}, {}, {}, {}, {})?;",
@@ -5985,7 +5953,7 @@ fn __bop_function_site_value(
                             new_tmp,
                             line
                         ));
-                        self.line(&format!("*{} = {};", target_tmp, replaced_tmp));
+                        self.line(&format!("*{target_tmp} = {replaced_tmp};"));
                     }
                 }
                 self.refresh_write_through_alias_overlay(target_name);
@@ -6027,13 +5995,11 @@ fn __bop_function_site_value(
             .join(", ");
         let sig = if params.is_empty() {
             format!(
-                "fn {}(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError>",
-                fn_name
+                "fn {fn_name}(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError>"
             )
         } else {
             format!(
-                "fn {}(ctx: &mut Ctx<'_>, {}) -> Result<::bop::value::Value, ::bop::error::BopError>",
-                fn_name, param_list
+                "fn {fn_name}(ctx: &mut Ctx<'_>, {param_list}) -> Result<::bop::value::Value, ::bop::error::BopError>"
             )
         };
         self.open_block(&sig);
@@ -6166,14 +6132,14 @@ fn __bop_function_site_value(
     fn expr_src(&mut self, expr: &Expr) -> Result<String, BopError> {
         let line = expr.line;
         let s = match &expr.kind {
-            ExprKind::Int(n) => format!("::bop::value::Value::Int({}i64)", n),
+            ExprKind::Int(n) => format!("::bop::value::Value::Int({n}i64)"),
             ExprKind::Number(n) => format!("::bop::value::Value::Number({}f64)", rust_f64(*n)),
             ExprKind::Str(s) => format!(
                 "::bop::value::Value::__new_str_in({}.to_string(), &ctx.memory)",
                 rust_string_literal(s)
             ),
             ExprKind::Bool(b) => {
-                format!("::bop::value::Value::Bool({})", b)
+                format!("::bop::value::Value::Bool({b})")
             }
             ExprKind::None => "::bop::value::Value::None".to_string(),
 
@@ -6215,12 +6181,11 @@ fn __bop_function_site_value(
             ExprKind::UnaryOp { op, expr: inner } => {
                 let inner_src = self.expr_src(inner)?;
                 match op {
-                    UnaryOp::Neg => format!(
-                        "{{ let __v = {}; ::bop::ops::neg(&__v, {})? }}",
-                        inner_src, line
-                    ),
+                    UnaryOp::Neg => {
+                        format!("{{ let __v = {inner_src}; ::bop::ops::neg(&__v, {line})? }}")
+                    }
                     UnaryOp::Not => {
-                        format!("{{ let __v = {}; ::bop::ops::not(&__v) }}", inner_src)
+                        format!("{{ let __v = {inner_src}; ::bop::ops::not(&__v) }}")
                     }
                 }
             }
@@ -6237,8 +6202,7 @@ fn __bop_function_site_value(
                 let obj_src = self.expr_src(object)?;
                 let idx_src = self.expr_src(index)?;
                 format!(
-                    "{{ let __o = {}; let __i = {}; ::bop::ops::index_get_in(&__o, &__i, {}, &ctx.memory)? }}",
-                    obj_src, idx_src, line
+                    "{{ let __o = {obj_src}; let __i = {idx_src}; ::bop::ops::index_get_in(&__o, &__i, {line}, &ctx.memory)? }}"
                 )
             }
 
@@ -6254,10 +6218,7 @@ fn __bop_function_site_value(
                 let cond = self.expr_src(condition)?;
                 let then_s = self.expr_src(then_expr)?;
                 let else_s = self.expr_src(else_expr)?;
-                format!(
-                    "(if ({}).is_truthy() {{ {} }} else {{ {} }})",
-                    cond, then_s, else_s
-                )
+                format!("(if ({cond}).is_truthy() {{ {then_s} }} else {{ {else_s} }})")
             }
 
             ExprKind::Match { scrutinee, arms } => self.match_src(scrutinee, arms, line)?,
@@ -6283,16 +6244,15 @@ fn __bop_function_site_value(
         let inner_src = self.expr_src(inner)?;
         let id = self.tmp_counter;
         self.tmp_counter += 1;
-        let v_name = format!("__try_v_{}", id);
+        let v_name = format!("__try_v_{id}");
         let err_arm = if self.in_top_level {
             format!(
-                "return ::std::result::Result::Err(::bop::error_messages::top_level_try_error({}));",
-                line
+                "return ::std::result::Result::Err(::bop::error_messages::top_level_try_error({line}));"
             )
         } else {
             // Inside a user fn: a Bop-level `return err` is
             // spelled `return Ok(err_value)` at the Rust level.
-            format!("return ::std::result::Result::Ok({}.clone());", v_name)
+            format!("return ::std::result::Result::Ok({v_name}.clone());")
         };
         // We construct a block that:
         //   1. evaluates the scrutinee once into a local;
@@ -6307,8 +6267,8 @@ fn __bop_function_site_value(
         // always returns (e.g. a bare `try` at the end of a fn).
         Ok(format!(
             "{{\n    \
-             let {v}: ::bop::value::Value = {inner};\n    \
-             match &{v} {{\n        \
+             let {v_name}: ::bop::value::Value = {inner_src};\n    \
+             match &{v_name} {{\n        \
                  ::bop::value::Value::EnumVariant(ev) if ev.variant() == \"Ok\" => {{\n            \
                      match ev.payload() {{\n                \
                          ::bop::value::EnumPayload::Tuple(items) if items.len() == 1 => items[0].clone(),\n                \
@@ -6329,10 +6289,6 @@ fn __bop_function_site_value(
                  }}\n    \
              }}\n\
              }}",
-            v = v_name,
-            inner = inner_src,
-            err_arm = err_arm,
-            line = line,
         ))
     }
 
@@ -6376,16 +6332,15 @@ fn __bop_function_site_value(
         let scrutinee_src = self.expr_src(scrutinee)?;
         let id = self.tmp_counter;
         self.tmp_counter += 1;
-        let sc_name = format!("__match_sc_{}", id);
-        let label = format!("match_arms_{}", id);
+        let sc_name = format!("__match_sc_{id}");
+        let label = format!("match_arms_{id}");
 
         let mut src = String::new();
         src.push_str("{\n");
         src.push_str(&format!(
-            "    let {}: ::bop::value::Value = {};\n",
-            sc_name, scrutinee_src
+            "    let {sc_name}: ::bop::value::Value = {scrutinee_src};\n"
         ));
-        src.push_str(&format!("    '{}: loop {{\n", label));
+        src.push_str(&format!("    '{label}: loop {{\n"));
 
         for arm in arms {
             let arm_line = arm.line;
@@ -6400,8 +6355,7 @@ fn __bop_function_site_value(
 
             src.push_str("        {\n");
             src.push_str(&format!(
-                "            let __pat: ::bop::parser::Pattern = {};\n",
-                pat_src
+                "            let __pat: ::bop::parser::Pattern = {pat_src};\n"
             ));
             src.push_str("            let mut __bindings: ::std::vec::Vec<(::std::string::String, ::bop::value::Value)> = ::std::vec::Vec::new();\n");
             // Emit a per-site resolver closure that encodes the
@@ -6413,8 +6367,7 @@ fn __bop_function_site_value(
                 &self.emit_resolver_closure_src(&namespaces, pattern_uses_bare_type(&arm.pattern)),
             );
             src.push_str(&format!(
-                "            if ::bop::pattern_matches_in(&__pat, &{}, &mut __bindings, &__resolver, &ctx.memory) {{\n",
-                sc_name
+                "            if ::bop::pattern_matches_in(&__pat, &{sc_name}, &mut __bindings, &__resolver, &ctx.memory) {{\n"
             ));
 
             self.push_scope();
@@ -6443,21 +6396,16 @@ fn __bop_function_site_value(
             if let Some(guard) = &arm.guard {
                 let guard_src = self.expr_src(guard)?;
                 src.push_str(&format!(
-                    "                if ({}).is_truthy() {{\n",
-                    guard_src
+                    "                if ({guard_src}).is_truthy() {{\n"
                 ));
                 let body_src = self.expr_src(&arm.body)?;
                 src.push_str(&format!(
-                    "                    break '{} ({});\n",
-                    label, body_src
+                    "                    break '{label} ({body_src});\n"
                 ));
                 src.push_str("                }\n");
             } else {
                 let body_src = self.expr_src(&arm.body)?;
-                src.push_str(&format!(
-                    "                break '{} ({});\n",
-                    label, body_src
-                ));
+                src.push_str(&format!("                break '{label} ({body_src});\n"));
             }
             self.pop_scope();
 
@@ -6471,8 +6419,7 @@ fn __bop_function_site_value(
         }
 
         src.push_str(&format!(
-            "        #[allow(unreachable_code)]\n        return ::std::result::Result::Err(::bop::error::BopError::runtime(\"No match arm matched the scrutinee\", {}));\n",
-            line
+            "        #[allow(unreachable_code)]\n        return ::std::result::Result::Err(::bop::error::BopError::runtime(\"No match arm matched the scrutinee\", {line}));\n"
         ));
         src.push_str("    }\n");
         src.push('}');
@@ -6492,16 +6439,14 @@ fn __bop_function_site_value(
                 let l = self.expr_src(left)?;
                 let r = self.expr_src(right)?;
                 Ok(format!(
-                    "{{ let __l = {}; if __l.is_truthy() {{ ::bop::value::Value::Bool(({}).is_truthy()) }} else {{ ::bop::value::Value::Bool(false) }} }}",
-                    l, r
+                    "{{ let __l = {l}; if __l.is_truthy() {{ ::bop::value::Value::Bool(({r}).is_truthy()) }} else {{ ::bop::value::Value::Bool(false) }} }}"
                 ))
             }
             BinOp::Or => {
                 let l = self.expr_src(left)?;
                 let r = self.expr_src(right)?;
                 Ok(format!(
-                    "{{ let __l = {}; if __l.is_truthy() {{ ::bop::value::Value::Bool(true) }} else {{ ::bop::value::Value::Bool(({}).is_truthy()) }} }}",
-                    l, r
+                    "{{ let __l = {l}; if __l.is_truthy() {{ ::bop::value::Value::Bool(true) }} else {{ ::bop::value::Value::Bool(({r}).is_truthy()) }} }}"
                 ))
             }
             _ => {
@@ -6516,12 +6461,11 @@ fn __bop_function_site_value(
                 let suffix_line = if matches!(op, BinOp::Eq | BinOp::NotEq) {
                     String::new()
                 } else {
-                    format!(", {}, &ctx.memory", line)
+                    format!(", {line}, &ctx.memory")
                 };
                 let trailing = if needs_try { "?" } else { "" };
                 Ok(format!(
-                    "{{ let __l = {}; let __r = {}; {}(&__l, &__r{}){} }}",
-                    l, r, op_path, suffix_line, trailing
+                    "{{ let __l = {l}; let __r = {r}; {op_path}(&__l, &__r{suffix_line}){trailing} }}"
                 ))
             }
         }
@@ -6748,13 +6692,13 @@ fn __bop_function_site_value(
         line: u32,
     ) -> Result<String, BopError> {
         let exact_site = self.local_function_site(name);
-        if let Some(site) = exact_site {
-            if args.len() != self.functions.sites[site].params.len() {
-                return Ok(format!(
-                    "{{ {} }}",
-                    self.function_site_arity_error_src(site, args.len(), line)
-                ));
-            }
+        if let Some(site) = exact_site
+            && args.len() != self.functions.sites[site].params.len()
+        {
+            return Ok(format!(
+                "{{ {} }}",
+                self.function_site_arity_error_src(site, args.len(), line)
+            ));
         }
 
         let actual_modes = args
@@ -6797,7 +6741,7 @@ fn __bop_function_site_value(
         for arg in args {
             let src = self.expr_src(arg)?;
             let tmp = self.fresh_tmp();
-            write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
+            write!(arg_lets, "let {tmp} = {src}; ").unwrap();
             arg_names.push(tmp);
         }
 
@@ -6809,7 +6753,7 @@ fn __bop_function_site_value(
             return Ok(format!("{{ {preflight}{arg_lets}{call} }}"));
         }
 
-        let binding_storage = self.binding_storage(&name);
+        let binding_storage = self.binding_storage(name);
         if let Some(
             storage @ (BindingStorage::RustLocal { .. } | BindingStorage::Persistent { .. }),
         ) = binding_storage.as_ref()
@@ -6822,7 +6766,7 @@ fn __bop_function_site_value(
             };
             return Ok(format!(
                 "{{ {preflight}{arg_lets}__bop_call_named_value(ctx, {callee}, {args_vec}, {name}, {line})? }}",
-                name = rust_string_literal(&name),
+                name = rust_string_literal(name),
             ));
         }
 
@@ -6831,13 +6775,11 @@ fn __bop_function_site_value(
                 let args_expr = build_arg_array(&arg_names);
                 if self.opts.sandbox {
                     format!(
-                        "__bop_host_print(ctx, &__bop_format_print(&{})); ::bop::value::Value::None",
-                        args_expr
+                        "__bop_host_print(ctx, &__bop_format_print(&{args_expr})); ::bop::value::Value::None"
                     )
                 } else {
                     format!(
-                        "ctx.host.on_print(&__bop_format_print(&{})); ::bop::value::Value::None",
-                        args_expr
+                        "ctx.host.on_print(&__bop_format_print(&{args_expr})); ::bop::value::Value::None"
                     )
                 }
             }
@@ -6885,7 +6827,7 @@ fn __bop_function_site_value(
                         "[{}]",
                         arg_names
                             .iter()
-                            .map(|n| format!("{}.clone()", n))
+                            .map(|n| format!("{n}.clone()"))
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
@@ -6896,7 +6838,7 @@ fn __bop_function_site_value(
                     } else {
                         format!("vec![{}]", arg_names.join(", "))
                     };
-                    let fallback = if let Some(site) = self.native_static_function_site(&name) {
+                    let fallback = if let Some(site) = self.native_static_function_site(name) {
                         format!(
                             "{{ {} }}",
                             self.reached_function_site_call_src(site, &arg_names, line)
@@ -6905,20 +6847,18 @@ fn __bop_function_site_value(
                         format!(
                             "__bop_call_active_function(ctx, {}, {}, {}, {})?",
                             rust_string_literal(&self.current_module),
-                            rust_string_literal(&name),
+                            rust_string_literal(name),
                             site_args,
                             line,
                         )
                     };
                     if self.opts.sandbox {
                         format!(
-                            "match __bop_host_call(ctx, {:?}, &{}, {}) {{ Some(r) => r?, None => {}, }}",
-                            name, cloned_args, line, fallback
+                            "match __bop_host_call(ctx, {name:?}, &{cloned_args}, {line}) {{ Some(r) => r?, None => {fallback}, }}"
                         )
                     } else {
                         format!(
-                            "match ctx.host.call({:?}, &{}, {}) {{ Some(r) => r?, None => {}, }}",
-                            name, cloned_args, line, fallback
+                            "match ctx.host.call({name:?}, &{cloned_args}, {line}) {{ Some(r) => r?, None => {fallback}, }}"
                         )
                     }
                 } else {
@@ -6931,13 +6871,11 @@ fn __bop_function_site_value(
                     // without any per-engine string duplication.
                     let hint_fallback = if self.opts.sandbox {
                         format!(
-                            "{{ let hint = __bop_host_function_hint(ctx); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}); e.friendly_hint = Some(hint); e }} }}",
-                            name, line, name, line
+                            "{{ let hint = __bop_host_function_hint(ctx); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({name:?}), {line}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({name:?}), {line}); e.friendly_hint = Some(hint); e }} }}"
                         )
                     } else {
                         format!(
-                            "{{ let hint = ctx.host.function_hint(); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({:?}), {}); e.friendly_hint = Some(hint.to_string()); e }} }}",
-                            name, line, name, line
+                            "{{ let hint = ctx.host.function_hint(); if hint.is_empty() {{ ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({name:?}), {line}) }} else {{ let mut e = ::bop::error::BopError::runtime(::bop::error_messages::function_not_found({name:?}), {line}); e.friendly_hint = Some(hint.to_string()); e }} }}"
                         )
                     };
                     if self.opts.sandbox {
@@ -6945,7 +6883,7 @@ fn __bop_function_site_value(
                             "match __bop_host_call(ctx, {name:?}, &{cloned_args}, {line}) {{ Some(r) => r?, None => match __bop_call_active_function(ctx, {module}, {name_lit}, {args}, {line}) {{ Ok(value) => value, Err(error) if error.message == ::bop::error_messages::function_not_found({name_lit}) => return Err({hint}), Err(error) => return Err(error), }}, }}",
                             name = name,
                             module = rust_string_literal(&self.current_module),
-                            name_lit = rust_string_literal(&name),
+                            name_lit = rust_string_literal(name),
                             args = if arg_names.is_empty() {
                                 "::std::vec::Vec::new()".to_string()
                             } else {
@@ -6955,8 +6893,7 @@ fn __bop_function_site_value(
                         )
                     } else {
                         format!(
-                            "match ctx.host.call({:?}, &{}, {}) {{ Some(r) => r?, None => return Err({}), }}",
-                            name, cloned_args, line, hint_fallback
+                            "match ctx.host.call({name:?}, &{cloned_args}, {line}) {{ Some(r) => r?, None => return Err({hint_fallback}), }}"
                         )
                     }
                 }
@@ -6972,11 +6909,11 @@ fn __bop_function_site_value(
         // top-level `let` or import in this module could ever shadow. Every
         // other call — builtins in import-free programs, user fns nothing
         // overlaps — dispatches directly.
-        if self.call_may_be_rebound(&name) {
+        if self.call_may_be_rebound(name) {
             body = format!(
                 "match __bop_binding_value(ctx, {module}, {name}) {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
                 module = rust_string_literal(&self.current_module),
-                name = rust_string_literal(&name),
+                name = rust_string_literal(name),
             );
         }
         if let Some(storage @ BindingStorage::OptionalImport { .. }) = binding_storage.as_ref() {
@@ -6985,11 +6922,11 @@ fn __bop_function_site_value(
                 .expect("optional import storage");
             body = format!(
                 "match {optional} {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }}",
-                name = rust_string_literal(&name),
+                name = rust_string_literal(name),
             );
         }
 
-        if let Some(alias) = self.declaration_alias_optional_src(&name) {
+        if let Some(alias) = self.declaration_alias_optional_src(name) {
             let args_vec = if arg_names.is_empty() {
                 "::std::vec::Vec::<::bop::value::Value>::new()".to_string()
             } else {
@@ -6997,7 +6934,7 @@ fn __bop_function_site_value(
             };
             return Ok(format!(
                 "{{ {arg_lets}match {alias} {{ ::std::option::Option::Some(__callee) => __bop_call_named_value(ctx, __callee, {args_vec}, {name}, {line})?, ::std::option::Option::None => {{ {body} }}, }} }}",
-                name = rust_string_literal(&name),
+                name = rust_string_literal(name),
             ));
         }
 
@@ -7007,8 +6944,7 @@ fn __bop_function_site_value(
     fn array_src(&mut self, items: &[Expr], line: u32) -> Result<String, BopError> {
         if items.is_empty() {
             return Ok(format!(
-                "::bop::value::Value::__try_new_array_in(::std::vec::Vec::new(), {}, &ctx.memory)?",
-                line
+                "::bop::value::Value::__try_new_array_in(::std::vec::Vec::new(), {line}, &ctx.memory)?"
             ));
         }
         let mut lets = String::new();
@@ -7016,7 +6952,7 @@ fn __bop_function_site_value(
         for item in items {
             let src = self.expr_src(item)?;
             let tmp = self.fresh_tmp();
-            write!(lets, "let {} = {}; ", tmp, src).unwrap();
+            write!(lets, "let {tmp} = {src}; ").unwrap();
             names.push(tmp);
         }
         Ok(format!(
@@ -7030,8 +6966,7 @@ fn __bop_function_site_value(
     fn dict_src(&mut self, entries: &[(String, Expr)], line: u32) -> Result<String, BopError> {
         if entries.is_empty() {
             return Ok(format!(
-                "::bop::value::Value::__try_new_dict_in(::std::vec::Vec::new(), {}, &ctx.memory)?",
-                line
+                "::bop::value::Value::__try_new_dict_in(::std::vec::Vec::new(), {line}, &ctx.memory)?"
             ));
         }
         let mut lets = String::new();
@@ -7039,7 +6974,7 @@ fn __bop_function_site_value(
         for (key, value) in entries {
             let src = self.expr_src(value)?;
             let tmp = self.fresh_tmp();
-            write!(lets, "let {} = {}; ", tmp, src).unwrap();
+            write!(lets, "let {tmp} = {src}; ").unwrap();
             pairs.push(format!(
                 "({}.to_string(), {})",
                 rust_string_literal(key),
@@ -7128,7 +7063,7 @@ fn __bop_function_site_value(
         for (name, expr) in fields {
             let src = self.expr_src(expr)?;
             let tmp = self.fresh_tmp();
-            write!(lets, "let {} = {}; ", tmp, src).unwrap();
+            write!(lets, "let {tmp} = {src}; ").unwrap();
             provided.push(format!(
                 "({}.to_string(), {})",
                 rust_string_literal(name),
@@ -7253,7 +7188,7 @@ fn __bop_function_site_value(
                 for arg in args {
                     let src = self.expr_src(arg)?;
                     let tmp = self.fresh_tmp();
-                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
+                    write!(lets, "let {tmp} = {src}; ").unwrap();
                     values.push(tmp);
                 }
                 Ok(format!(
@@ -7278,7 +7213,7 @@ fn __bop_function_site_value(
                 for (name, expr) in fields {
                     let src = self.expr_src(expr)?;
                     let tmp = self.fresh_tmp();
-                    write!(lets, "let {} = {}; ", tmp, src).unwrap();
+                    write!(lets, "let {tmp} = {src}; ").unwrap();
                     provided.push(format!(
                         "({}.to_string(), {})",
                         rust_string_literal(name),
@@ -7313,7 +7248,7 @@ fn __bop_function_site_value(
                     // The cloned Value lives only for the duration
                     // of the format call; its Drop tracks the
                     // de-alloc correctly against `bop::memory`.
-                    write!(body, "__s.push_str(&format!(\"{{}}\", {})); ", value).unwrap();
+                    write!(body, "__s.push_str(&format!(\"{{}}\", {value})); ").unwrap();
                 }
             }
         }
@@ -7705,7 +7640,7 @@ fn __bop_function_site_value(
         for arg in args {
             let src = self.expr_src(arg)?;
             let tmp = self.fresh_tmp();
-            write!(arg_lets, "let {} = {}; ", tmp, src).unwrap();
+            write!(arg_lets, "let {tmp} = {src}; ").unwrap();
             arg_tmps.push(tmp);
         }
 
@@ -7721,7 +7656,7 @@ fn __bop_function_site_value(
                 "[{}]",
                 arg_tmps
                     .iter()
-                    .map(|t| format!("{}.clone()", t))
+                    .map(|t| format!("{t}.clone()"))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -7793,30 +7728,16 @@ fn __bop_function_site_value(
                     let mut body = String::new();
                     write!(
                         body,
-                        "{{ {}let __ret = if matches!({}.overlay.as_ref(), ::std::option::Option::Some(::bop::value::Value::Array(_))) {{ \
-                            {constant_guard}::bop::methods::transactional_array_method_in({}.overlay.as_mut().expect(\"array overlay\"), {}, {}, {}, &ctx.memory)? \
+                        "{{ {arg_lets}let __ret = if matches!({overlay}.overlay.as_ref(), ::std::option::Option::Some(::bop::value::Value::Array(_))) {{ \
+                            {constant_guard}::bop::methods::transactional_array_method_in({overlay}.overlay.as_mut().expect(\"array overlay\"), {method_lit}, {owned_args}, {line}, &ctx.memory)? \
                         }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
                             {user_dispatch} \
                         }} else {{ \
-                            let {} = {}; \
-                                    let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
-                                    if let Some(__new_obj) = __mutated {{ {}.overlay = ::std::option::Option::Some(__new_obj); }} \
+                            let {obj_tmp} = {read}; \
+                                    let (__r, __mutated) = __bop_call_method(ctx, &{obj_tmp}, {method_lit}, &{args_arr}, {line})?; \
+                                    if let Some(__new_obj) = __mutated {{ {overlay}.overlay = ::std::option::Option::Some(__new_obj); }} \
                                     __r \
                         }}; __ret }}",
-                        arg_lets,
-                        overlay,
-                        overlay,
-                        method_lit,
-                        owned_args,
-                        line,
-                        obj_tmp,
-                        read,
-                        obj_tmp,
-                        method_lit,
-                        args_arr,
-                        line,
-                        overlay,
-                        user_dispatch = user_dispatch,
                     )
                     .unwrap();
                     return Ok(body);
@@ -7843,27 +7764,16 @@ fn __bop_function_site_value(
                 let mut body = String::new();
                 write!(
                     body,
-                    "{{ {}let __bop_memory = ctx.memory.clone(); let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
-                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; {constant_guard}::bop::methods::transactional_array_method_in({target_tmp}, {}, {}, {}, &__bop_memory)? \
+                    "{{ {arg_lets}let __bop_memory = ctx.memory.clone(); let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
+                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; {constant_guard}::bop::methods::transactional_array_method_in({target_tmp}, {method_lit}, {owned_args}, {line}, &__bop_memory)? \
                     }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
                         {user_dispatch} \
                     }} else {{ \
-                        let {} = {read_src}; \
-                                let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
+                        let {obj_tmp} = {read_src}; \
+                                let (__r, __mutated) = __bop_call_method(ctx, &{obj_tmp}, {method_lit}, &{args_arr}, {line})?; \
                                 if let Some(__new_obj) = __mutated {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; *{target_tmp} = __new_obj; }} \
                                 __r \
                     }}; {overlay_sync} __ret }}",
-                    arg_lets,
-                    method_lit,
-                    owned_args,
-                    line,
-                    obj_tmp,
-                    obj_tmp,
-                    method_lit,
-                    args_arr,
-                    line,
-                    overlay_sync = overlay_sync,
-                    user_dispatch = user_dispatch,
                 )
                 .unwrap();
                 return Ok(body);
@@ -7872,30 +7782,16 @@ fn __bop_function_site_value(
             let mut body = String::new();
             write!(
                 body,
-                "{{ {}let __ret = if matches!(&{}, ::bop::value::Value::Array(_)) {{ \
-                    {constant_guard}::bop::methods::transactional_array_method_in(&mut {}, {}, {}, {}, &ctx.memory)? \
+                "{{ {arg_lets}let __ret = if matches!(&{target}, ::bop::value::Value::Array(_)) {{ \
+                    {constant_guard}::bop::methods::transactional_array_method_in(&mut {target}, {method_lit}, {owned_args}, {line}, &ctx.memory)? \
                 }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
                     {user_dispatch} \
                 }} else {{ \
-                    let {} = {}.clone(); \
-                            let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
-                            if let Some(__new_obj) = __mutated {{ {} = __new_obj; }} \
+                    let {obj_tmp} = {target}.clone(); \
+                            let (__r, __mutated) = __bop_call_method(ctx, &{obj_tmp}, {method_lit}, &{args_arr}, {line})?; \
+                            if let Some(__new_obj) = __mutated {{ {target} = __new_obj; }} \
                             __r \
                 }}; __ret }}",
-                arg_lets,
-                target,
-                target,
-                method_lit,
-                owned_args,
-                line,
-                obj_tmp,
-                target,
-                obj_tmp,
-                method_lit,
-                args_arr,
-                line,
-                target,
-                user_dispatch = user_dispatch,
             )
             .unwrap();
             return Ok(body);
@@ -7907,7 +7803,7 @@ fn __bop_function_site_value(
         };
         let obj_tmp = self.fresh_tmp();
         let mut body = String::new();
-        write!(body, "{{ {}let {} = {}; ", arg_lets, obj_tmp, obj_src).unwrap();
+        write!(body, "{{ {arg_lets}let {obj_tmp} = {obj_src}; ").unwrap();
         // Try user-defined methods first — the dispatcher returns
         // `Some(Value)` when a match is found, else `None`
         // (meaning "fall through to the built-in method
@@ -7958,12 +7854,8 @@ fn __bop_function_site_value(
             "let __ret = {module_dispatch}{{ if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
                 {user_dispatch} \
             }} else {{ \
-                    let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
+                    let (__r, _) = __bop_call_method(ctx, &{obj_tmp}, {method_lit}, &{args_arr}, {line})?; __r \
             }} }}; __ret }}",
-            obj_tmp,
-            method_lit,
-            args_arr,
-            line,
         )
         .unwrap();
         Ok(body)
@@ -8050,8 +7942,8 @@ fn __bop_function_site_value(
         let mut alias_captures = Vec::new();
         for (index, alias) in declaration_aliases.iter().enumerate() {
             if let Some(parent_overlay) = self.declaration_alias_overlay(alias) {
-                let capture = format!("__alias_cap_{}", index);
-                alias_initializers.insert(alias.clone(), format!("{}.clone()", capture));
+                let capture = format!("__alias_cap_{index}");
+                alias_initializers.insert(alias.clone(), format!("{capture}.clone()"));
                 alias_captures.push((capture, parent_overlay));
             }
         }
@@ -8118,7 +8010,7 @@ fn __bop_function_site_value(
                 ),
                 None => format!("{}.clone()", rust_user_ident(cap)),
             };
-            writeln!(capture_prelude, "let __cap_{i} = {capture_source};", i = i,).unwrap();
+            writeln!(capture_prelude, "let __cap_{i} = {capture_source};",).unwrap();
             // `Fn` closures can be invoked repeatedly, so captures
             // must stay owned by the closure body. Clone per
             // invocation; the outer capture is the stable source.
@@ -8241,22 +8133,7 @@ fn __bop_function_site_value(
         };
 
         Ok(format!(
-            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<__BopCallOutcome, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{moves}{param_binds}let __bop_value_result = (|| -> Result<::bop::value::Value, ::bop::error::BopError> {{ {body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }})(); let value = __bop_value_result?; {memory_check}{param_sync}Ok(__BopCallOutcome {{ value, args: {final_args} }}) }}); __bop_wrap_callable({wrap_ctx}{params_array}, {modes_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
-            prelude = capture_prelude,
-            opaque_body_depth = opaque_body_depth,
-            arity = arity,
-            suffix = arity_suffix,
-            line = line,
-            type_bindings_init = type_bindings_init,
-            moves = capture_moves,
-            param_binds = param_binds,
-            param_sync = param_sync,
-            body = body_src,
-            params_array = params_array,
-            modes_array = modes_array,
-            final_args = final_args,
-            wrap_ctx = wrap_ctx,
-            memory_check = memory_check,
+            "{{ {capture_prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<__BopCallOutcome, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{arity_suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{capture_moves}{param_binds}let __bop_value_result = (|| -> Result<::bop::value::Value, ::bop::error::BopError> {{ {body_src} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }})(); let value = __bop_value_result?; {memory_check}{param_sync}Ok(__BopCallOutcome {{ value, args: {final_args} }}) }}); __bop_wrap_callable({wrap_ctx}{params_array}, {modes_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
         ))
     }
 }
@@ -8509,10 +8386,7 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
                     rust_string_literal(n)
                 ),
             };
-            format!(
-                "::bop::parser::Pattern::Array {{ elements: {}, rest: {} }}",
-                elems_src, rest_src,
-            )
+            format!("::bop::parser::Pattern::Array {{ elements: {elems_src}, rest: {rest_src} }}",)
         }
         Pattern::Or(alts) => {
             let parts: Vec<String> = alts.iter().map(pattern_rust).collect();
@@ -8521,7 +8395,7 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
             } else {
                 format!("::std::vec::Vec::from([{}])", parts.join(", "))
             };
-            format!("::bop::parser::Pattern::Or({})", alts_src)
+            format!("::bop::parser::Pattern::Or({alts_src})")
         }
     }
 }
@@ -8529,7 +8403,7 @@ fn pattern_rust(pat: &bop::parser::Pattern) -> String {
 fn literal_pattern_rust(lit: &bop::parser::LiteralPattern) -> String {
     use bop::parser::LiteralPattern;
     match lit {
-        LiteralPattern::Int(n) => format!("::bop::parser::LiteralPattern::Int({}i64)", n),
+        LiteralPattern::Int(n) => format!("::bop::parser::LiteralPattern::Int({n}i64)"),
         LiteralPattern::Number(n) => {
             format!("::bop::parser::LiteralPattern::Number({})", rust_f64(*n))
         }
@@ -8537,7 +8411,7 @@ fn literal_pattern_rust(lit: &bop::parser::LiteralPattern) -> String {
             "::bop::parser::LiteralPattern::Str({}.to_string())",
             rust_string_literal(s)
         ),
-        LiteralPattern::Bool(b) => format!("::bop::parser::LiteralPattern::Bool({})", b),
+        LiteralPattern::Bool(b) => format!("::bop::parser::LiteralPattern::Bool({b})"),
         LiteralPattern::None => "::bop::parser::LiteralPattern::None".to_string(),
     }
 }
@@ -8553,7 +8427,7 @@ fn variant_payload_rust(payload: &bop::parser::VariantPatternPayload) -> String 
             } else {
                 format!("::std::vec::Vec::from([{}])", parts.join(", "))
             };
-            format!("::bop::parser::VariantPatternPayload::Tuple({})", inner)
+            format!("::bop::parser::VariantPatternPayload::Tuple({inner})")
         }
         VariantPatternPayload::Struct { fields, rest } => {
             let fields_src = if fields.is_empty() {
@@ -8572,8 +8446,7 @@ fn variant_payload_rust(payload: &bop::parser::VariantPatternPayload) -> String 
                 format!("::std::vec::Vec::from([{}])", parts.join(", "))
             };
             format!(
-                "::bop::parser::VariantPatternPayload::Struct {{ fields: {}, rest: {} }}",
-                fields_src, rest,
+                "::bop::parser::VariantPatternPayload::Struct {{ fields: {fields_src}, rest: {rest} }}",
             )
         }
     }
@@ -8717,10 +8590,11 @@ fn scan_free_vars_expr(
         }
         ExprKind::StringInterp(parts) => {
             for part in parts {
-                if let StringPart::Variable(name) = part {
-                    if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                        free.required.insert(name.clone());
-                    }
+                if let StringPart::Variable(name) = part
+                    && !known.contains(name)
+                    && is_outer_local(name, outer_scopes)
+                {
+                    free.required.insert(name.clone());
                 }
             }
         }
@@ -8792,10 +8666,11 @@ fn scan_free_vars_expr(
             // Namespaced construction emits a runtime validation
             // against the module Value. Record that otherwise-hidden
             // Rust closure capture so opaque ownership depth includes it.
-            if let Some(name) = namespace {
-                if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                    free.required.insert(name.clone());
-                }
+            if let Some(name) = namespace
+                && !known.contains(name)
+                && is_outer_local(name, outer_scopes)
+            {
+                free.required.insert(name.clone());
             }
             for (_, v) in fields {
                 scan_free_vars_expr(v, known, free, outer_scopes, fn_info);
@@ -8804,10 +8679,11 @@ fn scan_free_vars_expr(
         ExprKind::EnumConstruct {
             namespace, payload, ..
         } => {
-            if let Some(name) = namespace {
-                if !known.contains(name) && is_outer_local(name, outer_scopes) {
-                    free.required.insert(name.clone());
-                }
+            if let Some(name) = namespace
+                && !known.contains(name)
+                && is_outer_local(name, outer_scopes)
+            {
+                free.required.insert(name.clone());
             }
             use bop::parser::VariantPayload;
             match payload {
@@ -8987,7 +8863,7 @@ fn rust_f64(n: f64) -> String {
         // Rust's `{:?}` on f64 always includes a decimal point,
         // which is exactly what we want so the literal parses back
         // as `f64` and not `i32`.
-        format!("{:?}", n)
+        format!("{n:?}")
     }
 }
 

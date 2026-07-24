@@ -30,7 +30,7 @@ fn namespace_prefix(chunk: &Chunk, namespace: Option<NamespaceIdx>) -> String {
     let name = chunk.name(namespace.name_idx());
     match namespace.slot_idx() {
         Some(slot) => format!("{}.(@{}).", name, slot.0),
-        None => format!("{}.", name),
+        None => format!("{name}."),
     }
 }
 
@@ -151,7 +151,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 .parts
                 .iter()
                 .map(|p| match p {
-                    InterpPart::Literal(s) => format!("{:?}", s),
+                    InterpPart::Literal(s) => format!("{s:?}"),
                     InterpPart::Local(slot) => format!("$@{}", slot.0),
                     InterpPart::Name(name) => format!("${}", chunk.name(*name)),
                 })
@@ -159,13 +159,13 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
             format!("StringInterp [{}]", parts.join(", "))
         }
 
-        Instr::MakeArray(n) => format!("MakeArray {}", n),
-        Instr::MakeDict(n) => format!("MakeDict {}", n),
+        Instr::MakeArray(n) => format!("MakeArray {n}"),
+        Instr::MakeDict(n) => format!("MakeDict {n}"),
 
         Instr::Call { name, argc } => {
             format!("Call {}/{}", chunk.name(*name), argc)
         }
-        Instr::CallValue { argc } => format!("CallValue /{}", argc),
+        Instr::CallValue { argc } => format!("CallValue /{argc}"),
         Instr::PrepareCall { name, site } => {
             format!("PrepareCall {}/#{}", chunk.name(*name), site.0)
         }
@@ -207,7 +207,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         } => {
             let name = chunk.name(*method);
             if *nested_place {
-                return format!("CallMethod .{}/{} (nested place)", name, argc);
+                return format!("CallMethod .{name}/{argc} (nested place)");
             }
             match assign_back_to {
                 Some(crate::chunk::AssignBack::Name(var)) => format!(
@@ -219,7 +219,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 Some(crate::chunk::AssignBack::Slot(slot)) => {
                     format!("CallMethod .{}/{} (back to @{})", name, argc, slot.0)
                 }
-                None => format!("CallMethod .{}/{}", name, argc),
+                None => format!("CallMethod .{name}/{argc}"),
             }
         }
         Instr::CallMethodInPlace {
@@ -230,7 +230,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
             let name = chunk.name(*method);
             let receiver = chunk.name(target.name_idx());
             match target.slot_idx() {
-                None => format!("CallMethodInPlace .{}/{} (target {})", name, argc, receiver),
+                None => format!("CallMethodInPlace .{name}/{argc} (target {receiver})"),
                 Some(slot) => format!("CallMethodInPlace .{}/{} (target @{})", name, argc, slot.0),
             }
         }
@@ -263,7 +263,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                 None => String::new(),
             };
             let alias = match &spec.alias {
-                Some(a) => format!(" as {}", a),
+                Some(a) => format!(" as {a}"),
                 None => String::new(),
             };
             format!("Use {}{}{}", spec.path, items, alias)
@@ -341,8 +341,8 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
             use crate::chunk::EnumConstructShape as S;
             let shape_str = match shape {
                 S::Unit => "Unit".to_string(),
-                S::Tuple(n) => format!("Tuple({})", n),
-                S::Struct(n) => format!("Struct({})", n),
+                S::Tuple(n) => format!("Tuple({n})"),
+                S::Struct(n) => format!("Struct({n})"),
             };
             let ns_prefix = namespace_prefix(chunk, *namespace);
             format!(
@@ -394,14 +394,14 @@ fn assign_op_suffix(op: crate::chunk::InPlaceAssignOp) -> &'static str {
 
 fn render_constant(c: &Constant) -> String {
     match c {
-        Constant::Int(n) => format!("{}", n),
+        Constant::Int(n) => format!("{n}"),
         Constant::Number(n) => {
             if *n == (*n as i64 as f64) && n.is_finite() {
                 format!("{}", *n as i64)
             } else {
-                format!("{}", n)
+                format!("{n}")
             }
         }
-        Constant::Str(s) => format!("{:?}", s),
+        Constant::Str(s) => format!("{s:?}"),
     }
 }

@@ -3807,9 +3807,9 @@ fn assert_three_way(entries: &[CorpusEntry]) {
 
             if w != v || v != a {
                 let mut msg = format!("\n--- {} ({}) ---\n", e.name, mode.label());
-                writeln!(msg, "walker: {:?}", w).unwrap();
-                writeln!(msg, "vm:     {:?}", v).unwrap();
-                writeln!(msg, "aot:    {:?}", a).unwrap();
+                writeln!(msg, "walker: {w:?}").unwrap();
+                writeln!(msg, "vm:     {v:?}").unwrap();
+                writeln!(msg, "aot:    {a:?}").unwrap();
                 failures.push(msg);
             }
         }

@@ -176,27 +176,27 @@ impl<'a> Validator<'a> {
                         ),
                     ));
                 }
-                if let Some(previous) = names_to_slots.insert(name.as_str(), slot.0) {
-                    if previous != slot.0 {
-                        return Err(self.invalid(
+                if let Some(previous) = names_to_slots.insert(name.as_str(), slot.0)
+                    && previous != slot.0
+                {
+                    return Err(self.invalid(
                             0,
                             format!(
                                 "{detail} maps repeated parameter `{name}` to both local slots {previous} and {}",
                                 slot.0
                             ),
                         ));
-                    }
                 }
-                if let Some(previous) = slots_to_names.insert(slot.0, name.as_str()) {
-                    if previous != name {
-                        return Err(self.invalid(
+                if let Some(previous) = slots_to_names.insert(slot.0, name.as_str())
+                    && previous != name
+                {
+                    return Err(self.invalid(
                             0,
                             format!(
                                 "{detail} maps distinct parameters `{previous}` and `{name}` to local slot {}",
                                 slot.0
                             ),
                         ));
-                    }
                 }
             }
             for source in &function.capture_sources {
@@ -231,18 +231,17 @@ impl<'a> Validator<'a> {
             }
             let mut ref_slots = BTreeSet::new();
             for target in site.ref_targets.iter().flatten() {
-                if let RefArgTarget::Binding(namespace) = target {
-                    if let Some(slot) = namespace.slot_idx() {
-                        if !ref_slots.insert(slot.0) {
-                            return Err(self.invalid(
-                                0,
-                                format!(
-                                    "{detail} uses local slot {} for more than one ref target",
-                                    slot.0
-                                ),
-                            ));
-                        }
-                    }
+                if let RefArgTarget::Binding(namespace) = target
+                    && let Some(slot) = namespace.slot_idx()
+                    && !ref_slots.insert(slot.0)
+                {
+                    return Err(self.invalid(
+                        0,
+                        format!(
+                            "{detail} uses local slot {} for more than one ref target",
+                            slot.0
+                        ),
+                    ));
                 }
             }
             for (position, (mode, target)) in site

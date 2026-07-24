@@ -43,12 +43,10 @@ fn reserved_binding_error(introducer: &Token, candidate: &SpannedToken) -> Optio
         // though parser diagnostics use the more general shared wording.
         error.friendly_hint = Some(match introducer {
             Token::Let => format!(
-                "You can't use `{}` as a variable name — try something like `my_{}` instead!",
-                keyword, keyword
+                "You can't use `{keyword}` as a variable name — try something like `my_{keyword}` instead!"
             ),
             Token::Fn => format!(
-                "You can't name a function `{}` — try something like `do_{}` instead!",
-                keyword, keyword
+                "You can't name a function `{keyword}` — try something like `do_{keyword}` instead!"
             ),
             _ => unreachable!("callers filter binding introducers"),
         });
@@ -94,12 +92,12 @@ print(message)"#;
     #[test]
     fn every_current_lexer_keyword_is_reserved_as_a_let_name() {
         for &keyword in crate::lexer::KEYWORD_NAMES {
-            let source = format!("let {} = 1", keyword);
-            let error = check(&source)
-                .unwrap_or_else(|| panic!("`{}` was not treated as reserved", keyword));
+            let source = format!("let {keyword} = 1");
+            let error =
+                check(&source).unwrap_or_else(|| panic!("`{keyword}` was not treated as reserved"));
             assert_eq!(
                 error.message,
-                format!("`{}` is a reserved word in Bop", keyword)
+                format!("`{keyword}` is a reserved word in Bop")
             );
         }
     }

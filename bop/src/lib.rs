@@ -1742,8 +1742,8 @@ print(d.len())"#),
         // where a name was expected. Column should point at the
         // start of the `42` token (column 5).
         let err = parse_err_full("let 42");
-        assert_eq!(err.line, Some(1), "err: {:?}", err);
-        assert_eq!(err.column, Some(5), "err: {:?}", err);
+        assert_eq!(err.line, Some(1), "err: {err:?}");
+        assert_eq!(err.column, Some(5), "err: {err:?}");
         assert!(err.message.contains("Expected a name"));
     }
 
@@ -1773,19 +1773,19 @@ print(d.len())"#),
         let src = "let 42";
         let err = parse_err_full(src);
         let rendered = err.render(src);
-        assert!(rendered.contains("--> line 1:5"), "rendered:\n{}", rendered);
+        assert!(rendered.contains("--> line 1:5"), "rendered:\n{rendered}");
         assert!(rendered.contains("let 42"));
         // Four spaces for `let ` before the caret at col 5.
-        assert!(rendered.contains("    ^"), "rendered:\n{}", rendered);
+        assert!(rendered.contains("    ^"), "rendered:\n{rendered}");
     }
 
     #[test]
     fn parse_error_on_line_2_points_at_line_2() {
         let src = "let x = 1\nlet = 2";
         let err = parse_err_full(src);
-        assert_eq!(err.line, Some(2), "err: {:?}", err);
+        assert_eq!(err.line, Some(2), "err: {err:?}");
         let rendered = err.render(src);
-        assert!(rendered.contains("let = 2"), "rendered:\n{}", rendered);
+        assert!(rendered.contains("let = 2"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -1800,7 +1800,7 @@ print(d.len())"#),
         assert!(rendered.contains("--> line 1"));
         assert!(rendered.contains("let x = 1 / 0"));
         // No caret line (column unknown).
-        assert!(!rendered.contains("^"), "rendered:\n{}", rendered);
+        assert!(!rendered.contains("^"), "rendered:\n{rendered}");
     }
 
     /// Like `parse_err` but returns the full `BopError` so
@@ -1823,7 +1823,7 @@ print(d.len())"#),
             r#"let length = 5
 print(lenght)"#,
         );
-        assert!(err.message.contains("not found"), "err: {:?}", err);
+        assert!(err.message.contains("not found"), "err: {err:?}");
         assert_eq!(err.friendly_hint.as_deref(), Some("Did you mean `length`?"));
     }
 
@@ -1897,8 +1897,7 @@ print(lenght)"#;
         let rendered = err.render(src);
         assert!(
             rendered.contains("hint: Did you mean `length`?"),
-            "rendered:\n{}",
-            rendered
+            "rendered:\n{rendered}"
         );
     }
 
@@ -2069,7 +2068,7 @@ print(top3.join(", "))"#),
     #[test]
     fn safety_infinite_loop_halts() {
         let msg = run_err_with_limits("while true { }", tight_limits());
-        assert!(msg.contains("too many steps"), "got: {}", msg);
+        assert!(msg.contains("too many steps"), "got: {msg}");
     }
 
     #[test]
@@ -2079,7 +2078,7 @@ print(top3.join(", "))"#),
 repeat 100 { s = s + s }"#,
             tight_limits(),
         );
-        assert!(msg.contains("Memory limit"), "got: {}", msg);
+        assert!(msg.contains("Memory limit"), "got: {msg}");
     }
 
     #[test]
@@ -2093,8 +2092,7 @@ repeat 1000 {
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2116,8 +2114,7 @@ repeat 1000 {
         let msg = handle.join().expect("recursion test thread panicked");
         assert!(
             msg.contains("nested function calls") || msg.contains("recursion"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2125,7 +2122,7 @@ repeat 1000 {
     fn safety_deep_parse_nesting() {
         let code = "(".repeat(200) + "1" + &")".repeat(200);
         let msg = parse(&code).unwrap_err().message;
-        assert!(msg.contains("nested too deeply"), "got: {}", msg);
+        assert!(msg.contains("nested too deeply"), "got: {msg}");
     }
 
     #[test]
@@ -2148,13 +2145,13 @@ repeat 1000 {
         let msg = handle
             .join()
             .expect("deep parse must not overflow a 2 MiB stack");
-        assert!(msg.contains("nested too deeply"), "got: {}", msg);
+        assert!(msg.contains("nested too deeply"), "got: {msg}");
     }
 
     #[test]
     fn safety_string_repeat_bomb() {
         let msg = run_err_with_limits(r#"let s = "x" * 999999"#, tight_limits());
-        assert!(msg.contains("Memory limit"), "got: {}", msg);
+        assert!(msg.contains("Memory limit"), "got: {msg}");
     }
 
     #[test]
@@ -2164,7 +2161,7 @@ repeat 1000 {
 repeat 100 { s = s + s }"#,
             tight_limits(),
         );
-        assert!(msg.contains("Memory limit"), "got: {}", msg);
+        assert!(msg.contains("Memory limit"), "got: {msg}");
     }
 
     #[test]
@@ -2176,8 +2173,7 @@ repeat 50 { a = a + a }"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2190,15 +2186,14 @@ for c in s { }"#,
         );
         assert!(
             msg.contains("too many steps") || msg.contains("Memory limit"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
     #[test]
     fn safety_demo_limits_step_bound() {
         let msg = run_err_with_limits("let i = 0\nwhile true { i = i + 1 }", BopLimits::demo());
-        assert!(msg.contains("too many steps"), "got: {}", msg);
+        assert!(msg.contains("too many steps"), "got: {msg}");
     }
 
     #[test]
@@ -2208,13 +2203,13 @@ for c in s { }"#,
 print(s)"#,
             BopLimits::demo(),
         );
-        assert!(msg.contains("Memory limit"), "got: {}", msg);
+        assert!(msg.contains("Memory limit"), "got: {msg}");
     }
 
     #[test]
     fn safety_nested_loop_step_bound() {
         let msg = run_err_with_limits("repeat 100 { repeat 100 { let x = 1 } }", tight_limits());
-        assert!(msg.contains("too many steps"), "got: {}", msg);
+        assert!(msg.contains("too many steps"), "got: {msg}");
     }
 
     #[test]
@@ -2227,8 +2222,7 @@ let x = 1"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2243,8 +2237,7 @@ let x = 1"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2257,8 +2250,7 @@ let x = 1"#,
         );
         assert!(
             msg.contains(builtins::RANGE_LIMIT_ERROR_MESSAGE),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2273,8 +2265,7 @@ let x = 1"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2285,7 +2276,7 @@ let x = 1"#,
             max_memory: 32 * 1024,
         };
         let msg = run_err_with_limits(r#"let s = "x" * 40000"#, limits);
-        assert!(msg.contains("Memory limit"), "got: {}", msg);
+        assert!(msg.contains("Memory limit"), "got: {msg}");
     }
 
     #[test]
@@ -2318,8 +2309,7 @@ let x = 1"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2418,7 +2408,7 @@ print(match x {
             r#"let x = 5
 match x { 1 => "a", 2 => "b" }"#,
         );
-        assert!(err.contains("No match arm matched"), "got: {}", err);
+        assert!(err.contains("No match arm matched"), "got: {err}");
     }
 
     #[test]
@@ -2706,9 +2696,9 @@ print(match r {
         // A real error must not be classified as a try-return
         // — otherwise it'd silently get swallowed by any
         // enclosing `try_call`.
-        assert!(!err.is_try_return, "got: {:?}", err);
+        assert!(!err.is_try_return, "got: {err:?}");
         // And the fatal flag is independent of the try flag.
-        assert!(!err.is_fatal, "got: {:?}", err);
+        assert!(!err.is_fatal, "got: {err:?}");
     }
 
     #[test]
@@ -2799,7 +2789,7 @@ let r = try Result::Err("boom")"#,
 }
 doit()"#,
         );
-        assert!(msg.contains("Result-shaped"), "got: {}", msg);
+        assert!(msg.contains("Result-shaped"), "got: {msg}");
     }
 
     #[test]
@@ -2820,8 +2810,7 @@ doit()"#,
         );
         assert!(
             msg.contains("Ok variant must carry exactly one"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
     }
 
@@ -2974,13 +2963,13 @@ print(match r {
     #[test]
     fn try_call_errors_on_wrong_arg_count() {
         let msg = run_err("try_call()");
-        assert!(msg.contains("try_call` expects 1"), "got: {}", msg);
+        assert!(msg.contains("try_call` expects 1"), "got: {msg}");
     }
 
     #[test]
     fn try_call_errors_on_non_function_arg() {
         let msg = run_err("try_call(42)");
-        assert!(msg.contains("try_call` expects a function"), "got: {}", msg);
+        assert!(msg.contains("try_call` expects a function"), "got: {msg}");
     }
 
     #[test]
@@ -3087,7 +3076,7 @@ print(match r {
     #[test]
     fn division_by_zero_errors() {
         let msg = run_err("print(10 / 0)");
-        assert!(msg.contains("Division by zero"), "got: {}", msg);
+        assert!(msg.contains("Division by zero"), "got: {msg}");
     }
 
     #[test]
@@ -3095,7 +3084,7 @@ print(match r {
         // i64::MAX + 1 overflows. The message should mention
         // "overflow".
         let msg = run_err("print(9223372036854775807 + 1)");
-        assert!(msg.contains("Integer overflow"), "got: {}", msg);
+        assert!(msg.contains("Integer overflow"), "got: {msg}");
     }
 
     #[test]
@@ -3199,7 +3188,7 @@ print(n)"#),
         // Integer literal that doesn't fit in i64 is a
         // lex-time error, not a silent downgrade to float.
         let msg = parse_err("let x = 99999999999999999999");
-        assert!(msg.contains("out of range"), "got: {}", msg);
+        assert!(msg.contains("out of range"), "got: {msg}");
     }
 
     #[test]
@@ -3692,7 +3681,7 @@ print(Foo { a: 1 }.type())"#),
             r#"struct Point { x, y }
 let p = Point { x: 1 }"#,
         );
-        assert!(err.contains("Missing field"), "got: {}", err);
+        assert!(err.contains("Missing field"), "got: {err}");
     }
 
     #[test]
@@ -3701,7 +3690,7 @@ let p = Point { x: 1 }"#,
             r#"struct Point { x, y }
 let p = Point { x: 1, y: 2, z: 3 }"#,
         );
-        assert!(err.contains("has no field"), "got: {}", err);
+        assert!(err.contains("has no field"), "got: {err}");
     }
 
     #[test]
@@ -3710,13 +3699,13 @@ let p = Point { x: 1, y: 2, z: 3 }"#,
             r#"struct Point { x, y }
 let p = Point { x: 1, x: 2, y: 3 }"#,
         );
-        assert!(err.contains("specified twice"), "got: {}", err);
+        assert!(err.contains("specified twice"), "got: {err}");
     }
 
     #[test]
     fn struct_undeclared_type_errors() {
         let err = run_err(r#"let p = Nope { x: 1 }"#);
-        assert!(err.contains("not declared"), "got: {}", err);
+        assert!(err.contains("not declared"), "got: {err}");
     }
 
     #[test]
@@ -3726,13 +3715,13 @@ let p = Point { x: 1, x: 2, y: 3 }"#,
 let p = Point { x: 1, y: 2 }
 print(p.z)"#,
         );
-        assert!(err.contains("no field"), "got: {}", err);
+        assert!(err.contains("no field"), "got: {err}");
     }
 
     #[test]
     fn struct_field_access_on_non_struct_errors() {
         let err = run_err("let x = 42\nprint(x.value)");
-        assert!(err.contains("Can't read field"), "got: {}", err);
+        assert!(err.contains("Can't read field"), "got: {err}");
     }
 
     #[test]
@@ -3741,7 +3730,7 @@ print(p.z)"#,
             r#"struct Foo { x }
 struct Foo { y }"#,
         );
-        assert!(err.contains("already declared"), "got: {}", err);
+        assert!(err.contains("already declared"), "got: {err}");
     }
 
     #[test]
@@ -3775,7 +3764,7 @@ print(total)"#),
         // with "not found" — confirming the struct-literal
         // restriction held at parse.
         let err = run_err("if Foo { print(\"hi\") }");
-        assert!(err.contains("not found"), "got: {}", err);
+        assert!(err.contains("not found"), "got: {err}");
     }
 
     #[test]
@@ -3883,7 +3872,7 @@ print(c.n)"#),
 let p = P { x: 1 }
 p.y = 99"#,
         );
-        assert!(err.contains("no field"), "got: {}", err);
+        assert!(err.contains("no field"), "got: {err}");
     }
 
     #[test]
@@ -3892,7 +3881,7 @@ p.y = 99"#,
             r#"let x = 5
 x.field = 1"#,
         );
-        assert!(err.contains("Can't assign to field"), "got: {}", err);
+        assert!(err.contains("Can't assign to field"), "got: {err}");
     }
 
     #[test]
@@ -3974,7 +3963,7 @@ print(A::X == B::X)"#),
             r#"enum E { A }
 let x = E::A(1)"#,
         );
-        assert!(err.contains("no payload"), "got: {}", err);
+        assert!(err.contains("no payload"), "got: {err}");
     }
 
     #[test]
@@ -3983,7 +3972,7 @@ let x = E::A(1)"#,
             r#"enum E { P(x, y) }
 let p = E::P(1)"#,
         );
-        assert!(err.contains("expects 2 argument"), "got: {}", err);
+        assert!(err.contains("expects 2 argument"), "got: {err}");
     }
 
     #[test]
@@ -3992,7 +3981,7 @@ let p = E::P(1)"#,
             r#"enum E { R { w, h } }
 let r = E::R { w: 1 }"#,
         );
-        assert!(err.contains("Missing field"), "got: {}", err);
+        assert!(err.contains("Missing field"), "got: {err}");
     }
 
     #[test]
@@ -4001,7 +3990,7 @@ let r = E::R { w: 1 }"#,
             r#"enum E { R { w, h } }
 let r = E::R { w: 1, h: 2, extra: 3 }"#,
         );
-        assert!(err.contains("no field"), "got: {}", err);
+        assert!(err.contains("no field"), "got: {err}");
     }
 
     #[test]
@@ -4010,13 +3999,13 @@ let r = E::R { w: 1, h: 2, extra: 3 }"#,
             r#"enum E { A }
 let x = E::Z"#,
         );
-        assert!(err.contains("no variant"), "got: {}", err);
+        assert!(err.contains("no variant"), "got: {err}");
     }
 
     #[test]
     fn enum_undeclared_type_errors() {
         let err = run_err("let x = Nope::V");
-        assert!(err.contains("not declared"), "got: {}", err);
+        assert!(err.contains("not declared"), "got: {err}");
     }
 
     #[test]
@@ -4071,7 +4060,7 @@ print(palette)"#),
             r#"enum E { A }
 enum E { B }"#,
         );
-        assert!(err.contains("already declared"), "got: {}", err);
+        assert!(err.contains("already declared"), "got: {err}");
     }
 
     // ─── User-defined methods on structs + enums ──────────────────
@@ -4141,7 +4130,7 @@ print(w.len())"#),
 let p = P { x: 1 }
 p.nope()"#,
         );
-        assert!(err.contains(".nope()"), "got: {}", err);
+        assert!(err.contains(".nope()"), "got: {err}");
     }
 
     #[test]
@@ -4152,7 +4141,7 @@ fn P.set(self, v) { return P { x: v } }
 let p = P { x: 1 }
 p.set(1, 2)"#,
         );
-        assert!(err.contains("expects"), "got: {}", err);
+        assert!(err.contains("expects"), "got: {err}");
     }
 
     #[test]
@@ -4198,7 +4187,7 @@ print(c.label("small"))"#),
     #[test]
     fn enum_duplicate_variant_errors() {
         let err = run_err(r#"enum E { A, A }"#);
-        assert!(err.contains("duplicate variant"), "got: {}", err);
+        assert!(err.contains("duplicate variant"), "got: {err}");
     }
 
     #[test]
@@ -4651,13 +4640,11 @@ print(label(o.Color::Green))"#,
         let rendered = err.render(src);
         assert!(
             rendered.contains("--> line 2:"),
-            "rendered should include line+col header, got:\n{}",
-            rendered
+            "rendered should include line+col header, got:\n{rendered}"
         );
         assert!(
             rendered.contains("^"),
-            "rendered should draw a caret, got:\n{}",
-            rendered
+            "rendered should draw a caret, got:\n{rendered}"
         );
     }
 
@@ -4749,7 +4736,7 @@ print(label(o.Color::Green))"#,
         let v = repl_eval(&mut session, "x + 1", &mut host).unwrap();
         match v {
             Some(Value::Int(n)) => assert_eq!(n, 6),
-            other => panic!("expected Int(6), got: {:?}", other),
+            other => panic!("expected Int(6), got: {other:?}"),
         }
     }
 
@@ -4790,7 +4777,7 @@ print(label(o.Color::Green))"#,
         let v = repl_eval(&mut session, "after", &mut host).unwrap();
         match v {
             Some(Value::Int(n)) => assert_eq!(n, 7),
-            other => panic!("expected Int(7), got: {:?}", other),
+            other => panic!("expected Int(7), got: {other:?}"),
         }
     }
 

@@ -12,7 +12,7 @@ pub(crate) fn env(args: &[Value], line: u32) -> Result<Value, BopError> {
         Err(std::env::VarError::NotPresent) => Ok(Value::None),
         Err(std::env::VarError::NotUnicode(_)) => Err(runtime(
             line,
-            format!("env variable `{}` is not valid Unicode", name),
+            format!("env variable `{name}` is not valid Unicode"),
         )),
     }
 }

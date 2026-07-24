@@ -260,7 +260,7 @@ pub fn builtin_panic(args: &[Value], line: u32) -> Result<Value, BopError> {
         // caller that hands us a struct or int still gets a
         // useful trace — cheaper than rejecting and forcing the
         // caller to add `.to_str()`.
-        other => format!("{}", other),
+        other => format!("{other}"),
     };
     Err(error(line, message))
 }

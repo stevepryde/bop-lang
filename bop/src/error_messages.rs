@@ -26,12 +26,12 @@ use alloc::{format, string::String};
 
 /// Format the diagnostic for an unknown variable.
 pub fn variable_not_found(name: &str) -> String {
-    format!("Variable `{}` not found", name)
+    format!("Variable `{name}` not found")
 }
 
 /// Format the diagnostic for an unknown function.
 pub fn function_not_found(name: &str) -> String {
-    format!("Function `{}` not found", name)
+    format!("Function `{name}` not found")
 }
 
 /// Format the diagnostic for a missing struct field.
@@ -39,67 +39,61 @@ pub fn function_not_found(name: &str) -> String {
 /// `ConstructStruct` / `FieldGet` / `FieldSet`, and the AOT's
 /// runtime `__bop_field_get` helper.
 pub fn struct_has_no_field(type_name: &str, field: &str) -> String {
-    format!("Struct `{}` has no field `{}`", type_name, field)
+    format!("Struct `{type_name}` has no field `{field}`")
 }
 
 /// Format the diagnostic for a missing field on a struct-shaped enum variant.
 /// For struct-shaped enum-variant field reads.
 pub fn variant_has_no_field(type_name: &str, variant: &str, field: &str) -> String {
-    format!(
-        "Variant `{}::{}` has no field `{}`",
-        type_name, variant, field
-    )
+    format!("Variant `{type_name}::{variant}` has no field `{field}`")
 }
 
 /// Format the diagnostic for an unknown struct type.
 pub fn struct_not_declared(type_name: &str) -> String {
-    format!("Struct `{}` is not declared", type_name)
+    format!("Struct `{type_name}` is not declared")
 }
 
 /// Format the diagnostic for an unknown enum type.
 pub fn enum_not_declared(type_name: &str) -> String {
-    format!("Enum `{}` is not declared", type_name)
+    format!("Enum `{type_name}` is not declared")
 }
 
 /// Format the diagnostic for an unknown enum variant.
 pub fn enum_has_no_variant(type_name: &str, variant: &str) -> String {
-    format!("Enum `{}` has no variant `{}`", type_name, variant)
+    format!("Enum `{type_name}` has no variant `{variant}`")
 }
 
 /// Format an invalid field-read diagnostic. `kind` is the pretty type name
 /// (`"array"`, `"int"`, etc.).
 pub fn cant_read_field(field: &str, kind: &str) -> String {
-    format!("Can't read field `{}` on {}", field, kind)
+    format!("Can't read field `{field}` on {kind}")
 }
 
 /// Format an invalid field-assignment diagnostic.
 pub fn cant_assign_field(field: &str, kind: &str) -> String {
-    format!("Can't assign to field `{}` on {}", field, kind)
+    format!("Can't assign to field `{field}` on {kind}")
 }
 
 /// Format the diagnostic for calling a non-function value.
 pub fn cant_call_a(kind: &str) -> String {
-    format!("Can't call a {}", kind)
+    format!("Can't call a {kind}")
 }
 
 /// Format the diagnostic for iterating over a non-iterable value.
 pub fn cant_iterate_over(kind: &str) -> String {
-    format!("Can't iterate over {}", kind)
+    format!("Can't iterate over {kind}")
 }
 
 /// Format the terminal method-dispatch diagnostic when nothing matches.
 pub fn no_such_method(kind: &str, method: &str) -> String {
-    format!("{} doesn't have a .{}() method", kind, method)
+    format!("{kind} doesn't have a .{method}() method")
 }
 
 /// Canonical runtime warning for a name rejected by a plain-glob import.
 ///
 /// The caller adds the leading `warning: ` when writing the diagnostic.
 pub fn glob_shadow_warning(name: &str, path: &str) -> String {
-    format!(
-        "`{}` from `{}` shadowed by an existing binding — the first definition wins",
-        name, path
-    )
+    format!("`{name}` from `{path}` shadowed by an existing binding — the first definition wins")
 }
 
 /// Actionable recovery paired with the canonical constant-mutation error.
@@ -109,10 +103,8 @@ pub const CONSTANT_MUTATION_HINT: &str =
 /// Construct the canonical error for an assignment or built-in mutation
 /// rooted at a constant binding.
 pub fn constant_mutation_error(name: &str, line: u32) -> crate::error::BopError {
-    let mut error = crate::error::BopError::runtime(
-        format!("can't reassign `{}` — it's a constant", name),
-        line,
-    );
+    let mut error =
+        crate::error::BopError::runtime(format!("can't reassign `{name}` — it's a constant"), line);
     error.friendly_hint = Some(String::from(CONSTANT_MUTATION_HINT));
     error
 }

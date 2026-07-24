@@ -128,9 +128,7 @@ fn contains_all(haystack: &str, needles: &[&str]) {
     for n in needles {
         assert!(
             haystack.contains(n),
-            "expected fragment not found: {:?}\n---\n{}\n---",
-            n,
-            haystack
+            "expected fragment not found: {n:?}\n---\n{haystack}\n---"
         );
     }
 }
@@ -312,10 +310,7 @@ fn binary_ops_use_ops_module() {
         let out = compile(src);
         assert!(
             out.contains(op),
-            "expected {} in output for `{}`:\n{}",
-            op,
-            src,
-            out
+            "expected {op} in output for `{src}`:\n{out}"
         );
     }
 }
@@ -475,8 +470,7 @@ fn unknown_call_falls_back_to_host() {
     // It should NOT try to call a nonexistent user-fn symbol.
     assert!(
         !out.contains("__bop_user_fn_n726561646c696e65"),
-        "unknown name should not emit a user-fn dispatch:\n{}",
-        out
+        "unknown name should not emit a user-fn dispatch:\n{out}"
     );
 }
 
@@ -711,13 +705,11 @@ fn method_call_on_ident_skips_back_assign_for_pure() {
     let out = compile("let a = [1, 2, 3]\nprint(a.len())");
     assert!(
         out.contains("let (__r, _) = __bop_call_method(ctx, &"),
-        "expected pure-method discard in:\n{}",
-        out
+        "expected pure-method discard in:\n{out}"
     );
     assert!(
         !out.contains("if let Some(__new_obj)"),
-        "pure method shouldn't emit the back-assign branch:\n{}",
-        out
+        "pure method shouldn't emit the back-assign branch:\n{out}"
     );
 }
 
@@ -731,8 +723,7 @@ fn method_call_on_literal_has_no_back_assign() {
     let out = compile("print([1, 2, 3].push(4))");
     assert!(
         out.contains("let (__r, _) = __bop_call_method(ctx, &"),
-        "expected literal-receiver discard in:\n{}",
-        out
+        "expected literal-receiver discard in:\n{out}"
     );
 }
 
@@ -909,8 +900,7 @@ fn sandbox_off_by_default_emits_no_tick_helper() {
     }
     assert!(
         out.contains("memory: ::bop::memory::MemoryContext::__untracked()"),
-        "non-sandbox init should use an explicit untracked context:\n{}",
-        out
+        "non-sandbox init should use an explicit untracked context:\n{out}"
     );
     assert!(!out.contains("ActiveMemoryGuard"));
     assert!(!out.contains("bop_memory_"));
@@ -947,9 +937,7 @@ fn sandbox_on_emits_tick_helper_and_limits_param() {
     ] {
         assert!(
             flat.contains(needle),
-            "expected fragment not found: {:?}\n---\n{}\n---",
-            needle,
-            out
+            "expected fragment not found: {needle:?}\n---\n{out}\n---"
         );
     }
     assert!(!out.contains("ActiveMemoryGuard"));
@@ -1015,8 +1003,7 @@ fn sandbox_emits_tick_at_while_iteration() {
     let out = norm(&compile_sandbox("while true { let x = 1 }"));
     assert!(
         out.contains("while (::bop::value::Value::Bool(true)).is_truthy() { __bop_tick(ctx,"),
-        "expected tick at top of while body:\n{}",
-        out
+        "expected tick at top of while body:\n{out}"
     );
 }
 
@@ -1045,8 +1032,7 @@ fn sandbox_emits_tick_at_repeat_and_for() {
     let repeat = norm(&compile_sandbox("repeat 3 { let x = 1 }"));
     assert!(
         repeat.contains(".max(0)) { __bop_tick(ctx,"),
-        "expected tick at top of repeat iteration:\n{}",
-        repeat
+        "expected tick at top of repeat iteration:\n{repeat}"
     );
 
     let forin = norm(&compile_sandbox("for x in [1, 2] { let y = x }"));
@@ -1055,8 +1041,7 @@ fn sandbox_emits_tick_at_repeat_and_for() {
     // (`__bop_iter_start` / `__bop_iter_step`).
     assert!(
         forin.contains("loop { __bop_tick(ctx,"),
-        "expected tick at top of for-in iteration body:\n{}",
-        forin
+        "expected tick at top of for-in iteration body:\n{forin}"
     );
 }
 
@@ -1067,8 +1052,7 @@ fn sandbox_emits_tick_at_fn_entry() {
         out.contains(
             "fn __bop_function_site_0(ctx: &mut Ctx<'_>) -> Result<::bop::value::Value, ::bop::error::BopError> { __bop_tick(ctx,"
         ),
-        "expected tick at function entry:\n{}",
-        out
+        "expected tick at function entry:\n{out}"
     );
 }
 
@@ -1081,8 +1065,7 @@ fn sandbox_run_program_ticks_once_on_entry() {
         out.contains(
             "fn run_program(ctx: &mut Ctx<'_>) -> Result<(), ::bop::error::BopError> { __bop_tick(ctx,"
         ),
-        "expected tick at run_program entry:\n{}",
-        out
+        "expected tick at run_program entry:\n{out}"
     );
 }
 
@@ -1095,25 +1078,21 @@ fn module_name_wraps_output_and_skips_main() {
     let out = transpile("print(1)", &opts).unwrap();
     assert!(
         out.starts_with("pub mod my_prog {\n"),
-        "expected module wrapper prefix:\n{}",
-        out
+        "expected module wrapper prefix:\n{out}"
     );
     assert!(
         out.trim_end().ends_with('}'),
-        "expected closing `}}`:\n{}",
-        out
+        "expected closing `}}`:\n{out}"
     );
     assert!(
         !out.contains("fn main()"),
-        "module mode should skip main:\n{}",
-        out
+        "module mode should skip main:\n{out}"
     );
     // The run fn should still be there, now addressed as
     // `my_prog::run`.
     assert!(
         out.contains("pub fn run<H: ::bop::BopHost>"),
-        "expected pub fn run:\n{}",
-        out
+        "expected pub fn run:\n{out}"
     );
 }
 
@@ -1129,15 +1108,13 @@ fn options_without_main_skip_entry_point() {
     let out = transpile("print(1)", &opts).unwrap();
     assert!(
         !out.contains("fn main()"),
-        "expected no main() when emit_main is false:\n{}",
-        out
+        "expected no main() when emit_main is false:\n{out}"
     );
     // But the library entry point (`run`) should still be there so
     // the emitter's output is usable.
     assert!(
         out.contains("pub fn run<H: ::bop::BopHost>"),
-        "expected `run` to still be emitted:\n{}",
-        out
+        "expected `run` to still be emitted:\n{out}"
     );
 }
 
@@ -2079,7 +2056,6 @@ let b = g.Point { x: 1, y: 2, z: 3 }"#,
     .expect("phase 2b should accept same-name types across root and module");
     assert!(
         src.contains("\"<root>\"") && src.contains("\"geom\""),
-        "expected both identities to surface as literals, got:\n{}",
-        src,
+        "expected both identities to surface as literals, got:\n{src}",
     );
 }
