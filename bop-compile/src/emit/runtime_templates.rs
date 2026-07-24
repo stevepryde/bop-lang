@@ -996,7 +996,19 @@ fn __bop_preflight_value_call(
     let callable = function
         .self_name
         .as_deref()
-        .unwrap_or("lambda");
+        .unwrap_or("fn");
+    if actual_modes.len() != function.params.len() {
+        return Err(::bop::error::BopError::runtime(
+            format!(
+                "`{}` expects {} argument{}, but got {}",
+                callable,
+                function.params.len(),
+                if function.params.len() == 1 { "" } else { "s" },
+                actual_modes.len(),
+            ),
+            line,
+        ));
+    }
     ::bop::validate_call_modes(
         callable,
         &function.param_modes,

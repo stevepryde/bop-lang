@@ -374,6 +374,46 @@ fn fn_decl_emits_bop_prefixed_fn() {
 }
 
 #[test]
+fn mixed_mode_function_sites_branch_on_active_site_before_call_dispatch() {
+    let out =
+        compile("fn f() { return 1 }\nif false { fn f(ref value) { value = 2 } }\nprint(f())");
+    contains_all(
+        &out,
+        &[
+            "match __bop_active_ref_function_site(ctx, \"<root>\", \"f\")",
+            "::std::option::Option::Some(__bop_site)",
+            "__bop_function_site_value(ctx, __bop_site, 3)?",
+            "match ctx.host.call(\"f\", &[], 3)",
+        ],
+    );
+}
+
+#[test]
+fn exact_value_self_preflights_before_argument_evaluation() {
+    let out = compile(
+        "fn side() { print(\"ARG\"); return 1 }\nfn f(value) { return f(side(), side()) }\nf(1)",
+    );
+    let body_start = out
+        .find("fn __bop_function_site_1(")
+        .expect("second declaration body");
+    let body_end = out[body_start..]
+        .find("\n}\n")
+        .map(|offset| body_start + offset)
+        .expect("second declaration body end");
+    let body = &out[body_start..body_end];
+    assert!(
+        body.contains(
+            "return Err(::bop::error::BopError::runtime(format!(\"`f` expects 1 argument, but got 2\"), 2))"
+        ),
+        "wrong-arity exact calls must emit their arity error"
+    );
+    assert!(
+        !body.contains("__bop_guarded_function_site_0(ctx"),
+        "wrong-arity exact calls must not evaluate argument expressions:\n{body}"
+    );
+}
+
+#[test]
 fn duplicate_parameters_rebind_in_order_without_duplicate_rust_arguments() {
     let out = compile("fn pick(value, value) { return value }");
     contains_all(
@@ -1489,6 +1529,8 @@ fn failed_module_with_methods_snapshots_only_its_dense_slots() {
             "ctx.method_slots[0] = __saved_method_slots[0];",
             "let __saved_method_slots = [ctx.method_slots[1]];",
             "ctx.method_slots[1] = ::std::option::Option::Some",
+            "filter(|site| site.module_path == \"bad\").map(|site| (site.id, ctx.reached_function_sites[site.id])).collect();",
+            "for (__site, __reached) in __saved_reached_function_sites { ctx.reached_function_sites[__site] = __reached; }",
         ],
     );
     assert!(

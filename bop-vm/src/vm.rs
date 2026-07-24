@@ -184,6 +184,9 @@ struct Frame {
     /// Copy-out records owned by this invocation. They are committed only by
     /// the normal-return path and are otherwise dropped during unwind.
     pending_write_backs: Vec<PendingWriteBack>,
+    /// Exact declaration invoked for a direct named-function frame. Bare
+    /// self-recursion resolves here before host/name dispatch.
+    current_function_entry: Option<Rc<FnEntry>>,
 }
 
 impl Frame {
@@ -208,6 +211,7 @@ impl Frame {
             captured_names: BTreeSet::new(),
             prepared_calls: Vec::new(),
             pending_write_backs: Vec::new(),
+            current_function_entry: None,
         }
     }
 
@@ -237,6 +241,7 @@ impl Frame {
             captured_names: BTreeSet::new(),
             prepared_calls: Vec::new(),
             pending_write_backs: Vec::new(),
+            current_function_entry: None,
         }
     }
 
@@ -310,6 +315,7 @@ fn unwrap_iter_step(v: &Value) -> IterStep {
 }
 
 struct FnEntry {
+    exact_self_name: Option<String>,
     params: Vec<String>,
     param_modes: Vec<ParamMode>,
     chunk: Rc<Chunk>,
@@ -319,6 +325,13 @@ struct FnEntry {
 
 enum PreparedCallable {
     User(Rc<FnEntry>),
+    /// Value-only named declarations retain the language's established
+    /// host-before-user-function dispatch. Ref-aware declarations stay
+    /// `User` so their mode metadata can drive transactional staging.
+    HostThenUser {
+        name: String,
+        entry: Rc<FnEntry>,
+    },
     Closure(Rc<BopFn>),
     UserMethod {
         entry: Rc<FnEntry>,
@@ -337,6 +350,23 @@ enum PreparedCallable {
     /// Builtins and host callables are value-only. Host arity is intentionally
     /// deferred because the embedding trait does not expose signature metadata.
     NamedFallback(String),
+}
+
+impl PreparedCallable {
+    fn named_user(name: &str, entry: Rc<FnEntry>) -> Self {
+        if entry
+            .param_modes
+            .iter()
+            .all(|mode| *mode == ParamMode::Value)
+        {
+            Self::HostThenUser {
+                name: name.to_string(),
+                entry,
+            }
+        } else {
+            Self::User(entry)
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -2683,6 +2713,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     ));
                 }
             }
+        } else if let Some(entry) = self
+            .frames
+            .last()
+            .and_then(|frame| frame.current_function_entry.as_ref())
+            .filter(|entry| entry.exact_self_name.as_deref() == Some(name.as_str()))
+            .cloned()
+        {
+            PreparedCallable::User(entry)
         } else if let Some(module) = self
             .frames
             .last()
@@ -2716,12 +2754,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
                 None => self
                     .lookup_function_entry(&name)
-                    .map(PreparedCallable::User)
+                    .map(|entry| PreparedCallable::named_user(&name, entry))
                     .unwrap_or_else(|| PreparedCallable::NamedFallback(name.clone())),
             }
         } else {
             self.lookup_function_entry(&name)
-                .map(PreparedCallable::User)
+                .map(|entry| PreparedCallable::named_user(&name, entry))
                 .unwrap_or_else(|| PreparedCallable::NamedFallback(name.clone()))
         };
         self.preflight_call(callable, name, site, line)
@@ -2922,7 +2960,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             validate_named_builtin_arity(name, site.arg_modes.len(), line)?;
         }
         let expected_modes: Option<&[ParamMode]> = match &callable {
-            PreparedCallable::User(entry) => Some(&entry.param_modes),
+            PreparedCallable::User(entry) | PreparedCallable::HostThenUser { entry, .. } => {
+                Some(&entry.param_modes)
+            }
             PreparedCallable::Closure(function) => Some(&function.param_modes),
             PreparedCallable::UserMethod {
                 entry,
@@ -3164,6 +3204,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let before = self.frames.len();
         let next = match prepared.callable {
             PreparedCallable::User(entry) => self.enter_user_fn_args(entry, args, line)?,
+            PreparedCallable::HostThenUser { name, entry } => {
+                if let Some(result) = self.host.call(&name, &args, line) {
+                    self.push_value(result?);
+                    return Ok(Next::Continue);
+                }
+                self.enter_user_fn_args(entry, args, line)?
+            }
             PreparedCallable::Closure(function) => self.call_closure(&function, args, line)?,
             PreparedCallable::UserMethod {
                 entry, receiver, ..
@@ -3284,6 +3331,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Some(entry.module_path.clone()),
             FrameWrap::None,
         );
+        self.frames
+            .last_mut()
+            .expect("callee frame")
+            .current_function_entry = Some(Rc::clone(&entry));
         self.apply_entry_alias_context(&entry);
         Ok(Next::Continue)
     }
@@ -3628,6 +3679,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Some(entry.module_path.clone()),
             FrameWrap::None,
         );
+        self.frames
+            .last_mut()
+            .expect("callee frame")
+            .current_function_entry = Some(Rc::clone(&entry));
         self.apply_entry_alias_context(&entry);
         // A fresh type_bindings frame scopes any type decl
         // inside this fn to the fn body itself — same rule
@@ -4048,6 +4103,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let method_name_s = chunk.name(method_name).to_string();
         let fn_def = chunk.function(fn_idx);
         let entry = Rc::new(FnEntry {
+            exact_self_name: None,
             params: fn_def.params.clone(),
             param_modes: fn_def.param_modes.clone(),
             chunk: Rc::clone(&fn_def.chunk),
@@ -4655,6 +4711,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let fn_def = chunk.function(idx);
         let name = fn_def.name.clone();
         let entry = Rc::new(FnEntry {
+            exact_self_name: Some(name.clone()),
             params: fn_def.params.clone(),
             param_modes: fn_def.param_modes.clone(),
             chunk: Rc::clone(&fn_def.chunk),
@@ -6439,6 +6496,75 @@ mod tests {
         ) -> Option<Result<Value, BopError>> {
             None
         }
+    }
+
+    #[test]
+    fn named_call_uses_host_once_then_exact_self_recursion_bypasses_it() {
+        struct Host {
+            calls: usize,
+            prints: Vec<String>,
+        }
+
+        impl BopHost for Host {
+            fn call(
+                &mut self,
+                name: &str,
+                _args: &[Value],
+                _line: u32,
+            ) -> Option<Result<Value, BopError>> {
+                if name != "f" {
+                    return None;
+                }
+                self.calls += 1;
+                (self.calls > 1).then_some(Ok(Value::Int(99)))
+            }
+
+            fn on_print(&mut self, message: &str) {
+                self.prints.push(message.to_string());
+            }
+        }
+
+        let mut host = Host {
+            calls: 0,
+            prints: Vec::new(),
+        };
+        run(
+            "fn f(n) { if n == 0 { return 1 } return f(n - 1) }\nprint(f(2))",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(host.calls, 1);
+        assert_eq!(host.prints, ["1"]);
+    }
+
+    #[test]
+    fn method_bare_name_resolves_named_function_not_method_self() {
+        struct PrintHost(Vec<String>);
+
+        impl BopHost for PrintHost {
+            fn call(
+                &mut self,
+                _name: &str,
+                _args: &[Value],
+                _line: u32,
+            ) -> Option<Result<Value, BopError>> {
+                None
+            }
+
+            fn on_print(&mut self, message: &str) {
+                self.0.push(message.to_string());
+            }
+        }
+
+        let mut host = PrintHost(Vec::new());
+        run(
+            "struct S {}\nfn m() { return 7 }\nfn S.m(self) { return m() }\nlet value = S {}\nprint(value.m())",
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
+        assert_eq!(host.0, ["7"]);
     }
 
     #[test]

@@ -579,7 +579,7 @@ fn analyze_module(
 
     let own_lets = collect_top_level_lets(&ast);
     let own_fns = collect_top_level_fn_params(&ast);
-    let function_candidates: BTreeSet<String> = collect_fn_info(&ast).all_fns.into_keys().collect();
+    let function_candidates: BTreeSet<String> = collect_fn_info(&ast).all_fns.into_iter().collect();
     let own_types = collect_top_level_types(&ast);
 
     // Effective exports mirror the bindings that each `use` shape
@@ -1099,24 +1099,27 @@ fn collect_top_level_fn_params(stmts: &[Stmt]) -> HashMap<String, Vec<Parameter>
     out
 }
 
-/// Result of the pre-pass over the AST. `all_fns` maps every
-/// user-defined function name (top-level or nested) to its
-/// parameter list so the emitter can decide dispatch + arity
-/// for each call site. `top_level_fns` is the subset that's
-/// reachable from outside its defining block and therefore
-/// eligible to be turned into a first-class `Value::Fn` via an
-/// emitted wrapper.
+/// Result of the pre-pass over the AST. Function names, declaration counts,
+/// and ref-mode presence are tracked independently: runtime-active site
+/// metadata remains authoritative when same-name declarations differ.
 #[derive(Clone, Default)]
 struct FnInfo {
-    all_fns: HashMap<String, Vec<Parameter>>,
+    all_fns: HashSet<String>,
     top_level_fns: HashSet<String>,
     site_counts: HashMap<String, usize>,
+    names_with_ref_sites: HashSet<String>,
+    names_with_value_only_sites: HashSet<String>,
 }
 
 impl FnInfo {
     fn record_site(&mut self, name: &str, params: &[Parameter]) {
-        self.all_fns.insert(name.to_string(), params.to_vec());
+        self.all_fns.insert(name.to_string());
         *self.site_counts.entry(name.to_string()).or_default() += 1;
+        if params.iter().any(|param| param.mode == ParamMode::Ref) {
+            self.names_with_ref_sites.insert(name.to_string());
+        } else {
+            self.names_with_value_only_sites.insert(name.to_string());
+        }
     }
 }
 
@@ -2649,7 +2652,7 @@ impl Emitter {
                 site, line
             ))
         } else if self.fn_info.top_level_fns.contains(name)
-            || self.fn_info.all_fns.contains_key(name)
+            || self.fn_info.all_fns.contains(name)
             || self.has_declaration_alias_overlay(name)
         {
             Ok(format!(
@@ -2785,14 +2788,7 @@ impl Emitter {
     ) -> String {
         let site = &self.functions.sites[site_id];
         if arg_names.len() != site.params.len() {
-            return format!(
-                "return Err(::bop::error::BopError::runtime(format!(\"`{}` expects {} argument{}, but got {}\"), {}))",
-                site.name,
-                site.params.len(),
-                if site.params.len() == 1 { "" } else { "s" },
-                arg_names.len(),
-                line,
-            );
+            return self.function_site_arity_error_src(site_id, arg_names.len(), line);
         }
         let args = if arg_names.is_empty() {
             String::new()
@@ -2802,6 +2798,23 @@ impl Emitter {
         format!(
             "{}(ctx{args}, {line})?",
             guarded_function_site_fn_name(site_id),
+        )
+    }
+
+    fn function_site_arity_error_src(
+        &self,
+        site_id: usize,
+        actual_arity: usize,
+        line: u32,
+    ) -> String {
+        let site = &self.functions.sites[site_id];
+        format!(
+            "return Err(::bop::error::BopError::runtime(format!(\"`{}` expects {} argument{}, but got {}\"), {}))",
+            site.name,
+            site.params.len(),
+            if site.params.len() == 1 { "" } else { "s" },
+            actual_arity,
+            line,
         )
     }
 
@@ -3264,7 +3277,7 @@ impl Emitter {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if self.is_local_in_current_scope(alias_name)
-                    || (self.fn_info.all_fns.contains_key(alias_name)
+                    || (self.fn_info.all_fns.contains(alias_name)
                         && !self.has_module_alias_candidate(alias_name))
                 {
                     return Err(BopError::runtime(
@@ -3405,7 +3418,7 @@ impl Emitter {
                     // it just like the walker and VM value scopes.
                     if self.is_local_in_current_scope(name)
                         || (self.is_module_top_scope()
-                            && self.fn_info.all_fns.contains_key(name)
+                            && self.fn_info.all_fns.contains(name)
                             && !self.has_module_alias_candidate(name))
                     {
                         if items.is_none() {
@@ -3572,6 +3585,12 @@ impl Emitter {
             "let __saved_imported_function_sites: ::std::vec::Vec<_> = ctx.module_imported_function_sites.iter().filter(|((module, _), _)| module == {}).map(|(key, site)| (key.clone(), *site)).collect();",
             rust_string_literal(name),
         ));
+        if !self.opts.sandbox {
+            self.line(&format!(
+                "let __saved_reached_function_sites: ::std::vec::Vec<(usize, bool)> = __BOP_FUNCTION_SITES.iter().filter(|site| site.module_path == {}).map(|site| (site.id, ctx.reached_function_sites[site.id])).collect();",
+                rust_string_literal(name),
+            ));
+        }
         self.line(&format!(
             "ctx.active_function_sites.retain(|(module, _), _| module != {});",
             rust_string_literal(name),
@@ -3644,9 +3663,6 @@ impl Emitter {
                 direct_function_index += 1;
                 self.line(&format!("__bop_activate_function(ctx, {site});"));
                 self.claim_function_in_current_scope(name);
-                if self.function_name_has_single_site(name) {
-                    self.bind_function_site(name, site);
-                }
                 continue;
             }
             self.emit_stmt(stmt)?;
@@ -3742,6 +3758,9 @@ impl Emitter {
             rust_string_literal(name),
         ));
         self.line("ctx.module_imported_function_sites.extend(__saved_imported_function_sites);");
+        if !self.opts.sandbox {
+            self.line("for (__site, __reached) in __saved_reached_function_sites { ctx.reached_function_sites[__site] = __reached; }");
+        }
         self.line(&format!(
             "ctx.bindings.remove({});",
             rust_string_literal(name),
@@ -4231,9 +4250,13 @@ impl Emitter {
                 collect_fn_info(&module.ast)
             };
             method_fn_info.site_counts = module_fn_info.site_counts.clone();
-            for (name, params) in module_fn_info.all_fns {
-                method_fn_info.all_fns.entry(name).or_insert(params);
-            }
+            method_fn_info
+                .names_with_ref_sites
+                .extend(module_fn_info.names_with_ref_sites);
+            method_fn_info
+                .names_with_value_only_sites
+                .extend(module_fn_info.names_with_value_only_sites);
+            method_fn_info.all_fns.extend(module_fn_info.all_fns);
             method_fn_info
                 .top_level_fns
                 .extend(module_fn_info.top_level_fns);
@@ -4852,6 +4875,68 @@ fn __bop_active_function_site(
         ))
 }
 
+fn __bop_preflight_function_site_call(
+    site_id: usize,
+    actual_modes: &[::bop::parser::ParamMode],
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    let site = &__BOP_FUNCTION_SITES[site_id];
+    if actual_modes.len() != site.params.len() {
+        return Err(::bop::error::BopError::runtime(
+            format!(
+                "`{}` expects {} argument{}, but got {}",
+                site.name,
+                site.params.len(),
+                if site.params.len() == 1 { "" } else { "s" },
+                actual_modes.len(),
+            ),
+            line,
+        ));
+    }
+    ::bop::validate_call_modes(site.name, site.param_modes, actual_modes, line)
+}
+
+fn __bop_preflight_active_function_call(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+    actual_modes: &[::bop::parser::ParamMode],
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    if __bop_binding_value(ctx, module_path, name).is_some() {
+        return Ok(());
+    }
+    if let ::std::option::Option::Some(site_id) = ctx
+        .active_function_sites
+        .get(&(module_path.to_string(), name.to_string()))
+        .or_else(|| ctx.module_imported_function_sites.get(&(module_path.to_string(), name.to_string())))
+        .copied()
+    {
+        __bop_preflight_function_site_call(site_id, actual_modes, line)?;
+    }
+    Ok(())
+}
+
+fn __bop_active_ref_function_site(
+    ctx: &Ctx<'_>,
+    module_path: &str,
+    name: &str,
+) -> ::std::option::Option<usize> {
+    if __bop_binding_value(ctx, module_path, name).is_some() {
+        return None;
+    }
+    ctx.active_function_sites
+        .get(&(module_path.to_string(), name.to_string()))
+        .or_else(|| ctx.module_imported_function_sites.get(&(module_path.to_string(), name.to_string())))
+        .copied()
+        .filter(|site_id| {
+            __BOP_FUNCTION_SITES[*site_id]
+                .param_modes
+                .iter()
+                .any(|mode| *mode == ::bop::parser::ParamMode::Ref)
+        })
+}
+
 fn __bop_import_function_site(
     ctx: &mut Ctx<'_>,
     module_path: &str,
@@ -5237,9 +5322,6 @@ fn __bop_function_site_value(
                 direct_function_index += 1;
                 self.line(&format!("__bop_activate_function(ctx, {site});"));
                 self.claim_function_in_current_scope(name);
-                if self.function_name_has_single_site(name) {
-                    self.bind_function_site(name, site);
-                }
                 continue;
             }
             self.emit_stmt(stmt)?;
@@ -5435,9 +5517,12 @@ fn __bop_function_site_value(
                 self.close_block();
             }
 
-            StmtKind::FnDecl { .. } => {
+            StmtKind::FnDecl { name, .. } => {
                 let site = self.function_site_for_stmt(stmt);
                 self.line(&format!("__bop_activate_function(ctx, {site});"));
+                if self.function_name_has_single_site(name) {
+                    self.bind_function_site(name, site);
+                }
             }
 
             StmtKind::Return { value } => {
@@ -6582,14 +6667,30 @@ fn __bop_function_site_value(
             return self.dynamic_value_call_src(callee_src, args, line);
         }
 
-        let declared_has_ref = self
-            .fn_info
-            .all_fns
-            .get(&name)
-            .is_some_and(|params| params.iter().any(|param| param.mode == ParamMode::Ref));
         let call_has_ref = args.iter().any(|arg| arg.mode == ParamMode::Ref);
-        if declared_has_ref || call_has_ref {
-            if self.fn_info.all_fns.contains_key(&name) {
+        // Exact lexical function bindings, including a function's self-name,
+        // must not be redirected to a later same-name declaration. Ref calls
+        // still use the shared preflight/staging path so mutations commit only
+        // after a successful call.
+        if let Some(site) = self.local_function_site(&name) {
+            let site_has_ref = self.functions.sites[site]
+                .params
+                .iter()
+                .any(|param| param.mode == ParamMode::Ref);
+            if site_has_ref || call_has_ref {
+                let callee_src = format!("__bop_function_site_value(ctx, {site}, {line})?");
+                return self.dynamic_value_call_src(callee_src, args, line);
+            }
+            return self.value_named_call_src(&name, args, line);
+        }
+
+        // A call using an explicit ref marker, or a name whose every
+        // declaration is ref-aware, always resolves a callable before any
+        // argument side effect.
+        let declared_has_ref = self.fn_info.names_with_ref_sites.contains(&name);
+        let declared_has_value_only = self.fn_info.names_with_value_only_sites.contains(&name);
+        if call_has_ref || (declared_has_ref && !declared_has_value_only) {
+            if self.fn_info.all_fns.contains(&name) {
                 let callee_src = format!(
                     "__bop_active_function_value(ctx, {}, {}, {})?",
                     rust_string_literal(&self.current_module),
@@ -6618,6 +6719,76 @@ fn __bop_function_site_value(
             ));
         }
 
+        // Mixed-mode same-name declarations require a runtime decision before
+        // evaluating ordinary arguments. Only the active site is
+        // authoritative: a reached ref site uses transactional preflight,
+        // while a reached value-only site (or no reached site) preserves
+        // host-before-named-function dispatch.
+        if declared_has_ref && declared_has_value_only && self.fn_info.all_fns.contains(&name) {
+            let ref_call = self.dynamic_value_call_src(
+                format!("__bop_function_site_value(ctx, __bop_site, {line})?"),
+                args,
+                line,
+            )?;
+            let value_call = self.value_named_call_src(&name, args, line)?;
+            return Ok(format!(
+                "{{ match __bop_active_ref_function_site(ctx, {module}, {name}) {{ ::std::option::Option::Some(__bop_site) => {{ {ref_call} }}, ::std::option::Option::None => {{ {value_call} }}, }} }}",
+                module = rust_string_literal(&self.current_module),
+                name = rust_string_literal(&name),
+            ));
+        }
+
+        self.value_named_call_src(&name, args, line)
+    }
+
+    fn value_named_call_src(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        line: u32,
+    ) -> Result<String, BopError> {
+        let exact_site = self.local_function_site(name);
+        if let Some(site) = exact_site {
+            if args.len() != self.functions.sites[site].params.len() {
+                return Ok(format!(
+                    "{{ {} }}",
+                    self.function_site_arity_error_src(site, args.len(), line)
+                ));
+            }
+        }
+
+        let actual_modes = args
+            .iter()
+            .map(|arg| match arg.mode {
+                ParamMode::Value => "::bop::parser::ParamMode::Value",
+                ParamMode::Ref => "::bop::parser::ParamMode::Ref",
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Named function calls validate the selected declaration before
+        // evaluating arguments. Correct-arity calls still evaluate their
+        // arguments before host dispatch, preserving host precedence.
+        let preflight = if exact_site.is_some() {
+            String::new()
+        } else if let Some(site) = self.native_static_function_site(name) {
+            if args.len() == self.functions.sites[site].params.len() {
+                String::new()
+            } else {
+                format!(
+                    "if ctx.reached_function_sites[{site}] {{ {}; }} ",
+                    self.function_site_arity_error_src(site, args.len(), line)
+                )
+            }
+        } else if self.fn_info.all_fns.contains(name) {
+            format!(
+                "__bop_preflight_active_function_call(ctx, {module}, {name}, &[{actual_modes}], {line})?; ",
+                module = rust_string_literal(&self.current_module),
+                name = rust_string_literal(name),
+            )
+        } else {
+            String::new()
+        };
+
         // Evaluate args into locals up-front so the resulting block
         // has a predictable evaluation order and doesn't reborrow
         // `ctx` inside nested sub-expressions.
@@ -6633,9 +6804,9 @@ fn __bop_function_site_value(
         // The invoked function's `self_name` is an exact lexical binding.
         // It must recurse to the retained declaration site directly, without
         // host interception or a later same-name redeclaration.
-        if let Some(site) = self.local_function_site(&name) {
+        if let Some(site) = exact_site {
             let call = self.exact_function_site_call_src(site, &arg_names, line);
-            return Ok(format!("{{ {}{} }}", arg_lets, call,));
+            return Ok(format!("{{ {preflight}{arg_lets}{call} }}"));
         }
 
         let binding_storage = self.binding_storage(&name);
@@ -6650,12 +6821,12 @@ fn __bop_function_site_value(
                 format!("::std::vec![{}]", arg_names.join(", "))
             };
             return Ok(format!(
-                "{{ {arg_lets}__bop_call_named_value(ctx, {callee}, {args_vec}, {name}, {line})? }}",
+                "{{ {preflight}{arg_lets}__bop_call_named_value(ctx, {callee}, {args_vec}, {name}, {line})? }}",
                 name = rust_string_literal(&name),
             ));
         }
 
-        let mut body = match name.as_str() {
+        let mut body = match name {
             "print" => {
                 let args_expr = build_arg_array(&arg_names);
                 if self.opts.sandbox {
@@ -6719,7 +6890,7 @@ fn __bop_function_site_value(
                             .join(", ")
                     )
                 };
-                if self.fn_info.all_fns.contains_key(&name) {
+                if self.fn_info.all_fns.contains(name) {
                     let site_args = if arg_names.is_empty() {
                         "::std::vec::Vec::new()".to_string()
                     } else {
@@ -6830,7 +7001,7 @@ fn __bop_function_site_value(
             ));
         }
 
-        Ok(format!("{{ {}{} }}", arg_lets, body))
+        Ok(format!("{{ {preflight}{arg_lets}{body} }}"))
     }
 
     fn array_src(&mut self, items: &[Expr], line: u32) -> Result<String, BopError> {
@@ -7264,7 +7435,7 @@ fn __bop_function_site_value(
             ) = &object.kind
             {
                 let storage = self.binding_storage(name).or_else(|| {
-                    (!self.fn_info.all_fns.contains_key(name)).then(|| BindingStorage::Persistent {
+                    (!self.fn_info.all_fns.contains(name)).then(|| BindingStorage::Persistent {
                         module: self.current_module.clone(),
                         name: name.clone(),
                     })
@@ -7375,7 +7546,7 @@ fn __bop_function_site_value(
             .unwrap();
             if let ExprKind::Ident(name) = &object.kind {
                 let storage = self.binding_storage(name).or_else(|| {
-                    (!self.fn_info.all_fns.contains_key(name)).then(|| BindingStorage::Persistent {
+                    (!self.fn_info.all_fns.contains(name)).then(|| BindingStorage::Persistent {
                         module: self.current_module.clone(),
                         name: name.clone(),
                     })
