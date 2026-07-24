@@ -31,6 +31,12 @@ use crate::chunk::{
 };
 use bop::parser::{MatchArm, Pattern, VariantKind};
 
+mod free_variables;
+mod pool_index;
+
+use free_variables::FreeVariables;
+use pool_index::{ConstantPoolIndex, NamePoolIndex};
+
 // ─── Local slot resolver ───────────────────────────────────────────
 //
 // Tracks the name → slot mapping for the function currently being
@@ -167,6 +173,13 @@ pub(crate) fn compile_program(program: &[Stmt]) -> Result<CompiledProgram, BopEr
 
 struct Compiler {
     chunk: Chunk,
+    /// Compiler-only lookup tables for the serialized chunk pools.
+    ///
+    /// The chunk vectors remain the source of truth for stable first-seen
+    /// ordering. These indexes map canonical keys to vector offsets, so they
+    /// accelerate interning without changing the bytecode format.
+    constant_index: ConstantPoolIndex,
+    name_index: NamePoolIndex,
     /// Lowest instruction offset that a trailing peephole rewrite may consume.
     ///
     /// Every control-flow landing point raises this floor. A rewrite may begin
@@ -193,7 +206,7 @@ struct Compiler {
     /// name's index is its capture slot in the final `FnDef`.
     /// `None` at module top-level where there's nothing to
     /// capture into.
-    free_vars: Option<Vec<String>>,
+    free_vars: Option<FreeVariables>,
     /// Names installed dynamically in the frame's scope rather than in local
     /// slots. Match-pattern bindings use this path. Keeping them separate
     /// prevents a nested lambda from propagating a pattern-local name into
@@ -223,6 +236,8 @@ impl Compiler {
     fn new() -> Self {
         Self {
             chunk: Chunk::new(),
+            constant_index: ConstantPoolIndex::default(),
+            name_index: NamePoolIndex::default(),
             fusion_floor: 0,
             runtime_scope_depth: 0,
             loops: Vec::new(),
@@ -275,15 +290,15 @@ impl Compiler {
         if self.has_runtime_binding(name) {
             return;
         }
-        if let Some(list) = self.free_vars.as_mut() {
-            if !list.iter().any(|n| n == name) {
-                list.push(name.to_string());
-            }
+        if let Some(free_vars) = self.free_vars.as_mut() {
+            free_vars.record(name);
         }
     }
 
     fn finish_program(self) -> CompiledProgram {
         debug_assert_eq!(self.runtime_scope_depth, 0);
+        debug_assert_eq!(self.constant_index.len(), self.chunk.constants.len());
+        debug_assert_eq!(self.name_index.len(), self.chunk.names.len());
         CompiledProgram {
             chunk: self.chunk,
             root_function_visibility: self.root_function_visibility,
@@ -481,33 +496,11 @@ impl Compiler {
     // ─── Pool helpers ─────────────────────────────────────────────
 
     fn add_const(&mut self, c: Constant) -> ConstIdx {
-        // Dedup numbers and strings so the pool doesn't grow quadratically
-        // on programs that reuse literals heavily.
-        if let Some(i) = self
-            .chunk
-            .constants
-            .iter()
-            .position(|existing| match (existing, &c) {
-                (Constant::Int(a), Constant::Int(b)) => a == b,
-                (Constant::Number(a), Constant::Number(b)) => a.to_bits() == b.to_bits(),
-                (Constant::Str(a), Constant::Str(b)) => a == b,
-                _ => false,
-            })
-        {
-            return ConstIdx(i as u32);
-        }
-        let idx = ConstIdx(self.chunk.constants.len() as u32);
-        self.chunk.constants.push(c);
-        idx
+        self.constant_index.intern(&mut self.chunk.constants, c)
     }
 
     fn add_name(&mut self, name: &str) -> NameIdx {
-        if let Some(i) = self.chunk.names.iter().position(|n| n == name) {
-            return NameIdx(i as u32);
-        }
-        let idx = NameIdx(self.chunk.names.len() as u32);
-        self.chunk.names.push(name.to_string());
-        idx
+        self.name_index.intern(&mut self.chunk.names, name)
     }
 
     fn add_interp(&mut self, recipe: InterpRecipe) -> InterpIdx {
@@ -1670,6 +1663,8 @@ impl Compiler {
         // Save outer compile state so the body's chunk / loops /
         // free-var list stays isolated.
         let saved_chunk = core::mem::take(&mut self.chunk);
+        let saved_constant_index = core::mem::take(&mut self.constant_index);
+        let saved_name_index = core::mem::take(&mut self.name_index);
         let saved_fusion_floor = core::mem::replace(&mut self.fusion_floor, 0);
         let saved_runtime_scope_depth = core::mem::replace(&mut self.runtime_scope_depth, 0);
         let saved_loops = core::mem::take(&mut self.loops);
@@ -1679,7 +1674,7 @@ impl Compiler {
         // Enter the new function: push a resolver + start a
         // fresh free-var collector.
         self.resolvers.push(LocalResolver::new(params));
-        self.free_vars = Some(Vec::new());
+        self.free_vars = Some(FreeVariables::default());
 
         // Compile the body into the new chunk. Catch errors so we
         // still restore state on the way out.
@@ -1692,8 +1687,15 @@ impl Compiler {
         // Snapshot what we need from the function's compile
         // state before restoring the outer one.
         let resolver = self.resolvers.pop().expect("resolver pushed above");
-        let free = self.free_vars.take().expect("free-vars set above");
+        let free = self
+            .free_vars
+            .take()
+            .expect("free-vars set above")
+            .into_ordered();
         let mut chunk = core::mem::replace(&mut self.chunk, saved_chunk);
+        let function_constant_index =
+            core::mem::replace(&mut self.constant_index, saved_constant_index);
+        let function_name_index = core::mem::replace(&mut self.name_index, saved_name_index);
         self.fusion_floor = saved_fusion_floor;
         let function_runtime_scope_depth =
             core::mem::replace(&mut self.runtime_scope_depth, saved_runtime_scope_depth);
@@ -1703,6 +1705,8 @@ impl Compiler {
 
         result?;
         debug_assert_eq!(function_runtime_scope_depth, 0);
+        debug_assert_eq!(function_constant_index.len(), chunk.constants.len());
+        debug_assert_eq!(function_name_index.len(), chunk.names.len());
 
         // Resolve each free variable against the enclosing
         // resolver (if any) to decide whether it's a direct slot

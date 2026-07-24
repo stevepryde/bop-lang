@@ -9,7 +9,7 @@
 
 use bop::parse;
 use bop_vm::chunk::SlotIdx;
-use bop_vm::{Instr, LoopStateKind, compile, disassemble};
+use bop_vm::{Constant, Instr, LoopStateKind, compile, disassemble};
 use std::rc::Rc;
 
 fn disasm(source: &str) -> String {
@@ -912,6 +912,83 @@ fn unresolved_lambda_name_compiles_as_a_parent_scope_candidate() {
 }
 
 #[test]
+fn free_variable_order_and_nested_propagation_are_deterministic() {
+    let ast = parse(
+        r#"fn build() {
+    return fn() {
+        let local = second
+        return fn() { return first + missing + first }
+    }
+}
+fn isolated() {
+    return fn() { return other + other }
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+
+    let build = &chunk.functions[0];
+    let outer_lambda = &build.chunk.functions[0];
+    let inner_lambda = &outer_lambda.chunk.functions[0];
+    assert_eq!(inner_lambda.capture_names, ["first", "missing"]);
+    assert_eq!(
+        outer_lambda.capture_names,
+        ["second", "first", "missing"],
+        "nested ParentScope captures must propagate after earlier direct reads"
+    );
+    assert_eq!(build.capture_names, ["second", "first", "missing"]);
+
+    let isolated = &chunk.functions[1];
+    let isolated_lambda = &isolated.chunk.functions[0];
+    assert_eq!(isolated_lambda.capture_names, ["other"]);
+    assert_eq!(
+        isolated.capture_names,
+        ["other"],
+        "a sibling function must start with a fresh free-variable collector"
+    );
+}
+
+#[test]
+fn runtime_bindings_do_not_enter_the_static_free_variable_index() {
+    let ast = parse(
+        r#"fn build(value) {
+    return match value {
+        bound => bound + outside,
+    }
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let function = &chunk.functions[0];
+
+    assert_eq!(function.capture_names, ["outside"]);
+}
+
+#[test]
+fn large_unique_free_variable_compilation_keeps_first_seen_order() {
+    const COUNT: usize = 8_192;
+    let mut source = String::from("fn collect() {\n");
+    for index in 0..COUNT {
+        source.push_str(&format!("unresolved_{index:05}\n"));
+    }
+    source.push_str("}\n");
+
+    let ast = parse(&source).expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let function = &chunk.functions[0];
+
+    assert_eq!(function.capture_names.len(), COUNT);
+    assert_eq!(
+        function.capture_names.first().map(String::as_str),
+        Some("unresolved_00000")
+    );
+    assert_eq!(
+        function.capture_names.last().map(String::as_str),
+        Some("unresolved_08191")
+    );
+}
+
+#[test]
 fn break_outside_loop_is_compile_error() {
     let ast = parse("break").expect("parse");
     let err = compile(&ast).expect_err("should reject break outside loop");
@@ -955,6 +1032,50 @@ print(x)"#,
     assert_eq!(x_count, 1, "expected deduplicated name entry");
     // But `y` is its own name.
     assert!(chunk.names.iter().any(|n| n == "y"));
+}
+
+#[test]
+fn nested_function_pool_indexes_remain_chunk_local() {
+    let ast = parse(
+        r#"let outer_before = "shared"
+fn nested() {
+    let inner_first = "shared"
+    let inner_second = "inner"
+    print(inner_first, inner_second, external_inner, external_inner)
+}
+let outer_after = "outer"
+print(outer_before, outer_after, external_outer, external_outer)"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let nested = &chunk.functions[0].chunk;
+
+    assert!(matches!(
+        chunk.constants.as_slice(),
+        [Constant::Str(first), Constant::Str(second)]
+            if first == "shared" && second == "outer"
+    ));
+    assert!(matches!(
+        nested.constants.as_slice(),
+        [Constant::Str(first), Constant::Str(second)]
+            if first == "shared" && second == "inner"
+    ));
+    assert_eq!(
+        chunk
+            .names
+            .iter()
+            .filter(|name| name.as_str() == "external_outer")
+            .count(),
+        1
+    );
+    assert_eq!(
+        nested
+            .names
+            .iter()
+            .filter(|name| name.as_str() == "external_inner")
+            .count(),
+        1
+    );
 }
 
 #[test]
