@@ -39,7 +39,11 @@ behaviour.
   works through aliases, closures, imports, and other dynamic call paths.
 - **REF-002 — Copy-in/copy-out.** Each `ref` parameter receives a staged value
   copied from its caller target. Reads and writes in the callee affect that
-  staged local. The caller binding is not aliased during execution.
+  staged local. The caller binding is not aliased during execution. Repeated
+  parameter spellings share one language binding and are rebound by positional
+  arguments in source order. Every ref position copies the final shared value
+  back to its own target, and any ref position marks the shared binding as a
+  ref parameter for the closure-capture fence.
 - **REF-003 — Transactional return.** A call must commit all of its staged
   `ref` values to their caller targets only after a normal Bop return, including
   implicit return at the end of a function, and after all pending resource-limit

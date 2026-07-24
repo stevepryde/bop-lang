@@ -1,9 +1,15 @@
 //! Structural validation for public, hand-built bytecode chunks.
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{collections::BTreeSet, format, string::String, vec, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::String,
+    vec,
+    vec::Vec,
+};
 #[cfg(any(feature = "std", not(feature = "no_std")))]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bop::error::BopError;
 
@@ -19,17 +25,14 @@ use bop::parser::ParamMode;
 /// function is primarily useful for embedders that construct or deserialize
 /// [`Chunk`] values themselves.
 pub fn validate_chunk(chunk: &Chunk) -> Result<(), BopError> {
-    let mut pending = vec![Validator::new(chunk, 0, 0, String::from("top-level chunk"))];
+    let mut pending = vec![Validator::new(chunk, 0, String::from("top-level chunk"))];
     let mut visited = BTreeSet::new();
     while let Some(validator) = pending.pop() {
         // Function bodies are Rc-backed and may form a heavily shared DAG.
         // Validate each allocation once so a hand-built diamond cannot turn
         // verification into exponential work. The traversal is iterative so
         // arbitrary nesting cannot overflow the Rust call stack.
-        let identity = (
-            validator.chunk as *const Chunk as usize,
-            validator.parameter_slots,
-        );
+        let identity = validator.chunk as *const Chunk as usize;
         if visited.insert(identity) {
             validator.validate(&mut pending)?;
         }
@@ -40,16 +43,14 @@ pub fn validate_chunk(chunk: &Chunk) -> Result<(), BopError> {
 struct Validator<'a> {
     chunk: &'a Chunk,
     available_slots: u32,
-    parameter_slots: u32,
     context: String,
 }
 
 impl<'a> Validator<'a> {
-    fn new(chunk: &'a Chunk, available_slots: u32, parameter_slots: u32, context: String) -> Self {
+    fn new(chunk: &'a Chunk, available_slots: u32, context: String) -> Self {
         Self {
             chunk,
             available_slots,
-            parameter_slots,
             context,
         }
     }
@@ -80,8 +81,9 @@ impl<'a> Validator<'a> {
         // shape prevents a tiny hand-built chunk from claiming billions of
         // unused slots and forcing an effectively unbounded frame allocation.
         let mut declared_slots = BTreeSet::new();
-        for slot in 0..self.parameter_slots {
-            declared_slots.insert(slot);
+        for slot in &self.chunk.parameter_slots {
+            self.slot(*slot, 0, "parameter metadata")?;
+            declared_slots.insert(slot.0);
         }
         for instr in &self.chunk.code {
             if let Instr::StoreLocal(slot) = instr {
@@ -129,13 +131,13 @@ impl<'a> Validator<'a> {
                     ),
                 ));
             }
-            if function.params.len() > function.slot_count as usize {
+            if function.params.len() != function.chunk.parameter_slots.len() {
                 return Err(self.invalid(
                     0,
                     format!(
-                        "{detail} has {} parameters but only {} local slots",
+                        "{detail} has {} parameters but {} parameter-slot entries",
                         function.params.len(),
-                        function.slot_count
+                        function.chunk.parameter_slots.len()
                     ),
                 ));
             }
@@ -158,6 +160,45 @@ impl<'a> Validator<'a> {
                     ),
                 ));
             }
+            let mut names_to_slots = BTreeMap::new();
+            let mut slots_to_names = BTreeMap::new();
+            for (name, slot) in function
+                .params
+                .iter()
+                .zip(function.chunk.parameter_slots.iter())
+            {
+                if slot.0 >= function.slot_count {
+                    return Err(self.invalid(
+                        0,
+                        format!(
+                            "{detail} maps parameter `{name}` to out-of-range local slot {}",
+                            slot.0
+                        ),
+                    ));
+                }
+                if let Some(previous) = names_to_slots.insert(name.as_str(), slot.0) {
+                    if previous != slot.0 {
+                        return Err(self.invalid(
+                            0,
+                            format!(
+                                "{detail} maps repeated parameter `{name}` to both local slots {previous} and {}",
+                                slot.0
+                            ),
+                        ));
+                    }
+                }
+                if let Some(previous) = slots_to_names.insert(slot.0, name.as_str()) {
+                    if previous != name {
+                        return Err(self.invalid(
+                            0,
+                            format!(
+                                "{detail} maps distinct parameters `{previous}` and `{name}` to local slot {}",
+                                slot.0
+                            ),
+                        ));
+                    }
+                }
+            }
             for source in &function.capture_sources {
                 if let CaptureSource::ParentSlot(slot) = source {
                     self.slot(*slot, 0, &format!("{detail} capture"))?;
@@ -166,7 +207,6 @@ impl<'a> Validator<'a> {
             pending.push(Validator::new(
                 &function.chunk,
                 function.slot_count,
-                function.params.len() as u32,
                 format!("nested {detail}"),
             ));
         }

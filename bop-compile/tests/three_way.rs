@@ -1301,6 +1301,54 @@ print(Holder { n: 6 }.pick(7, 8))
 print(make(9)(10))"#,
     ),
     (
+        "duplicate_parameter_ref_semantics",
+        r#"fn ref_value(ref value, value) { value += 2 }
+fn value_ref(value, ref value) { value += 3 }
+fn ref_ref(ref value, ref value) { value += 4 }
+struct Holder { n }
+fn Holder.update(self, ref value, value) { value += self.n }
+fn Holder.replace(ref self, self) { self = Holder { n: self } }
+let first = 1
+let second = 1
+let third = 1
+let fourth = 2
+let method_target = 1
+let receiver = Holder { n: 1 }
+ref_value(ref first, 7)
+value_ref(7, ref second)
+ref_ref(ref third, ref fourth)
+Holder { n: 6 }.update(ref method_target, 9)
+receiver.replace(12)
+print([first, second, third, fourth, method_target, receiver.n])"#,
+    ),
+    (
+        "duplicate_lambda_parameter_ref_semantics",
+        r#"let ref_value = fn(ref value, value) { value += 5 }
+let value_ref = fn(value, ref value) { value += 6 }
+let ref_ref = fn(ref value, ref value) { value += 7 }
+let first = 2
+let second = 2
+let third = 2
+let fourth = 3
+ref_value(ref first, 8)
+value_ref(8, ref second)
+ref_ref(ref third, ref fourth)
+let rollback_target = 4
+let fail = fn(ref value, value) {
+    value = 99
+    panic("rollback")
+}
+fn attempt() { fail(ref rollback_target, 8) }
+print(try_call(attempt).is_err())
+print([first, second, third, fourth, rollback_target])"#,
+    ),
+    (
+        "duplicate_lambda_ref_target_rejection",
+        r#"let both = fn(ref value, ref value) { value = 9 }
+let target = 1
+both(ref target, ref target)"#,
+    ),
+    (
         "closure_captures_value",
         r#"let n = 5
 let add_n = fn(x) { return x + n }

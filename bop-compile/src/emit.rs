@@ -8095,11 +8095,10 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         }
         let mut param_sync = String::new();
         for (index, p) in params.iter().enumerate() {
-            let is_visible_binding = !params[index + 1..].iter().any(|later| later.name == p.name);
-            if is_visible_binding {
+            if p.mode == ParamMode::Ref {
                 writeln!(
                     param_sync,
-                    "__bop_lambda_arg_{index} = {ident};",
+                    "__bop_lambda_arg_{index} = {ident}.clone();",
                     ident = rust_user_ident(&p.name),
                 )
                 .unwrap();

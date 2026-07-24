@@ -9,7 +9,7 @@
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{
-    collections::BTreeMap as VisibilityMap,
+    collections::{BTreeMap as VisibilityMap, BTreeSet as RefParameterSlots},
     rc::Rc,
     string::{String, ToString},
     vec,
@@ -19,7 +19,7 @@ use alloc::{
 use core::cell::Cell;
 #[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::{
-    collections::HashMap as VisibilityMap,
+    collections::{HashMap as VisibilityMap, HashSet as RefParameterSlots},
     rc::Rc,
     string::{String, ToString},
     vec,
@@ -84,7 +84,9 @@ pub(super) struct LocalResolver {
     next_slot: u32,
     /// High-water mark used to size the VM frame once at call time.
     pub(super) max_slot: u32,
-    pub(super) ref_param_slots: Vec<SlotIdx>,
+    /// Positional ABI parameter -> canonical language binding slot.
+    pub(super) parameter_slots: Vec<SlotIdx>,
+    ref_param_slots: RefParameterSlots<u32>,
 }
 
 impl LocalResolver {
@@ -96,20 +98,30 @@ impl LocalResolver {
             visible: VisibleSlots::default(),
             next_slot: 0,
             max_slot: 0,
-            ref_param_slots: Vec::new(),
+            parameter_slots: Vec::with_capacity(params.len()),
+            ref_param_slots: RefParameterSlots::new(),
         };
-        let mut ref_param_slots = Vec::new();
         for parameter in params {
-            let slot = SlotIdx(resolver.next_slot);
-            resolver.bind_slot(&parameter.name, slot);
+            let slot = match resolver.visible.get(&parameter.name) {
+                Some(slot) => slot,
+                None => {
+                    let slot = SlotIdx(resolver.next_slot);
+                    resolver.next_slot += 1;
+                    resolver.bind_slot(&parameter.name, slot);
+                    slot
+                }
+            };
+            resolver.parameter_slots.push(slot);
             if parameter.mode == ParamMode::Ref {
-                ref_param_slots.push(slot);
+                resolver.ref_param_slots.insert(slot.0);
             }
-            resolver.next_slot += 1;
         }
         resolver.max_slot = resolver.next_slot;
-        resolver.ref_param_slots = ref_param_slots;
         resolver
+    }
+
+    pub(super) fn is_ref_parameter_binding(&self, slot: SlotIdx) -> bool {
+        self.ref_param_slots.contains(&slot.0)
     }
 
     fn bind_slot(&mut self, name: &str, slot: SlotIdx) {
@@ -209,7 +221,8 @@ mod tests {
 
         assert_eq!(resolver.resolve("outer"), Some(SlotIdx(0)));
         assert_eq!(resolver.resolve("by_ref"), Some(SlotIdx(1)));
-        assert_eq!(resolver.ref_param_slots, [SlotIdx(1)]);
+        assert_eq!(resolver.parameter_slots, [SlotIdx(0), SlotIdx(1)]);
+        assert!(resolver.is_ref_parameter_binding(SlotIdx(1)));
 
         let first = resolver.declare("same_scope");
         let second = resolver.declare("same_scope");
@@ -232,6 +245,27 @@ mod tests {
         assert_eq!(resolver.resolve("same_scope"), Some(second));
         assert_eq!(resolver.resolve("missing"), None);
         assert_eq!(resolver.max_slot, 8);
+    }
+
+    #[test]
+    fn duplicate_parameters_share_one_binding_and_preserve_positional_metadata() {
+        let params = [
+            parameter("same", ParamMode::Value),
+            parameter("same", ParamMode::Ref),
+            parameter("other", ParamMode::Ref),
+            parameter("same", ParamMode::Value),
+        ];
+        let resolver = LocalResolver::new(&params);
+
+        assert_eq!(
+            resolver.parameter_slots,
+            [SlotIdx(0), SlotIdx(0), SlotIdx(1), SlotIdx(0)]
+        );
+        assert_eq!(resolver.resolve("same"), Some(SlotIdx(0)));
+        assert_eq!(resolver.resolve("other"), Some(SlotIdx(1)));
+        assert!(resolver.is_ref_parameter_binding(SlotIdx(0)));
+        assert!(resolver.is_ref_parameter_binding(SlotIdx(1)));
+        assert_eq!(resolver.max_slot, 2);
     }
 
     fn indexed_lookup_count(binding_count: usize) -> usize {

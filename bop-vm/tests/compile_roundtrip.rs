@@ -9,7 +9,7 @@
 
 use bop::parse;
 use bop_vm::chunk::{RefArgTarget, SlotIdx};
-use bop_vm::{Constant, Instr, LoopStateKind, compile, disassemble};
+use bop_vm::{Constant, Instr, LoopStateKind, compile, disassemble, validate_chunk};
 use std::rc::Rc;
 
 fn disasm(source: &str) -> String {
@@ -420,6 +420,43 @@ print(double(5))"#,
     assert!(d.contains("LoadLocal @0"), "body body missing:\n{}", d);
     assert!(d.contains("Mul"), "body op missing:\n{}", d);
     assert!(d.contains("Return"), "body return missing:\n{}", d);
+}
+
+#[test]
+fn duplicate_parameter_positions_map_to_canonical_binding_slots() {
+    let ast = parse(
+        r#"fn rebind(ref same, same, other, ref other) {
+    same = other
+    return same
+}"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    validate_chunk(&chunk).expect("compiler-produced duplicate parameter metadata should validate");
+    let function = &chunk.functions[0];
+
+    assert_eq!(function.params, ["same", "same", "other", "other"]);
+    assert_eq!(
+        function.param_modes,
+        [
+            bop::parser::ParamMode::Ref,
+            bop::parser::ParamMode::Value,
+            bop::parser::ParamMode::Value,
+            bop::parser::ParamMode::Ref,
+        ]
+    );
+    assert_eq!(
+        function.chunk.parameter_slots,
+        [SlotIdx(0), SlotIdx(0), SlotIdx(1), SlotIdx(1)]
+    );
+    assert_eq!(function.slot_count, 2);
+    assert_eq!(function.chunk.slot_count, 2);
+    assert!(function.chunk.code.iter().all(|instruction| {
+        !matches!(
+            instruction,
+            Instr::LoadLocal(slot) | Instr::StoreLocal(slot) if slot.0 >= 2
+        )
+    }));
 }
 
 #[test]

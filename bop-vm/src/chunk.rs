@@ -726,6 +726,13 @@ pub struct Chunk {
     /// bindings live in the BTreeMap scope). The VM uses this
     /// to pre-size each call frame's `slots` vec exactly once.
     pub slot_count: u32,
+    /// Positional ABI parameter -> canonical language binding slot.
+    ///
+    /// Repeated parameter spellings map to the same slot. Calls assign these
+    /// slots in source order, so the last positional argument for a spelling
+    /// becomes the binding visible to the body. Ref write-backs use the same
+    /// map rather than assuming every positional parameter owns a slot.
+    pub parameter_slots: Vec<SlotIdx>,
 }
 
 /// Compiled struct type record.

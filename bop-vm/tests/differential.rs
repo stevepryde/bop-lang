@@ -4379,6 +4379,97 @@ print(make(9)(10))"#,
 }
 
 #[test]
+fn duplicate_parameter_ref_semantics_match_across_callable_kinds() {
+    let outcome = run_both(
+        r#"fn value_value(value, value) { return value }
+fn ref_value(ref value, value) { value += 2 }
+fn value_ref(value, ref value) { value += 3 }
+fn ref_ref(ref value, ref value) { value += 4 }
+struct Holder { n }
+fn Holder.update(self, ref value, value) { value += self.n }
+fn Holder.replace(ref self, self) { self = Holder { n: self } }
+let first = 1
+let second = 1
+let third = 1
+let fourth = 1
+let fifth = 2
+let sixth = 2
+let seventh = 2
+let eighth = 3
+let method_target = 1
+let receiver = Holder { n: 1 }
+ref_value(ref first, 7)
+let alias = value_ref
+alias(7, ref second)
+ref_ref(ref third, ref fourth)
+let lambda_ref_value = fn(ref value, value) { value += 5 }
+let lambda_value_ref = fn(value, ref value) { value += 6 }
+let lambda_ref_ref = fn(ref value, ref value) { value += 7 }
+lambda_ref_value(ref fifth, 8)
+lambda_value_ref(8, ref sixth)
+lambda_ref_ref(ref seventh, ref eighth)
+Holder { n: 6 }.update(ref method_target, 9)
+receiver.replace(12)
+print(value_value(10, 11))
+print([first, second, third, fourth, fifth, sixth, seventh, eighth, method_target, receiver.n])"#,
+        &standard(),
+    );
+    assert!(outcome.is_ok(), "outcome: {outcome:?}");
+    assert_eq!(
+        outcome.prints,
+        ["11", "[9, 4, 5, 5, 13, 8, 10, 10, 15, 12]"]
+    );
+}
+
+#[test]
+fn duplicate_ref_targets_remain_atomic_and_unique() {
+    let rollback = run_both(
+        r#"let fail = fn(ref value, value) {
+    value = 99
+    panic("rollback")
+}
+let target = 1
+fn invoke() { fail(ref target, 7) }
+print(try_call(invoke).is_err())
+print(target)"#,
+        &standard(),
+    );
+    assert!(rollback.is_ok(), "outcome: {rollback:?}");
+    assert_eq!(rollback.prints, ["true", "1"]);
+
+    let duplicate = run_both(
+        r#"let both = fn(ref value, ref value) { value = 9 }
+let target = 1
+both(ref target, ref target)"#,
+        &standard(),
+    );
+    assert!(
+        duplicate
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("same variable")),
+        "outcome: {duplicate:?}"
+    );
+    assert!(duplicate.prints.is_empty());
+}
+
+#[test]
+fn any_duplicate_ref_position_prevents_closure_capture() {
+    for source in [
+        "fn bad(ref value, value) { return fn() { return value } }\nlet target = 1\nbad(ref target, 2)",
+        "fn bad(value, ref value) { return fn() { return value } }\nlet target = 1\nbad(2, ref target)",
+        "let bad = fn(ref value, value) { return fn() { return value } }\nlet target = 1\nbad(ref target, 2)",
+    ] {
+        let outcome = run_both(source, &standard());
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("a `ref` parameter can't be captured by a closure"),
+            "source: {source}"
+        );
+    }
+}
+
+#[test]
 fn closure_captures_value() {
     assert_eq!(
         say(r#"let n = 5

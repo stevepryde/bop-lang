@@ -388,6 +388,33 @@ fn duplicate_parameters_rebind_in_order_without_duplicate_rust_arguments() {
 }
 
 #[test]
+fn duplicate_lambda_ref_positions_copy_out_the_canonical_binding() {
+    let cases = [
+        (
+            "let callback = fn(ref value, value) { value += 1 }",
+            vec!["__bop_lambda_arg_0 = __bop_user_value_76616c7565.clone();"],
+        ),
+        (
+            "let callback = fn(value, ref value) { value += 1 }",
+            vec!["__bop_lambda_arg_1 = __bop_user_value_76616c7565.clone();"],
+        ),
+        (
+            "let callback = fn(ref value, ref value) { value += 1 }",
+            vec![
+                "__bop_lambda_arg_0 = __bop_user_value_76616c7565.clone();",
+                "__bop_lambda_arg_1 = __bop_user_value_76616c7565.clone();",
+            ],
+        ),
+    ];
+
+    for (source, expected_syncs) in cases {
+        for output in [compile(source), compile_sandbox(source)] {
+            contains_all(&output, &expected_syncs);
+        }
+    }
+}
+
+#[test]
 fn unknown_call_falls_back_to_host() {
     // `readline` isn't in the builtin list and isn't declared in
     // the program, so the emit should route through ctx.host.call

@@ -107,7 +107,10 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   value is staged in the callee and all targets commit only after a normal
   return and pending resource checks; a runtime or fatal error rolls every
   target back. Forwarding updates the outer staged local, while a ref parameter
-  cannot be captured. A normally returned language `Result::Err` is still a
+  cannot be captured. Repeated parameter spellings denote one language binding:
+  positional values rebind it in source order, every ref position reads its
+  final value for commit, and any ref position makes that binding ineligible
+  for closure capture. A normally returned language `Result::Err` is still a
   successful return and commits. Host-to-script `BopInstance::call` and
   `call_value` remain value-only and reject ref-bearing callables before
   execution because host values do not identify Bop bindings.
