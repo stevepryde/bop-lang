@@ -25,8 +25,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bop_compile::{ModuleResolver, Options, transpile};
+
+const SCRATCH_CREATE_ATTEMPTS: usize = 128;
+static NEXT_SCRATCH_DIR: AtomicUsize = AtomicUsize::new(0);
 
 pub fn compile_file(
     input: &str,
@@ -149,10 +154,16 @@ fn build_native(
     // spaces, quotes, Unicode, and other path-safe characters
     // cannot produce an invalid or malformed manifest.
     let target_name = cargo_target_name(stem);
-    let scratch = scratch_dir(&target_name);
-    if let Err(e) = std::fs::create_dir_all(scratch.join("src")) {
+    let scratch = match create_scratch_dir(&target_name) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("error creating scratch dir: {e}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    if let Err(e) = std::fs::create_dir(scratch.join("src")) {
         eprintln!(
-            "error creating scratch dir `{}`: {e}",
+            "error creating scratch source dir `{}`: {e}",
             scratch.display()
         );
         return Err(ExitCode::from(1));
@@ -249,10 +260,67 @@ fn default_binary_path(input: &Path) -> PathBuf {
     p
 }
 
-fn scratch_dir(stem: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!("bop-compile-{stem}-{}", std::process::id()));
-    p
+/// Atomically claim a fresh, private scratch project root.
+///
+/// The path must not be accepted when it already exists: Cargo automatically
+/// discovers files such as `build.rs`, so reusing a directory an attacker can
+/// populate would execute their code during `cargo build`. Candidate names are
+/// deliberately hard to collide with, but the security boundary is the atomic
+/// non-recursive `create`, not the secrecy of the name.
+fn create_scratch_dir(stem: &str) -> std::io::Result<PathBuf> {
+    let parent = std::env::temp_dir();
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = NEXT_SCRATCH_DIR.fetch_add(1, Ordering::Relaxed) as u128;
+    let pid = std::process::id();
+
+    let candidates = (0..SCRATCH_CREATE_ATTEMPTS).map(|attempt| {
+        let nonce = started_at
+            .wrapping_add(sequence << 64)
+            .wrapping_add(attempt as u128);
+        parent.join(format!("bop-compile-{stem}-{pid}-{nonce:032x}"))
+    });
+    claim_first_available_scratch_dir(candidates)
+}
+
+fn claim_first_available_scratch_dir(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> std::io::Result<PathBuf> {
+    for candidate in candidates {
+        match create_private_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!("`{}`: {error}", candidate.display()),
+                ));
+            }
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "couldn't claim a new scratch directory after {SCRATCH_CREATE_ATTEMPTS} attempts"
+        ),
+    ))
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new().create(path)
+    }
 }
 
 /// Derive a guaranteed-safe internal Cargo package and binary
@@ -347,7 +415,6 @@ lto = "thin"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
 
@@ -404,6 +471,46 @@ mod tests {
                 "my program"
             })
         );
+    }
+
+    #[test]
+    fn scratch_creation_never_reuses_an_attacker_controlled_directory() {
+        let root = resolver_test_root("scratch_collision");
+        let injected = root.join("attacker-claimed");
+        let fresh = root.join("bop-claimed");
+        std::fs::create_dir(&injected).unwrap();
+        std::fs::write(
+            injected.join("build.rs"),
+            "compile_error!(\"attacker build script executed\");",
+        )
+        .unwrap();
+
+        let scratch =
+            claim_first_available_scratch_dir([injected.clone(), fresh.clone()]).unwrap();
+
+        assert_eq!(scratch, fresh);
+        assert!(!scratch.join("build.rs").exists());
+        assert_eq!(
+            std::fs::read_to_string(injected.join("build.rs")).unwrap(),
+            "compile_error!(\"attacker build script executed\");"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_creation_uses_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = resolver_test_root("scratch_permissions");
+        let scratch =
+            claim_first_available_scratch_dir([root.join("bop-claimed")]).unwrap();
+        let mode = std::fs::metadata(&scratch).unwrap().permissions().mode();
+
+        assert_eq!(mode & 0o077, 0, "scratch mode was {mode:o}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
