@@ -1,8 +1,8 @@
 //! Compact insertion-order sidecar for dictionary key lookup.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{string::String, vec::Vec};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::{string::String, vec::Vec};
 
 #[cfg(test)]

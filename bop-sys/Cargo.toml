@@ -21,8 +21,8 @@ name = "bop_sys"
 # std target. `default-features = false` here just opts out of
 # bundling the `bop-std` blob at this layer; we forward the
 # feature explicitly below so embedders still get it when they
-# want it.
-bop = { version = "0.4.0", path = "../bop", package = "bop-lang", default-features = false }
+# want it. Rust `std` itself is required by this host crate.
+bop = { version = "0.4.0", path = "../bop", package = "bop-lang", default-features = false, features = ["std"] }
 
 [features]
 default = ["bop-std"]

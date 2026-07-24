@@ -4,7 +4,7 @@
 //! These are pure-data operations on `Value`. Host-backed builtins like
 //! file I/O live in `bop-sys` instead.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
 use crate::error::BopError;
@@ -107,9 +107,9 @@ pub fn make_iter_done() -> Value {
 // parser module already uses `alloc::vec!` under no_std, so the
 // engines follow the same convention here. Nothing clever — just a
 // re-export that picks the right `vec!` macro per config.
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std as alloc_import;
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc as alloc_import;
 
 pub fn builtin_range(

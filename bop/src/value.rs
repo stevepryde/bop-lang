@@ -6,7 +6,7 @@
 //! call `bop_alloc`. This is enforced by the type system — code outside
 //! this module cannot access the private inner fields.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{
     collections::BTreeMap,
     format,
@@ -16,7 +16,7 @@ use alloc::{
     vec::Vec,
 };
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::{collections::BTreeMap, rc::{Rc, Weak}};
 
 use core::cell::RefCell;

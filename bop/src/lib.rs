@@ -141,27 +141,30 @@
 //! also enforce a fixed function-call depth. Limit failures are fatal and
 //! cannot be swallowed by Bop's `try_call`.
 //!
-//! The default `bop-std` feature bundles the `std.math`, `std.iter`,
+//! The default `std` feature enables Rust standard-library integration. The
+//! separate default `bop-std` feature bundles the `std.math`, `std.iter`,
 //! `std.collections`, `std.string`, `std.json`, and `std.test` modules as Bop
 //! source; resolve them through [`stdlib::resolve`]. Disable default features
-//! for the smallest core build. The opt-in `no_std` feature replaces
-//! standard-library floating-point operations with `libm`.
+//! to omit the bundled modules while keeping Rust `std` by explicitly enabling
+//! `std`. A genuine no_std build uses `default-features = false` plus the
+//! opt-in `no_std` feature, which replaces standard-library floating-point
+//! operations with `libm`. If Cargo unifies `std` and `no_std`, `std` wins.
 //!
 //! The complete language and embedding guides live at
 //! <https://bop-lang.com/docs/>.
 
-#![cfg_attr(feature = "no_std", no_std)]
+#![cfg_attr(all(feature = "no_std", not(feature = "std")), no_std)]
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 extern crate alloc;
 
-// The standard test harness remains available when `--all-features` selects
-// the library's `no_std` surface; make that test-only dependency explicit.
-#[cfg(all(test, feature = "no_std"))]
+// A genuine no_std unit-test build still uses Rust's standard test harness;
+// make that test-only dependency explicit.
+#[cfg(all(test, feature = "no_std", not(feature = "std")))]
 #[macro_use]
 extern crate std;
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{string::String, vec::Vec};
 
 pub mod error;
@@ -372,7 +375,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     use alloc::string::ToString;
     use std::cell::RefCell;
 

@@ -1,9 +1,9 @@
 //! AST → bytecode compilation. See `crate` docs for the instruction
 //! set overview.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{rc::Rc, string::{String, ToString}, vec, vec::Vec};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::rc::Rc;
 
 use bop::error::BopError;
@@ -12,9 +12,9 @@ use bop::parser::{
     UnaryOp, Visibility,
 };
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::collections::BTreeMap;
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::BTreeMap;
 
 use crate::chunk::{

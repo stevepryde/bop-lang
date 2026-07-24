@@ -1,4 +1,4 @@
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 
 use crate::builtins::{error, error_with_hint};

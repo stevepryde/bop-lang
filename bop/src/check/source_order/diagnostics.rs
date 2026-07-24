@@ -2,7 +2,7 @@ use super::{KnownEnum, LexicalEnv, TypeBinding};
 use crate::error::BopWarning;
 use crate::parser::{MatchArm, Pattern};
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::String, vec::Vec};
 
 pub(super) fn check_match_exhaustive(

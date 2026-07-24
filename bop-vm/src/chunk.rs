@@ -5,9 +5,9 @@
 use core::num::{NonZeroU32, NonZeroU64};
 use bop::parser::ParamMode;
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{rc::Rc, string::String, vec::Vec};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::rc::Rc;
 
 /// One bytecode operation.

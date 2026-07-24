@@ -1,8 +1,8 @@
 //! Structural validation for public, hand-built bytecode chunks.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{collections::BTreeSet, format, string::String, vec, vec::Vec};
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::collections::BTreeSet;
 
 use bop::error::BopError;

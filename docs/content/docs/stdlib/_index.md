@@ -56,10 +56,12 @@ The modules are plain Bop source — you can find the implementations in `bop/sr
 Disable default Cargo features to omit the bundled source:
 
 ```toml
-bop = { package = "bop-lang", version = "0.4", default-features = false }
+bop = { package = "bop-lang", version = "0.4", default-features = false, features = ["std"] }
 ```
 
 Embedders that keep the feature still choose whether to expose it: a custom
 host must call `bop::stdlib::resolve` from `BopHost::resolve_module`.
 Conversely, a host can bundle or load its own `std.*` source even when the
 feature is disabled. Nothing in the core language depends on the stdlib.
+The `std` feature shown above controls Rust standard-library integration; it is
+separate from the bundled Bop stdlib.

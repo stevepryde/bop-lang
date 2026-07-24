@@ -1,6 +1,6 @@
 //! Stateful host-callable tree-walker instances and shared ABI metadata.
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{format, string::String, vec::Vec};
 
 use crate::builtins::error;
@@ -8,9 +8,9 @@ use crate::{BopError, BopHost, BopLimits, ReplSession, Value};
 use core::cell::Cell;
 use std_or_alloc::rc::Rc;
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc as std_or_alloc;
-#[cfg(not(feature = "no_std"))]
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 use std as std_or_alloc;
 
 use crate::memory::{ActiveMemoryGuard, MemoryAccount};
@@ -176,7 +176,7 @@ impl Drop for OperationGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "no_std")]
+    #[cfg(all(feature = "no_std", not(feature = "std")))]
     use alloc::string::ToString;
     use std::cell::RefCell;
     use std::collections::BTreeMap;

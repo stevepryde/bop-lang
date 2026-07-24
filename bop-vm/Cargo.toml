@@ -20,11 +20,13 @@ name = "bop_vm"
 bop = { version = "0.4.0", path = "../bop", package = "bop-lang", default-features = false }
 
 [features]
-default = ["bop-std"]
+default = ["std", "bop-std"]
+# Keeps std-only host behavior enabled and forwards that choice to bop-lang.
+# When Cargo unifies `std` and `no_std`, `std` takes precedence.
+std = ["bop/std"]
 # Forwards to bop-lang's `no_std` feature — opt in when
 # building for bare-metal / edge wasm / embedded targets.
-# Default (std) users can ignore this entirely and won't pull
-# libm into their dep graph.
+# Use it with default features disabled for a genuine no_std build.
 no_std = ["bop/no_std"]
 # Forwards to bop-lang's `bop-std` feature — bundles the
 # Bop standard library (`use std.math`, `std.json`, …) at

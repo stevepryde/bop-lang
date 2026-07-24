@@ -12,7 +12,7 @@ mod source_order;
 use crate::error::BopWarning;
 use crate::parser::Stmt;
 
-#[cfg(feature = "no_std")]
+#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{string::String, vec::Vec};
 
 /// Run static checks without module source. Imported types remain opaque.
