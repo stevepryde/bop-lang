@@ -136,6 +136,130 @@ chmod +x "$artifact_dir/bop_entry"
 }
 
 #[test]
+fn compile_roots_cargo_config_discovery_at_the_invocation_directory() {
+    let root = temp_project();
+    let invocation_dir = root.join("user-project");
+    let scratch_parent = root.join("scratch-parent");
+    let fake_bin = root.join("fake-bin");
+    let cargo_log = root.join("cargo-invocation.txt");
+    let input = invocation_dir.join("entry.bop");
+    let output = invocation_dir.join("compiled-entry");
+    let scratch_config = scratch_parent.join(".cargo/config.toml");
+    let user_config = invocation_dir.join(".cargo/config.toml");
+    std::fs::create_dir_all(scratch_config.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    std::fs::write(
+        &scratch_config,
+        "[build]\n# inert scratch ancestor marker\n",
+    )
+    .unwrap();
+    std::fs::write(&user_config, "[term]\n# intentional user config marker\n").unwrap();
+    std::fs::write(&input, "print(\"compiled\")").unwrap();
+
+    // Record only harmless process metadata. The scratch ancestor config is
+    // never interpreted or given executable settings: the working directory
+    // and explicit paths are sufficient to prove Cargo's discovery boundary.
+    let fake_cargo = fake_bin.join("cargo");
+    std::fs::write(
+        &fake_cargo,
+        r#"#!/bin/sh
+set -eu
+if [ "${1-}" = "--version" ]; then
+    echo "cargo 1.88.0"
+    exit 0
+fi
+
+{
+    pwd -P
+    printf '%s\n' "$@"
+} > "$FAKE_CARGO_LOG"
+
+target_dir=""
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--target-dir" ]; then
+        shift
+        target_dir="$1"
+    fi
+    shift
+done
+
+test -n "$target_dir"
+mkdir -p "$target_dir/release"
+printf '#!/bin/sh\nexit 0\n' > "$target_dir/release/bop_entry"
+chmod +x "$target_dir/release/bop_entry"
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_cargo).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&fake_cargo, permissions).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_bop"))
+        .arg("compile")
+        .arg("entry.bop")
+        .arg("-o")
+        .arg("compiled-entry")
+        .arg("--keep")
+        .current_dir(&invocation_dir)
+        .env("PATH", path_with_fake_bin(&fake_bin))
+        .env("TMPDIR", &scratch_parent)
+        .env("FAKE_CARGO_LOG", &cargo_log)
+        .output()
+        .expect("run bop compile");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+
+    assert_eq!(result.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(output.is_file(), "relative output should use the user cwd");
+
+    let recorded: Vec<_> = std::fs::read_to_string(&cargo_log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(recorded.len(), 7, "unexpected Cargo command: {recorded:?}");
+
+    let canonical_invocation_dir = std::fs::canonicalize(&invocation_dir).unwrap();
+    let canonical_scratch_parent = std::fs::canonicalize(&scratch_parent).unwrap();
+    let manifest_path = PathBuf::from(&recorded[4]);
+    let target_dir = PathBuf::from(&recorded[6]);
+    assert_eq!(PathBuf::from(&recorded[0]), canonical_invocation_dir);
+    assert_eq!(
+        &recorded[1..],
+        &[
+            "build",
+            "--release",
+            "--manifest-path",
+            recorded[4].as_str(),
+            "--target-dir",
+            recorded[6].as_str(),
+        ]
+    );
+    assert!(manifest_path.is_absolute());
+    assert!(target_dir.is_absolute());
+    assert_eq!(manifest_path.file_name().unwrap(), "Cargo.toml");
+    assert_eq!(target_dir, manifest_path.parent().unwrap().join("target"));
+    assert!(
+        manifest_path.starts_with(&canonical_scratch_parent),
+        "generated manifest should remain under the selected temp hierarchy"
+    );
+    assert!(
+        scratch_config.is_file(),
+        "the inert config marker must remain above the scratch leaf"
+    );
+    assert!(
+        user_config.is_file(),
+        "Cargo should still discover intentional config from the user cwd"
+    );
+    assert!(
+        !canonical_invocation_dir.starts_with(&canonical_scratch_parent),
+        "scratch ancestry must not be part of Cargo config discovery"
+    );
+
+    std::fs::remove_dir_all(root).expect("remove temporary project");
+}
+
+#[test]
 fn extensionless_source_uses_distinct_default_binary_name() {
     let project = temp_project();
     let fake_bin = project.join("fake-bin");
