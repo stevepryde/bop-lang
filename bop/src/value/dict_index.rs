@@ -161,7 +161,7 @@ impl DictKeyIndex {
         self.probes.get()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "std", not(feature = "no_std"))))]
     pub(super) fn rehash_moves(&self) -> usize {
         self.rehash_moves.get()
     }
@@ -171,7 +171,7 @@ impl DictKeyIndex {
         self.len
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "std", not(feature = "no_std"))))]
     pub(super) fn slot_count(&self) -> usize {
         self.slots.len()
     }

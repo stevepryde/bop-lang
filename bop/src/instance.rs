@@ -6,14 +6,7 @@ use alloc::{format, string::String, vec::Vec};
 use crate::builtins::error;
 use crate::{BopError, BopHost, BopLimits, ReplSession, Value};
 use core::cell::Cell;
-use std_or_alloc::rc::Rc;
-
-#[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc as std_or_alloc;
-#[cfg(any(feature = "std", not(feature = "no_std")))]
-use std as std_or_alloc;
-
-use crate::memory::{ActiveMemoryGuard, MemoryAccount};
+use crate::memory::MemoryContext;
 
 /// A public root function exposed by a loaded [`crate::BopInstance`].
 ///
@@ -54,7 +47,7 @@ pub struct BopInstance {
     entries: Vec<EntryPoint>,
     limits: BopLimits,
     in_operation: Cell<bool>,
-    memory: Rc<MemoryAccount>,
+    memory: MemoryContext,
 }
 
 impl BopInstance {
@@ -67,13 +60,10 @@ impl BopInstance {
     ) -> Result<Self, BopError> {
         let stmts = crate::parse(source)?;
         let mut session = ReplSession::new();
-        let memory = MemoryAccount::__new(limits.max_memory);
-        {
-            let _memory = ActiveMemoryGuard::__activate(&memory);
-            session.run_stmts(&stmts, host, limits)?;
-            if memory.__exceeded() {
-                return Err(memory_limit_error());
-            }
+        let memory = MemoryContext::__new(limits.max_memory);
+        session.run_stmts_in(&stmts, host, limits, &memory)?;
+        if memory.__exceeded() {
+            return Err(memory_limit_error());
         }
         let entries = session.instance_entries();
         Ok(Self {
@@ -116,8 +106,9 @@ impl BopInstance {
         if self.memory.__exceeded() {
             return Err(memory_limit_error());
         }
-        let _memory = ActiveMemoryGuard::__activate(&self.memory);
-        let result = self.session.call_named(name, args, host, &self.limits);
+        let result = self
+            .session
+            .call_named(name, args, host, &self.limits, &self.memory);
         if self.memory.__exceeded() {
             Err(memory_limit_error())
         } else {
@@ -137,12 +128,12 @@ impl BopInstance {
         if self.memory.__exceeded() {
             return Err(memory_limit_error());
         }
-        let _memory = ActiveMemoryGuard::__activate(&self.memory);
-        let result = self.session.call_fn(
+        let result = self.session.call_fn_in(
             callable.clone(),
             args.to_vec(),
             host,
             &self.limits,
+            &self.memory,
         );
         if self.memory.__exceeded() {
             Err(memory_limit_error())
@@ -385,13 +376,13 @@ mod tests {
             &BopLimits::standard(),
         )
         .unwrap();
-        let loaded_bytes = instance.memory.used();
+        let loaded_bytes = instance.memory.__used();
         assert!(loaded_bytes > 0);
 
         instance.call("facade_pop", &[], &mut host).unwrap();
-        assert_eq!(instance.memory.used(), loaded_bytes);
+        assert_eq!(instance.memory.__used(), loaded_bytes);
         instance.call("direct_pop", &[], &mut host).unwrap();
-        assert_eq!(instance.memory.used(), loaded_bytes);
+        assert_eq!(instance.memory.__used(), loaded_bytes);
     }
 
     #[test]
@@ -409,11 +400,11 @@ mod tests {
             &BopLimits::standard(),
         )
         .unwrap();
-        let loaded_bytes = instance.memory.used();
+        let loaded_bytes = instance.memory.__used();
         assert!(loaded_bytes > 0);
 
         instance.call("clear", &[], &mut host).unwrap();
-        let cleared_bytes = instance.memory.used();
+        let cleared_bytes = instance.memory.__used();
         assert!(cleared_bytes < loaded_bytes);
 
         let mut empty_modules = BTreeMap::new();
@@ -429,7 +420,7 @@ mod tests {
             &BopLimits::standard(),
         )
         .unwrap();
-        assert_eq!(cleared_bytes, empty.memory.used());
+        assert_eq!(cleared_bytes, empty.memory.__used());
     }
 
     #[test]
@@ -509,10 +500,10 @@ mod tests {
         );
         let mut host = WrappingModuleHost { modules };
         let mut instance = BopInstance::load(root, &mut host, &BopLimits::standard()).unwrap();
-        let loaded_bytes = instance.memory.used();
+        let loaded_bytes = instance.memory.__used();
         assert!(loaded_bytes > 0);
         instance.call("clear", &[], &mut host).unwrap();
-        let cleared_bytes = instance.memory.used();
+        let cleared_bytes = instance.memory.__used();
         assert!(cleared_bytes < loaded_bytes);
 
         let mut empty_modules = BTreeMap::new();
@@ -523,7 +514,7 @@ mod tests {
         );
         let mut empty_host = WrappingModuleHost { modules: empty_modules };
         let empty = BopInstance::load(root, &mut empty_host, &BopLimits::standard()).unwrap();
-        assert_eq!(cleared_bytes, empty.memory.used());
+        assert_eq!(cleared_bytes, empty.memory.__used());
     }
 
     #[test]
@@ -677,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn host_allocations_are_suspended_and_final_return_is_checked() {
+    fn host_allocations_are_untracked_and_final_return_is_checked() {
         let limits = BopLimits { max_steps: 100, max_memory: 32 };
         let mut host = RetainingHost { retained: None };
         let mut instance = BopInstance::load(
@@ -691,7 +682,7 @@ mod tests {
         let error = instance.call("too_large", &[], &mut host).unwrap_err();
         assert!(error.is_fatal);
         assert!(error.message.contains("Memory limit"));
-        assert_eq!(instance.memory.used(), 0);
+        assert_eq!(instance.memory.__used(), 0);
         instance.call("host_only", &[], &mut host).unwrap();
     }
 
@@ -712,10 +703,7 @@ mod tests {
 
     #[test]
     fn external_host_values_are_free_until_the_instance_first_mutates_them() {
-        let external = {
-            let _suspended = ActiveMemoryGuard::__suspend();
-            Value::new_array((0..256).map(Value::Int).collect())
-        };
+        let external = Value::new_array((0..256).map(Value::Int).collect());
         let limits = BopLimits { max_steps: 100, max_memory: 64 };
         let mut host = ExternalValueHost { value: Some(external) };
         let mut instance = BopInstance::load(
@@ -726,12 +714,12 @@ mod tests {
         .unwrap();
 
         instance.call("keep", &[], &mut host).unwrap();
-        assert_eq!(instance.memory.used(), 0);
+        assert_eq!(instance.memory.__used(), 0);
 
         let mutation_error = instance.call("mutate", &[], &mut host).unwrap_err();
         assert!(mutation_error.is_fatal);
         assert!(mutation_error.message.contains("Memory limit"));
-        assert!(instance.memory.used() > limits.max_memory);
+        assert!(instance.memory.__used() > limits.max_memory);
 
         let poisoned_error = instance.call("harmless", &[], &mut host).unwrap_err();
         assert!(poisoned_error.is_fatal);
@@ -747,19 +735,19 @@ mod tests {
             &BopLimits::standard(),
         )
         .unwrap();
-        assert_eq!(instance.memory.used(), 0);
+        assert_eq!(instance.memory.__used(), 0);
 
         let retained = instance.call("make", &[], &mut host).unwrap();
-        let retained_bytes = instance.memory.used();
+        let retained_bytes = instance.memory.__used();
         assert!(retained_bytes > 0);
         instance.call("harmless", &[], &mut host).unwrap();
-        assert_eq!(instance.memory.used(), retained_bytes);
+        assert_eq!(instance.memory.__used(), retained_bytes);
 
         let second_owner = retained.clone();
         drop(retained);
-        assert_eq!(instance.memory.used(), retained_bytes);
+        assert_eq!(instance.memory.__used(), retained_bytes);
         drop(second_owner);
-        assert_eq!(instance.memory.used(), 0);
+        assert_eq!(instance.memory.__used(), 0);
     }
 
     #[test]
@@ -771,20 +759,20 @@ mod tests {
         let mut second = BopInstance::load(source, &mut host, &limits).unwrap();
 
         let first_value = first.call("make", &[Value::Int(1)], &mut host).unwrap();
-        let first_bytes = first.memory.used();
+        let first_bytes = first.memory.__used();
         assert!(first_bytes > 0);
-        assert_eq!(second.memory.used(), 0);
+        assert_eq!(second.memory.__used(), 0);
 
         let second_value = second.call("make", &[Value::Int(2)], &mut host).unwrap();
-        let second_bytes = second.memory.used();
+        let second_bytes = second.memory.__used();
         assert!(second_bytes > 0);
-        assert_eq!(first.memory.used(), first_bytes);
+        assert_eq!(first.memory.__used(), first_bytes);
 
         drop(first_value);
-        assert_eq!(first.memory.used(), 0);
-        assert_eq!(second.memory.used(), second_bytes);
+        assert_eq!(first.memory.__used(), 0);
+        assert_eq!(second.memory.__used(), second_bytes);
         drop(second_value);
-        assert_eq!(second.memory.used(), 0);
+        assert_eq!(second.memory.__used(), 0);
     }
 
     struct HookAllocatingHost {
@@ -831,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn every_host_hook_runs_with_instance_accounting_suspended() {
+    fn every_host_hook_leaves_instance_accounting_unchanged() {
         let limits = BopLimits { max_steps: 100, max_memory: 64 };
         let mut host = HookAllocatingHost { retained: RefCell::new(Vec::new()) };
         let mut instance = BopInstance::load(
@@ -840,7 +828,7 @@ mod tests {
             &limits,
         )
         .unwrap();
-        assert_eq!(instance.memory.used(), 0);
+        assert_eq!(instance.memory.__used(), 0);
 
         instance.call("print_it", &[], &mut host).unwrap();
         instance.call("host_it", &[], &mut host).unwrap();
@@ -850,7 +838,7 @@ mod tests {
             .friendly_hint
             .as_deref()
             .is_some_and(|hint| hint.contains("host hint")));
-        assert_eq!(instance.memory.used(), 0);
+        assert_eq!(instance.memory.__used(), 0);
         assert!(host.retained.borrow().len() >= 8);
     }
 

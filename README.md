@@ -187,6 +187,14 @@ bop-lang = { version = "0.4", default-features = false, features = ["no_std"] }
 bop-vm   = { version = "0.4", default-features = false, features = ["no_std"] }
 ```
 
+Memory accounting in the walker, VM, and generated sandbox runtime is carried
+by an explicit per-engine context, so concurrent or nested no_std executions
+cannot charge one another. The old ambient `bop_memory_*` compatibility hooks
+are available only with `std`; custom no_std engine integrations must pass an
+explicit context through Bop's context-aware internal runtime APIs. Values
+created by a host through the public `Value` constructors remain untracked
+until an engine mutation copies their backing storage into its own account.
+
 ## Crates in this workspace
 
 - [`bop-lang`](bop/) — the language core (parser, walker, `BopHost` trait, `Value`). The Bop stdlib (`use std.math`, `std.json`, …) ships inside this crate as bundled Bop source, gated behind the `bop-std` feature (on by default).

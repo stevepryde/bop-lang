@@ -136,15 +136,14 @@ pub struct Options {
     pub use_bop_sys: bool,
     /// If true, the emitted code enforces [`bop::BopLimits`]: step
     /// counts are checked at every loop iteration and function
-    /// entry, `bop::memory`'s allocation hooks are initialised with
-    /// `max_memory`, and [`bop::BopHost::on_tick`] fires at the
+    /// entry, an explicit memory context enforces `max_memory`, and
+    /// [`bop::BopHost::on_tick`] fires at the
     /// same checkpoints. The generated `run` takes a `&BopLimits`
     /// parameter in this mode.
     ///
-    /// When false (the default), the emitted code is straight-line
-    /// Rust with no accounting overhead: `run` takes only a host,
-    /// and runaway programs are the caller's problem. This matches
-    /// the plan's "hot path should be clean" goal.
+    /// When false (the default), the emitted code uses an untracked
+    /// memory context and has no limit-checking overhead: `run` takes
+    /// only a host, and runaway programs are the caller's problem.
     pub sandbox: bool,
     /// If `Some(name)`, wrap the entire emitted output in
     /// `pub mod <name> { ... }`. Use this when you want to embed

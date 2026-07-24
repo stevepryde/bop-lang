@@ -3,6 +3,7 @@ use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 
 use crate::builtins::{error, error_with_hint};
 use crate::error::BopError;
+use crate::memory::MemoryContext;
 use crate::ops::{
     normalize_element_index, normalize_insert_index, normalize_slice_bound, numeric_index,
 };
@@ -24,6 +25,17 @@ pub fn array_method(
     args: &[Value],
     line: u32,
 ) -> Result<(Value, Option<Value>), BopError> {
+    array_method_in(arr, method, args, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn array_method_in(
+    arr: &[Value],
+    method: &str,
+    args: &[Value],
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<(Value, Option<Value>), BopError> {
     match method {
         "len" => Ok((Value::Int(arr.len() as i64), None)),
         "push" => {
@@ -32,12 +44,12 @@ pub fn array_method(
             }
             let mut new_arr = arr.to_vec();
             new_arr.push(args[0].clone());
-            Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
+            Ok((Value::None, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
         }
         "pop" => {
             let mut new_arr = arr.to_vec();
             let popped = new_arr.pop().unwrap_or(Value::None);
-            Ok((popped, Some(Value::try_new_array(new_arr, line)?)))
+            Ok((popped, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
         }
         "has" => {
             if args.len() != 1 {
@@ -62,7 +74,7 @@ pub fn array_method(
                 .ok_or_else(|| error(line, format!("Insert index {} is out of bounds", i)))?;
             let mut new_arr = arr.to_vec();
             new_arr.insert(actual, args[1].clone());
-            Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
+            Ok((Value::None, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
         }
         "remove" => {
             if args.len() != 1 {
@@ -73,7 +85,7 @@ pub fn array_method(
                 .ok_or_else(|| error(line, format!("Remove index {} is out of bounds", i)))?;
             let mut new_arr = arr.to_vec();
             let removed = new_arr.remove(actual);
-            Ok((removed, Some(Value::try_new_array(new_arr, line)?)))
+            Ok((removed, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
         }
         "slice" => {
             if args.len() != 2 {
@@ -84,17 +96,17 @@ pub fn array_method(
             let end = normalize_slice_bound(end, arr.len());
             let start = normalize_slice_bound(start, arr.len()).min(end);
             let slice = arr[start..end].to_vec();
-            Ok((Value::try_new_array(slice, line)?, None))
+            Ok((Value::__try_new_array_in(slice, line, memory)?, None))
         }
         "reverse" => {
             let mut new_arr = arr.to_vec();
             new_arr.reverse();
-            Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
+            Ok((Value::None, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
         }
         "sort" => {
             let mut new_arr = arr.to_vec();
             new_arr.sort_by(compare_array_values);
-            Ok((Value::None, Some(Value::try_new_array(new_arr, line)?)))
+            Ok((Value::None, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
         }
         "join" => {
             if args.len() != 1 {
@@ -109,7 +121,7 @@ pub fn array_method(
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
                 .join(sep);
-            Ok((Value::new_str(result), None))
+            Ok((Value::__new_str_in(result, memory), None))
         }
         "iter" => {
             crate::builtins::expect_args("iter", args, 0, line)?;
@@ -117,7 +129,7 @@ pub fn array_method(
             // source array must not poke the iterator. Cheap
             // because every inner Value::Clone is either a
             // primitive copy or an Rc bump.
-            Ok((Value::try_new_array_iter(arr.to_vec(), line)?, None))
+            Ok((Value::__try_new_array_iter_in(arr.to_vec(), line, memory)?, None))
         }
         _ => Err(error(line, format!("Array doesn't have a .{}() method", method))),
     }
@@ -133,16 +145,27 @@ pub fn array_method_mut(
     args: Vec<Value>,
     line: u32,
 ) -> Result<Value, BopError> {
+    array_method_mut_in(arr, method, args, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn array_method_mut_in(
+    arr: &mut BopArray,
+    method: &str,
+    args: Vec<Value>,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
     match method {
         "push" => {
             if args.len() != 1 {
                 return Err(error(line, ".push() needs exactly 1 argument"));
             }
             let value = args.into_iter().next().expect("length checked");
-            arr.try_push(value, line)?;
+            arr.__try_push_in(value, line, memory)?;
             Ok(Value::None)
         }
-        "pop" => Ok(arr.pop().unwrap_or(Value::None)),
+        "pop" => Ok(arr.__pop_in(memory).unwrap_or(Value::None)),
         "insert" => {
             if args.len() != 2 {
                 return Err(error(line, ".insert() needs 2 arguments: index and value"));
@@ -154,7 +177,7 @@ pub fn array_method_mut(
             let actual = normalize_insert_index(index, arr.len()).ok_or_else(|| {
                 error(line, format!("Insert index {} is out of bounds", index))
             })?;
-            arr.try_insert(actual, value, line)?;
+            arr.__try_insert_in(actual, value, line, memory)?;
             Ok(Value::None)
         }
         "remove" => {
@@ -166,14 +189,14 @@ pub fn array_method_mut(
             let actual = normalize_element_index(index, arr.len()).ok_or_else(|| {
                 error(line, format!("Remove index {} is out of bounds", index))
             })?;
-            Ok(arr.remove(actual))
+            Ok(arr.__remove_in(actual, memory))
         }
         "reverse" => {
-            arr.reverse();
+            arr.__reverse_in(memory);
             Ok(Value::None)
         }
         "sort" => {
-            arr.sort_by(compare_array_values);
+            arr.__sort_by_in(compare_array_values, memory);
             Ok(Value::None)
         }
         _ => Err(error(
@@ -196,6 +219,23 @@ pub fn transactional_array_method(
     args: Vec<Value>,
     line: u32,
 ) -> Result<Value, BopError> {
+    transactional_array_method_in(
+        binding,
+        method,
+        args,
+        line,
+        &MemoryContext::__legacy_current(),
+    )
+}
+
+#[doc(hidden)]
+pub fn transactional_array_method_in(
+    binding: &mut Value,
+    method: &str,
+    args: Vec<Value>,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
     let mut staged = core::mem::replace(binding, Value::None);
     let Value::Array(array) = &mut staged else {
         *binding = staged;
@@ -210,7 +250,7 @@ pub fn transactional_array_method(
         _ => None,
     };
 
-    let result = array_method_mut(array, method, args, line);
+    let result = array_method_mut_in(array, method, args, line, memory);
     let value = match result {
         Ok(value) => value,
         Err(error) => {
@@ -218,13 +258,13 @@ pub fn transactional_array_method(
             return Err(error);
         }
     };
-    if crate::memory::bop_memory_exceeded() {
+    if memory.__exceeded() {
         if let Some(index) = growth_index {
             let Value::Array(array) = &mut staged else {
                 unreachable!("staged receiver stayed an array")
             };
             if index < array.len() {
-                array.remove(index);
+                array.__remove_in(index, memory);
             }
         }
         *binding = staged;
@@ -262,6 +302,17 @@ pub fn string_method(
     method: &str,
     args: &[Value],
     line: u32,
+) -> Result<(Value, Option<Value>), BopError> {
+    string_method_in(s, method, args, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn string_method_in(
+    s: &str,
+    method: &str,
+    args: &[Value],
+    line: u32,
+    memory: &MemoryContext,
 ) -> Result<(Value, Option<Value>), BopError> {
     match method {
         "len" => Ok((Value::Int(s.chars().count() as i64), None)),
@@ -316,9 +367,9 @@ pub fn string_method(
             };
             let parts: Vec<Value> = s
                 .split(sep)
-                .map(|p| Value::new_str(p.to_string()))
+                .map(|p| Value::__new_str_in(p.to_string(), memory))
                 .collect();
-            Ok((Value::try_new_array(parts, line)?, None))
+            Ok((Value::__try_new_array_in(parts, line, memory)?, None))
         }
         "replace" => {
             if args.len() != 2 {
@@ -333,19 +384,19 @@ pub fn string_method(
                 _ => return Err(error(line, ".replace() arguments must be strings")),
             };
             let result = s.replace(old, new);
-            Ok((Value::new_str(result), None))
+            Ok((Value::__new_str_in(result, memory), None))
         }
         "upper" => {
             let result = s.to_uppercase();
-            Ok((Value::new_str(result), None))
+            Ok((Value::__new_str_in(result, memory), None))
         }
         "lower" => {
             let result = s.to_lowercase();
-            Ok((Value::new_str(result), None))
+            Ok((Value::__new_str_in(result, memory), None))
         }
         "trim" => {
             let result = s.trim().to_string();
-            Ok((Value::new_str(result), None))
+            Ok((Value::__new_str_in(result, memory), None))
         }
         "slice" => {
             if args.len() != 2 {
@@ -357,7 +408,7 @@ pub fn string_method(
             let end = normalize_slice_bound(end, chars.len());
             let start = normalize_slice_bound(start, chars.len()).min(end);
             let result: String = chars[start..end].iter().collect();
-            Ok((Value::new_str(result), None))
+            Ok((Value::__new_str_in(result, memory), None))
         }
         "to_int" => {
             if !args.is_empty() {
@@ -387,7 +438,7 @@ pub fn string_method(
         "iter" => {
             crate::builtins::expect_args("iter", args, 0, line)?;
             let chars: Vec<char> = s.chars().collect();
-            Ok((Value::new_string_iter(chars), None))
+            Ok((Value::__new_string_iter_in(chars, memory), None))
         }
         _ => Err(error(line, format!("String doesn't have a .{}() method", method))),
     }
@@ -532,18 +583,29 @@ pub fn dict_method(
     args: &[Value],
     line: u32,
 ) -> Result<(Value, Option<Value>), BopError> {
+    dict_method_in(entries, method, args, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn dict_method_in(
+    entries: &[(String, Value)],
+    method: &str,
+    args: &[Value],
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<(Value, Option<Value>), BopError> {
     match method {
         "len" => Ok((Value::Int(entries.len() as i64), None)),
         "keys" => {
             let keys: Vec<Value> = entries
                 .iter()
-                .map(|(k, _)| Value::new_str(k.clone()))
+                .map(|(k, _)| Value::__new_str_in(k.clone(), memory))
                 .collect();
-            Ok((Value::try_new_array(keys, line)?, None))
+            Ok((Value::__try_new_array_in(keys, line, memory)?, None))
         }
         "values" => {
             let vals: Vec<Value> = entries.iter().map(|(_, v)| v.clone()).collect();
-            Ok((Value::try_new_array(vals, line)?, None))
+            Ok((Value::__try_new_array_in(vals, line, memory)?, None))
         }
         "has" => {
             if args.len() != 1 {
@@ -560,7 +622,7 @@ pub fn dict_method(
             // Matches `for k in dict` semantics: iterate keys
             // in declaration order.
             let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
-            Ok((Value::new_dict_iter(keys), None))
+            Ok((Value::__new_dict_iter_in(keys, memory), None))
         }
         _ => Err(error(line, format!("Dict doesn't have a .{}() method", method))),
     }
@@ -580,24 +642,41 @@ pub fn common_method(
     args: &[Value],
     line: u32,
 ) -> Result<Option<(Value, Option<Value>)>, BopError> {
+    common_method_in(
+        receiver,
+        method,
+        args,
+        line,
+        &MemoryContext::__legacy_current(),
+    )
+}
+
+#[doc(hidden)]
+pub fn common_method_in(
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Option<(Value, Option<Value>)>, BopError> {
     match method {
         "type" => {
             crate::builtins::expect_args("type", args, 0, line)?;
             Ok(Some((
-                Value::new_str(receiver.type_name().to_string()),
+                Value::__new_str_in(receiver.type_name().to_string(), memory),
                 None,
             )))
         }
         "to_str" => {
             crate::builtins::expect_args("to_str", args, 0, line)?;
             Ok(Some((
-                Value::new_str(format!("{}", receiver)),
+                Value::__new_str_in(format!("{}", receiver), memory),
                 None,
             )))
         }
         "inspect" => {
             crate::builtins::expect_args("inspect", args, 0, line)?;
-            Ok(Some((Value::new_str(receiver.inspect()), None)))
+            Ok(Some((Value::__new_str_in(receiver.inspect(), memory), None)))
         }
         // `.is_none()` / `.is_some()` — dynamic-typing's answer
         // to `Option`. Any variable can hold `none` (missing
@@ -1037,23 +1116,43 @@ pub fn result_method(
 /// `builtins` but specialised to the "wrap a value" case each
 /// engine's callable dispatch uses.
 pub fn make_result_ok(value: Value, line: u32) -> Result<Value, BopError> {
-    Value::try_new_enum_tuple(
+    make_result_ok_in(value, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn make_result_ok_in(
+    value: Value,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    Value::__try_new_enum_tuple_in(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Ok"),
         alloc_vec_of(value),
         line,
+        memory,
     )
 }
 
 /// Same as [`make_result_ok`] but for `Err`.
 pub fn make_result_err(value: Value, line: u32) -> Result<Value, BopError> {
-    Value::try_new_enum_tuple(
+    make_result_err_in(value, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn make_result_err_in(
+    value: Value,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    Value::__try_new_enum_tuple_in(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Err"),
         alloc_vec_of(value),
         line,
+        memory,
     )
 }
 
@@ -1084,7 +1183,24 @@ pub fn iter_method(
     args: &[Value],
     line: u32,
 ) -> Result<(Value, Option<Value>), BopError> {
-    use crate::builtins::{expect_args, make_iter_done, make_iter_next};
+    iter_method_in(
+        receiver,
+        method,
+        args,
+        line,
+        &MemoryContext::__legacy_current(),
+    )
+}
+
+#[doc(hidden)]
+pub fn iter_method_in(
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<(Value, Option<Value>), BopError> {
+    use crate::builtins::{expect_args, make_iter_done_in, make_iter_next_in};
     let cell = match receiver {
         Value::Iter(cell) => cell,
         _ => unreachable!("iter_method called on non-iterator receiver"),
@@ -1093,9 +1209,9 @@ pub fn iter_method(
         "next" => {
             expect_args("next", args, 0, line)?;
             let mut inner = cell.borrow_mut();
-            match inner.next() {
-                Some(v) => Ok((make_iter_next(v, line)?, None)),
-                None => Ok((make_iter_done(), None)),
+            match inner.__next_in(memory) {
+                Some(v) => Ok((make_iter_next_in(v, line, memory)?, None)),
+                None => Ok((make_iter_done_in(memory), None)),
             }
         }
         "iter" => {

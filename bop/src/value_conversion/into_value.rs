@@ -255,7 +255,7 @@ where
     Value::try_new_dict(values, 0).map_err(ValueConversionError::construction)
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "std", not(feature = "no_std"))))]
 mod tests {
     use crate::memory::{bop_memory_init, bop_memory_used};
 

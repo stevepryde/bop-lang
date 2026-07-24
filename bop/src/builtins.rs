@@ -8,7 +8,7 @@
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
 use crate::error::BopError;
-use crate::memory::bop_would_exceed;
+use crate::memory::MemoryContext;
 use crate::parser::{VariantDecl, VariantKind};
 use crate::value::Value;
 
@@ -83,23 +83,39 @@ pub fn builtin_iter_variants() -> Vec<VariantDecl> {
 /// caller's pattern against `Iter::Next(v)` fires regardless of
 /// which module the iterator's `.next()` was declared in.
 pub fn make_iter_next(value: Value, line: u32) -> Result<Value, BopError> {
+    make_iter_next_in(value, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn make_iter_next_in(
+    value: Value,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
     let items: Vec<Value> = alloc_import::vec![value];
-    Value::try_new_enum_tuple(
+    Value::__try_new_enum_tuple_in(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Iter"),
         String::from("Next"),
         items,
         line,
+        memory,
     )
 }
 
 /// Build the `Iter::Done` sentinel. Carries the builtin module
 /// path for the same matching reason as [`make_iter_next`].
 pub fn make_iter_done() -> Value {
-    Value::new_enum_unit(
+    make_iter_done_in(&MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn make_iter_done_in(memory: &MemoryContext) -> Value {
+    Value::__new_enum_unit_in(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Iter"),
         String::from("Done"),
+        memory,
     )
 }
 
@@ -116,6 +132,21 @@ pub fn builtin_range(
     args: &[Value],
     line: u32,
     rand_state: &mut u64,
+) -> Result<Value, BopError> {
+    builtin_range_in(
+        args,
+        line,
+        rand_state,
+        &MemoryContext::__legacy_current(),
+    )
+}
+
+#[doc(hidden)]
+pub fn builtin_range_in(
+    args: &[Value],
+    line: u32,
+    rand_state: &mut u64,
+    memory: &MemoryContext,
 ) -> Result<Value, BopError> {
     let _ = rand_state; // unused here, keeping signature uniform
     // `range` operates in integer space — matches Python and
@@ -150,7 +181,7 @@ pub fn builtin_range(
     let bytes = len
         .checked_mul(core::mem::size_of::<Value>())
         .ok_or_else(|| range_memory_error(line))?;
-    if bop_would_exceed(bytes) {
+    if memory.__would_exceed(bytes) {
         return Err(range_memory_error(line));
     }
 
@@ -169,7 +200,7 @@ pub fn builtin_range(
                 .ok_or_else(|| error(line, "range arithmetic overflow"))?;
         }
     }
-    Value::try_new_array(result, line)
+    Value::__try_new_array_in(result, line, memory)
 }
 
 /// Return the exact number of values produced by a non-zero-step range.
@@ -444,13 +475,23 @@ pub fn error_fatal(line: u32, message: impl Into<String>) -> BopError {
 /// matches it via `Result::Ok(v)` resolves `Result` to the same
 /// builtin in its own type-binding scope.
 pub fn make_try_call_ok(value: Value, line: u32) -> Result<Value, BopError> {
+    make_try_call_ok_in(value, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn make_try_call_ok_in(
+    value: Value,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
     let items: Vec<Value> = alloc_import::vec![value];
-    Value::try_new_enum_tuple(
+    Value::__try_new_enum_tuple_in(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Ok"),
         items,
         line,
+        memory,
     )
 }
 
@@ -459,7 +500,12 @@ pub fn make_try_call_ok(value: Value, line: u32) -> Result<Value, BopError> {
 /// `RuntimeError` is also a builtin — same `<builtin>` module
 /// path as `Result`.
 pub fn make_try_call_err(err: &BopError) -> Value {
-    let message = Value::new_str(err.message.clone());
+    make_try_call_err_in(err, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn make_try_call_err_in(err: &BopError, memory: &MemoryContext) -> Value {
+    let message = Value::__new_str_in(err.message.clone(), memory);
     // Line numbers are integers — use Int now that phase 6
     // distinguishes them from floats.
     let line = Value::Int(err.line.unwrap_or(0) as i64);
@@ -467,24 +513,45 @@ pub fn make_try_call_err(err: &BopError) -> Value {
         (String::from("message"), message),
         (String::from("line"), line),
     ];
-    let rt_err = Value::new_struct(
+    let rt_err = Value::__try_new_struct_in(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("RuntimeError"),
         fields,
-    );
+        0,
+        memory,
+    )
+    .expect("builtin RuntimeError has bounded ownership depth");
     let items: Vec<Value> = alloc_import::vec![rt_err];
-    Value::new_enum_tuple(
+    Value::__try_new_enum_tuple_in(
         String::from(crate::value::BUILTIN_MODULE_PATH),
         String::from("Result"),
         String::from("Err"),
         items,
+        0,
+        memory,
     )
+    .expect("builtin Result::Err has bounded ownership depth")
 }
 
 /// Pre-flight check for string repeat
 pub fn check_string_repeat_memory(len: usize, count: usize, line: u32) -> Result<(), BopError> {
+    check_string_repeat_memory_in(
+        len,
+        count,
+        line,
+        &MemoryContext::__legacy_current(),
+    )
+}
+
+#[doc(hidden)]
+pub fn check_string_repeat_memory_in(
+    len: usize,
+    count: usize,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<(), BopError> {
     let result_len = len.saturating_mul(count);
-    if bop_would_exceed(result_len) {
+    if memory.__would_exceed(result_len) {
         Err(error_fatal_with_hint(
             line,
             "Memory limit exceeded",
@@ -497,8 +564,23 @@ pub fn check_string_repeat_memory(len: usize, count: usize, line: u32) -> Result
 
 /// Pre-flight check for string concat
 pub fn check_string_concat_memory(a_len: usize, b_len: usize, line: u32) -> Result<(), BopError> {
+    check_string_concat_memory_in(
+        a_len,
+        b_len,
+        line,
+        &MemoryContext::__legacy_current(),
+    )
+}
+
+#[doc(hidden)]
+pub fn check_string_concat_memory_in(
+    a_len: usize,
+    b_len: usize,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<(), BopError> {
     let result_len = a_len + b_len;
-    if bop_would_exceed(result_len) {
+    if memory.__would_exceed(result_len) {
         Err(error_fatal_with_hint(
             line,
             "Memory limit exceeded",
@@ -511,8 +593,23 @@ pub fn check_string_concat_memory(a_len: usize, b_len: usize, line: u32) -> Resu
 
 /// Pre-flight check for array concat
 pub fn check_array_concat_memory(a_len: usize, b_len: usize, line: u32) -> Result<(), BopError> {
+    check_array_concat_memory_in(
+        a_len,
+        b_len,
+        line,
+        &MemoryContext::__legacy_current(),
+    )
+}
+
+#[doc(hidden)]
+pub fn check_array_concat_memory_in(
+    a_len: usize,
+    b_len: usize,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<(), BopError> {
     let result_bytes = (a_len + b_len) * core::mem::size_of::<Value>();
-    if bop_would_exceed(result_bytes) {
+    if memory.__would_exceed(result_bytes) {
         Err(error_fatal_with_hint(
             line,
             "Memory limit exceeded",
@@ -526,11 +623,15 @@ pub fn check_array_concat_memory(a_len: usize, b_len: usize, line: u32) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::bop_memory_init;
 
     fn run_range(args: &[Value]) -> Result<Value, BopError> {
         let mut rand_state = 0;
-        builtin_range(args, 7, &mut rand_state)
+        builtin_range_in(
+            args,
+            7,
+            &mut rand_state,
+            &MemoryContext::__new(usize::MAX),
+        )
     }
 
     fn array_ints(value: &Value) -> Vec<i64> {
@@ -562,7 +663,6 @@ mod tests {
 
     #[test]
     fn range_accepts_exactly_ten_thousand_values() {
-        bop_memory_init(2 * 1024 * 1024);
         let value = run_range(&[Value::Int(10_000)]).expect("range should fit");
         let items = array_ints(&value);
         assert_eq!(items.len(), RANGE_MAX_ITEMS);
@@ -571,7 +671,6 @@ mod tests {
 
     #[test]
     fn range_emits_extreme_bounds_without_overflow_or_truncation() {
-        bop_memory_init(1024);
         let value = run_range(&[
             Value::Int(i64::MIN),
             Value::Int(i64::MAX),
@@ -591,7 +690,6 @@ mod tests {
 
     #[test]
     fn oversized_range_is_a_dedicated_fatal_limit_error() {
-        bop_memory_init(usize::MAX);
         let err = run_range(&[Value::Int(10_001)]).expect_err("range should exceed limit");
         assert!(err.is_fatal);
         assert_eq!(err.line, Some(7));
@@ -601,7 +699,6 @@ mod tests {
 
     #[test]
     fn range_limit_uses_exact_cardinality_for_steps_and_direction() {
-        bop_memory_init(2 * 1024 * 1024);
         let forward = run_range(&[Value::Int(0), Value::Int(20_000), Value::Int(2)])
             .expect("10,000 stepped values should fit");
         assert_eq!(array_ints(&forward).len(), RANGE_MAX_ITEMS);
@@ -626,8 +723,14 @@ mod tests {
 
     #[test]
     fn configured_memory_limit_still_applies_below_range_cap() {
-        bop_memory_init(64);
-        let err = run_range(&[Value::Int(10)]).expect_err("range should exceed memory limit");
+        let mut rand_state = 0;
+        let err = builtin_range_in(
+            &[Value::Int(10)],
+            7,
+            &mut rand_state,
+            &MemoryContext::__new(64),
+        )
+        .expect_err("range should exceed memory limit");
         assert!(err.is_fatal);
         assert_eq!(err.message, "Memory limit exceeded");
         assert_eq!(

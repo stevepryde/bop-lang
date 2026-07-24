@@ -4677,6 +4677,53 @@ impl Emitter {
         let shared = RUNTIME_SHARED
             .replace("/*__BOP_RUNTIME_VIS__*/", shared_visibility)
             .replace(
+                "/*__BOP_MEMORY_HELPER__*/",
+                if self.opts.sandbox {
+                    r#"fn __bop_check_memory(
+    ctx: &Ctx<'_>,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    if ctx.memory.__exceeded() {
+        Err(::bop::builtins::error_fatal_with_hint(
+            line,
+            "Memory limit exceeded",
+            "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+"#
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_MEMORY_CHECK__*/",
+                if self.opts.sandbox {
+                    "__bop_check_memory(ctx, line)?;"
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "/*__BOP_TRY_MEMORY_CHECK__*/",
+                if self.opts.sandbox {
+                    r#"    if wrapped.is_ok() && ctx.memory.__exceeded() {
+        Err(::bop::builtins::error_fatal_with_hint(
+            line,
+            "Memory limit exceeded",
+            "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+        ))
+    } else {
+        wrapped
+    }"#
+                } else {
+                    "    wrapped"
+                },
+            )
+            .replace(
                 "/*__BOP_INVOKE_HELPER__*/",
                 if self.opts.sandbox {
                     r#"fn __bop_invoke_aot_callable(
@@ -4693,7 +4740,9 @@ impl Emitter {
     __bop_enter_aot_call(ctx, line)?;
     let result = callable(ctx, args);
     __bop_leave_aot_call(ctx);
-    result
+    let outcome = result?;
+    __bop_check_memory(ctx, line)?;
+    Ok(outcome)
 }
 
 "#
@@ -5675,7 +5724,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                                 .expect("overlay checked above");
                             self.line(&format!("let {} = {};", current_tmp, current));
                             self.line(&format!(
-                                "let {} = {}(&{}, &{}, {})?;",
+                                "let {} = {}(&{}, &{}, {}, &ctx.memory)?;",
                                 next_tmp,
                                 compound_op_path(*compound),
                                 current_tmp,
@@ -5694,6 +5743,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 if !self.is_local(name) {
                     let rhs_tmp = self.fresh_tmp();
                     let target_tmp = self.fresh_tmp();
+                    let memory_tmp = (!matches!(op, AssignOp::Eq)).then(|| self.fresh_tmp());
                     self.line(&format!("let {rhs_tmp} = {rhs_src};"));
                     if self.opts.sandbox
                         && matches!(op, AssignOp::Eq)
@@ -5713,6 +5763,9 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                             name: name.to_string(),
                     });
                     let target_src = self.storage_mut_src(&storage, name, line);
+                    if let Some(memory_tmp) = &memory_tmp {
+                        self.line(&format!("let {memory_tmp} = ctx.memory.clone();"));
+                    }
                     self.line(&format!(
                         "let {target_tmp}: &mut ::bop::value::Value = {target_src};"
                     ));
@@ -5721,11 +5774,13 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                             self.line(&format!("*{target_tmp} = {rhs_tmp};"));
                         }
                         compound => {
+                            let memory_tmp =
+                                memory_tmp.as_ref().expect("compound assignment has memory");
                             let current_tmp = self.fresh_tmp();
                             let next_tmp = self.fresh_tmp();
                             self.line(&format!("let {current_tmp} = {target_tmp}.clone();"));
                             self.line(&format!(
-                                "let {next_tmp} = {}(&{current_tmp}, &{rhs_tmp}, {line})?;",
+                                "let {next_tmp} = {}(&{current_tmp}, &{rhs_tmp}, {line}, &{memory_tmp})?;",
                                 compound_op_path(*compound),
                             ));
                             self.line(&format!("*{target_tmp} = {next_tmp};"));
@@ -5742,7 +5797,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         let rhs_tmp = self.fresh_tmp();
                         self.line(&format!("let {} = {};", rhs_tmp, rhs_src));
                         self.line(&format!(
-                            "{} = {}(&{}, &{}, {})?;",
+                            "{} = {}(&{}, &{}, {}, &ctx.memory)?;",
                             ident, op_path, ident, rhs_tmp, line
                         ));
                     }
@@ -5769,10 +5824,15 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 let idx_src = self.expr_src(index)?;
                 let val_tmp = self.fresh_tmp();
                 let idx_tmp = self.fresh_tmp();
+                let target_is_local = self.is_local(target_name);
+                let memory_tmp = (!target_is_local).then(|| self.fresh_tmp());
                 self.line(&format!("let {} = {};", val_tmp, val_src));
                 self.line(&format!("let {} = {};", idx_tmp, idx_src));
+                if let Some(memory_tmp) = &memory_tmp {
+                    self.line(&format!("let {memory_tmp} = ctx.memory.clone();"));
+                }
                 let target_tmp = self.fresh_tmp();
-                let target_src = if !self.is_local(target_name) {
+                let target_src = if !target_is_local {
                     if let Some(target_src) = self.declaration_alias_mut_src(target_name, line) {
                         target_src
                     } else {
@@ -5790,11 +5850,14 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 self.line(&format!(
                     "let {target_tmp}: &mut ::bop::value::Value = {target_src};"
                 ));
+                let memory_ref = memory_tmp
+                    .as_ref()
+                    .map_or("&ctx.memory".to_string(), |tmp| format!("&{tmp}"));
                 match op {
                     AssignOp::Eq => {
                         self.line(&format!(
-                            "::bop::ops::index_set({}, &{}, {}, {})?;",
-                            target_tmp, idx_tmp, val_tmp, line
+                            "::bop::ops::index_set_in({}, &{}, {}, {}, {})?;",
+                            target_tmp, idx_tmp, val_tmp, line, memory_ref
                         ));
                     }
                     compound => {
@@ -5802,16 +5865,16 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         let cur_tmp = self.fresh_tmp();
                         let new_tmp = self.fresh_tmp();
                         self.line(&format!(
-                            "let {} = ::bop::ops::index_get({}, &{}, {})?;",
-                            cur_tmp, target_tmp, idx_tmp, line
+                            "let {} = ::bop::ops::index_get_in({}, &{}, {}, {})?;",
+                            cur_tmp, target_tmp, idx_tmp, line, memory_ref
                         ));
                         self.line(&format!(
-                            "let {} = {}(&{}, &{}, {})?;",
-                            new_tmp, op_path, cur_tmp, val_tmp, line
+                            "let {} = {}(&{}, &{}, {}, {})?;",
+                            new_tmp, op_path, cur_tmp, val_tmp, line, memory_ref
                         ));
                         self.line(&format!(
-                            "::bop::ops::index_set({}, &{}, {}, {})?;",
-                            target_tmp, idx_tmp, new_tmp, line
+                            "::bop::ops::index_set_in({}, &{}, {}, {}, {})?;",
+                            target_tmp, idx_tmp, new_tmp, line, memory_ref
                         ));
                     }
                 }
@@ -5830,9 +5893,14 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 };
                 let val_src = self.expr_src(value)?;
                 let val_tmp = self.fresh_tmp();
+                let target_is_local = self.is_local(target_name);
+                let memory_tmp = (!target_is_local).then(|| self.fresh_tmp());
                 self.line(&format!("let {} = {};", val_tmp, val_src));
+                if let Some(memory_tmp) = &memory_tmp {
+                    self.line(&format!("let {memory_tmp} = ctx.memory.clone();"));
+                }
                 let target_tmp = self.fresh_tmp();
-                let target_src = if self.is_local(target_name) {
+                let target_src = if target_is_local {
                     format!("&mut {}", rust_user_ident(target_name))
                 } else {
                     self.declaration_alias_mut_src(target_name, line)
@@ -5850,6 +5918,9 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     "let {}: &mut ::bop::value::Value = {};",
                     target_tmp, target_src
                 ));
+                let memory_ref = memory_tmp
+                    .as_ref()
+                    .map_or("&ctx.memory".to_string(), |tmp| format!("&{tmp}"));
                 match op {
                     AssignOp::Eq => {
                         let old_tmp = self.fresh_tmp();
@@ -5859,8 +5930,9 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                             old_tmp, target_tmp
                         ));
                         self.line(&format!(
-                            "let {} = __bop_field_set({}, {}, {}, {})?;",
+                            "let {} = __bop_field_set({}, {}, {}, {}, {})?;",
                             new_tmp,
+                            memory_ref,
                             old_tmp,
                             rust_string_literal(field),
                             val_tmp,
@@ -5880,8 +5952,8 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                             line
                         ));
                         self.line(&format!(
-                            "let {} = {}(&{}, &{}, {})?;",
-                            new_tmp, op_path, cur_tmp, val_tmp, line
+                            "let {} = {}(&{}, &{}, {}, {})?;",
+                            new_tmp, op_path, cur_tmp, val_tmp, line, memory_ref
                         ));
                         let old_tmp = self.fresh_tmp();
                         let replaced_tmp = self.fresh_tmp();
@@ -5890,8 +5962,9 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                             old_tmp, target_tmp
                         ));
                         self.line(&format!(
-                            "let {} = __bop_field_set({}, {}, {}, {})?;",
+                            "let {} = __bop_field_set({}, {}, {}, {}, {})?;",
                             replaced_tmp,
+                            memory_ref,
                             old_tmp,
                             rust_string_literal(field),
                             new_tmp,
@@ -6092,7 +6165,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             ExprKind::Int(n) => format!("::bop::value::Value::Int({}i64)", n),
             ExprKind::Number(n) => format!("::bop::value::Value::Number({}f64)", rust_f64(*n)),
             ExprKind::Str(s) => format!(
-                "::bop::value::Value::new_str({}.to_string())",
+                "::bop::value::Value::__new_str_in({}.to_string(), &ctx.memory)",
                 rust_string_literal(s)
             ),
             ExprKind::Bool(b) => {
@@ -6160,7 +6233,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 let obj_src = self.expr_src(object)?;
                 let idx_src = self.expr_src(index)?;
                 format!(
-                    "{{ let __o = {}; let __i = {}; ::bop::ops::index_get(&__o, &__i, {})? }}",
+                    "{{ let __o = {}; let __i = {}; ::bop::ops::index_get_in(&__o, &__i, {}, &ctx.memory)? }}",
                     obj_src, idx_src, line
                 )
             }
@@ -6336,7 +6409,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 &self.emit_resolver_closure_src(&namespaces, pattern_uses_bare_type(&arm.pattern)),
             );
             src.push_str(&format!(
-                "            if ::bop::pattern_matches(&__pat, &{}, &mut __bindings, &__resolver) {{\n",
+                "            if ::bop::pattern_matches_in(&__pat, &{}, &mut __bindings, &__resolver, &ctx.memory) {{\n",
                 sc_name
             ));
 
@@ -6439,7 +6512,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 let suffix_line = if matches!(op, BinOp::Eq | BinOp::NotEq) {
                     String::new()
                 } else {
-                    format!(", {}", line)
+                    format!(", {}, &ctx.memory", line)
                 };
                 let trailing = if needs_try { "?" } else { "" };
                 Ok(format!(
@@ -6685,7 +6758,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 }
             }
             "range" => format!(
-                "::bop::builtins::builtin_range(&{}, {}, &mut ctx.rand_state)?",
+                "{{ let __bop_memory = ctx.memory.clone(); ::bop::builtins::builtin_range_in(&{}, {}, &mut ctx.rand_state, &__bop_memory)? }}",
                 build_arg_array(&arg_names),
                 line
             ),
@@ -6853,7 +6926,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
     fn array_src(&mut self, items: &[Expr], line: u32) -> Result<String, BopError> {
         if items.is_empty() {
             return Ok(format!(
-                "::bop::value::Value::try_new_array(::std::vec::Vec::new(), {})?",
+                "::bop::value::Value::__try_new_array_in(::std::vec::Vec::new(), {}, &ctx.memory)?",
                 line
             ));
         }
@@ -6866,7 +6939,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             names.push(tmp);
         }
         Ok(format!(
-            "{{ {}::bop::value::Value::try_new_array(vec![{}], {})? }}",
+            "{{ {}::bop::value::Value::__try_new_array_in(vec![{}], {}, &ctx.memory)? }}",
             lets,
             names.join(", "),
             line
@@ -6876,7 +6949,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
     fn dict_src(&mut self, entries: &[(String, Expr)], line: u32) -> Result<String, BopError> {
         if entries.is_empty() {
             return Ok(format!(
-                "::bop::value::Value::try_new_dict(::std::vec::Vec::new(), {})?",
+                "::bop::value::Value::__try_new_dict_in(::std::vec::Vec::new(), {}, &ctx.memory)?",
                 line
             ));
         }
@@ -6893,7 +6966,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             ));
         }
         Ok(format!(
-            "{{ {}::bop::value::Value::try_new_dict(vec![{}], {})? }}",
+            "{{ {}::bop::value::Value::__try_new_dict_in(vec![{}], {}, &ctx.memory)? }}",
             lets,
             pairs.join(", "),
             line
@@ -6987,7 +7060,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 __bop_validate_named_fields(__declared_fields, &[{provided_names}], {type_name}, ::std::option::Option::None, {line})?; \
                 {lets}let __provided = vec![{provided}]; \
                 let __ordered = __bop_order_named_fields(__declared_fields, __provided); \
-                ::bop::value::Value::try_new_struct(__module_path, {type_name}.to_string(), __ordered, {line})? }}",
+                ::bop::value::Value::__try_new_struct_in(__module_path, {type_name}.to_string(), __ordered, {line}, &ctx.memory)? }}",
             module_path_src = module_path_src,
             type_name = rust_string_literal(type_name),
             provided_names = provided_names,
@@ -7091,7 +7164,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     __BopDynamicVariantShape::Unit => {{}}, \
                     __BopDynamicVariantShape::Tuple(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects positional arguments `(…)`\", {type_lit}, {variant_lit}), {line})), \
                     __BopDynamicVariantShape::Struct(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects named fields `{{{{ … }}}}`\", {type_lit}, {variant_lit}), {line})), \
-                }} ::bop::value::Value::new_enum_unit(__module_path, {type_lit}.to_string(), {variant_lit}.to_string()) }}"
+                }} ::bop::value::Value::__new_enum_unit_in(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), &ctx.memory) }}"
             )),
             VariantPayload::Tuple(args) => {
                 let mut lets = String::new();
@@ -7108,7 +7181,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         __BopDynamicVariantShape::Tuple(__fields) if __fields.len() == {actual} => {{}}, \
                         __BopDynamicVariantShape::Tuple(__fields) => return Err(::bop::error::BopError::runtime(format!(\"`{{}}::{{}}` expects {{}} argument{{}}, but got {{}}\", {type_lit}, {variant_lit}, __fields.len(), if __fields.len() == 1 {{ \"\" }} else {{ \"s\" }}, {actual}), {line})), \
                         __BopDynamicVariantShape::Struct(_) => return Err(::bop::error::BopError::runtime(format!(\"Variant `{{}}::{{}}` expects named fields `{{{{ … }}}}`\", {type_lit}, {variant_lit}), {line})), \
-                    }} {lets}::bop::value::Value::try_new_enum_tuple(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), vec![{values}], {line})? }}",
+                    }} {lets}::bop::value::Value::__try_new_enum_tuple_in(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), vec![{values}], {line}, &ctx.memory)? }}",
                     actual = args.len(),
                     values = values.join(", "),
                 ))
@@ -7138,7 +7211,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         __BopDynamicVariantShape::Struct(__fields) => __fields, \
                     }}; __bop_validate_named_fields(__declared_fields, &[{provided_names}], {type_lit}, ::std::option::Option::Some({variant_lit}), {line})?; \
                     {lets}let __provided = vec![{provided}]; let __ordered = __bop_order_named_fields(__declared_fields, __provided); \
-                    ::bop::value::Value::try_new_enum_struct(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), __ordered, {line})? }}",
+                    ::bop::value::Value::__try_new_enum_struct_in(__module_path, {type_lit}.to_string(), {variant_lit}.to_string(), __ordered, {line}, &ctx.memory)? }}",
                     provided = provided.join(", "),
                 ))
             }
@@ -7163,7 +7236,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 }
             }
         }
-        body.push_str("::bop::value::Value::new_str(__s) }");
+        body.push_str("::bop::value::Value::__new_str_in(__s, &ctx.memory) }");
         Ok(body)
     }
 
@@ -7646,7 +7719,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     write!(
                         body,
                         "{{ {}let __ret = if matches!({}.overlay.as_ref(), ::std::option::Option::Some(::bop::value::Value::Array(_))) {{ \
-                            {constant_guard}::bop::methods::transactional_array_method({}.overlay.as_mut().expect(\"array overlay\"), {}, {}, {})? \
+                            {constant_guard}::bop::methods::transactional_array_method_in({}.overlay.as_mut().expect(\"array overlay\"), {}, {}, {}, &ctx.memory)? \
                         }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
                             {user_dispatch} \
                         }} else {{ \
@@ -7695,8 +7768,8 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 let mut body = String::new();
                 write!(
                     body,
-                    "{{ {}let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
-                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; {constant_guard}::bop::methods::transactional_array_method({target_tmp}, {}, {}, {})? \
+                    "{{ {}let __bop_memory = ctx.memory.clone(); let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
+                        let {target_tmp}: &mut ::bop::value::Value = {target_src}; {constant_guard}::bop::methods::transactional_array_method_in({target_tmp}, {}, {}, {}, &__bop_memory)? \
                     }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
                         {user_dispatch} \
                     }} else {{ \
@@ -7725,7 +7798,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             write!(
                 body,
                 "{{ {}let __ret = if matches!(&{}, ::bop::value::Value::Array(_)) {{ \
-                    {constant_guard}::bop::methods::transactional_array_method(&mut {}, {}, {}, {})? \
+                    {constant_guard}::bop::methods::transactional_array_method_in(&mut {}, {}, {}, {}, &ctx.memory)? \
                 }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
                     {user_dispatch} \
                 }} else {{ \
@@ -8087,9 +8160,14 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             String::new()
         };
         let wrap_ctx = if self.opts.sandbox { "ctx, " } else { "" };
+        let memory_check = if self.opts.sandbox {
+            format!("__bop_check_memory(ctx, {line})?; ")
+        } else {
+            String::new()
+        };
 
         Ok(format!(
-            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<__BopCallOutcome, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{moves}{param_binds}let __bop_value_result = (|| -> Result<::bop::value::Value, ::bop::error::BopError> {{ {body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }})(); let value = __bop_value_result?; {param_sync}Ok(__BopCallOutcome {{ value, args: {final_args} }}) }}); __bop_wrap_callable({wrap_ctx}{params_array}, {modes_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
+            "{{ {prelude}let __opaque_body_depth = {opaque_body_depth}; let __callable: ::std::rc::Rc<dyn for<'__a> Fn(&mut Ctx<'__a>, ::std::vec::Vec<::bop::value::Value>) -> Result<__BopCallOutcome, ::bop::error::BopError>> = ::std::rc::Rc::new(move |ctx, mut args| {{ if args.len() != {arity} {{ return Err(::bop::error::BopError::runtime(format!(\"lambda expects {arity} argument{suffix}, but got {{}}\", args.len()), {line})); }} {type_bindings_init}{moves}{param_binds}let __bop_value_result = (|| -> Result<::bop::value::Value, ::bop::error::BopError> {{ {body} #[allow(unreachable_code)] Ok(::bop::value::Value::None) }})(); let value = __bop_value_result?; {memory_check}{param_sync}Ok(__BopCallOutcome {{ value, args: {final_args} }}) }}); __bop_wrap_callable({wrap_ctx}{params_array}, {modes_array}, ::std::vec::Vec::new(), None, __opaque_body_depth, {line}, __callable)? }}",
             prelude = capture_prelude,
             opaque_body_depth = opaque_body_depth,
             arity = arity,
@@ -8104,6 +8182,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             modes_array = modes_array,
             final_args = final_args,
             wrap_ctx = wrap_ctx,
+            memory_check = memory_check,
         ))
     }
 }
@@ -8708,17 +8787,17 @@ fn is_outer_local(name: &str, outer_scopes: &[EmissionScope]) -> bool {
 
 fn bin_op_path(op: BinOp) -> &'static str {
     match op {
-        BinOp::Add => "::bop::ops::add",
-        BinOp::Sub => "::bop::ops::sub",
-        BinOp::Mul => "::bop::ops::mul",
-        BinOp::Div => "::bop::ops::div",
-        BinOp::Mod => "::bop::ops::rem",
+        BinOp::Add => "::bop::ops::add_in",
+        BinOp::Sub => "::bop::ops::sub_in",
+        BinOp::Mul => "::bop::ops::mul_in",
+        BinOp::Div => "::bop::ops::div_in",
+        BinOp::Mod => "::bop::ops::rem_in",
         BinOp::Eq => "::bop::ops::eq",
         BinOp::NotEq => "::bop::ops::not_eq",
-        BinOp::Lt => "::bop::ops::lt",
-        BinOp::Gt => "::bop::ops::gt",
-        BinOp::LtEq => "::bop::ops::lt_eq",
-        BinOp::GtEq => "::bop::ops::gt_eq",
+        BinOp::Lt => "::bop::ops::lt_in",
+        BinOp::Gt => "::bop::ops::gt_in",
+        BinOp::LtEq => "::bop::ops::lt_eq_in",
+        BinOp::GtEq => "::bop::ops::gt_eq_in",
         BinOp::And | BinOp::Or => unreachable!("short-circuit handled separately"),
     }
 }
@@ -8726,11 +8805,11 @@ fn bin_op_path(op: BinOp) -> &'static str {
 fn compound_op_path(op: AssignOp) -> &'static str {
     match op {
         AssignOp::Eq => unreachable!("caller filters out AssignOp::Eq"),
-        AssignOp::AddEq => "::bop::ops::add",
-        AssignOp::SubEq => "::bop::ops::sub",
-        AssignOp::MulEq => "::bop::ops::mul",
-        AssignOp::DivEq => "::bop::ops::div",
-        AssignOp::ModEq => "::bop::ops::rem",
+        AssignOp::AddEq => "::bop::ops::add_in",
+        AssignOp::SubEq => "::bop::ops::sub_in",
+        AssignOp::MulEq => "::bop::ops::mul_in",
+        AssignOp::DivEq => "::bop::ops::div_in",
+        AssignOp::ModEq => "::bop::ops::rem_in",
     }
 }
 
@@ -8970,7 +9049,7 @@ mod tests {
             "missing authoritative mutable Array binding:\n{output}"
         );
         assert!(
-            output.contains("::bop::methods::transactional_array_method(")
+            output.contains("::bop::methods::transactional_array_method_in(")
                 && output.contains("\"push\""),
             "missing shared in-place array dispatch:\n{output}"
         );
@@ -9004,7 +9083,7 @@ mod tests {
         let output = emitted("[1].push(2)");
 
         assert!(
-            !output.contains("::bop::methods::transactional_array_method(&mut"),
+            !output.contains("::bop::methods::transactional_array_method_in(&mut"),
             "temporary receiver must not use identifier write-back fast path:\n{output}"
         );
         assert!(

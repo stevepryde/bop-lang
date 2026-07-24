@@ -1,10 +1,10 @@
 //! Value type for the Bop interpreter.
 //!
 //! Heap-allocating variants use newtypes with private fields.
-//! The only way to construct them is through the tracked constructors
-//! (`Value::new_str`, `Value::new_array`, `Value::new_dict`), which
-//! call `bop_alloc`. This is enforced by the type system — code outside
-//! this module cannot access the private inner fields.
+//! Public constructors create host-owned, untracked values. Runtime engines
+//! use the context-aware internal constructors and mutation helpers, which
+//! attach allocation receipts to the engine's explicit memory account. The
+//! private inner fields prevent callers from bypassing either path.
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{
@@ -22,7 +22,7 @@ use std::{collections::BTreeMap, rc::{Rc, Weak}};
 use core::cell::RefCell;
 
 use crate::error::BopError;
-use crate::memory::MemoryReceipt;
+use crate::memory::{MemoryContext, MemoryReceipt};
 use crate::parser::Stmt;
 
 mod dict_index;
@@ -319,19 +319,22 @@ impl ArrayData {
         self.items.capacity() * core::mem::size_of::<Value>()
             + self.depth_counts.tracked_bytes()
     }
+
+    fn clone_in(&self, memory: &MemoryContext) -> Self {
+        let mut cloned = Self {
+            items: self.items.clone(),
+            depth: self.depth,
+            depth_counts: self.depth_counts.clone(),
+            receipt: MemoryReceipt::new_in(memory, 0),
+        };
+        cloned.receipt.resize(cloned.tracked_bytes());
+        cloned
+    }
 }
 
 impl Clone for ArrayData {
     fn clone(&self) -> Self {
-        let cloned = Self {
-            items: self.items.clone(),
-            depth: self.depth,
-            depth_counts: self.depth_counts.clone(),
-            receipt: MemoryReceipt::new(0),
-        };
-        let mut cloned = cloned;
-        cloned.receipt.resize(cloned.tracked_bytes());
-        cloned
+        self.clone_in(&MemoryContext::__legacy_current())
     }
 }
 
@@ -347,23 +350,26 @@ impl DictData {
         let bytes = self.tracked_bytes();
         self.receipt.resize(bytes);
     }
-}
 
-impl Clone for DictData {
-    fn clone(&self) -> Self {
+    fn clone_in(&self, memory: &MemoryContext) -> Self {
         let entries = self.entries.clone();
         let key_bytes = entries.iter().map(|(key, _)| key.capacity()).sum();
-        let cloned = Self {
+        let mut cloned = Self {
             entries,
             key_bytes,
             key_index: self.key_index.clone(),
             depth: self.depth,
             depth_counts: self.depth_counts.clone(),
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
-        let mut cloned = cloned;
         cloned.receipt.resize(cloned.tracked_bytes());
         cloned
+    }
+}
+
+impl Clone for DictData {
+    fn clone(&self) -> Self {
+        self.clone_in(&MemoryContext::__legacy_current())
     }
 }
 
@@ -375,20 +381,23 @@ impl StructData {
             + self.fields.capacity() * core::mem::size_of::<(String, Value)>()
             + key_bytes
     }
-}
 
-impl Clone for StructData {
-    fn clone(&self) -> Self {
-        let cloned = Self {
+    fn clone_in(&self, memory: &MemoryContext) -> Self {
+        let mut cloned = Self {
             module_path: self.module_path.clone(),
             type_name: self.type_name.clone(),
             fields: self.fields.clone(),
             depth: self.depth,
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
-        let mut cloned = cloned;
         cloned.receipt.resize(cloned.tracked_bytes());
         cloned
+    }
+}
+
+impl Clone for StructData {
+    fn clone(&self) -> Self {
+        self.clone_in(&MemoryContext::__legacy_current())
     }
 }
 
@@ -408,21 +417,24 @@ impl EnumVariantData {
             }
         }
     }
-}
 
-impl Clone for EnumVariantData {
-    fn clone(&self) -> Self {
-        let cloned = Self {
+    fn clone_in(&self, memory: &MemoryContext) -> Self {
+        let mut cloned = Self {
             module_path: self.module_path.clone(),
             type_name: self.type_name.clone(),
             variant: self.variant.clone(),
             payload: self.payload.clone(),
             depth: self.depth,
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
-        let mut cloned = cloned;
         cloned.receipt.resize(cloned.tracked_bytes());
         cloned
+    }
+}
+
+impl Clone for EnumVariantData {
+    fn clone(&self) -> Self {
+        self.clone_in(&MemoryContext::__legacy_current())
     }
 }
 
@@ -883,6 +895,11 @@ impl BopIter {
     // source compatibility; the trait method delegates here explicitly.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Value> {
+        self.__next_in(&MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __next_in(&mut self, memory: &MemoryContext) -> Option<Value> {
         match &mut self.kind {
             BopIterKind::Array { items, pos } => {
                 if *pos < items.len() {
@@ -895,7 +912,7 @@ impl BopIter {
             }
             BopIterKind::String { chars, pos } => {
                 if *pos < chars.len() {
-                    let v = Value::new_str(chars[*pos].to_string());
+                    let v = Value::__new_str_in(chars[*pos].to_string(), memory);
                     *pos += 1;
                     Some(v)
                 } else {
@@ -904,7 +921,7 @@ impl BopIter {
             }
             BopIterKind::Dict { keys, pos } => {
                 if *pos < keys.len() {
-                    let v = Value::new_str(keys[*pos].clone());
+                    let v = Value::__new_str_in(keys[*pos].clone(), memory);
                     *pos += 1;
                     Some(v)
                 } else {
@@ -1101,13 +1118,12 @@ impl BopModule {
     }
 }
 
-// ─── Tracked constructors ──────────────────────────────────────────────────
+// ─── Constructors ──────────────────────────────────────────────────────────
 //
-// These call bop_alloc() to track the allocation but do NOT check the limit.
-// Enforcement happens at tick() via bop_memory_exceeded(). This means a single
-// operation can overshoot the limit before the next tick catches it. High-risk
-// operations (string repeat, string/array concat) use bop_would_exceed() as a
-// preflight check in the evaluator to avoid this.
+// Public constructors are host-facing compatibility APIs and are untracked
+// unless a std-only legacy account was explicitly installed. Engines call the
+// `*_in` variants with their own MemoryContext. Constructors attach receipts;
+// engine checkpoints and high-risk operation preflights enforce the limit.
 
 impl Value {
     /// Recursive ownership depth used to keep all `Value` trait operations
@@ -1132,10 +1148,15 @@ impl Value {
     }
 
     pub fn new_str(s: String) -> Self {
+        Self::__new_str_in(s, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __new_str_in(s: String, memory: &MemoryContext) -> Self {
         let bytes = s.capacity();
         Value::Str(BopStr(Rc::new(BopStrData {
             text: s,
-            _receipt: MemoryReceipt::new(bytes),
+            _receipt: MemoryReceipt::new_in(memory, bytes),
         })))
     }
 
@@ -1154,13 +1175,22 @@ impl Value {
     }
 
     pub fn try_new_array(items: Vec<Value>, line: u32) -> Result<Self, BopError> {
+        Self::__try_new_array_in(items, line, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __try_new_array_in(
+        items: Vec<Value>,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(&items, 1, line)?;
         let depth_counts = OrderedDepthCounts::from_values(&items, line)?;
         let mut data = ArrayData {
             items,
             depth,
             depth_counts,
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
         data.receipt.resize(data.tracked_bytes());
         Ok(Value::Array(BopArray(Rc::new(data))))
@@ -1179,6 +1209,15 @@ impl Value {
     }
 
     pub fn try_new_dict(entries: Vec<(String, Value)>, line: u32) -> Result<Self, BopError> {
+        Self::__try_new_dict_in(entries, line, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __try_new_dict_in(
+        entries: Vec<(String, Value)>,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(entries.iter().map(|(_, value)| value), 1, line)?;
         let depth_counts = OrderedDepthCounts::from_entries(&entries, line)?;
         let key_index = DictKeyIndex::try_from_entries(&entries, line)?;
@@ -1189,7 +1228,7 @@ impl Value {
             key_index,
             depth,
             depth_counts,
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
         data.receipt.resize(data.tracked_bytes());
         Ok(Value::Dict(BopDict(Rc::new(data))))
@@ -1224,13 +1263,30 @@ impl Value {
         fields: Vec<(String, Value)>,
         line: u32,
     ) -> Result<Self, BopError> {
+        Self::__try_new_struct_in(
+            module_path,
+            type_name,
+            fields,
+            line,
+            &MemoryContext::__legacy_current(),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn __try_new_struct_in(
+        module_path: String,
+        type_name: String,
+        fields: Vec<(String, Value)>,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(fields.iter().map(|(_, value)| value), 1, line)?;
         let mut data = StructData {
             module_path,
             type_name,
             fields,
             depth,
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
         data.receipt.resize(data.tracked_bytes());
         Ok(Value::Struct(BopStruct(Rc::new(data))))
@@ -1253,46 +1309,80 @@ impl Value {
     }
 
     pub fn try_new_array_iter(items: Vec<Value>, line: u32) -> Result<Self, BopError> {
+        Self::__try_new_array_iter_in(items, line, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __try_new_array_iter_in(
+        items: Vec<Value>,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(&items, 1, line)?;
         let bytes = items.capacity() * core::mem::size_of::<Value>();
         Ok(Value::Iter(Rc::new(RefCell::new(BopIter {
             kind: BopIterKind::Array { items, pos: 0 },
             depth,
-            _receipt: MemoryReceipt::new(bytes),
+            _receipt: MemoryReceipt::new_in(memory, bytes),
         }))))
     }
 
     /// Build a built-in iterator over a string's Unicode code
     /// points.
     pub fn new_string_iter(chars: Vec<char>) -> Self {
+        Self::__new_string_iter_in(chars, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __new_string_iter_in(chars: Vec<char>, memory: &MemoryContext) -> Self {
         let bytes = chars.capacity() * core::mem::size_of::<char>();
         Value::Iter(Rc::new(RefCell::new(BopIter {
             kind: BopIterKind::String { chars, pos: 0 },
             depth: 1,
-            _receipt: MemoryReceipt::new(bytes),
+            _receipt: MemoryReceipt::new_in(memory, bytes),
         })))
     }
 
     /// Build a built-in iterator over a dict's keys (declaration
     /// order).
     pub fn new_dict_iter(keys: Vec<String>) -> Self {
+        Self::__new_dict_iter_in(keys, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __new_dict_iter_in(keys: Vec<String>, memory: &MemoryContext) -> Self {
         let key_bytes: usize = keys.iter().map(|k| k.capacity()).sum();
         let bytes = keys.capacity() * core::mem::size_of::<String>() + key_bytes;
         Value::Iter(Rc::new(RefCell::new(BopIter {
             kind: BopIterKind::Dict { keys, pos: 0 },
             depth: 1,
-            _receipt: MemoryReceipt::new(bytes),
+            _receipt: MemoryReceipt::new_in(memory, bytes),
         })))
     }
 
     pub fn new_enum_unit(module_path: String, type_name: String, variant: String) -> Self {
+        Self::__new_enum_unit_in(
+            module_path,
+            type_name,
+            variant,
+            &MemoryContext::__legacy_current(),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn __new_enum_unit_in(
+        module_path: String,
+        type_name: String,
+        variant: String,
+        memory: &MemoryContext,
+    ) -> Self {
         let mut data = EnumVariantData {
             module_path,
             type_name,
             variant,
             payload: EnumPayload::Unit,
             depth: 1,
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
         data.receipt.resize(data.tracked_bytes());
         Value::EnumVariant(BopEnumVariant(Rc::new(data)))
@@ -1328,6 +1418,25 @@ impl Value {
         items: Vec<Value>,
         line: u32,
     ) -> Result<Self, BopError> {
+        Self::__try_new_enum_tuple_in(
+            module_path,
+            type_name,
+            variant,
+            items,
+            line,
+            &MemoryContext::__legacy_current(),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn __try_new_enum_tuple_in(
+        module_path: String,
+        type_name: String,
+        variant: String,
+        items: Vec<Value>,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(&items, 1, line)?;
         let mut data = EnumVariantData {
             module_path,
@@ -1335,7 +1444,7 @@ impl Value {
             variant,
             payload: EnumPayload::Tuple(items),
             depth,
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
         data.receipt.resize(data.tracked_bytes());
         Ok(Value::EnumVariant(BopEnumVariant(Rc::new(data))))
@@ -1372,6 +1481,25 @@ impl Value {
         fields: Vec<(String, Value)>,
         line: u32,
     ) -> Result<Self, BopError> {
+        Self::__try_new_enum_struct_in(
+            module_path,
+            type_name,
+            variant,
+            fields,
+            line,
+            &MemoryContext::__legacy_current(),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn __try_new_enum_struct_in(
+        module_path: String,
+        type_name: String,
+        variant: String,
+        fields: Vec<(String, Value)>,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<Self, BopError> {
         let depth = checked_owner_depth(fields.iter().map(|(_, value)| value), 1, line)?;
         let mut data = EnumVariantData {
             module_path,
@@ -1379,7 +1507,7 @@ impl Value {
             variant,
             payload: EnumPayload::Struct(fields),
             depth,
-            receipt: MemoryReceipt::new(0),
+            receipt: MemoryReceipt::new_in(memory, 0),
         };
         data.receipt.resize(data.tracked_bytes());
         Ok(Value::EnumVariant(BopEnumVariant(Rc::new(data))))
@@ -1560,8 +1688,9 @@ impl Value {
 // ─── Clone (tracks allocations) ────────────────────────────────────────────
 //
 // Composite containers are CoW handles. Cloning them only bumps an `Rc`;
-// backing storage is cloned and charged by `Rc::make_mut` on the first shared
-// mutation. Immutable strings also use a shared backing, so ordinary
+// the first shared mutation uses `ensure_owner` to clone the backing into the
+// active engine's explicit account. Immutable strings also use a shared
+// backing, so ordinary
 // assignment, argument passing, capture, and return stay O(1).
 
 impl Clone for Value {
@@ -1612,7 +1741,6 @@ impl Value {
     /// acyclic, so completed-node memoization is sufficient.
     #[doc(hidden)]
     pub fn __compatibility_snapshot(&self, line: u32) -> Result<Self, BopError> {
-        let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
         self.compatibility_snapshot_inner(&mut BTreeMap::new(), line)
     }
 
@@ -1621,7 +1749,6 @@ impl Value {
         bindings: &BTreeMap<String, Value>,
         line: u32,
     ) -> Result<Vec<(String, Value)>, BopError> {
-        let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
         let mut memo = BTreeMap::new();
         bindings
             .iter()
@@ -1686,7 +1813,7 @@ impl Value {
                 let bytes = text.capacity();
                 Value::Str(BopStr(Rc::new(BopStrData {
                     text,
-                    _receipt: MemoryReceipt::new(bytes),
+                    _receipt: MemoryReceipt::new_in(&MemoryContext::__untracked(), bytes),
                 })))
             }
             Value::Array(value) => {
@@ -1700,7 +1827,7 @@ impl Value {
                     items,
                     depth: value.0.depth,
                     depth_counts: value.0.depth_counts.clone(),
-                    receipt: MemoryReceipt::new(0),
+                    receipt: MemoryReceipt::new_in(&MemoryContext::__untracked(), 0),
                 };
                 data.receipt.resize(data.tracked_bytes());
                 Value::Array(BopArray(Rc::new(data)))
@@ -1723,7 +1850,7 @@ impl Value {
                     key_index: value.0.key_index.clone(),
                     depth: value.0.depth,
                     depth_counts: value.0.depth_counts.clone(),
-                    receipt: MemoryReceipt::new(0),
+                    receipt: MemoryReceipt::new_in(&MemoryContext::__untracked(), 0),
                 };
                 data.receipt.resize(data.tracked_bytes());
                 Value::Dict(BopDict(Rc::new(data)))
@@ -1744,7 +1871,7 @@ impl Value {
                     type_name: value.0.type_name.clone(),
                     fields,
                     depth: value.0.depth,
-                    receipt: MemoryReceipt::new(0),
+                    receipt: MemoryReceipt::new_in(&MemoryContext::__untracked(), 0),
                 };
                 data.receipt.resize(data.tracked_bytes());
                 Value::Struct(BopStruct(Rc::new(data)))
@@ -1775,7 +1902,7 @@ impl Value {
                     variant: value.0.variant.clone(),
                     payload,
                     depth: value.0.depth,
-                    receipt: MemoryReceipt::new(0),
+                    receipt: MemoryReceipt::new_in(&MemoryContext::__untracked(), 0),
                 };
                 data.receipt.resize(data.tracked_bytes());
                 Value::EnumVariant(BopEnumVariant(Rc::new(data)))
@@ -1811,7 +1938,7 @@ impl Value {
                 Value::Iter(Rc::new(RefCell::new(BopIter {
                     kind,
                     depth: iter.depth,
-                    _receipt: MemoryReceipt::new(bytes),
+                    _receipt: MemoryReceipt::new_in(&MemoryContext::__untracked(), bytes),
                 })))
             }
             Value::Fn(value) => {
@@ -2086,17 +2213,22 @@ impl core::ops::Deref for BopDict {
 // ─── Mutation methods ──────────────────────────────────────────────────────
 
 impl BopArray {
-    fn ensure_active_owner(&mut self) {
-        if !self.0.receipt.owner_matches_active() {
-            self.0 = Rc::new((*self.0).clone());
+    fn ensure_owner(&mut self, memory: &MemoryContext) {
+        if Rc::strong_count(&self.0) > 1 || !self.0.receipt.owner_matches(memory) {
+            self.0 = Rc::new(self.0.clone_in(memory));
         }
     }
 
     /// Take the inner Vec, leaving an empty array. Deallocates the buffer
     /// from the memory tracker since it's leaving Value's control.
     pub fn take(&mut self) -> Vec<Value> {
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.__take_in(&MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __take_in(&mut self, memory: &MemoryContext) -> Vec<Value> {
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("array backing was made unique");
         let taken = core::mem::take(&mut data.items);
         data.depth = 1;
         data.depth_counts.clear();
@@ -2130,9 +2262,19 @@ impl BopArray {
     /// Append one value without cloning the existing array. Capacity growth is
     /// charged exactly once and all fallible checks happen before insertion.
     pub fn try_push(&mut self, value: Value, line: u32) -> Result<(), BopError> {
+        self.__try_push_in(value, line, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __try_push_in(
+        &mut self,
+        value: Value,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<(), BopError> {
         let child_depth = Self::check_child_depth(&value, line)?;
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("array backing was made unique");
         data.depth_counts.ensure_depth(child_depth, line)?;
         data.depth_counts.try_reserve_child(line)?;
         Self::try_reserve_item(data, line)?;
@@ -2145,11 +2287,16 @@ impl BopArray {
 
     /// Remove and return the final value, if any.
     pub fn pop(&mut self) -> Option<Value> {
+        self.__pop_in(&MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __pop_in(&mut self, memory: &MemoryContext) -> Option<Value> {
         if self.is_empty() {
             return None;
         }
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("array backing was made unique");
         let child_depth = data.depth_counts.child_depths.pop()?;
         let value = data.items.pop()?;
         data.depth_counts.remove(child_depth);
@@ -2164,9 +2311,20 @@ impl BopArray {
         value: Value,
         line: u32,
     ) -> Result<(), BopError> {
+        self.__try_insert_in(index, value, line, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __try_insert_in(
+        &mut self,
+        index: usize,
+        value: Value,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<(), BopError> {
         let child_depth = Self::check_child_depth(&value, line)?;
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("array backing was made unique");
         data.depth_counts.ensure_depth(child_depth, line)?;
         data.depth_counts.try_reserve_child(line)?;
         Self::try_reserve_item(data, line)?;
@@ -2179,8 +2337,13 @@ impl BopArray {
 
     /// Remove and return a value at an already-normalized element index.
     pub fn remove(&mut self, index: usize) -> Value {
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.__remove_in(index, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __remove_in(&mut self, index: usize, memory: &MemoryContext) -> Value {
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("array backing was made unique");
         let child_depth = data.depth_counts.child_depths.remove(index);
         let value = data.items.remove(index);
         data.depth_counts.remove(child_depth);
@@ -2189,15 +2352,29 @@ impl BopArray {
     }
 
     pub fn reverse(&mut self) {
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.__reverse_in(&MemoryContext::__legacy_current());
+    }
+
+    #[doc(hidden)]
+    pub fn __reverse_in(&mut self, memory: &MemoryContext) {
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("array backing was made unique");
         data.items.reverse();
         data.depth_counts.child_depths.reverse();
     }
 
     pub fn sort_by(&mut self, compare: impl FnMut(&Value, &Value) -> core::cmp::Ordering) {
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.__sort_by_in(compare, &MemoryContext::__legacy_current());
+    }
+
+    #[doc(hidden)]
+    pub fn __sort_by_in(
+        &mut self,
+        compare: impl FnMut(&Value, &Value) -> core::cmp::Ordering,
+        memory: &MemoryContext,
+    ) {
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("array backing was made unique");
         let mut compare = compare;
         let mut order: Vec<usize> = (0..data.items.len()).collect();
         order.sort_by(|a, b| compare(&data.items[*a], &data.items[*b]));
@@ -2220,8 +2397,8 @@ impl BopArray {
         }
     }
 
-    /// Set a value at the given index. The old value at that index is dropped
-    /// (firing its Drop impl which calls bop_dealloc). No capacity change.
+    /// Set a value at the given index. The old value at that index is dropped,
+    /// releasing any allocation receipts it owns. No capacity change.
     pub fn set(&mut self, index: usize, val: Value) {
         trusted(self.try_set(index, val, 0));
     }
@@ -2229,10 +2406,21 @@ impl BopArray {
     /// Line-aware, atomic variant of [`Self::set`]. The existing element is
     /// left untouched if the replacement would exceed [`MAX_VALUE_DEPTH`].
     pub fn try_set(&mut self, index: usize, val: Value, line: u32) -> Result<(), BopError> {
+        self.__try_set_in(index, val, line, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __try_set_in(
+        &mut self,
+        index: usize,
+        val: Value,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<(), BopError> {
         let new_child_depth = Self::check_child_depth(&val, line)?;
         let old_child_depth = self.0.depth_counts.child_depths[index];
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("array backing was made unique");
         if new_child_depth != old_child_depth {
             data.depth_counts.ensure_depth(new_child_depth, line)?;
         }
@@ -2250,9 +2438,9 @@ impl BopArray {
 }
 
 impl BopStruct {
-    fn ensure_active_owner(&mut self) {
-        if !self.0.receipt.owner_matches_active() {
-            self.0 = Rc::new((*self.0).clone());
+    fn ensure_owner(&mut self, memory: &MemoryContext) {
+        if Rc::strong_count(&self.0) > 1 || !self.0.receipt.owner_matches(memory) {
+            self.0 = Rc::new(self.0.clone_in(memory));
         }
     }
 
@@ -2290,6 +2478,17 @@ impl BopStruct {
 
     /// Line-aware, atomic variant of [`Self::set_field`].
     pub fn try_set_field(&mut self, name: &str, value: Value, line: u32) -> Result<bool, BopError> {
+        self.__try_set_field_in(name, value, line, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __try_set_field_in(
+        &mut self,
+        name: &str,
+        value: Value,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<bool, BopError> {
         let Some(index) = self.0.fields.iter().position(|(key, _)| key == name) else {
             return Ok(false);
         };
@@ -2307,8 +2506,8 @@ impl BopStruct {
             1,
             line,
         )?;
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("struct backing was made unique");
         data.fields[index].1 = value;
         data.depth = depth;
         Ok(true)
@@ -2347,9 +2546,9 @@ impl BopEnumVariant {
 }
 
 impl BopDict {
-    fn ensure_active_owner(&mut self) {
-        if !self.0.receipt.owner_matches_active() {
-            self.0 = Rc::new((*self.0).clone());
+    fn ensure_owner(&mut self, memory: &MemoryContext) {
+        if Rc::strong_count(&self.0) > 1 || !self.0.receipt.owner_matches(memory) {
+            self.0 = Rc::new(self.0.clone_in(memory));
         }
     }
 
@@ -2367,6 +2566,17 @@ impl BopDict {
     /// larger reserved capacities, but entries, lookup mappings, depth counts,
     /// and cached key bytes remain logically unchanged and mutually coherent.
     pub fn try_set_key(&mut self, key: &str, val: Value, line: u32) -> Result<(), BopError> {
+        self.__try_set_key_in(key, val, line, &MemoryContext::__legacy_current())
+    }
+
+    #[doc(hidden)]
+    pub fn __try_set_key_in(
+        &mut self,
+        key: &str,
+        val: Value,
+        line: u32,
+        memory: &MemoryContext,
+    ) -> Result<(), BopError> {
         let new_child_depth = val.ownership_depth();
         if new_child_depth.saturating_add(1) > MAX_VALUE_DEPTH {
             return Err(value_depth_error(line));
@@ -2379,8 +2589,8 @@ impl BopDict {
         };
         let old_child_depth = existing.map(|index| self.0.depth_counts.child_depths[index]);
 
-        self.ensure_active_owner();
-        let data = Rc::make_mut(&mut self.0);
+        self.ensure_owner(memory);
+        let data = Rc::get_mut(&mut self.0).expect("dict backing was made unique");
         if let Some(index) = existing {
             if old_child_depth != Some(new_child_depth) {
                 data.depth_counts.ensure_depth(new_child_depth, line)?;
@@ -2581,6 +2791,7 @@ mod module_type_export_tests {
 #[cfg(test)]
 mod depth_tests {
     use super::*;
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     use crate::memory::{bop_memory_init, bop_memory_used};
 
     fn nested_array(depth: u16) -> Value {
@@ -2616,6 +2827,7 @@ mod depth_tests {
         drop(cloned);
     }
 
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     #[test]
     fn compatibility_snapshots_preserve_shared_dags_without_retaining_receipts() {
         bop_memory_init(usize::MAX);
@@ -3125,6 +3337,7 @@ mod depth_tests {
         drop(borrow);
     }
 
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     #[test]
     fn incremental_dict_construction_has_amortized_index_work_and_exact_accounting() {
         const ENTRY_COUNT: usize = 4_096;
@@ -3192,6 +3405,7 @@ mod depth_tests {
         assert_eq!(dict.len(), 2);
     }
 
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     #[test]
     fn dict_compatibility_snapshots_copy_exact_depth_metadata() {
         bop_memory_init(usize::MAX);
@@ -3275,6 +3489,7 @@ mod depth_tests {
         );
     }
 
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     #[test]
     fn array_cow_charges_once_and_unique_pushes_do_not_copy() {
         bop_memory_init(usize::MAX);
@@ -3325,6 +3540,7 @@ mod depth_tests {
         assert_eq!(bop_memory_used(), 0);
     }
 
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     #[test]
     fn dict_and_struct_detach_once_while_enum_clones_stay_shared() {
         bop_memory_init(usize::MAX);
@@ -3397,6 +3613,7 @@ mod depth_tests {
         assert_eq!(bop_memory_used(), 0);
     }
 
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     #[test]
     fn shared_dict_insertion_keeps_cloned_key_and_index_accounting_exact() {
         bop_memory_init(usize::MAX);
@@ -3435,6 +3652,7 @@ mod depth_tests {
         assert_eq!(bop_memory_used(), 0);
     }
 
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     #[test]
     fn shared_container_dag_releases_storage_with_its_last_owner() {
         bop_memory_init(usize::MAX);
