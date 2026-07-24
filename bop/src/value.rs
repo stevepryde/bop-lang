@@ -2640,6 +2640,29 @@ impl BopDict {
 
 // ─── Equality ──────────────────────────────────────────────────────────────
 
+fn dicts_equal(left: &BopDict, right: &BopDict) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+
+    // Pointer identity is only a shortcut when every entry owns a distinct
+    // key. Compatibility constructors may preserve duplicate keys, whose
+    // equality deliberately retains first-match semantics. Values also are
+    // not universally reflexive (for example NaN and iterators), so shared
+    // dictionaries must still check their values rather than returning true.
+    if Rc::ptr_eq(&left.0, &right.0) && left.0.key_index.entry_count() == left.len() {
+        return left.iter().all(|(_, value)| values_equal(value, value));
+    }
+
+    left.iter().all(|(key, value)| {
+        right
+            .0
+            .key_index
+            .get(&right.0.entries, key)
+            .is_some_and(|index| values_equal(value, &right.0.entries[index].1))
+    })
+}
+
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x == y,
@@ -2657,14 +2680,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
         }
-        (Value::Dict(x), Value::Dict(y)) => {
-            x.len() == y.len()
-                && x.iter().all(|(k, v)| {
-                    y.iter()
-                        .find(|(k2, _)| k2 == k)
-                        .is_some_and(|(_, v2)| values_equal(v, v2))
-                })
-        }
+        (Value::Dict(x), Value::Dict(y)) => dicts_equal(x, y),
         // Functions have identity-based equality: two references
         // to the same `BopFn` compare equal; structurally identical
         // closures constructed independently do not.
@@ -2707,6 +2723,145 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                 }
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod equality_tests {
+    use super::*;
+
+    fn dict(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+        Value::new_dict(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn dict_equality_is_insertion_order_independent() {
+        let left = dict([("first", Value::Int(1)), ("second", Value::Number(2.5))]);
+        let right = dict([("second", Value::Number(2.5)), ("first", Value::Int(1))]);
+
+        assert!(values_equal(&left, &right));
+        assert!(values_equal(&right, &left));
+    }
+
+    #[test]
+    fn dict_equality_rejects_different_keys_values_and_lengths() {
+        let expected = dict([("first", Value::Int(1)), ("second", Value::Int(2))]);
+
+        assert!(!values_equal(
+            &expected,
+            &dict([("first", Value::Int(1)), ("other", Value::Int(2))])
+        ));
+        assert!(!values_equal(
+            &expected,
+            &dict([("first", Value::Int(1)), ("second", Value::Int(3))])
+        ));
+        assert!(!values_equal(&expected, &dict([("first", Value::Int(1))])));
+    }
+
+    #[test]
+    fn dict_equality_preserves_cross_type_numeric_values() {
+        let integers = dict([("positive", Value::Int(1)), ("negative", Value::Int(-7))]);
+        let numbers = dict([
+            ("negative", Value::Number(-7.0)),
+            ("positive", Value::Number(1.0)),
+        ]);
+        let different = dict([
+            ("negative", Value::Number(-7.5)),
+            ("positive", Value::Number(1.0)),
+        ]);
+
+        assert!(values_equal(&integers, &numbers));
+        assert!(values_equal(&numbers, &integers));
+        assert!(!values_equal(&integers, &different));
+    }
+
+    #[test]
+    fn dict_equality_remains_structural_for_nested_values() {
+        let left = dict([
+            (
+                "array",
+                Value::new_array(vec![Value::Int(1), Value::Number(2.0)]),
+            ),
+            (
+                "dict",
+                dict([("inner-a", Value::Bool(true)), ("inner-b", Value::None)]),
+            ),
+        ]);
+        let equal = dict([
+            (
+                "dict",
+                dict([("inner-b", Value::None), ("inner-a", Value::Bool(true))]),
+            ),
+            (
+                "array",
+                Value::new_array(vec![Value::Number(1.0), Value::Int(2)]),
+            ),
+        ]);
+        let unequal = dict([
+            (
+                "dict",
+                dict([("inner-b", Value::None), ("inner-a", Value::Bool(false))]),
+            ),
+            (
+                "array",
+                Value::new_array(vec![Value::Number(1.0), Value::Int(2)]),
+            ),
+        ]);
+
+        assert!(values_equal(&left, &equal));
+        assert!(!values_equal(&left, &unequal));
+    }
+
+    #[test]
+    fn shared_dict_equality_preserves_non_reflexive_cases() {
+        let ordinary = dict([("value", Value::Int(1))]);
+        let ordinary_clone = ordinary.clone();
+        assert!(values_equal(&ordinary, &ordinary_clone));
+
+        let nan = dict([("value", Value::Number(f64::NAN))]);
+        let nan_clone = nan.clone();
+        assert!(!values_equal(&nan, &nan_clone));
+
+        let duplicate = Value::new_dict(vec![
+            ("same".into(), Value::Int(1)),
+            ("same".into(), Value::Int(2)),
+        ]);
+        let duplicate_clone = duplicate.clone();
+        assert!(!values_equal(&duplicate, &duplicate_clone));
+    }
+
+    #[test]
+    fn distinct_dict_equality_uses_amortized_constant_time_key_lookups() {
+        const ENTRY_COUNT: usize = 4_096;
+
+        let left = Value::new_dict(
+            (0..ENTRY_COUNT)
+                .map(|index| (format!("key-{index}"), Value::Int(index as i64)))
+                .collect(),
+        );
+        let right = Value::new_dict(
+            (0..ENTRY_COUNT)
+                .rev()
+                .map(|index| (format!("key-{index}"), Value::Int(index as i64)))
+                .collect(),
+        );
+        let Value::Dict(right_dict) = &right else {
+            unreachable!()
+        };
+        right_dict.0.key_index.reset_probes();
+
+        assert!(values_equal(&left, &right));
+
+        let probes = right_dict.0.key_index.probes();
+        assert!(
+            (ENTRY_COUNT..ENTRY_COUNT * 16).contains(&probes),
+            "equality should perform one indexed lookup per key, got {probes} probes"
+        );
     }
 }
 
