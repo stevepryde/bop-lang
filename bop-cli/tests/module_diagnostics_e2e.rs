@@ -109,6 +109,66 @@ fn warning_pass_does_not_eagerly_reject_an_unexecuted_broken_module() {
     std::fs::remove_dir_all(project).expect("remove temporary project");
 }
 
+#[test]
+fn run_resolves_absolute_nested_entry_modules_from_the_entry_directory() {
+    let project = temp_project();
+    let entry_dir = project.join("scripts").join("nested");
+    let invocation_dir = project.join("elsewhere");
+    std::fs::create_dir_all(&entry_dir).unwrap();
+    std::fs::create_dir_all(&invocation_dir).unwrap();
+
+    std::fs::write(
+        entry_dir.join("entry.bop"),
+        r#"use geom
+let shape = Shape::Circle(5)
+let value = match shape {
+    Shape::Circle(radius) => radius,
+    Shape::Square(side) => side,
+}
+print(value)"#,
+    )
+    .unwrap();
+    std::fs::write(
+        entry_dir.join("geom.bop"),
+        "enum Shape { Circle(radius), Square(side), Triangle }",
+    )
+    .unwrap();
+    // A same-named module in the process CWD makes the regression prove the
+    // entry directory wins rather than merely finding a module by accident.
+    std::fs::write(
+        invocation_dir.join("geom.bop"),
+        "enum Shape { FromWrongDirectory }",
+    )
+    .unwrap();
+
+    let entry = entry_dir.join("entry.bop").canonicalize().unwrap();
+    let entry_arg = entry.to_str().expect("temporary path must be UTF-8");
+    let vm = run_bop(&invocation_dir, &["run", entry_arg]);
+    let walker = run_bop(&invocation_dir, &["run", entry_arg, "--novm"]);
+
+    for (engine, output) in [("VM", &vm), ("walker", &walker)] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{engine} failed to resolve beside the absolute entry:\n{stderr}"
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "5");
+        assert!(
+            stderr.contains("`Shape::Triangle`"),
+            "{engine} warning resolver did not use the entry directory:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("FromWrongDirectory"),
+            "{engine} resolved the process-CWD module:\n{stderr}"
+        );
+    }
+    assert_eq!(vm.stdout, walker.stdout);
+    assert_eq!(vm.stderr, walker.stderr);
+
+    std::fs::remove_dir_all(project).expect("remove temporary project");
+}
+
 /// Run root.bop through both engines, assert both fail with the
 /// expected exit code, and assert their stdout/stderr are
 /// byte-for-byte identical. Returns the shared stderr.

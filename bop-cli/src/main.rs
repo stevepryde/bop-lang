@@ -39,6 +39,7 @@ use std::process::ExitCode;
 
 mod args;
 mod compile;
+mod entry_path;
 mod repl;
 mod run;
 

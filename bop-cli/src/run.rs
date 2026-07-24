@@ -1,5 +1,6 @@
 //! `bop run FILE` — execute a script.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use bop::{BopHost, BopLimits};
@@ -21,6 +22,7 @@ pub fn run_file(path: &str, no_vm: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let module_root = crate::entry_path::module_root(Path::new(path));
 
     // Static checks (match exhaustiveness) surface before any
     // program output. Parse errors fail fast; warnings are
@@ -32,7 +34,7 @@ pub fn run_file(path: &str, no_vm: bool) -> ExitCode {
     // declared in the root file. The resolver borrow is
     // scoped so we're free to build a fresh host for the
     // actual run below.
-    let mut check_host = StdHost::new();
+    let mut check_host = StdHost::new().with_module_root(&module_root);
     let resolver = |path: &str| check_host.resolve_module(path);
     match bop::parse_with_warnings_and_resolver(&source, resolver) {
         Ok((_stmts, warnings)) => {
@@ -46,7 +48,7 @@ pub fn run_file(path: &str, no_vm: bool) -> ExitCode {
         }
     }
 
-    let mut host = StdHost::new();
+    let mut host = StdHost::new().with_module_root(module_root);
     let result = if no_vm {
         bop::run(&source, &mut host, &BopLimits::standard())
     } else {
