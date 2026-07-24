@@ -536,9 +536,9 @@ struct ModuleArtifacts {
 
 #[derive(Clone, Default)]
 struct ModuleLexicalContext {
-    type_bindings: BTreeMap<String, String>,
-    module_aliases: BTreeMap<String, Rc<bop::value::BopModule>>,
-    imported_functions: BTreeMap<String, Rc<FnEntry>>,
+    type_bindings: Rc<BTreeMap<String, String>>,
+    module_aliases: Rc<BTreeMap<String, Rc<bop::value::BopModule>>>,
+    imported_functions: Rc<BTreeMap<String, Rc<FnEntry>>>,
 }
 
 /// Import cache shared across nested VMs so recursive imports
@@ -814,11 +814,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let step_budget = limits.max_steps.saturating_mul(STEP_SCALE);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
         let root_lexical_context = Rc::new(ModuleLexicalContext {
-            type_bindings: builtin_bindings.clone(),
-            module_aliases: BTreeMap::new(),
-            imported_functions: BTreeMap::new(),
+            type_bindings: Rc::new(builtin_bindings.clone()),
+            module_aliases: Rc::new(BTreeMap::new()),
+            imported_functions: Rc::new(BTreeMap::new()),
         });
-        let top = Frame::top(chunk, Rc::clone(&root_lexical_context));
+        // The top frame resolves directly through the VM's live scope maps.
+        // Keeping another strong reference to the root lexical context would
+        // force copy-on-write publication to clone on every declaration.
+        let top = Frame::top(chunk, Rc::new(ModuleLexicalContext::default()));
         Self {
             frames: vec![top],
             stack: Vec::new(),
@@ -1232,8 +1235,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     fn apply_entry_alias_context(&mut self, entry: &FnEntry) {
         let frame = self.frames.last_mut().expect("callee frame");
         let mut context = (*frame.lexical_context).clone();
-        context
-            .module_aliases
+        Rc::make_mut(&mut context.module_aliases)
             .retain(|name, _| entry.declaration_alias_names.contains(name));
         frame.lexical_context = Rc::new(context);
     }
@@ -1446,11 +1448,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
         let aliases = self.module_aliases.last_mut().expect("module alias scope");
         if let Some(module) = module {
-            aliases.insert(name, module);
+            aliases.insert(name.clone(), Rc::clone(&module));
+            self.publish_root_module_alias(name, Some(module));
         } else {
             aliases.remove(&name);
+            self.publish_root_module_alias(name, None);
         }
-        self.refresh_root_lexical_context();
     }
 
     /// `lookup_var`, but pull the name from the current chunk by
@@ -1640,15 +1643,28 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
     }
 
-    fn refresh_root_lexical_context(&mut self) {
-        self.root_lexical_context = Rc::new(ModuleLexicalContext {
-            type_bindings: self.type_bindings.first().cloned().unwrap_or_default(),
-            module_aliases: self.module_aliases.first().cloned().unwrap_or_default(),
-            imported_functions: self.imported_functions.first().cloned().unwrap_or_default(),
-        });
-        if let Some(frame) = self.frames.first_mut() {
-            frame.lexical_context = Rc::clone(&self.root_lexical_context);
+    fn publish_root_type_binding(&mut self, name: String, origin: String) {
+        let context = Rc::make_mut(&mut self.root_lexical_context);
+        Rc::make_mut(&mut context.type_bindings).insert(name, origin);
+    }
+
+    fn publish_root_module_alias(
+        &mut self,
+        name: String,
+        module: Option<Rc<bop::value::BopModule>>,
+    ) {
+        let context = Rc::make_mut(&mut self.root_lexical_context);
+        let aliases = Rc::make_mut(&mut context.module_aliases);
+        if let Some(module) = module {
+            aliases.insert(name, module);
+        } else {
+            aliases.remove(&name);
         }
+    }
+
+    fn publish_root_imported_function(&mut self, name: String, function: Rc<FnEntry>) {
+        let context = Rc::make_mut(&mut self.root_lexical_context);
+        Rc::make_mut(&mut context.imported_functions).insert(name, function);
     }
 
     /// Resolve module-owned sibling functions from cached module artifacts
@@ -4080,7 +4096,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         if self.is_module_top_scope() {
             self.type_exports
                 .insert(name.to_string(), self.current_module.clone());
-            self.refresh_root_lexical_context();
+            self.publish_root_type_binding(name.to_string(), self.current_module.clone());
         }
     }
 
@@ -5089,6 +5105,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if let Some(scope) = self.type_bindings.last_mut() {
                 scope.insert(alias_name.to_string(), path.to_string());
             }
+            if refresh_root_context {
+                self.publish_root_module_alias(alias_name.to_string(), Some(Rc::clone(&module_rc)));
+                self.publish_root_type_binding(alias_name.to_string(), path.to_string());
+            }
         } else {
             // Flat form (glob / selective). Glob skips
             // `_`-prefixed names (privacy); selective doesn't
@@ -5124,7 +5144,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     self.imported_functions
                         .last_mut()
                         .expect("imported function scope")
-                        .insert(name.clone(), entry);
+                        .insert(name.clone(), Rc::clone(&entry));
+                    if module_top_scope {
+                        self.publish_root_imported_function(name.clone(), entry);
+                    }
                 }
                 let module = artifacts.module_exports.get(&name).cloned();
                 let origin = artifacts
@@ -5155,7 +5178,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     self.module_aliases
                         .last_mut()
                         .expect("module alias scope")
-                        .insert(name, module);
+                        .insert(name.clone(), Rc::clone(&module));
+                    if module_top_scope {
+                        self.publish_root_module_alias(name, Some(module));
+                    }
                 }
             }
             // Bring the module's exposed types in by bare name
@@ -5178,6 +5204,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     self.type_exports
                         .entry(type_name.clone())
                         .or_insert_with(|| origin.clone());
+                    self.publish_root_type_binding(type_name.clone(), origin.clone());
                 }
             }
         }
@@ -5187,9 +5214,6 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 .last_mut()
                 .expect("import scope")
                 .insert(path.to_string());
-        }
-        if refresh_root_context {
-            self.refresh_root_lexical_context();
         }
         Ok(())
     }
@@ -5511,15 +5535,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 _ => None,
             })
             .collect();
-        let lexical_context = Rc::new(ModuleLexicalContext {
-            type_bindings: sub.type_bindings.into_iter().next().unwrap_or_default(),
-            module_aliases: module_exports.clone(),
-            imported_functions: sub
-                .imported_functions
-                .into_iter()
-                .next()
-                .unwrap_or_default(),
-        });
+        let mut lexical_context = Rc::try_unwrap(core::mem::take(&mut sub.root_lexical_context))
+            .unwrap_or_else(|context| (*context).clone());
+        lexical_context.module_aliases = Rc::new(module_exports.clone());
+        let lexical_context = Rc::new(lexical_context);
         Ok(ModuleArtifacts {
             bindings,
             binding_origins,
@@ -6706,6 +6725,66 @@ for outer in [1, 2] {
         assert!(vm.type_bindings[1].is_empty());
         assert!(vm.module_aliases[1].is_empty());
         assert!(vm.imported_functions[1].is_empty());
+    }
+
+    #[test]
+    fn root_type_publication_reuses_unique_context_storage() {
+        const DECLARATIONS: usize = 1_024;
+        let mut host = SilentHost;
+        let mut vm = Vm::new(Chunk::new(), &mut host, BopLimits::standard());
+        let context = Rc::as_ptr(&vm.root_lexical_context);
+        let bindings = Rc::as_ptr(&vm.root_lexical_context.type_bindings);
+
+        for index in 0..DECLARATIONS {
+            vm.bind_local_type(&format!("Type{index}"));
+        }
+
+        assert_eq!(Rc::as_ptr(&vm.root_lexical_context), context);
+        assert_eq!(Rc::as_ptr(&vm.root_lexical_context.type_bindings), bindings);
+        assert_eq!(
+            vm.root_lexical_context.type_bindings.len(),
+            DECLARATIONS + 3
+        );
+    }
+
+    #[test]
+    fn restored_lexical_snapshot_forks_without_leaking_abandoned_changes() {
+        let mut host = SilentHost;
+        let mut vm = Vm::new(Chunk::new(), &mut host, BopLimits::standard());
+        vm.publish_root_type_binding("A".to_string(), "root".to_string());
+        let snapshot = Rc::clone(&vm.root_lexical_context);
+        vm.publish_root_type_binding("B".to_string(), "leaked".to_string());
+
+        vm.root_lexical_context = Rc::clone(&snapshot);
+        vm.publish_root_type_binding("C".to_string(), "root".to_string());
+
+        assert_eq!(
+            vm.root_lexical_context.type_bindings.get("A"),
+            Some(&"root".to_string())
+        );
+        assert!(!vm.root_lexical_context.type_bindings.contains_key("B"));
+        assert_eq!(
+            vm.root_lexical_context.type_bindings.get("C"),
+            Some(&"root".to_string())
+        );
+    }
+
+    #[test]
+    fn repeated_publication_replaces_in_place_without_retaining_history() {
+        let mut host = SilentHost;
+        let mut vm = Vm::new(Chunk::new(), &mut host, BopLimits::standard());
+        let bindings = Rc::as_ptr(&vm.root_lexical_context.type_bindings);
+
+        for index in 0..1_000 {
+            vm.publish_root_type_binding("Repeated".to_string(), index.to_string());
+        }
+
+        assert_eq!(Rc::as_ptr(&vm.root_lexical_context.type_bindings), bindings);
+        assert_eq!(vm.root_lexical_context.type_bindings.len(), 4);
+        assert_eq!(
+            vm.root_lexical_context.type_bindings.get("Repeated"),
+            Some(&"999".to_string())
+        );
     }
 
     #[test]

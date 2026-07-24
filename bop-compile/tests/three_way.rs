@@ -2090,6 +2090,27 @@ type ImportCase = (
 
 const IMPORTS_CORPUS: &[ImportCase] = &[
     (
+        "incremental_type_publication_preserves_source_order_and_module_context",
+        r#"fn make_later() { return Later {} }
+print(try_call(make_later).is_err())
+struct Later {}
+print(type(make_later()))
+use schema
+use schema as api
+let direct = make(4)
+let namespaced = api.make(5)
+print(direct.value, namespaced.value)
+print(match signal(6) { Signal::Item(value) => value, _ => 0 })
+print(match api.signal(7) { api.Signal::Item(value) => value, _ => 0 })"#,
+        &[
+            ("helper", "fn increment(value) { return value + 1 }"),
+            (
+                "schema",
+                "use helper as dep\nstruct Box { value }\nenum Signal { Item(value) }\nfn make(value) { return Box { value: dep.increment(value) } }\nfn signal(value) { return Signal::Item(dep.increment(value)) }",
+            ),
+        ],
+    ),
+    (
         "shared_imported_named_functions",
         r#"use funcs as funcs
 let callback = funcs.call
@@ -3783,6 +3804,26 @@ fn three_way_rounding_methods_respect_i64_boundaries() {
         })
         .collect::<Vec<_>>();
     assert_eq!(entries.len(), 1);
+    assert_three_way(&entries);
+}
+
+#[test]
+#[ignore]
+fn three_way_incremental_type_publication_semantics() {
+    const NAMES: &[&str] = &[
+        "incremental_type_publication_preserves_source_order_and_module_context",
+        "type_bindings_module_init_and_retry_cleanup",
+    ];
+    let entries = IMPORTS_CORPUS
+        .iter()
+        .filter(|(name, _, _)| NAMES.contains(name))
+        .map(|(name, source, modules)| CorpusEntry {
+            name,
+            source,
+            modules,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), NAMES.len());
     assert_three_way(&entries);
 }
 

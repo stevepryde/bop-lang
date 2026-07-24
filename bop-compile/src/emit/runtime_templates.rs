@@ -75,7 +75,9 @@ pub(super) const CTX_BASE: &str = r#"pub struct Ctx<'h> {
     pub abi_declarations: ::std::vec::Vec<usize>,
     pub module_type_bindings: ::std::collections::HashMap<
         ::std::string::String,
-        ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
+        ::std::rc::Rc<
+            ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
+        >,
     >,
     pub struct_defs: ::std::collections::HashMap<
         ::std::string::String,
@@ -110,7 +112,9 @@ struct __BopState {
     >,
     module_type_bindings: ::std::collections::HashMap<
         ::std::string::String,
-        ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
+        ::std::rc::Rc<
+            ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
+        >,
     >,
     struct_defs: ::std::collections::HashMap<
         ::std::string::String,
@@ -564,7 +568,7 @@ fn __bop_binding_is_array(
 
 type __BopTypeFrame =
     ::std::collections::BTreeMap<::std::string::String, ::std::string::String>;
-type __BopTypeBindings = ::std::vec::Vec<__BopTypeFrame>;
+type __BopTypeBindings = ::std::vec::Vec<::std::rc::Rc<__BopTypeFrame>>;
 
 fn __bop_builtin_type_frame() -> __BopTypeFrame {
     let mut bindings = __BopTypeFrame::new();
@@ -575,7 +579,7 @@ fn __bop_builtin_type_frame() -> __BopTypeFrame {
 }
 
 fn __bop_fresh_module_type_bindings() -> __BopTypeBindings {
-    ::std::vec![__bop_builtin_type_frame()]
+    ::std::vec![::std::rc::Rc::new(__bop_builtin_type_frame())]
 }
 
 fn __bop_callable_type_bindings(ctx: &Ctx<'_>, module: &str) -> __BopTypeBindings {
@@ -583,33 +587,47 @@ fn __bop_callable_type_bindings(ctx: &Ctx<'_>, module: &str) -> __BopTypeBinding
         .module_type_bindings
         .get(module)
         .cloned()
-        .unwrap_or_else(__bop_builtin_type_frame);
-    ::std::vec![committed, __BopTypeFrame::new()]
+        .unwrap_or_else(|| ::std::rc::Rc::new(__bop_builtin_type_frame()));
+    ::std::vec![committed, ::std::rc::Rc::new(__BopTypeFrame::new())]
 }
 
-fn __bop_flatten_type_bindings(bindings: &__BopTypeBindings) -> __BopTypeFrame {
-    let mut flattened = __BopTypeFrame::new();
-    for frame in bindings {
-        for (name, origin) in frame {
-            flattened.insert(name.clone(), origin.clone());
-        }
-    }
-    flattened
+fn __bop_reset_type_bindings(ctx: &mut Ctx<'_>, module: &str) {
+    ctx.module_type_bindings
+        .insert(module.to_string(), ::std::rc::Rc::new(__bop_builtin_type_frame()));
 }
 
-fn __bop_publish_type_bindings(
+fn __bop_publish_type_binding(
     ctx: &mut Ctx<'_>,
     module: &str,
-    bindings: &__BopTypeBindings,
+    name: &str,
+    origin: &str,
 ) {
-    ctx.module_type_bindings
-        .insert(module.to_string(), __bop_flatten_type_bindings(bindings));
+    let bindings = ctx.module_type_bindings
+        .entry(module.to_string())
+        .or_insert_with(|| ::std::rc::Rc::new(__bop_builtin_type_frame()));
+    ::std::rc::Rc::make_mut(bindings)
+        .insert(name.to_string(), origin.to_string());
+}
+
+fn __bop_publish_imported_type_binding(
+    ctx: &mut Ctx<'_>,
+    module: &str,
+    name: &str,
+    origin: &str,
+) {
+    let bindings = ctx.module_type_bindings
+        .entry(module.to_string())
+        .or_insert_with(|| ::std::rc::Rc::new(__bop_builtin_type_frame()));
+    ::std::rc::Rc::make_mut(bindings)
+        .entry(name.to_string())
+        .or_insert_with(|| origin.to_string());
 }
 
 fn __bop_bind_type(bindings: &mut __BopTypeBindings, name: &str, origin: &str) {
-    bindings
+    let frame = bindings
         .last_mut()
-        .expect("type bindings always have a frame")
+        .expect("type bindings always have a frame");
+    ::std::rc::Rc::make_mut(frame)
         .insert(name.to_string(), origin.to_string());
 }
 
@@ -618,9 +636,10 @@ fn __bop_bind_imported_type(
     name: &str,
     origin: &str,
 ) {
-    bindings
+    let frame = bindings
         .last_mut()
-        .expect("type bindings always have a frame")
+        .expect("type bindings always have a frame");
+    ::std::rc::Rc::make_mut(frame)
         .entry(name.to_string())
         .or_insert_with(|| origin.to_string());
 }
