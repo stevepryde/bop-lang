@@ -238,7 +238,10 @@ fn range_limit_error(line: u32) -> BopError {
 /// `Number` (the caller's `f64::floor` / `ceil` / `round`
 /// already handled `NaN` / `±inf` correctly).
 pub fn finite_to_int_or_number(n: f64) -> Value {
-    if n.is_finite() && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+    // `i64::MAX as f64` rounds up to 2^63, so the upper comparison must
+    // be strict. Otherwise 2^63 passes the range check and Rust's saturating
+    // float-to-int cast silently turns it into `i64::MAX`.
+    if n.is_finite() && n >= i64::MIN as f64 && n < i64::MAX as f64 {
         Value::Int(n as i64)
     } else {
         Value::Number(n)
@@ -586,6 +589,9 @@ pub fn check_array_concat_memory_in(
 mod tests {
     use super::*;
 
+    const TWO_TO_63: f64 = 9_223_372_036_854_775_808.0;
+    const LARGEST_IN_RANGE_F64: f64 = 9_223_372_036_854_774_784.0;
+
     fn run_range(args: &[Value]) -> Result<Value, BopError> {
         let mut rand_state = 0;
         builtin_range_in(args, 7, &mut rand_state, &MemoryContext::__new(usize::MAX))
@@ -602,6 +608,22 @@ mod tests {
                 _ => panic!("range returned a non-integer item"),
             })
             .collect()
+    }
+
+    #[test]
+    fn finite_integer_conversion_respects_the_exact_i64_boundary() {
+        assert!(matches!(
+            finite_to_int_or_number(TWO_TO_63),
+            Value::Number(value) if value == TWO_TO_63
+        ));
+        assert!(matches!(
+            finite_to_int_or_number(i64::MIN as f64),
+            Value::Int(i64::MIN)
+        ));
+        assert!(matches!(
+            finite_to_int_or_number(LARGEST_IN_RANGE_F64),
+            Value::Int(value) if value == LARGEST_IN_RANGE_F64 as i64
+        ));
     }
 
     #[test]
