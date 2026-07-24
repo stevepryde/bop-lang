@@ -924,8 +924,7 @@ fn main() {
 #[test]
 #[ignore]
 fn e2e_sandbox_generated_instance_scopes_limits_and_host_memory() {
-    let source = r#"boot()
-let kept = none
+    let mut source = r#"boot()
 let mutation = 0
 pub fn external_value() { return host_value() }
 pub fn detach_value() {
@@ -947,14 +946,16 @@ pub fn make_result() {
 pub fn mutate_then_fail() { mutation += 1; panic("boom") }
 pub fn mutate_then_spin() { mutation += 1; repeat 200 { } }
 pub fn read_mutation() { return mutation }
-pub fn poison() {
-    kept = host_value()
-    repeat 16 {
-        kept.push("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-    }
-}"#;
+"#
+    .to_string();
+    let oversized_items = vec!["0"; 256].join(",");
+    source.push_str("\npub fn transient_peak() { return [");
+    source.push_str(&oversized_items);
+    source.push_str("] }\npub fn retain_over_limit() { retain_charged([");
+    source.push_str(&oversized_items);
+    source.push_str("]) }\n");
     let mut rust_src = transpile(
-        source,
+        &source,
         &Options {
             emit_main: false,
             use_bop_sys: false,
@@ -973,6 +974,7 @@ impl ::bop::BopHost for InnerHost {
 }
 struct Host {
     retained: ::std::cell::RefCell<Vec<::bop::value::Value>>,
+    charged: Option<::bop::value::Value>,
     other: Option<(BopInstance, InnerHost)>,
 }
 impl Host {
@@ -985,13 +987,17 @@ impl Host {
     }
 }
 impl ::bop::BopHost for Host {
-    fn call(&mut self, name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
+    fn call(&mut self, name: &str, args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {
         if name == "boot" {
             self.retain_external();
             return Some(Ok(::bop::value::Value::None));
         }
         if name == "host_value" {
             return Some(Ok(self.retain_external()));
+        }
+        if name == "retain_charged" {
+            self.charged = Some(args[0].clone());
+            return Some(Ok(::bop::value::Value::None));
         }
         if name == "nested_other" {
             let (mut other, mut inner_host) = self.other.take().expect("nested instance installed");
@@ -1015,7 +1021,11 @@ impl ::bop::BopHost for Host {
 }
 fn main() {
     let limits = ::bop::BopLimits { max_steps: 100, max_memory: 1_600 };
-    let mut host = Host { retained: ::std::cell::RefCell::new(Vec::new()), other: None };
+    let mut host = Host {
+        retained: ::std::cell::RefCell::new(Vec::new()),
+        charged: None,
+        other: None,
+    };
     let mut instance = BopInstance::load(&mut host, &limits).unwrap();
     let baseline = instance.memory.__used();
     assert_eq!(baseline, 0, "top-level host allocations must not enter the instance account");
@@ -1078,11 +1088,29 @@ fn main() {
     assert!(reentry.message.contains("cannot be re-entered"));
     assert!(matches!(instance.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap(), ::bop::value::Value::Int(1)));
 
-    let mut poisoned = BopInstance::load(&mut host, &limits).unwrap();
-    let poison = poisoned.call("poison", &[], &mut host).unwrap_err();
-    assert!(poison.is_fatal && poison.message.contains("Memory limit exceeded"));
-    let poisoned_again = poisoned.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap_err();
-    assert!(poisoned_again.is_fatal && poisoned_again.message.contains("Memory limit exceeded"));
+    let mut transient = BopInstance::load(&mut host, &limits).unwrap();
+    let transient_baseline = transient.memory.__used();
+    assert_eq!(transient_baseline, 0);
+    let peak = transient.call("transient_peak", &[], &mut host).unwrap_err();
+    assert!(peak.is_fatal && peak.message.contains("Memory limit exceeded"));
+    assert_eq!(transient.memory.__used(), transient_baseline);
+    assert!(matches!(
+        transient.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap(),
+        ::bop::value::Value::Int(1)
+    ));
+
+    let mut retained = BopInstance::load(&mut host, &limits).unwrap();
+    let retained_error = retained.call("retain_over_limit", &[], &mut host).unwrap_err();
+    assert!(retained_error.is_fatal && retained_error.message.contains("Memory limit exceeded"));
+    assert!(retained.memory.__used() > limits.max_memory);
+    let retained_again = retained.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap_err();
+    assert!(retained_again.is_fatal && retained_again.message.contains("Memory limit exceeded"));
+    drop(host.charged.take());
+    assert_eq!(retained.memory.__used(), 0);
+    assert!(matches!(
+        retained.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap(),
+        ::bop::value::Value::Int(1)
+    ));
     assert!(matches!(instance.call("spin", &[::bop::value::Value::Int(1)], &mut host).unwrap(), ::bop::value::Value::Int(1)));
     println!("ok");
 }
