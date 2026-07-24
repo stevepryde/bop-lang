@@ -244,6 +244,7 @@ fn execute_recursively_validates_function_chunks_and_capture_metadata() {
         code: vec![Instr::LoadConst(ConstIdx(0)), Instr::ReturnNone],
         lines: vec![11, 0],
         slot_count: 1,
+        parameter_slots: vec![SlotIdx(0)],
         ..Chunk::new()
     };
     let function = FnDef {
@@ -338,6 +339,7 @@ fn shared_chunks_are_validated_for_each_distinct_parameter_layout() {
         code: vec![Instr::ReturnNone],
         lines: vec![0],
         slot_count: 1,
+        parameter_slots: vec![SlotIdx(0)],
         ..Chunk::new()
     });
     let function = |name: &str, params: Vec<String>| {
@@ -361,7 +363,67 @@ fn shared_chunks_are_validated_for_each_distinct_parameter_layout() {
     ];
 
     let error = execution_error(outer);
-    assert!(error.message.contains("only 0 are densely declared"));
+    assert!(
+        error
+            .message
+            .contains("0 parameters but 1 parameter-slot entries")
+    );
+}
+
+#[test]
+fn parameter_binding_metadata_must_match_names_and_slots() {
+    let function = |params: &[&str], parameter_slots: &[u32], slot_count: u32| FnDef {
+        name: "binding".into(),
+        params: params.iter().map(|name| (*name).into()).collect(),
+        param_modes: vec![ParamMode::Value; params.len()],
+        chunk: Rc::new(Chunk {
+            code: vec![Instr::ReturnNone],
+            lines: vec![0],
+            slot_count,
+            parameter_slots: parameter_slots.iter().copied().map(SlotIdx).collect(),
+            ..Chunk::new()
+        }),
+        slot_count,
+        capture_names: vec![],
+        capture_sources: vec![],
+    };
+    let outer = |function| Chunk {
+        code: vec![Instr::DefineFn(FnIdx(0)), Instr::Halt],
+        lines: vec![1, 0],
+        functions: vec![function],
+        ..Chunk::new()
+    };
+
+    let missing = execution_error(outer(function(&["x"], &[], 1)));
+    assert!(
+        missing
+            .message
+            .contains("1 parameters but 0 parameter-slot entries")
+    );
+
+    let out_of_range = execution_error(outer(function(&["x"], &[1], 1)));
+    assert!(out_of_range.message.contains("out-of-range local slot 1"));
+
+    let split_duplicate = execution_error(outer(function(&["x", "x"], &[0, 1], 2)));
+    assert!(
+        split_duplicate
+            .message
+            .contains("repeated parameter `x` to both local slots 0 and 1")
+    );
+
+    let aliased_distinct = execution_error(outer(function(&["x", "y"], &[0, 0], 1)));
+    assert!(
+        aliased_distinct
+            .message
+            .contains("distinct parameters `x` and `y` to local slot 0")
+    );
+
+    execute(
+        outer(function(&["x", "x"], &[0, 0], 1)),
+        &mut SilentHost,
+        &BopLimits::standard(),
+    )
+    .expect("duplicate spellings may intentionally share a binding slot");
 }
 
 #[test]

@@ -1616,7 +1616,7 @@ impl Compiler {
                     if self
                         .resolvers
                         .last()
-                        .is_some_and(|resolver| resolver.ref_param_slots.contains(slot))
+                        .is_some_and(|resolver| resolver.is_ref_parameter_binding(*slot))
             )
         }) {
             let mut error = err(0, "a `ref` parameter can't be captured by a closure");
@@ -1643,13 +1643,15 @@ impl Compiler {
             capture_sources.push(source);
         }
 
-        chunk.slot_count = resolver.max_slot;
+        let slot_count = resolver.max_slot;
+        chunk.slot_count = slot_count;
+        chunk.parameter_slots = resolver.parameter_slots;
         Ok(FnDef {
             name: name.to_string(),
             params: params.iter().map(|param| param.name.clone()).collect(),
             param_modes: params.iter().map(|param| param.mode).collect(),
             chunk: Rc::new(chunk),
-            slot_count: resolver.max_slot,
+            slot_count,
             capture_names,
             capture_sources,
         })

@@ -367,7 +367,7 @@ struct PreparedCall {
 }
 
 struct PendingWriteBack {
-    param_slot: SlotIdx,
+    parameter: usize,
     target: ResolvedRefTarget,
 }
 
@@ -3134,7 +3134,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let receiver_snapshot = if let Some(recipe) = prepared.receiver_ref {
             let (target, snapshot) = self.resolve_ref_target(recipe, 0, line)?;
             pending.push(PendingWriteBack {
-                param_slot: SlotIdx(0),
+                parameter: 0,
                 target,
             });
             Some(snapshot)
@@ -3152,7 +3152,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
             full_args[prepared_ref.param] = Some(snapshot);
             pending.push(PendingWriteBack {
-                param_slot: SlotIdx((prepared_ref.param + param_offset) as u32),
+                parameter: prepared_ref.param + param_offset,
                 target,
             });
         }
@@ -3266,10 +3266,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 "Check that your recursive function has a base case that stops calling itself.",
             ));
         }
-        let slot_count = (entry.chunk.slot_count as usize).max(args.len());
+        let slot_count = entry.chunk.slot_count as usize;
         let mut slots = self.take_slots(slot_count);
         for (index, arg) in args.into_iter().enumerate() {
-            slots[index] = arg;
+            let slot = entry
+                .chunk
+                .parameter_slots
+                .get(index)
+                .ok_or_else(|| error(line, "VM: parameter slot metadata is incomplete"))?;
+            slots[slot.0 as usize] = arg;
         }
         self.push_function_frame(
             entry.chunk.clone(),
@@ -3580,20 +3585,25 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             return Err(error(line, "VM: stack underflow"));
         }
 
-        // Build the frame's flat slot array: args go into the
-        // first `argc` slots (by compile-time-assigned order),
-        // the rest of `slot_count` are pre-seeded with `None` so
-        // later `StoreLocal`s land in-bounds. Backing allocation
-        // comes from the freelist when possible — ~500k per-call
-        // heap allocs under `fib(28)` fold into a steady-state
-        // set of ~MAX_CALL_DEPTH reused vecs.
-        let slot_count = (entry.chunk.slot_count as usize).max(argc);
+        // Build the frame's flat slot array. Positional arguments rebind their
+        // canonical language slots in source order; the rest of `slot_count`
+        // is pre-seeded with `None` so later `StoreLocal`s land in-bounds.
+        // Backing allocation comes from the freelist when possible — ~500k
+        // per-call heap allocs under `fib(28)` fold into a steady-state set of
+        // ~MAX_CALL_DEPTH reused vecs.
+        let slot_count = entry.chunk.slot_count as usize;
         let mut slots = self.take_slots(slot_count);
         let start = self.stack.len() - argc;
         for i in 0..argc {
             let slot = core::mem::replace(&mut self.stack[start + i], Slot::Value(Value::None));
             match slot {
-                Slot::Value(v) => slots[i] = v,
+                Slot::Value(v) => {
+                    let parameter_slot =
+                        entry.chunk.parameter_slots.get(i).ok_or_else(|| {
+                            error(line, "VM: parameter slot metadata is incomplete")
+                        })?;
+                    slots[parameter_slot.0 as usize] = v;
+                }
                 _ => {
                     self.stack.truncate(start);
                     self.return_slots(slots);
@@ -3837,14 +3847,16 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         "Check that your recursive function has a base case that stops calling itself.",
                     ));
                 }
-                // User methods use the same slot-based frame
-                // layout as regular fn calls. `self` takes slot 0,
-                // remaining params take 1..entry.params.len().
-                let slot_count = (entry.chunk.slot_count as usize).max(entry.params.len());
+                // User methods use the same positional-to-binding metadata as
+                // regular functions. The receiver is position 0.
+                let slot_count = entry.chunk.slot_count as usize;
                 let mut slots = self.take_slots(slot_count);
-                slots[0] = obj;
-                for (i, a) in args.into_iter().enumerate() {
-                    slots[i + 1] = a;
+                for (position, value) in core::iter::once(obj).chain(args).enumerate() {
+                    let slot =
+                        entry.chunk.parameter_slots.get(position).ok_or_else(|| {
+                            error(line, "VM: parameter slot metadata is incomplete")
+                        })?;
+                    slots[slot.0 as usize] = value;
                 }
                 self.push_function_frame(
                     entry.chunk.clone(),
@@ -4809,10 +4821,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // stack — they're looked up by name at the compile-time
         // fallback path (`LoadVar`) because the compiler can't
         // resolve them to slots from inside the lambda body.
-        let slot_count = (chunk.slot_count as usize).max(func.params.len());
+        let slot_count = chunk.slot_count as usize;
         let mut slots = self.take_slots(slot_count);
         for (i, arg) in args.into_iter().enumerate() {
-            slots[i] = arg;
+            let slot = chunk
+                .parameter_slots
+                .get(i)
+                .ok_or_else(|| error(line, "VM: parameter slot metadata is incomplete"))?;
+            slots[slot.0 as usize] = arg;
         }
 
         let mut scope = BTreeMap::new();
@@ -5650,9 +5666,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
         let mut values = Vec::with_capacity(frame.pending_write_backs.len());
         for pending in &frame.pending_write_backs {
+            let parameter_slot = frame
+                .chunk
+                .parameter_slots
+                .get(pending.parameter)
+                .ok_or_else(|| error(line, "VM: ref parameter metadata is incomplete"))?;
             let value = frame
                 .slots
-                .get(pending.param_slot.0 as usize)
+                .get(parameter_slot.0 as usize)
                 .cloned()
                 .ok_or_else(|| error(line, "VM: ref parameter slot out of range"))?;
             match &pending.target {
@@ -5800,11 +5821,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 "Check that your recursive function has a base case that stops calling itself.",
             ));
         }
-        let slot_count = (entry.chunk.slot_count as usize).max(entry.params.len());
+        let slot_count = entry.chunk.slot_count as usize;
         let mut slots = self.take_slots(slot_count);
-        slots[0] = receiver;
-        for (i, a) in extra_args.into_iter().enumerate() {
-            slots[i + 1] = a;
+        for (position, value) in core::iter::once(receiver).chain(extra_args).enumerate() {
+            let slot = entry
+                .chunk
+                .parameter_slots
+                .get(position)
+                .ok_or_else(|| error(line, "VM: parameter slot metadata is incomplete"))?;
+            slots[slot.0 as usize] = value;
         }
         self.push_function_frame(
             entry.chunk.clone(),
