@@ -185,6 +185,26 @@ fn run_aot(code: &str, test_name: &str) -> String {
     run.stdout
 }
 
+fn assert_aot_modes_match_walker(code: &str, test_name: &str) {
+    let expected = walker_output(code);
+    assert_eq!(run_aot(code, &format!("{test_name}_native")), expected);
+    let sandbox = run_aot_with_opts(
+        code,
+        &format!("{test_name}_sandbox"),
+        &Options {
+            sandbox: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(
+        sandbox.status,
+        Some(0),
+        "sandbox stderr:\n{}",
+        sandbox.stderr
+    );
+    assert_eq!(sandbox.stdout, expected);
+}
+
 #[test]
 #[ignore]
 fn e2e_ref_parameters_commit_rollback_and_dynamic_dispatch() {
@@ -3421,6 +3441,224 @@ fn e2e_named_fn_as_value() {
 let f = double
 print(f(7))"#,
     );
+}
+
+#[test]
+#[ignore]
+fn e2e_native_nested_named_functions_are_first_class_values() {
+    assert_aot_matches(
+        "native_nested_named_functions_are_first_class_values",
+        r#"fn apply(callable, value) { return callable(value) }
+fn build(flag) {
+    fn transform(value) { return value + 1 }
+    let assigned = transform
+    if flag {
+        fn transform(value) { return value * 10 }
+    }
+    return [assigned, transform]
+}
+let functions = build(true)
+let stored = {"first": functions[0], "second": functions[1]}
+print(stored["first"](4))
+print(apply(stored["second"], 4))"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_native_nested_function_sites_are_reached_in_source_order() {
+    assert_aot_matches(
+        "native_nested_function_sites_are_reached_in_source_order",
+        r#"fn read_before_declaration() {
+    return missing
+    fn missing() { return 1 }
+}
+fn read_dead_declaration() {
+    if false {
+        fn missing() { return 2 }
+    }
+    return missing
+}
+print(try_call(read_before_declaration))
+print(try_call(read_dead_declaration))
+if true {
+    fn selected() { return 3 }
+}
+let retained = selected
+if true {
+    fn selected() { return 4 }
+}
+print(retained(), selected())"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_aot_exact_ref_self_recursion_retains_its_declaration_site() {
+    assert_aot_modes_match_walker(
+        r#"fn f(ref value, remaining) {
+    if remaining == 0 { return }
+    value += 1
+    f(ref value, remaining - 1)
+}
+let retained = f
+fn f(ref value, remaining) { value = 99 }
+let value = 0
+retained(ref value, 2)
+print(value)"#,
+        "exact_ref_self_recursion",
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_aot_active_function_site_controls_ref_mode_preflight() {
+    assert_aot_modes_match_walker(
+        r#"fn f(ref value) { value = 2 }
+if false {
+    fn f(value) { return value }
+}
+fn side_effect() { print("evaluated"); return 3 }
+let value = 1
+let attempt = fn() { f(side_effect()) }
+print(try_call(attempt), value)"#,
+        "active_function_ref_mode_preflight",
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_aot_exact_value_self_arity_preflight_precedes_argument_side_effects() {
+    assert_aot_modes_match_walker(
+        r#"fn side() { print("ARG"); return 1 }
+fn f(value) { return f(side(), side()) }
+let attempt = fn() { return f(1) }
+print(try_call(attempt))"#,
+        "exact_value_self_arity_preflight",
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_aot_active_value_site_and_module_named_calls_preserve_host_precedence() {
+    for sandbox in [false, true] {
+        let mut rust_src = transpile(
+            r#"fn root_fn() { return 1 }
+if false {
+    fn root_fn(ref value) { value = 2 }
+}
+use dep.{invoke}
+print(root_fn())
+print(invoke())"#,
+            &Options {
+                emit_main: false,
+                use_bop_sys: false,
+                sandbox,
+                module_resolver: Some(modules_from_map([(
+                    "dep",
+                    "fn module_fn() { return 2 }\nfn invoke() { return module_fn() }",
+                )])),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let run_call = if sandbox {
+            "run(&mut host, &limits)"
+        } else {
+            "run(&mut host)"
+        };
+        rust_src.push_str(&format!(
+            r#"
+struct Host {{ calls: usize }}
+impl ::bop::BopHost for Host {{
+    fn call(&mut self, name: &str, _args: &[::bop::value::Value], _line: u32) -> Option<Result<::bop::value::Value, ::bop::error::BopError>> {{
+        let value = match name {{
+            "root_fn" => 99,
+            "module_fn" => 98,
+            _ => return None,
+        }};
+        self.calls += 1;
+        Some(Ok(::bop::value::Value::Int(value)))
+    }}
+    fn on_print(&mut self, message: &str) {{ println!("{{}}", message); }}
+}}
+fn main() {{
+    let limits = ::bop::BopLimits::standard();
+    let mut host = Host {{ calls: 0 }};
+    {run_call}.unwrap();
+    println!("calls={{}}", host.calls);
+}}
+"#
+        ));
+        let run = run_generated_source(
+            if sandbox {
+                "sandbox_named_function_host_precedence"
+            } else {
+                "native_named_function_host_precedence"
+            },
+            rust_src,
+        );
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated program failed: {}",
+            run.stderr
+        );
+        assert_eq!(run.stdout, "99\n98\ncalls=2");
+    }
+}
+
+#[test]
+#[ignore]
+fn e2e_aot_failed_module_load_rolls_back_retained_function_reachability() {
+    let source = r#"use stash.{get}
+fn load_bad() { use bad }
+print(try_call(load_bad))
+let retained = get()
+print(try_call(retained))"#;
+    let modules = [
+        (
+            "stash",
+            "let saved = none\nfn save(value) { saved = value }\nfn get() { return saved }",
+        ),
+        (
+            "bad",
+            "use stash.{save}\nfn helper() { return 7 }\nfn expose() { return helper() }\nsave(expose)\nmissing()",
+        ),
+    ];
+    for sandbox in [false, true] {
+        let run = run_aot_with_modules_and_opts(
+            source,
+            if sandbox {
+                "sandbox_failed_module_reached_site_rollback"
+            } else {
+                "native_failed_module_reached_site_rollback"
+            },
+            &modules,
+            &Options {
+                sandbox,
+                ..Options::default()
+            },
+        );
+        assert_eq!(
+            run.status,
+            Some(0),
+            "generated program failed: {}",
+            run.stderr
+        );
+        let lines = run.stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "unexpected output: {}", run.stdout);
+        assert!(
+            lines[0].contains("Function `missing` not found"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("Function `helper` not found"),
+            "{}",
+            lines[1]
+        );
+    }
 }
 
 #[test]
