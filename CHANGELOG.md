@@ -110,8 +110,10 @@ Wait for each package to become available in the crates.io index before
 publishing a dependent package.
 
 Before publishing, verify that the pinned release dependency graph builds on
-the minimum supported toolchain:
+the minimum supported toolchain and that every crate archive includes both
+canonical license texts:
 
 ```sh
 cargo +1.88.0 check --workspace --all-targets --locked
+bun run release:check-licenses
 ```
