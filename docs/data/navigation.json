@@ -4,7 +4,7 @@
     "items": [
       {
         "title": "Introduction",
-        "source": "introduction.md",
+        "source": "_index.md",
         "path": "/docs/"
       },
       {
@@ -139,7 +139,7 @@
     "items": [
       {
         "title": "Overview",
-        "source": "stdlib/index.md",
+        "source": "stdlib/_index.md",
         "path": "/docs/stdlib/"
       },
       {

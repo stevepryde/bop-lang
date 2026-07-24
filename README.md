@@ -10,7 +10,10 @@ A small, dynamically-typed, **embeddable** programming language for Rust hosts â
 ## Why Bop?
 
 - **Embedded-first.** One crate (`bop-lang`), one trait (`BopHost`), no runtime dependencies. You wire up the functions you want Bop to reach; Bop can't touch anything else.
-- **Sandboxed by default.** No filesystem, network, clock, or ambient I/O. `BopLimits` caps three things the language itself can't escape: steps executed, bytes allocated, and fn-call depth. A runaway script halts cleanly with a diagnostic, not a hung process.
+- **Sandboxed by default.** No filesystem, network, clock, or ambient I/O.
+  `BopLimits` caps steps and tracked bytes, and every sandboxed engine also
+  enforces a fixed function-call depth. A runaway script halts cleanly with a
+  diagnostic, not a hung process.
 - **Three engines, one language.** Walker, bytecode VM, or AOT-to-Rust transpiler â€” same parser, same semantics, same error shapes. Switch engines with a one-line change.
 - **One-shot or persistent.** Run isolated scripts, or load a `BopInstance`
   whose `pub fn` entries, globals, modules, callbacks, types, methods, and RNG
@@ -218,6 +221,19 @@ bun run site:serve
 
 Use `bun run site:check` to validate content and internal links, and
 `bun run site:build` to create the deployable site in `docs/public/`.
+
+## AI and coding assistants
+
+[`llms.txt`](llms.txt) is the concise, spec-compliant entry point for coding
+tools that need to write Bop programs or embed Bop in a Rust application. The
+website build also publishes clean Markdown for every curated documentation
+page and a complete context bundle at
+[`/llms-full.txt`](https://bop-lang.com/llms-full.txt).
+
+Run `bun run site:llms` to regenerate and validate these derived files locally.
+The generator follows `docs/data/navigation.json`, strips Zola front matter,
+rewrites internal documentation links to their Markdown forms, and fails when
+`llms.txt` references a missing generated page.
 
 ## License
 

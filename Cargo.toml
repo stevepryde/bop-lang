@@ -1,5 +1,12 @@
 [workspace]
-members = ["bop", "bop-cli", "bop-compile", "bop-sys", "bop-vm"]
+members = [
+    "bop",
+    "bop-cli",
+    "bop-compile",
+    "bop-sys",
+    "bop-vm",
+    "examples/rust-embedding",
+]
 resolver = "2"
 
 [workspace.package]

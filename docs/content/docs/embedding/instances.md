@@ -73,42 +73,47 @@ Bop wrapper when needed.
 ## Tree-walker instance
 
 ```rust
-use bop::{BopHost, BopInstance, BopLimits, Value};
+use bop::{BopError, BopHost, BopInstance, BopLimits, Value};
 
-# struct Host;
-# impl BopHost for Host {
-#     fn call(&mut self, _: &str, _: &[Value], _: u32)
-#         -> Option<Result<Value, bop::BopError>> { None }
-# }
-# fn main() -> Result<(), bop::BopError> {
-let source = r#"
-    let count = 0
-    pub fn increment(by) {
-        count += by
-        return count
+struct Host;
+
+impl BopHost for Host {
+    fn call(&mut self, _: &str, _: &[Value], _: u32)
+        -> Option<Result<Value, BopError>>
+    {
+        None
     }
-    pub fn make_reader() {
-        return fn() { return count }
-    }
-"#;
-
-let mut host = Host;
-let limits = BopLimits::standard();
-let mut instance = BopInstance::load(source, &mut host, &limits)?;
-
-for entry in instance.entry_points() {
-    println!("{}/{}", entry.name(), entry.arity());
 }
 
-let first = instance.call("increment", &[Value::Int(2)], &mut host)?;
-assert_eq!(first.inspect(), "2");
+fn main() -> Result<(), BopError> {
+    let source = r#"
+        let count = 0
+        pub fn increment(by) {
+            count += by
+            return count
+        }
+        pub fn make_reader() {
+            return fn() { return count }
+        }
+    "#;
 
-let reader = instance.call("make_reader", &[], &mut host)?;
-instance.call("increment", &[Value::Int(3)], &mut host)?;
-let current = instance.call_value(&reader, &[], &mut host)?;
-assert_eq!(current.inspect(), "5");
-# Ok(())
-# }
+    let mut host = Host;
+    let limits = BopLimits::standard();
+    let mut instance = BopInstance::load(source, &mut host, &limits)?;
+
+    for entry in instance.entry_points() {
+        println!("{}/{}", entry.name(), entry.arity());
+    }
+
+    let first = instance.call("increment", &[Value::Int(2)], &mut host)?;
+    assert_eq!(first.inspect(), "2");
+
+    let reader = instance.call("make_reader", &[], &mut host)?;
+    instance.call("increment", &[Value::Int(3)], &mut host)?;
+    let current = instance.call_value(&reader, &[], &mut host)?;
+    assert_eq!(current.inspect(), "5");
+    Ok(())
+}
 ```
 
 `call` validates the public name and arity. `call_value` accepts a function
@@ -120,32 +125,37 @@ call.
 The VM is a drop-in replacement at this API boundary:
 
 ```rust
-use bop::{BopHost, BopLimits, Value};
+use bop::{BopError, BopHost, BopLimits, Value};
 use bop_vm::BopInstance;
 
-# struct Host;
-# impl BopHost for Host {
-#     fn call(&mut self, _: &str, _: &[Value], _: u32)
-#         -> Option<Result<Value, bop::BopError>> { None }
-# }
-# fn main() -> Result<(), bop::BopError> {
-let mut host = Host;
-let mut instance = BopInstance::load(
-    "let total = 0\npub fn add(n) { total += n; return total }",
-    &mut host,
-    &BopLimits::standard(),
-)?;
+struct Host;
 
-assert_eq!(
-    instance.call("add", &[Value::Int(4)], &mut host)?.inspect(),
-    "4",
-);
-assert_eq!(
-    instance.call("add", &[Value::Int(5)], &mut host)?.inspect(),
-    "9",
-);
-# Ok(())
-# }
+impl BopHost for Host {
+    fn call(&mut self, _: &str, _: &[Value], _: u32)
+        -> Option<Result<Value, BopError>>
+    {
+        None
+    }
+}
+
+fn main() -> Result<(), BopError> {
+    let mut host = Host;
+    let mut instance = BopInstance::load(
+        "let total = 0\npub fn add(n) { total += n; return total }",
+        &mut host,
+        &BopLimits::standard(),
+    )?;
+
+    assert_eq!(
+        instance.call("add", &[Value::Int(4)], &mut host)?.inspect(),
+        "4",
+    );
+    assert_eq!(
+        instance.call("add", &[Value::Int(5)], &mut host)?.inspect(),
+        "9",
+    );
+    Ok(())
+}
 ```
 
 Use `compile` plus `execute` when you want to reuse bytecode but intentionally

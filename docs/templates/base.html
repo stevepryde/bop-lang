@@ -16,6 +16,10 @@
   <meta property="og:site_name" content="Bop">
   <meta name="twitter:card" content="summary">
   <link rel="canonical" href="{{ current_url | default(value=config.base_url) | safe }}">
+  <link rel="alternate" type="text/plain" href="{{ config.base_url }}/llms.txt" title="Bop LLM documentation index">
+  {% if site_current_path is starting_with("/docs/") %}
+  <link rel="alternate" type="text/markdown" href="{{ current_url | safe }}index.html.md" title="Markdown version">
+  {% endif %}
   <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
   <link rel="preload" href="/fonts/source-sans-3-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/fonts/jetbrains-mono-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
