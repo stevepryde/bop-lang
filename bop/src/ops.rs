@@ -411,34 +411,29 @@ pub fn index_get_in(
             let i = numeric_index(idx).ok_or_else(|| {
                 error(
                     line,
-                    format!(
-                        "Can't index {} with {}",
-                        obj.type_name(),
-                        idx.type_name()
-                    ),
+                    format!("Can't index {} with {}", obj.type_name(), idx.type_name()),
                 )
             })?;
             let actual = normalize_element_index(i, arr.len());
-            actual.and_then(|index| arr.get(index)).cloned().ok_or_else(|| {
-                error(
-                    line,
-                    format!(
-                        "Index {} is out of bounds (array has {} items)",
-                        i,
-                        arr.len()
-                    ),
-                )
-            })
+            actual
+                .and_then(|index| arr.get(index))
+                .cloned()
+                .ok_or_else(|| {
+                    error(
+                        line,
+                        format!(
+                            "Index {} is out of bounds (array has {} items)",
+                            i,
+                            arr.len()
+                        ),
+                    )
+                })
         }
         Value::Str(s) => {
             let i = numeric_index(idx).ok_or_else(|| {
                 error(
                     line,
-                    format!(
-                        "Can't index {} with {}",
-                        obj.type_name(),
-                        idx.type_name()
-                    ),
+                    format!("Can't index {} with {}", obj.type_name(), idx.type_name()),
                 )
             })?;
             let chars: Vec<char> = s.chars().collect();
@@ -470,11 +465,7 @@ pub fn index_get_in(
                 .unwrap_or(Value::None)),
             _ => Err(error(
                 line,
-                format!(
-                    "Can't index {} with {}",
-                    obj.type_name(),
-                    idx.type_name()
-                ),
+                format!("Can't index {} with {}", obj.type_name(), idx.type_name()),
             )),
         },
         _ => Err(error(
@@ -484,12 +475,7 @@ pub fn index_get_in(
     }
 }
 
-pub fn index_set(
-    obj: &mut Value,
-    idx: &Value,
-    val: Value,
-    line: u32,
-) -> Result<(), BopError> {
+pub fn index_set(obj: &mut Value, idx: &Value, val: Value, line: u32) -> Result<(), BopError> {
     index_set_in(obj, idx, val, line, &MemoryContext::__legacy_current())
 }
 
@@ -503,9 +489,8 @@ pub fn index_set_in(
 ) -> Result<(), BopError> {
     match obj {
         Value::Array(arr) => {
-            let i = numeric_index(idx).ok_or_else(|| {
-                error(line, "Can't set index with these types")
-            })?;
+            let i = numeric_index(idx)
+                .ok_or_else(|| error(line, "Can't set index with these types"))?;
             let len = arr.len();
             let actual = normalize_element_index(i, len).ok_or_else(|| {
                 error(
@@ -516,9 +501,7 @@ pub fn index_set_in(
             arr.__try_set_in(actual, val, line, memory)
         }
         Value::Dict(entries) => match idx {
-            Value::Str(key) => {
-                entries.__try_set_key_in(key, val, line, memory)
-            }
+            Value::Str(key) => entries.__try_set_key_in(key, val, line, memory),
             _ => Err(error(line, "Can't set index with these types")),
         },
         _ => Err(error(line, "Can't set index with these types")),

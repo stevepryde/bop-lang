@@ -207,14 +207,8 @@ mod tests {
     fn constant_mutation_error_keeps_message_hint_and_line_together() {
         let error = constant_mutation_error("VALUES", 12);
         assert_eq!(error.line, Some(12));
-        assert_eq!(
-            error.message,
-            "can't reassign `VALUES` — it's a constant"
-        );
-        assert_eq!(
-            error.friendly_hint.as_deref(),
-            Some(CONSTANT_MUTATION_HINT)
-        );
+        assert_eq!(error.message, "can't reassign `VALUES` — it's a constant");
+        assert_eq!(error.friendly_hint.as_deref(), Some(CONSTANT_MUTATION_HINT));
     }
 
     #[test]

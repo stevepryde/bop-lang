@@ -1,5 +1,10 @@
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{format, string::{String, ToString}, vec, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use crate::builtins::{error, error_with_hint};
 use crate::error::BopError;
@@ -44,12 +49,18 @@ pub fn array_method_in(
             }
             let mut new_arr = arr.to_vec();
             new_arr.push(args[0].clone());
-            Ok((Value::None, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
+            Ok((
+                Value::None,
+                Some(Value::__try_new_array_in(new_arr, line, memory)?),
+            ))
         }
         "pop" => {
             let mut new_arr = arr.to_vec();
             let popped = new_arr.pop().unwrap_or(Value::None);
-            Ok((popped, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
+            Ok((
+                popped,
+                Some(Value::__try_new_array_in(new_arr, line, memory)?),
+            ))
         }
         "has" => {
             if args.len() != 1 {
@@ -74,7 +85,10 @@ pub fn array_method_in(
                 .ok_or_else(|| error(line, format!("Insert index {} is out of bounds", i)))?;
             let mut new_arr = arr.to_vec();
             new_arr.insert(actual, args[1].clone());
-            Ok((Value::None, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
+            Ok((
+                Value::None,
+                Some(Value::__try_new_array_in(new_arr, line, memory)?),
+            ))
         }
         "remove" => {
             if args.len() != 1 {
@@ -85,7 +99,10 @@ pub fn array_method_in(
                 .ok_or_else(|| error(line, format!("Remove index {} is out of bounds", i)))?;
             let mut new_arr = arr.to_vec();
             let removed = new_arr.remove(actual);
-            Ok((removed, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
+            Ok((
+                removed,
+                Some(Value::__try_new_array_in(new_arr, line, memory)?),
+            ))
         }
         "slice" => {
             if args.len() != 2 {
@@ -101,12 +118,18 @@ pub fn array_method_in(
         "reverse" => {
             let mut new_arr = arr.to_vec();
             new_arr.reverse();
-            Ok((Value::None, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
+            Ok((
+                Value::None,
+                Some(Value::__try_new_array_in(new_arr, line, memory)?),
+            ))
         }
         "sort" => {
             let mut new_arr = arr.to_vec();
             new_arr.sort_by(compare_array_values);
-            Ok((Value::None, Some(Value::__try_new_array_in(new_arr, line, memory)?)))
+            Ok((
+                Value::None,
+                Some(Value::__try_new_array_in(new_arr, line, memory)?),
+            ))
         }
         "join" => {
             if args.len() != 1 {
@@ -129,9 +152,15 @@ pub fn array_method_in(
             // source array must not poke the iterator. Cheap
             // because every inner Value::Clone is either a
             // primitive copy or an Rc bump.
-            Ok((Value::__try_new_array_iter_in(arr.to_vec(), line, memory)?, None))
+            Ok((
+                Value::__try_new_array_iter_in(arr.to_vec(), line, memory)?,
+                None,
+            ))
         }
-        _ => Err(error(line, format!("Array doesn't have a .{}() method", method))),
+        _ => Err(error(
+            line,
+            format!("Array doesn't have a .{}() method", method),
+        )),
     }
 }
 
@@ -174,9 +203,8 @@ pub fn array_method_mut_in(
             let index = args.next().expect("length checked");
             let value = args.next().expect("length checked");
             let index = expect_method_index("insert", &index, line)?;
-            let actual = normalize_insert_index(index, arr.len()).ok_or_else(|| {
-                error(line, format!("Insert index {} is out of bounds", index))
-            })?;
+            let actual = normalize_insert_index(index, arr.len())
+                .ok_or_else(|| error(line, format!("Insert index {} is out of bounds", index)))?;
             arr.__try_insert_in(actual, value, line, memory)?;
             Ok(Value::None)
         }
@@ -186,9 +214,8 @@ pub fn array_method_mut_in(
             }
             let index = args.into_iter().next().expect("length checked");
             let index = expect_method_index("remove", &index, line)?;
-            let actual = normalize_element_index(index, arr.len()).ok_or_else(|| {
-                error(line, format!("Remove index {} is out of bounds", index))
-            })?;
+            let actual = normalize_element_index(index, arr.len())
+                .ok_or_else(|| error(line, format!("Remove index {} is out of bounds", index)))?;
             Ok(arr.__remove_in(actual, memory))
         }
         "reverse" => {
@@ -421,18 +448,18 @@ pub fn string_method_in(
             if let Ok(n) = s.parse::<i64>() {
                 return Ok((Value::Int(n), None));
             }
-            let n: f64 = s.parse().map_err(|_| {
-                error(line, format!("Can't convert \"{}\" to a number", s))
-            })?;
+            let n: f64 = s
+                .parse()
+                .map_err(|_| error(line, format!("Can't convert \"{}\" to a number", s)))?;
             Ok((Value::Int(n as i64), None))
         }
         "to_float" => {
             if !args.is_empty() {
                 return Err(error(line, ".to_float() takes no arguments"));
             }
-            let n: f64 = s.parse().map_err(|_| {
-                error(line, format!("Can't convert \"{}\" to a number", s))
-            })?;
+            let n: f64 = s
+                .parse()
+                .map_err(|_| error(line, format!("Can't convert \"{}\" to a number", s)))?;
             Ok((Value::Number(n), None))
         }
         "iter" => {
@@ -440,7 +467,10 @@ pub fn string_method_in(
             let chars: Vec<char> = s.chars().collect();
             Ok((Value::__new_string_iter_in(chars, memory), None))
         }
-        _ => Err(error(line, format!("String doesn't have a .{}() method", method))),
+        _ => Err(error(
+            line,
+            format!("String doesn't have a .{}() method", method),
+        )),
     }
 }
 
@@ -482,7 +512,10 @@ mod tests {
             panic!("remove did not return an integer");
         };
         assert_eq!(removed, 40);
-        assert_eq!(ints(&update.expect("remove did not update the array")), [10, 20, 30]);
+        assert_eq!(
+            ints(&update.expect("remove did not update the array")),
+            [10, 20, 30]
+        );
     }
 
     #[test]
@@ -493,25 +526,18 @@ mod tests {
             (-3, &[99, 10, 20, 30][..]),
             (3, &[10, 20, 30, 99][..]),
         ] {
-            let result = array_method(
-                &source,
-                "insert",
-                &[Value::Int(index), Value::Int(99)],
-                9,
-            )
-            .expect("valid insertion index should succeed");
+            let result = array_method(&source, "insert", &[Value::Int(index), Value::Int(99)], 9)
+                .expect("valid insertion index should succeed");
             assert_eq!(ints(&updated_array(result)), expected);
         }
 
         for index in [-4, 4] {
-            let err = array_method(
-                &source,
-                "insert",
-                &[Value::Int(index), Value::Int(99)],
-                9,
-            )
-            .expect_err("out-of-range insertion should fail");
-            assert_eq!(err.message, format!("Insert index {} is out of bounds", index));
+            let err = array_method(&source, "insert", &[Value::Int(index), Value::Int(99)], 9)
+                .expect_err("out-of-range insertion should fail");
+            assert_eq!(
+                err.message,
+                format!("Insert index {} is out of bounds", index)
+            );
         }
     }
 
@@ -529,13 +555,9 @@ mod tests {
             (-100, 100, &[10, 20, 30, 40][..]),
             (3, 1, &[][..]),
         ] {
-            let (slice, update) = array_method(
-                &source,
-                "slice",
-                &[Value::Int(start), Value::Int(end)],
-                9,
-            )
-            .expect("slice should normalize its bounds");
+            let (slice, update) =
+                array_method(&source, "slice", &[Value::Int(start), Value::Int(end)], 9)
+                    .expect("slice should normalize its bounds");
             assert!(update.is_none());
             assert_eq!(ints(&slice), expected);
         }
@@ -543,13 +565,8 @@ mod tests {
 
     #[test]
     fn string_slice_counts_unicode_characters_from_the_end() {
-        let (slice, update) = string_method(
-            "a🦀éz",
-            "slice",
-            &[Value::Int(-3), Value::Int(-1)],
-            9,
-        )
-        .expect("unicode slice should succeed");
+        let (slice, update) = string_method("a🦀éz", "slice", &[Value::Int(-3), Value::Int(-1)], 9)
+            .expect("unicode slice should succeed");
         assert!(update.is_none());
         let Value::Str(ref slice) = slice else {
             panic!("slice did not return a string");
@@ -566,7 +583,10 @@ mod tests {
             panic!("remove did not return an integer");
         };
         assert_eq!(removed, 30);
-        assert_eq!(ints(&update.expect("remove did not update the array")), [10, 20]);
+        assert_eq!(
+            ints(&update.expect("remove did not update the array")),
+            [10, 20]
+        );
 
         let err = array_method(&source, "remove", &[Value::Int(i64::MIN)], 9)
             .expect_err("extreme negative index should fail");
@@ -583,7 +603,13 @@ pub fn dict_method(
     args: &[Value],
     line: u32,
 ) -> Result<(Value, Option<Value>), BopError> {
-    dict_method_in(entries, method, args, line, &MemoryContext::__legacy_current())
+    dict_method_in(
+        entries,
+        method,
+        args,
+        line,
+        &MemoryContext::__legacy_current(),
+    )
 }
 
 #[doc(hidden)]
@@ -624,7 +650,10 @@ pub fn dict_method_in(
             let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
             Ok((Value::__new_dict_iter_in(keys, memory), None))
         }
-        _ => Err(error(line, format!("Dict doesn't have a .{}() method", method))),
+        _ => Err(error(
+            line,
+            format!("Dict doesn't have a .{}() method", method),
+        )),
     }
 }
 
@@ -676,7 +705,10 @@ pub fn common_method_in(
         }
         "inspect" => {
             crate::builtins::expect_args("inspect", args, 0, line)?;
-            Ok(Some((Value::__new_str_in(receiver.inspect(), memory), None)))
+            Ok(Some((
+                Value::__new_str_in(receiver.inspect(), memory),
+                None,
+            )))
         }
         // `.is_none()` / `.is_some()` — dynamic-typing's answer
         // to `Option`. Any variable can hold `none` (missing
@@ -687,17 +719,11 @@ pub fn common_method_in(
         // ally at the call site and composes with method chains.
         "is_none" => {
             crate::builtins::expect_args("is_none", args, 0, line)?;
-            Ok(Some((
-                Value::Bool(matches!(receiver, Value::None)),
-                None,
-            )))
+            Ok(Some((Value::Bool(matches!(receiver, Value::None)), None)))
         }
         "is_some" => {
             crate::builtins::expect_args("is_some", args, 0, line)?;
-            Ok(Some((
-                Value::Bool(!matches!(receiver, Value::None)),
-                None,
-            )))
+            Ok(Some((Value::Bool(!matches!(receiver, Value::None)), None)))
         }
         _ => Ok(None),
     }
@@ -822,11 +848,7 @@ fn to_f64_or_error(v: &Value, method: &str, line: u32) -> Result<f64, BopError> 
         Value::Number(n) => Ok(*n),
         other => Err(error(
             line,
-            format!(
-                "`.{}` expects a number, got {}",
-                method,
-                other.type_name()
-            ),
+            format!("`.{}` expects a number, got {}", method, other.type_name()),
         )),
     }
 }
@@ -877,7 +899,11 @@ fn pair_pick(
     expect_args(method, args, 1, line)?;
     match (receiver, &args[0]) {
         (Value::Int(a), Value::Int(b)) => {
-            let pick = if pick_smaller { (*a).min(*b) } else { (*a).max(*b) };
+            let pick = if pick_smaller {
+                (*a).min(*b)
+            } else {
+                (*a).max(*b)
+            };
             Ok((Value::Int(pick), None))
         }
         (Value::Number(a), Value::Number(b)) => {
@@ -919,14 +945,13 @@ pub fn is_mutating_method(method: &str) -> bool {
 /// reuse one of these names with a different signature.
 pub fn builtin_method_arity(method: &str) -> Option<usize> {
     match method {
-        "len" | "pop" | "reverse" | "sort" | "iter" | "keys" | "values"
-        | "upper" | "lower" | "trim" | "to_int" | "to_float" | "type"
-        | "to_str" | "inspect" | "is_none" | "is_some" | "abs" | "sqrt"
-        | "sin" | "cos" | "tan" | "exp" | "log" | "floor" | "ceil"
+        "len" | "pop" | "reverse" | "sort" | "iter" | "keys" | "values" | "upper" | "lower"
+        | "trim" | "to_int" | "to_float" | "type" | "to_str" | "inspect" | "is_none"
+        | "is_some" | "abs" | "sqrt" | "sin" | "cos" | "tan" | "exp" | "log" | "floor" | "ceil"
         | "round" | "is_ok" | "is_err" | "unwrap" | "next" => Some(0),
-        "push" | "has" | "index_of" | "remove" | "join" | "contains"
-        | "starts_with" | "ends_with" | "split" | "pow" | "min" | "max"
-        | "expect" | "unwrap_or" | "map" | "map_err" | "and_then" => Some(1),
+        "push" | "has" | "index_of" | "remove" | "join" | "contains" | "starts_with"
+        | "ends_with" | "split" | "pow" | "min" | "max" | "expect" | "unwrap_or" | "map"
+        | "map_err" | "and_then" => Some(1),
         "insert" | "slice" | "replace" => Some(2),
         _ => None,
     }
@@ -1048,9 +1073,7 @@ pub fn result_method(
             return None;
         }
         match e.payload() {
-            crate::value::EnumPayload::Tuple(items) if items.len() == 1 => {
-                Some(items[0].clone())
-            }
+            crate::value::EnumPayload::Tuple(items) if items.len() == 1 => Some(items[0].clone()),
             _ => None,
         }
     };
@@ -1059,9 +1082,7 @@ pub fn result_method(
             return None;
         }
         match e.payload() {
-            crate::value::EnumPayload::Tuple(items) if items.len() == 1 => {
-                Some(items[0].clone())
-            }
+            crate::value::EnumPayload::Tuple(items) if items.len() == 1 => Some(items[0].clone()),
             _ => None,
         }
     };

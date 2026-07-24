@@ -166,8 +166,7 @@ fn reset_meta_command_clears_session() {
     let (_stdout, stderr, code) = run_repl(src);
     assert_eq!(code, 1);
     assert!(
-        stderr.contains("Variable `x` not found")
-            || stderr.to_lowercase().contains("not found"),
+        stderr.contains("Variable `x` not found") || stderr.to_lowercase().contains("not found"),
         "expected 'x not found' error after :reset, got: {}",
         stderr
     );

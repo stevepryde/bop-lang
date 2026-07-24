@@ -274,32 +274,14 @@ impl<'a> Validator<'a> {
             }
             Instr::PrepareCall { name, site } => {
                 self.pool(name.0, self.chunk.names.len(), line, "name", &at)?;
-                self.pool(
-                    site.0,
-                    self.chunk.call_sites.len(),
-                    line,
-                    "call site",
-                    &at,
-                )?;
+                self.pool(site.0, self.chunk.call_sites.len(), line, "call site", &at)?;
             }
             Instr::PrepareCallValue { site } | Instr::CallPrepared { site } => {
-                self.pool(
-                    site.0,
-                    self.chunk.call_sites.len(),
-                    line,
-                    "call site",
-                    &at,
-                )?;
+                self.pool(site.0, self.chunk.call_sites.len(), line, "call site", &at)?;
             }
             Instr::PrepareMethodValue { method, site, .. } => {
                 self.pool(method.0, self.chunk.names.len(), line, "name", &at)?;
-                self.pool(
-                    site.0,
-                    self.chunk.call_sites.len(),
-                    line,
-                    "call site",
-                    &at,
-                )?;
+                self.pool(site.0, self.chunk.call_sites.len(), line, "call site", &at)?;
             }
             Instr::PrepareMethodNamed {
                 target,
@@ -308,13 +290,7 @@ impl<'a> Validator<'a> {
             } => {
                 self.namespace_ref(target, line, &at)?;
                 self.pool(method.0, self.chunk.names.len(), line, "name", &at)?;
-                self.pool(
-                    site.0,
-                    self.chunk.call_sites.len(),
-                    line,
-                    "call site",
-                    &at,
-                )?;
+                self.pool(site.0, self.chunk.call_sites.len(), line, "call site", &at)?;
             }
             Instr::CallMethod {
                 method,

@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
-use bop::{BopHost, BopLimits, Value};
 use bop::parser::ParamMode;
+use bop::{BopHost, BopLimits, Value};
 use bop_vm::chunk::{
     CallSite, CallSiteIdx, Chunk, CodeOffset, ConstIdx, ConstructFieldsIdx, EnumConstructShape,
     EnumIdx, FnDef, FnIdx, Instr, InterpIdx, InterpPart, InterpRecipe, NameIdx, NamespaceIdx,
@@ -36,7 +36,11 @@ fn execute_rejects_invalid_call_site_metadata_and_indexes() {
         ref_targets: vec![],
     });
     let mismatch = execution_error(mismatched);
-    assert!(mismatch.message.contains("1 argument modes but 0 ref-target entries"));
+    assert!(
+        mismatch
+            .message
+            .contains("1 argument modes but 0 ref-target entries")
+    );
 
     let mut invalid_target = chunk_with(Instr::Halt);
     invalid_target.names.push("value".into());

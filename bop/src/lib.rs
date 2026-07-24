@@ -167,26 +167,23 @@ extern crate std;
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{string::String, vec::Vec};
 
-pub mod error;
-pub mod error_messages;
 #[doc(hidden)]
 pub mod ast_visit;
-pub mod value;
-pub mod value_conversion;
+pub mod builtins;
+pub mod check;
+pub mod error;
+pub mod error_messages;
+pub mod host;
+mod instance;
 pub mod lexer;
-pub mod parser;
-pub mod ref_params;
 pub mod math;
 pub mod memory;
+pub mod methods;
 pub mod naming;
 pub mod ops;
+pub mod parser;
 pub mod precheck;
-pub mod builtins;
-pub mod host;
-pub mod methods;
-pub mod suggest;
-pub mod check;
-mod instance;
+pub mod ref_params;
 /// Bundled Bop standard library (`use std.math`, `std.json`,
 /// `std.collections`, `std.iter`, `std.string`, `std.test`).
 /// Feature-gated behind `bop-std` (on by default).
@@ -198,14 +195,17 @@ mod instance;
 /// public entry point.
 #[cfg(feature = "bop-std")]
 pub mod stdlib;
+pub mod suggest;
+pub mod value;
+pub mod value_conversion;
 
 mod evaluator;
 
 pub use error::BopError;
 pub use error::BopWarning;
+pub use instance::{BopInstance, EntryPoint};
 pub use parser::{ParamMode, Stmt, count_instructions};
 pub use ref_params::{validate_call_modes, validate_value_only_call_modes};
-pub use instance::{BopInstance, EntryPoint};
 pub use value::Value;
 pub use value_conversion::{FromValue, IntoValue, ValueConversionError, ValuePathSegment};
 
@@ -340,9 +340,7 @@ pub fn parse(source: &str) -> Result<Vec<Stmt>, BopError> {
 /// [`parse_with_warnings_and_resolver`] for a variant that
 /// walks `use` statements to pick up imported enum decls so
 /// exhaustiveness warnings fire on them too.
-pub fn parse_with_warnings(
-    source: &str,
-) -> Result<(Vec<Stmt>, Vec<error::BopWarning>), BopError> {
+pub fn parse_with_warnings(source: &str) -> Result<(Vec<Stmt>, Vec<error::BopWarning>), BopError> {
     let stmts = parse(source)?;
     let warnings = check::check_program(&stmts);
     Ok((stmts, warnings))
@@ -393,12 +391,21 @@ mod tests {
         }
 
         fn last_print(&self) -> String {
-            self.prints.borrow().last().cloned().expect("no print output")
+            self.prints
+                .borrow()
+                .last()
+                .cloned()
+                .expect("no print output")
         }
     }
 
     impl BopHost for TestHost {
-        fn call(&mut self, _name: &str, _args: &[Value], _line: u32) -> Option<Result<Value, BopError>> {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
             None
         }
 
@@ -679,12 +686,18 @@ print("hi {name}!")"#),
 
     #[test]
     fn if_true_branch() {
-        assert_eq!(say("if true { print(\"yes\") } else { print(\"no\") }"), "yes");
+        assert_eq!(
+            say("if true { print(\"yes\") } else { print(\"no\") }"),
+            "yes"
+        );
     }
 
     #[test]
     fn if_false_branch() {
-        assert_eq!(say("if false { print(\"yes\") } else { print(\"no\") }"), "no");
+        assert_eq!(
+            say("if false { print(\"yes\") } else { print(\"no\") }"),
+            "no"
+        );
     }
 
     #[test]
@@ -776,8 +789,7 @@ print(third)"#;
         assert_eq!(leading_semicolon.column, Some(23));
         assert_eq!(leading_semicolon.message, "I didn't expect `;` here");
 
-        let boundary_semicolon =
-            parse_err_full("let value = if true { 1 };\nelse { 2 }");
+        let boundary_semicolon = parse_err_full("let value = if true { 1 };\nelse { 2 }");
         assert_eq!(boundary_semicolon.line, Some(1));
         assert_eq!(boundary_semicolon.column, Some(26));
         assert_eq!(boundary_semicolon.message, "Expected `else` but found `;`");
@@ -886,7 +898,10 @@ print(noop().type())"#),
 
     #[test]
     fn fn_uses_defining_root_but_not_caller_locals() {
-        assert_eq!(say("let secret = 42\nfn peek() { return secret }\nprint(peek())"), "42");
+        assert_eq!(
+            say("let secret = 42\nfn peek() { return secret }\nprint(peek())"),
+            "42"
+        );
         assert!(
             run_err(
                 r#"fn peek() { return caller_local }
@@ -905,8 +920,7 @@ caller()"#
     #[test]
     fn ref_parameters_commit_on_normal_returns_and_survive_aliases() {
         assert_eq!(
-            say(
-                r#"fn swap(ref left, ref right) {
+            say(r#"fn swap(ref left, ref right) {
     let old = left
     left = right
     right = old
@@ -915,32 +929,27 @@ let alias = swap
 let a = 1
 let b = 2
 alias(ref a, ref b)
-print([a, b])"#,
-            ),
+print([a, b])"#,),
             "[2, 1]"
         );
         assert_eq!(
-            say(
-                r#"fn set_and_return_err(ref value) {
+            say(r#"fn set_and_return_err(ref value) {
     value = 7
     return Err("ordinary value")
 }
 let value = 1
 let result = set_and_return_err(ref value)
-print([value, result.is_err()])"#,
-            ),
+print([value, result.is_err()])"#,),
             "[7, true]"
         );
         assert_eq!(
-            say(
-                r#"fn set_and_try(ref value) {
+            say(r#"fn set_and_try(ref value) {
     value = 8
     try Err("ordinary early return")
 }
 let value = 1
 let result = set_and_try(ref value)
-print([value, result.is_err()])"#,
-            ),
+print([value, result.is_err()])"#,),
             "[8, true]"
         );
     }
@@ -948,27 +957,23 @@ print([value, result.is_err()])"#,
     #[test]
     fn ref_preflight_blocks_argument_side_effects_and_reports_modes() {
         assert_eq!(
-            say(
-                r#"let hits = []
+            say(r#"let hits = []
 fn side() { hits.push(1); return 1 }
 fn needs_ref(ref value) { value = 2 }
 fn missing_marker() { needs_ref(side()) }
 let result = try_call(missing_marker)
-print([hits, result.is_err()])"#,
-            ),
+print([hits, result.is_err()])"#,),
             "[[], true]"
         );
 
         assert_eq!(
-            say(
-                r#"let hits = []
+            say(r#"let hits = []
 fn target(ref value) { }
 fn choose() { hits.push("callee"); return target }
 fn side() { hits.push("argument"); return 1 }
 fn invoke() { choose()(side()) }
 let result = try_call(invoke)
-print([hits, result.is_err()])"#,
-            ),
+print([hits, result.is_err()])"#,),
             "[[\"callee\"], true]"
         );
 
@@ -977,29 +982,33 @@ print([hits, result.is_err()])"#,
             invalid.message,
             "`ref` argument 1 must name a mutable variable"
         );
-        assert!(invalid
-            .friendly_hint
-            .as_deref()
-            .unwrap()
-            .contains("`let` variable"));
-        let missing = run_err_full(
-            "fn needs_ref(ref value) { }\nlet value = 1\nneeds_ref(value)",
+        assert!(
+            invalid
+                .friendly_hint
+                .as_deref()
+                .unwrap()
+                .contains("`let` variable")
         );
+        let missing = run_err_full("fn needs_ref(ref value) { }\nlet value = 1\nneeds_ref(value)");
         assert_eq!(
             missing.message,
             "argument 1 to `needs_ref` must be passed with `ref`"
         );
-        assert!(missing.friendly_hint.as_deref().unwrap().contains("Write `ref`"));
+        assert!(
+            missing
+                .friendly_hint
+                .as_deref()
+                .unwrap()
+                .contains("Write `ref`")
+        );
 
         assert_eq!(
-            say(
-                r#"let hits = []
+            say(r#"let hits = []
 fn side() { hits.push(1); return 1 }
 fn invalid_target(ref value, ordinary) { }
 fn invoke() { invalid_target(ref [1], side()) }
 let result = try_call(invoke)
-print([hits, result.is_err()])"#,
-            ),
+print([hits, result.is_err()])"#,),
             "[[], true]"
         );
     }
@@ -1007,26 +1016,22 @@ print([hits, result.is_err()])"#,
     #[test]
     fn ref_snapshots_after_ordinary_arguments_and_commits_all_targets() {
         assert_eq!(
-            say(
-                r#"let value = 1
+            say(r#"let value = 1
 fn ordinary() { value += 1; return 10 }
 fn update(ref target, amount) { target += amount }
 update(ref value, ordinary())
-print(value)"#,
-            ),
+print(value)"#,),
             "12"
         );
         assert_eq!(
-            say(
-                r#"fn assign_pair(ref left, ref right) {
+            say(r#"fn assign_pair(ref left, ref right) {
     left = 10
     right = 20
 }
 let left = 1
 let right = 2
 assign_pair(ref left, ref right)
-print([left, right])"#,
-            ),
+print([left, right])"#,),
             "[10, 20]"
         );
     }
@@ -1034,8 +1039,7 @@ print([left, right])"#,
     #[test]
     fn ref_errors_roll_back_every_target_including_forwarded_stages() {
         assert_eq!(
-            say(
-                r#"let left = 1
+            say(r#"let left = 1
 let right = 2
 fn fail(ref a, ref b) {
     a = 10
@@ -1044,13 +1048,11 @@ fn fail(ref a, ref b) {
 }
 fn invoke() { fail(ref left, ref right) }
 let result = try_call(invoke)
-print([left, right, result.is_err()])"#,
-            ),
+print([left, right, result.is_err()])"#,),
             "[1, 2, true]"
         );
         assert_eq!(
-            say(
-                r#"let value = 1
+            say(r#"let value = 1
 fn inner(ref staged) { staged = 9 }
 fn outer(ref staged) {
     inner(ref staged)
@@ -1058,43 +1060,37 @@ fn outer(ref staged) {
 }
 fn invoke() { outer(ref value) }
 let result = try_call(invoke)
-print([value, result.is_err()])"#,
-            ),
+print([value, result.is_err()])"#,),
             "[1, true]"
         );
     }
 
     #[test]
     fn ref_target_fences_reject_duplicates_captures_and_ref_capture() {
-        let duplicate = run_err(
-            "fn pair(ref a, ref b) { }\nlet value = 1\npair(ref value, ref value)",
-        );
+        let duplicate =
+            run_err("fn pair(ref a, ref b) { }\nlet value = 1\npair(ref value, ref value)");
         assert!(duplicate.contains("same variable"));
 
         assert_eq!(
-            say(
-                r#"fn touch(ref value) { value = 2 }
+            say(r#"fn touch(ref value) { value = 2 }
 fn make() {
     let captured = 1
     return fn() { touch(ref captured) }
 }
 let closure = make()
 let result = try_call(closure)
-print(result.is_err())"#,
-            ),
+print(result.is_err())"#,),
             "true"
         );
 
         assert_eq!(
-            say(
-                r#"let value = 1
+            say(r#"let value = 1
 fn outer(ref staged) {
     let closure = fn() { return staged }
 }
 fn invoke() { outer(ref value) }
 let result = try_call(invoke)
-print([value, result.is_err()])"#,
-            ),
+print([value, result.is_err()])"#,),
             "[1, true]"
         );
     }
@@ -1102,56 +1098,47 @@ print([value, result.is_err()])"#,
     #[test]
     fn ref_method_receivers_stage_after_args_and_user_methods_allow_ref_args() {
         assert_eq!(
-            say(
-                r#"let items = [1]
+            say(r#"let items = [1]
 fn argument() { items.push(2); return 3 }
 (items).push(argument())
-print(items)"#,
-            ),
+print(items)"#,),
             "[1, 2, 3]"
         );
         assert_eq!(say("print(([1, 2]).pop())"), "2");
         assert_eq!(say("print(([1, 2]).push(3))"), "none");
         assert_eq!(
-            say(
-                r#"struct Amount { n }
+            say(r#"struct Amount { n }
 fn Amount.add_to(self, ref target) { target += self.n }
 let amount = Amount { n: 4 }
 let value = 3
 amount.add_to(ref value)
-print(value)"#,
-            ),
+print(value)"#,),
             "7"
         );
 
         assert_eq!(
-            say(
-                r#"let items = []
+            say(r#"let items = []
 let hits = []
 fn side() { hits.push(1); return 1 }
 fn invoke() { items.push(ref side()) }
 let result = try_call(invoke)
-print([items, hits, result.is_err()])"#,
-            ),
+print([items, hits, result.is_err()])"#,),
             "[[], [], true]"
         );
         assert_eq!(
-            say(
-                r#"struct Box { value }
+            say(r#"struct Box { value }
 fn Box.set(ref self, value) { self.value = value }
 let item = Box { value: 1 }
 item.set(4)
-print(item.value)"#
-            ),
+print(item.value)"#),
             "4"
         );
     }
 
     #[test]
     fn zero_parameter_method_reports_total_arity_before_evaluating_arguments() {
-        let error = run_err_full(
-            "struct Empty { }\nfn Empty.zero() { return none }\nEmpty { }.zero()",
-        );
+        let error =
+            run_err_full("struct Empty { }\nfn Empty.zero() { return none }\nEmpty { }.zero()");
         assert_eq!(
             error.message,
             "`Empty.zero` expects 0 arguments (including `self`), but got 1"
@@ -1160,16 +1147,14 @@ print(item.value)"#
         assert!(!error.is_fatal);
 
         assert_eq!(
-            say(
-                r#"struct Empty { }
+            say(r#"struct Empty { }
 let events = []
 fn Empty.zero() { return none }
 fn make() { events.push("receiver"); return Empty { } }
 fn side() { events.push("argument"); return 1 }
 fn invoke() { make().zero(side()) }
 let result = try_call(invoke)
-print([events, result.is_err()])"#,
-            ),
+print([events, result.is_err()])"#,),
             r#"[["receiver"], true]"#
         );
     }
@@ -1729,7 +1714,10 @@ print(d.len())"#),
 
     #[test]
     fn dict_equality() {
-        assert_eq!(say(r#"print({"a": 1, "b": 2} == {"b": 2, "a": 1})"#), "true");
+        assert_eq!(
+            say(r#"print({"a": 1, "b": 2} == {"b": 2, "a": 1})"#),
+            "true"
+        );
         assert_eq!(say(r#"print({"a": 1} == {"a": 2})"#), "false");
         assert_eq!(say(r#"print({"a": 1} == {"b": 1})"#), "false");
         assert_eq!(say(r#"print({"a": 1} == {"a": 1, "b": 2})"#), "false");
@@ -1797,11 +1785,7 @@ print(d.len())"#),
         let err = parse_err_full(src);
         assert_eq!(err.line, Some(2), "err: {:?}", err);
         let rendered = err.render(src);
-        assert!(
-            rendered.contains("let = 2"),
-            "rendered:\n{}",
-            rendered
-        );
+        assert!(rendered.contains("let = 2"), "rendered:\n{}", rendered);
     }
 
     #[test]
@@ -1840,10 +1824,7 @@ print(d.len())"#),
 print(lenght)"#,
         );
         assert!(err.message.contains("not found"), "err: {:?}", err);
-        assert_eq!(
-            err.friendly_hint.as_deref(),
-            Some("Did you mean `length`?")
-        );
+        assert_eq!(err.friendly_hint.as_deref(), Some("Did you mean `length`?"));
     }
 
     #[test]
@@ -1864,20 +1845,14 @@ print(lenght)"#,
 gret("world")"#,
         );
         assert!(err.message.contains("not found"));
-        assert_eq!(
-            err.friendly_hint.as_deref(),
-            Some("Did you mean `greet`?")
-        );
+        assert_eq!(err.friendly_hint.as_deref(), Some("Did you mean `greet`?"));
     }
 
     #[test]
     fn typo_builtin_suggests_core_name() {
         // `rang(5)` → core builtin `range`.
         let err = run_err_full("rang(5)");
-        assert_eq!(
-            err.friendly_hint.as_deref(),
-            Some("Did you mean `range`?")
-        );
+        assert_eq!(err.friendly_hint.as_deref(), Some("Did you mean `range`?"));
     }
 
     #[test]
@@ -1891,10 +1866,7 @@ print(p.z)"#,
         // Both `x` and `y` are within 1 edit of `z`; the
         // candidate order in `s.fields()` is declaration order,
         // so `x` wins the tie.
-        assert_eq!(
-            err.friendly_hint.as_deref(),
-            Some("Did you mean `x`?")
-        );
+        assert_eq!(err.friendly_hint.as_deref(), Some("Did you mean `x`?"));
     }
 
     #[test]
@@ -1904,10 +1876,7 @@ print(p.z)"#,
 let p = Point { x: 1, ya: 2 }"#,
         );
         assert!(err.message.contains("has no field `ya`"));
-        assert_eq!(
-            err.friendly_hint.as_deref(),
-            Some("Did you mean `y`?")
-        );
+        assert_eq!(err.friendly_hint.as_deref(), Some("Did you mean `y`?"));
     }
 
     #[test]
@@ -1917,10 +1886,7 @@ let p = Point { x: 1, ya: 2 }"#,
 let s = Shape::Circel(5)"#,
         );
         assert!(err.message.contains("has no variant `Circel`"));
-        assert_eq!(
-            err.friendly_hint.as_deref(),
-            Some("Did you mean `Circle`?")
-        );
+        assert_eq!(err.friendly_hint.as_deref(), Some("Did you mean `Circle`?"));
     }
 
     #[test]
@@ -2127,7 +2093,8 @@ repeat 1000 {
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
@@ -2149,7 +2116,8 @@ repeat 1000 {
         let msg = handle.join().expect("recursion test thread panicked");
         assert!(
             msg.contains("nested function calls") || msg.contains("recursion"),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
@@ -2208,7 +2176,8 @@ repeat 50 { a = a + a }"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
@@ -2221,16 +2190,14 @@ for c in s { }"#,
         );
         assert!(
             msg.contains("too many steps") || msg.contains("Memory limit"),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
     #[test]
     fn safety_demo_limits_step_bound() {
-        let msg = run_err_with_limits(
-            "let i = 0\nwhile true { i = i + 1 }",
-            BopLimits::demo(),
-        );
+        let msg = run_err_with_limits("let i = 0\nwhile true { i = i + 1 }", BopLimits::demo());
         assert!(msg.contains("too many steps"), "got: {}", msg);
     }
 
@@ -2260,7 +2227,8 @@ let x = 1"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
@@ -2275,7 +2243,8 @@ let x = 1"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
@@ -2288,7 +2257,8 @@ let x = 1"#,
         );
         assert!(
             msg.contains(builtins::RANGE_LIMIT_ERROR_MESSAGE),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
@@ -2303,7 +2273,8 @@ let x = 1"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
@@ -2347,7 +2318,8 @@ let x = 1"#,
         );
         assert!(
             msg.contains("Memory limit") || msg.contains("too many steps"),
-            "got: {}", msg
+            "got: {}",
+            msg
         );
     }
 
@@ -2358,7 +2330,12 @@ let x = 1"#,
     }
 
     impl BopHost for CustomHost {
-        fn call(&mut self, name: &str, args: &[Value], line: u32) -> Option<Result<Value, BopError>> {
+        fn call(
+            &mut self,
+            name: &str,
+            args: &[Value],
+            line: u32,
+        ) -> Option<Result<Value, BopError>> {
             match name {
                 "greet" => {
                     if args.len() != 1 {
@@ -2390,7 +2367,12 @@ let x = 1"#,
     #[test]
     fn host_custom_builtin() {
         let mut host = CustomHost { prints: vec![] };
-        run(r#"print(greet("world"))"#, &mut host, &BopLimits::standard()).unwrap();
+        run(
+            r#"print(greet("world"))"#,
+            &mut host,
+            &BopLimits::standard(),
+        )
+        .unwrap();
         assert_eq!(host.prints, vec!["Hello, world!"]);
     }
 
@@ -2432,8 +2414,10 @@ print(match x {
 
     #[test]
     fn match_no_arm_errors() {
-        let err = run_err(r#"let x = 5
-match x { 1 => "a", 2 => "b" }"#);
+        let err = run_err(
+            r#"let x = 5
+match x { 1 => "a", 2 => "b" }"#,
+        );
         assert!(err.contains("No match arm matched"), "got: {}", err);
     }
 
@@ -2554,7 +2538,8 @@ print(match t {
     fn match_nested_pattern() {
         // Classic Rust-style: Err(FileError::NotFound(path)).
         assert_eq!(
-            say(r#"enum FileError { NotFound(path), Permission(path), Other }
+            say(
+                r#"enum FileError { NotFound(path), Permission(path), Other }
 enum Result { Ok(value), Err(error) }
 let r = Result::Err(FileError::NotFound("/etc/passwd"))
 print(match r {
@@ -2562,7 +2547,8 @@ print(match r {
     Result::Err(FileError::NotFound(p)) => p,
     Result::Err(FileError::Permission(p)) => p,
     Result::Err(FileError::Other) => "other",
-})"#),
+})"#
+            ),
             "/etc/passwd"
         );
     }
@@ -2609,10 +2595,12 @@ print(match a {
     #[test]
     fn match_binding_scope_limited_to_arm() {
         assert!(
-            run_err(r#"let v = 5
+            run_err(
+                r#"let v = 5
 match v { x => print(x) }
-print(x)"#)
-                .contains("not found")
+print(x)"#
+            )
+            .contains("not found")
         );
     }
 
@@ -2713,12 +2701,7 @@ print(match r {
         // true` but is caught at the fn boundary and never
         // reaches the caller.
         let mut host = TestHost::new();
-        let err = run(
-            "print(1 / 0)",
-            &mut host,
-            &test_limits(),
-        )
-        .unwrap_err();
+        let err = run("print(1 / 0)", &mut host, &test_limits()).unwrap_err();
         assert_eq!(err.message, "Division by zero");
         // A real error must not be classified as a try-return
         // — otherwise it'd silently get swallowed by any
@@ -2991,21 +2974,13 @@ print(match r {
     #[test]
     fn try_call_errors_on_wrong_arg_count() {
         let msg = run_err("try_call()");
-        assert!(
-            msg.contains("try_call` expects 1"),
-            "got: {}",
-            msg
-        );
+        assert!(msg.contains("try_call` expects 1"), "got: {}", msg);
     }
 
     #[test]
     fn try_call_errors_on_non_function_arg() {
         let msg = run_err("try_call(42)");
-        assert!(
-            msg.contains("try_call` expects a function"),
-            "got: {}",
-            msg
-        );
+        assert!(msg.contains("try_call` expects a function"), "got: {}", msg);
     }
 
     #[test]
@@ -3125,10 +3100,7 @@ print(match r {
 
     #[test]
     fn i64_min_literal_is_an_exact_int_in_expressions_and_patterns() {
-        assert_eq!(
-            say("print(-9223372036854775808)"),
-            "-9223372036854775808"
-        );
+        assert_eq!(say("print(-9223372036854775808)"), "-9223372036854775808");
         assert_eq!(say("print((-9223372036854775808).type())"), "int");
         assert_eq!(
             say("print(-9223372036854775808 == (-9223372036854775807 - 1))"),
@@ -3143,13 +3115,11 @@ print(match r {
             "-9223372036854775807"
         );
         assert_eq!(
-            say(
-                r#"let min = -9223372036854775808
+            say(r#"let min = -9223372036854775808
 print(match min {
     -9223372036854775808 => "minimum",
     _ => "other",
-})"#,
-            ),
+})"#,),
             "minimum"
         );
     }
@@ -3277,11 +3247,7 @@ print(n)"#),
         }
 
         fn resolve_count(&self, name: &str) -> u32 {
-            *self
-                .resolve_counts
-                .borrow()
-                .get(name)
-                .unwrap_or(&0)
+            *self.resolve_counts.borrow().get(name).unwrap_or(&0)
         }
     }
 
@@ -3358,8 +3324,7 @@ print(e)"#,
     #[test]
     fn import_module_not_found_errors() {
         let mut host = ModuleHost::new(&[]);
-        let err = run("use nope", &mut host, &BopLimits::standard())
-            .unwrap_err();
+        let err = run("use nope", &mut host, &BopLimits::standard()).unwrap_err();
         assert!(
             err.message.contains("Module `nope` not found"),
             "got: {}",
@@ -3410,7 +3375,10 @@ print(doubled_pi)"#,
         let rendered = error.render(root_source);
 
         assert_eq!(
-            error.source_context.as_ref().map(|context| context.module_path.as_str()),
+            error
+                .source_context
+                .as_ref()
+                .map(|context| context.module_path.as_str()),
             Some("bad")
         );
         assert!(rendered.contains("in module `bad` at line 2"));
@@ -3432,17 +3400,17 @@ print(doubled_pi)"#,
 
         assert_eq!(context.module_path, "inner");
         assert_eq!(context.source.as_deref(), Some(inner_source));
-        assert!(error.render(root_source).contains("in module `inner` at line 2"));
+        assert!(
+            error
+                .render(root_source)
+                .contains("in module `inner` at line 2")
+        );
     }
 
     #[test]
     fn import_circular_detected() {
-        let mut host = ModuleHost::new(&[
-            ("a", "use b\nlet x = 1"),
-            ("b", "use a\nlet y = 2"),
-        ]);
-        let err = run("use a", &mut host, &BopLimits::standard())
-            .unwrap_err();
+        let mut host = ModuleHost::new(&[("a", "use b\nlet x = 1"), ("b", "use a\nlet y = 2")]);
+        let err = run("use a", &mut host, &BopLimits::standard()).unwrap_err();
         assert!(
             err.message.contains("Circular import"),
             "got: {}",
@@ -3487,12 +3455,7 @@ print(c)"#,
     #[test]
     fn use_selective_unknown_name_errors() {
         let mut host = ModuleHost::new(&[("m", "let a = 1")]);
-        let err = run(
-            r#"use m.{b}"#,
-            &mut host,
-            &BopLimits::standard(),
-        )
-        .unwrap_err();
+        let err = run(r#"use m.{b}"#, &mut host, &BopLimits::standard()).unwrap_err();
         assert!(
             err.message.contains("isn't exported"),
             "got: {}",
@@ -3502,10 +3465,7 @@ print(c)"#,
 
     #[test]
     fn use_alias_binds_module_value() {
-        let mut host = ModuleHost::new(&[(
-            "m",
-            "let pi = 3\nfn double(n) { return n + n }",
-        )]);
+        let mut host = ModuleHost::new(&[("m", "let pi = 3\nfn double(n) { return n + n }")]);
         run(
             r#"use m as m
 print(m.pi)
@@ -3620,10 +3580,7 @@ print(e.hp)"#,
 
     #[test]
     fn alias_namespaced_variant_ctor() {
-        let mut host = ModuleHost::new(&[(
-            "r",
-            "enum Result { Ok(v), Err(e) }",
-        )]);
+        let mut host = ModuleHost::new(&[("r", "enum Result { Ok(v), Err(e) }")]);
         run(
             r#"use r as r
 let v = r.Result::Ok(42)
@@ -3731,22 +3688,28 @@ print(Foo { a: 1 }.type())"#),
 
     #[test]
     fn struct_missing_field_errors() {
-        let err = run_err(r#"struct Point { x, y }
-let p = Point { x: 1 }"#);
+        let err = run_err(
+            r#"struct Point { x, y }
+let p = Point { x: 1 }"#,
+        );
         assert!(err.contains("Missing field"), "got: {}", err);
     }
 
     #[test]
     fn struct_extra_field_errors() {
-        let err = run_err(r#"struct Point { x, y }
-let p = Point { x: 1, y: 2, z: 3 }"#);
+        let err = run_err(
+            r#"struct Point { x, y }
+let p = Point { x: 1, y: 2, z: 3 }"#,
+        );
         assert!(err.contains("has no field"), "got: {}", err);
     }
 
     #[test]
     fn struct_duplicate_field_errors() {
-        let err = run_err(r#"struct Point { x, y }
-let p = Point { x: 1, x: 2, y: 3 }"#);
+        let err = run_err(
+            r#"struct Point { x, y }
+let p = Point { x: 1, x: 2, y: 3 }"#,
+        );
         assert!(err.contains("specified twice"), "got: {}", err);
     }
 
@@ -3758,9 +3721,11 @@ let p = Point { x: 1, x: 2, y: 3 }"#);
 
     #[test]
     fn struct_field_access_missing_errors() {
-        let err = run_err(r#"struct Point { x, y }
+        let err = run_err(
+            r#"struct Point { x, y }
 let p = Point { x: 1, y: 2 }
-print(p.z)"#);
+print(p.z)"#,
+        );
         assert!(err.contains("no field"), "got: {}", err);
     }
 
@@ -3772,8 +3737,10 @@ print(p.z)"#);
 
     #[test]
     fn struct_duplicate_decl_errors() {
-        let err = run_err(r#"struct Foo { x }
-struct Foo { y }"#);
+        let err = run_err(
+            r#"struct Foo { x }
+struct Foo { y }"#,
+        );
         assert!(err.contains("already declared"), "got: {}", err);
     }
 
@@ -3851,8 +3818,7 @@ if fn() { return Point { x: 8, y: 0 }.x }() == 8 { print("lambda") }"#,
         assert_eq!(
             host.prints.borrow().clone(),
             [
-                "call", "paren", "index", "array", "dict", "result", "match", "if-expr",
-                "lambda",
+                "call", "paren", "index", "array", "dict", "result", "match", "if-expr", "lambda",
             ]
         );
     }
@@ -3860,8 +3826,7 @@ if fn() { return Point { x: 8, y: 0 }.x }() == 8 { print("lambda") }"#,
     #[test]
     fn control_flow_head_braces_remain_disambiguated() {
         assert_eq!(
-            say(
-                r#"const CONDITION = false
+            say(r#"const CONDITION = false
 const ITEMS = [1, 2]
 const COUNT = 0
 const VALUE = 1
@@ -3869,8 +3834,7 @@ if CONDITION { print("bad-if") }
 while CONDITION { print("bad-while") }
 for item in ITEMS { print(item) }
 repeat COUNT { print("bad-repeat") }
-print(match VALUE { _ => "ok" })"#,
-            ),
+print(match VALUE { _ => "ok" })"#,),
             "ok"
         );
     }
@@ -3914,16 +3878,20 @@ print(c.n)"#),
 
     #[test]
     fn struct_field_assign_unknown_field_errors() {
-        let err = run_err(r#"struct P { x }
+        let err = run_err(
+            r#"struct P { x }
 let p = P { x: 1 }
-p.y = 99"#);
+p.y = 99"#,
+        );
         assert!(err.contains("no field"), "got: {}", err);
     }
 
     #[test]
     fn struct_field_assign_on_non_struct_errors() {
-        let err = run_err(r#"let x = 5
-x.field = 1"#);
+        let err = run_err(
+            r#"let x = 5
+x.field = 1"#,
+        );
         assert!(err.contains("Can't assign to field"), "got: {}", err);
     }
 
@@ -4002,36 +3970,46 @@ print(A::X == B::X)"#),
 
     #[test]
     fn enum_variant_mismatch_unit_given_args() {
-        let err = run_err(r#"enum E { A }
-let x = E::A(1)"#);
+        let err = run_err(
+            r#"enum E { A }
+let x = E::A(1)"#,
+        );
         assert!(err.contains("no payload"), "got: {}", err);
     }
 
     #[test]
     fn enum_variant_mismatch_tuple_arity() {
-        let err = run_err(r#"enum E { P(x, y) }
-let p = E::P(1)"#);
+        let err = run_err(
+            r#"enum E { P(x, y) }
+let p = E::P(1)"#,
+        );
         assert!(err.contains("expects 2 argument"), "got: {}", err);
     }
 
     #[test]
     fn enum_variant_mismatch_struct_missing_field() {
-        let err = run_err(r#"enum E { R { w, h } }
-let r = E::R { w: 1 }"#);
+        let err = run_err(
+            r#"enum E { R { w, h } }
+let r = E::R { w: 1 }"#,
+        );
         assert!(err.contains("Missing field"), "got: {}", err);
     }
 
     #[test]
     fn enum_variant_mismatch_struct_extra_field() {
-        let err = run_err(r#"enum E { R { w, h } }
-let r = E::R { w: 1, h: 2, extra: 3 }"#);
+        let err = run_err(
+            r#"enum E { R { w, h } }
+let r = E::R { w: 1, h: 2, extra: 3 }"#,
+        );
         assert!(err.contains("no field"), "got: {}", err);
     }
 
     #[test]
     fn enum_undeclared_variant_errors() {
-        let err = run_err(r#"enum E { A }
-let x = E::Z"#);
+        let err = run_err(
+            r#"enum E { A }
+let x = E::Z"#,
+        );
         assert!(err.contains("no variant"), "got: {}", err);
     }
 
@@ -4089,8 +4067,10 @@ print(palette)"#),
 
     #[test]
     fn enum_duplicate_decl_errors() {
-        let err = run_err(r#"enum E { A }
-enum E { B }"#);
+        let err = run_err(
+            r#"enum E { A }
+enum E { B }"#,
+        );
         assert!(err.contains("already declared"), "got: {}", err);
     }
 
@@ -4156,18 +4136,22 @@ print(w.len())"#),
 
     #[test]
     fn method_unknown_on_struct_errors() {
-        let err = run_err(r#"struct P { x }
+        let err = run_err(
+            r#"struct P { x }
 let p = P { x: 1 }
-p.nope()"#);
+p.nope()"#,
+        );
         assert!(err.contains(".nope()"), "got: {}", err);
     }
 
     #[test]
     fn method_wrong_arg_count_errors() {
-        let err = run_err(r#"struct P { x }
+        let err = run_err(
+            r#"struct P { x }
 fn P.set(self, v) { return P { x: v } }
 let p = P { x: 1 }
-p.set(1, 2)"#);
+p.set(1, 2)"#,
+        );
         assert!(err.contains("expects"), "got: {}", err);
     }
 
@@ -4281,16 +4265,8 @@ print(leak())"#,
         let cases = [
             ("const VALUES = [1, 2]\nVALUES[0] = 9", "VALUES", 2),
             ("const VALUES = [1, 2]\nVALUES[0] += 9", "VALUES", 2),
-            (
-                "const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] = 9",
-                "LOOKUP",
-                2,
-            ),
-            (
-                "const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] += 9",
-                "LOOKUP",
-                2,
-            ),
+            ("const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] = 9", "LOOKUP", 2),
+            ("const LOOKUP = {\"n\": 1}\nLOOKUP[\"n\"] += 9", "LOOKUP", 2),
             (
                 "struct Counter { n }\nconst COUNTER = Counter { n: 1 }\nCOUNTER.n = 9",
                 "COUNTER",
@@ -4352,8 +4328,7 @@ print(leak())"#,
             let source = format!("const VALUES = [3, 1, 2]\n{call}");
             let err = run_err_full(&source);
             assert_eq!(
-                err.message,
-                "can't reassign `VALUES` — it's a constant",
+                err.message, "can't reassign `VALUES` — it's a constant",
                 "source: {source}"
             );
             assert_eq!(err.line, Some(2), "source: {source}");
@@ -4371,30 +4346,27 @@ print(leak())"#,
 }
 mutate()"#,
         );
-        assert_eq!(
-            err.message,
-            "can't reassign `VALUES` — it's a constant"
-        );
+        assert_eq!(err.message, "can't reassign `VALUES` — it's a constant");
         assert_eq!(err.line, Some(3));
     }
 
     #[test]
     fn const_non_array_receivers_keep_ordinary_method_dispatch() {
         assert_eq!(
-            say(
-                r#"struct Accumulator { total }
+            say(r#"struct Accumulator { total }
 fn Accumulator.push(self, value) { return self.total + value }
 fn Accumulator.pop(self) { return self.total }
 const ACCUMULATOR = Accumulator { total: 7 }
 const LOOKUP = {"n": 1}
-print([ACCUMULATOR.push(5), ACCUMULATOR.pop(), LOOKUP.keys()])"#
-            ),
+print([ACCUMULATOR.push(5), ACCUMULATOR.pop(), LOOKUP.keys()])"#),
             r#"[12, 7, ["n"]]"#
         );
 
         assert_eq!(
-            run_err(r#"const LOOKUP = {"n": 1}
-LOOKUP.remove("n")"#),
+            run_err(
+                r#"const LOOKUP = {"n": 1}
+LOOKUP.remove("n")"#
+            ),
             "Dict doesn't have a .remove() method"
         );
     }
@@ -4402,16 +4374,14 @@ LOOKUP.remove("n")"#),
     #[test]
     fn lowercase_array_mutating_methods_remain_valid() {
         assert_eq!(
-            say(
-                r#"let values = [3, 1, 2]
+            say(r#"let values = [3, 1, 2]
 values.sort()
 values.reverse()
 values.insert(1, 4)
 values.remove(0)
 values.push(5)
 values.pop()
-print(values)"#
-            ),
+print(values)"#),
             "[4, 2, 1]"
         );
     }
@@ -4551,10 +4521,7 @@ print(make(4)(5))"#;
     #[test]
     fn const_name_must_be_all_caps() {
         let err = run_err("const Pi = 3");
-        assert!(
-            err.to_lowercase().contains("constant"),
-            "got: {err}"
-        );
+        assert!(err.to_lowercase().contains("constant"), "got: {err}");
     }
 
     #[test]
@@ -4635,10 +4602,7 @@ print(label(o.Color::Green))"#,
             &BopLimits::standard(),
         )
         .unwrap();
-        assert_eq!(
-            host.output(),
-            "paint red\nother red\nother"
-        );
+        assert_eq!(host.output(), "paint red\nother red\nother");
     }
 
     #[test]
@@ -4647,9 +4611,10 @@ print(label(o.Color::Green))"#,
         // exposes modules through its in-memory map, captures
         // prints, and the runtime threads them together with no
         // extra wiring on the embedder side.
-        let mut host = crate::host::StringModuleHost::new([
-            ("greetings", "fn hello(name) { print(\"hi \" + name) }"),
-        ]);
+        let mut host = crate::host::StringModuleHost::new([(
+            "greetings",
+            "fn hello(name) { print(\"hi \" + name) }",
+        )]);
         run(
             "use greetings\nhello(\"bop\")",
             &mut host,
@@ -4741,12 +4706,7 @@ print(label(o.Color::Green))"#,
     fn session_fn_declared_on_one_eval_callable_next() {
         let mut session = ReplSession::new();
         let mut host = TestHost::new();
-        repl_eval(
-            &mut session,
-            "fn double(x) { return x + x }",
-            &mut host,
-        )
-        .unwrap();
+        repl_eval(&mut session, "fn double(x) { return x + x }", &mut host).unwrap();
         repl_eval(&mut session, "print(double(21))", &mut host).unwrap();
         assert_eq!(host.last_print(), "42");
     }
@@ -4781,9 +4741,11 @@ print(label(o.Color::Green))"#,
         // Some(Value). Drives the REPL echo behaviour.
         let mut session = ReplSession::new();
         let mut host = TestHost::new();
-        assert!(repl_eval(&mut session, "let x = 5", &mut host)
-            .unwrap()
-            .is_none());
+        assert!(
+            repl_eval(&mut session, "let x = 5", &mut host)
+                .unwrap()
+                .is_none()
+        );
         let v = repl_eval(&mut session, "x + 1", &mut host).unwrap();
         match v {
             Some(Value::Int(n)) => assert_eq!(n, 6),
@@ -4856,12 +4818,7 @@ print(label(o.Color::Green))"#,
             prints: std::cell::RefCell<Vec<String>>,
         }
         impl BopHost for ModHost {
-            fn call(
-                &mut self,
-                _: &str,
-                _: &[Value],
-                _: u32,
-            ) -> Option<Result<Value, BopError>> {
+            fn call(&mut self, _: &str, _: &[Value], _: u32) -> Option<Result<Value, BopError>> {
                 None
             }
             fn on_print(&mut self, message: &str) {

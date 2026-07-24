@@ -360,14 +360,14 @@ fn function_loop_blocks_do_not_emit_runtime_scope_cleanup() {
     let body = &chunk.functions[0].chunk.code;
 
     assert!(
-        body.iter().any(|instr| matches!(
-            instr,
-            bop_vm::Instr::PopLoopState(LoopStateKind::Iterator)
-        )),
+        body.iter()
+            .any(|instr| matches!(instr, bop_vm::Instr::PopLoopState(LoopStateKind::Iterator))),
         "function break must retain iterator cleanup"
     );
     assert!(
-        !body.iter().any(|instr| matches!(instr, bop_vm::Instr::PopScope)),
+        !body
+            .iter()
+            .any(|instr| matches!(instr, bop_vm::Instr::PopScope)),
         "slot-resolved function blocks must not invent runtime scope cleanup"
     );
 }
@@ -398,9 +398,21 @@ fn function_declaration_and_call() {
         r#"fn double(x) { return x * 2 }
 print(double(5))"#,
     );
-    assert!(d.contains("DefineFn #0 (double)"), "top-level missing fn def:\n{}", d);
-    assert!(d.contains("PrepareCall double/#1"), "call site missing:\n{}", d);
-    assert!(d.contains("fn #0 double(x):"), "nested body header missing:\n{}", d);
+    assert!(
+        d.contains("DefineFn #0 (double)"),
+        "top-level missing fn def:\n{}",
+        d
+    );
+    assert!(
+        d.contains("PrepareCall double/#1"),
+        "call site missing:\n{}",
+        d
+    );
+    assert!(
+        d.contains("fn #0 double(x):"),
+        "nested body header missing:\n{}",
+        d
+    );
     // Param `x` resolves to the function's slot 0 (the compile-
     // time `LocalResolver` assigns params in declaration order),
     // so the body reads it via `LoadLocal @0` rather than the
@@ -422,11 +434,13 @@ fn match_in_named_fn_emits_runtime_scope_pair() {
     let body = &chunk.functions[0].chunk.code;
 
     assert!(
-        body.iter().any(|instr| matches!(instr, bop_vm::Instr::PushScope)),
+        body.iter()
+            .any(|instr| matches!(instr, bop_vm::Instr::PushScope)),
         "named-function match must open a runtime binding scope"
     );
     assert!(
-        body.iter().any(|instr| matches!(instr, bop_vm::Instr::PopScope)),
+        body.iter()
+            .any(|instr| matches!(instr, bop_vm::Instr::PopScope)),
         "named-function match must close its runtime binding scope"
     );
 }
@@ -454,12 +468,15 @@ fn method_call_on_literal_has_no_back_assign() {
     // `[1,2].len()` operates on a literal expression; no back-assign.
     let d = disasm("print([1, 2].len())");
     assert!(
-        d.contains("PrepareMethodValue .len/#1\n")
-            || d.contains("PrepareMethodValue .len/#1 "),
+        d.contains("PrepareMethodValue .len/#1\n") || d.contains("PrepareMethodValue .len/#1 "),
         "expected prepared temporary method call in:\n{}",
         d
     );
-    assert!(!d.contains("(back to"), "literal method call shouldn't back-assign:\n{}", d);
+    assert!(
+        !d.contains("(back to"),
+        "literal method call shouldn't back-assign:\n{}",
+        d
+    );
 }
 
 #[test]
@@ -494,7 +511,11 @@ fn compound_assign_on_index_is_target_aware() {
         d
     );
     assert!(!d.contains("LoadVar a"), "must not clone receiver:\n{}", d);
-    assert!(!d.contains("StoreVar a"), "must not clone-store receiver:\n{}", d);
+    assert!(
+        !d.contains("StoreVar a"),
+        "must not clone-store receiver:\n{}",
+        d
+    );
 }
 
 #[test]
@@ -510,7 +531,11 @@ c.n += 2"#,
         d
     );
     assert!(!d.contains("LoadVar c"), "must not clone receiver:\n{}", d);
-    assert!(!d.contains("StoreVar c"), "must not clone-store receiver:\n{}", d);
+    assert!(
+        !d.contains("StoreVar c"),
+        "must not clone-store receiver:\n{}",
+        d
+    );
 }
 
 #[test]
@@ -531,8 +556,10 @@ print(update([1]))"#,
 
 #[test]
 fn string_interpolation_uses_recipe() {
-    let d = disasm(r#"let name = "bop"
-print("hi {name}!")"#);
+    let d = disasm(
+        r#"let name = "bop"
+print("hi {name}!")"#,
+    );
     assert!(
         d.contains(r#"StringInterp ["hi ", $name, "!"]"#),
         "interpolation recipe not rendered as expected:\n{}",
@@ -852,9 +879,17 @@ fn nested_function_has_its_own_chunk() {
     return inner()
 }"#,
     );
-    assert!(d.contains("DefineFn #0 (outer)"), "outer fn missing:\n{}", d);
+    assert!(
+        d.contains("DefineFn #0 (outer)"),
+        "outer fn missing:\n{}",
+        d
+    );
     assert!(d.contains("fn #0 outer"), "outer body missing:\n{}", d);
-    assert!(d.contains("DefineFn #0 (inner)"), "inner fn inside outer missing:\n{}", d);
+    assert!(
+        d.contains("DefineFn #0 (inner)"),
+        "inner fn inside outer missing:\n{}",
+        d
+    );
     assert!(d.contains("fn #0 inner"), "inner body missing:\n{}", d);
 }
 
@@ -900,10 +935,13 @@ fn continue_outside_loop_is_compile_error() {
 
 #[test]
 fn constants_and_names_are_deduplicated() {
-    let ast = parse(r#"let x = "hi"
+    let ast = parse(
+        r#"let x = "hi"
 let y = "hi"
 print(x)
-print(x)"#).expect("parse");
+print(x)"#,
+    )
+    .expect("parse");
     let chunk = compile(&ast).expect("compile");
     // Only one "hi" constant: the string appears once in the pool.
     let hi_count = chunk

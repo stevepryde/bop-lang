@@ -59,9 +59,8 @@ use rustyline::{Context, Editor, Helper};
 /// Bop language keywords — offered as completion candidates
 /// when the user hits tab on a bare prefix.
 const KEYWORDS: &[&str] = &[
-    "let", "const", "pub", "ref", "fn", "if", "else", "while", "repeat", "for", "in",
-    "return", "break", "continue", "match", "struct", "enum", "use",
-    "as", "true", "false", "none", "try",
+    "let", "const", "pub", "ref", "fn", "if", "else", "while", "repeat", "for", "in", "return",
+    "break", "continue", "match", "struct", "enum", "use", "as", "true", "false", "none", "try",
 ];
 
 /// Every meta-command the REPL recognises. Typing one of
@@ -159,8 +158,7 @@ impl Completer for BopHelper {
 
         let typed = self.typed_names.borrow();
         let session = self.session_names.borrow();
-        let mut candidates: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
+        let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for &kw in KEYWORDS {
             if kw.starts_with(prefix) {
                 candidates.insert(kw.to_string());
@@ -220,10 +218,7 @@ fn is_incomplete_input(input: &str) -> bool {
 }
 
 impl Validator for BopHelper {
-    fn validate(
-        &self,
-        ctx: &mut ValidationContext,
-    ) -> rustyline::Result<ValidationResult> {
+    fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
         if is_incomplete_input(ctx.input()) {
             Ok(ValidationResult::Incomplete)
         } else {
@@ -263,11 +258,7 @@ enum StepOutcome {
 /// Meta-commands (`:help`, `:vars`, `:reset`, `:quit`) are
 /// handled here before the text ever reaches the parser.
 /// Everything else goes through `session.eval`.
-fn step<H: BopHost>(
-    session: &mut ReplSession,
-    host: &mut H,
-    input: &str,
-) -> StepOutcome {
+fn step<H: BopHost>(session: &mut ReplSession, host: &mut H, input: &str) -> StepOutcome {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return StepOutcome::Ok;
@@ -311,10 +302,7 @@ fn handle_meta(session: &mut ReplSession, cmd: &str) -> StepOutcome {
             StepOutcome::Note(String::from("session cleared.\n"))
         }
         ":quit" | ":q" | ":exit" => StepOutcome::Quit,
-        other => StepOutcome::Note(format!(
-            "unknown command `{}` — try `:help`\n",
-            other
-        )),
+        other => StepOutcome::Note(format!("unknown command `{}` — try `:help`\n", other)),
     }
 }
 
@@ -412,7 +400,7 @@ pub fn run() -> ExitCode {
                 }
             }
             Err(ReadlineError::Interrupted) => continue, // Ctrl-C
-            Err(ReadlineError::Eof) => break,             // Ctrl-D
+            Err(ReadlineError::Eof) => break,            // Ctrl-D
             Err(e) => {
                 eprintln!("readline error: {}", e);
                 break;
@@ -524,12 +512,7 @@ mod tests {
         }
     }
     impl BopHost for TestHost {
-        fn call(
-            &mut self,
-            _: &str,
-            _: &[Value],
-            _: u32,
-        ) -> Option<Result<Value, bop::BopError>> {
+        fn call(&mut self, _: &str, _: &[Value], _: u32) -> Option<Result<Value, bop::BopError>> {
             None
         }
         fn on_print(&mut self, message: &str) {
@@ -573,9 +556,7 @@ mod tests {
 
     #[test]
     fn unclosed_fn_body_is_incomplete() {
-        assert!(is_incomplete_input(
-            "fn double(x) {\n    return x + x"
-        ));
+        assert!(is_incomplete_input("fn double(x) {\n    return x + x"));
     }
 
     #[test]
@@ -661,8 +642,7 @@ mod tests {
 
     #[test]
     fn fn_survives_between_steps() {
-        let (prints, _, _) =
-            drive(&["fn double(x) { return x + x }", "print(double(21))"]);
+        let (prints, _, _) = drive(&["fn double(x) { return x + x }", "print(double(21))"]);
         assert_eq!(prints, vec!["42"]);
     }
 
@@ -722,7 +702,7 @@ mod tests {
         let (prints, _, outcomes) = drive(&[
             "let good = 1",
             "let bad = undefined", // runtime error
-            "print(good)",          // still runs; `good` survives
+            "print(good)",         // still runs; `good` survives
         ]);
         assert!(matches!(outcomes[1], StepOutcome::Err(_)));
         assert_eq!(prints, vec!["1"]);
@@ -743,11 +723,7 @@ mod tests {
 
     #[test]
     fn vars_lists_current_bindings() {
-        let (_prints, stdout, _) = drive(&[
-            "let alpha = 1",
-            "fn beta() { return 2 }",
-            ":vars",
-        ]);
+        let (_prints, stdout, _) = drive(&["let alpha = 1", "fn beta() { return 2 }", ":vars"]);
         // :vars output is the last line printed.
         let last = stdout.last().unwrap();
         assert!(last.contains("alpha"));
@@ -799,19 +775,10 @@ mod tests {
 
     #[test]
     fn render_writes_errors_to_stderr_with_source_snippet() {
-        let err_val = bop::BopError::runtime_at(
-            "boom",
-            1,
-            std::num::NonZeroU32::new(5),
-        );
+        let err_val = bop::BopError::runtime_at("boom", 1, std::num::NonZeroU32::new(5));
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
-        render_outcome(
-            &StepOutcome::Err(err_val),
-            "let x = 1",
-            &mut out,
-            &mut err,
-        );
+        render_outcome(&StepOutcome::Err(err_val), "let x = 1", &mut out, &mut err);
         let err_text = String::from_utf8(err).unwrap();
         assert!(err_text.contains("boom"));
         assert!(err_text.contains("let x = 1"));

@@ -2,7 +2,12 @@
 //! set overview.
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{rc::Rc, string::{String, ToString}, vec, vec::Vec};
+use alloc::{
+    rc::Rc,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 #[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::rc::Rc;
 
@@ -12,10 +17,10 @@ use bop::parser::{
     UnaryOp, Visibility,
 };
 
-#[cfg(any(feature = "std", not(feature = "no_std")))]
-use std::collections::BTreeMap;
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::BTreeMap;
+#[cfg(any(feature = "std", not(feature = "no_std")))]
+use std::collections::BTreeMap;
 
 use crate::chunk::{
     CallSite, CallSiteIdx, CaptureSource, Chunk, CodeOffset, ConstIdx, Constant,
@@ -355,14 +360,10 @@ impl Compiler {
                     if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
                         (code[code.len() - 2], code[code.len() - 1])
                     {
-                        if let crate::chunk::Constant::Int(k) =
-                            self.chunk.constants[c.0 as usize]
-                        {
+                        if let crate::chunk::Constant::Int(k) = self.chunk.constants[c.0 as usize] {
                             if let Ok(k32) = i32::try_from(k) {
                                 self.chunk.code.truncate(code.len() - 2);
-                                self.chunk
-                                    .lines
-                                    .truncate(self.chunk.lines.len() - 2);
+                                self.chunk.lines.truncate(self.chunk.lines.len() - 2);
                                 return Some(Instr::LoadLocalAddInt(s, k32));
                             }
                         }
@@ -386,14 +387,10 @@ impl Compiler {
                     if let (Instr::LoadLocal(s), Instr::LoadConst(c)) =
                         (code[code.len() - 2], code[code.len() - 1])
                     {
-                        if let crate::chunk::Constant::Int(k) =
-                            self.chunk.constants[c.0 as usize]
-                        {
+                        if let crate::chunk::Constant::Int(k) = self.chunk.constants[c.0 as usize] {
                             if let Ok(k32) = i32::try_from(k) {
                                 self.chunk.code.truncate(code.len() - 2);
-                                self.chunk
-                                    .lines
-                                    .truncate(self.chunk.lines.len() - 2);
+                                self.chunk.lines.truncate(self.chunk.lines.len() - 2);
                                 return Some(Instr::LtLocalInt(s, k32));
                             }
                         }
@@ -423,22 +420,16 @@ impl Compiler {
                 // `LoadLocal(slot), LoadConst(Int k), Add, StoreLocal(slot)`.
                 if self.can_fuse_tail(3) {
                     let n = code.len();
-                    if let (
-                        Instr::LoadLocal(ls),
-                        Instr::LoadConst(c),
-                        Instr::Add,
-                    ) = (code[n - 3], code[n - 2], code[n - 1])
+                    if let (Instr::LoadLocal(ls), Instr::LoadConst(c), Instr::Add) =
+                        (code[n - 3], code[n - 2], code[n - 1])
                     {
                         if ls == *store_slot {
-                            if let crate::chunk::Constant::Int(k) = self
-                                .chunk
-                                .constants[c.0 as usize]
+                            if let crate::chunk::Constant::Int(k) =
+                                self.chunk.constants[c.0 as usize]
                             {
                                 if let Ok(k32) = i32::try_from(k) {
                                     self.chunk.code.truncate(n - 3);
-                                    self.chunk
-                                        .lines
-                                        .truncate(self.chunk.lines.len() - 3);
+                                    self.chunk.lines.truncate(self.chunk.lines.len() - 3);
                                     return Some(Instr::IncLocalInt(*store_slot, k32));
                                 }
                             }
@@ -454,8 +445,7 @@ impl Compiler {
     /// Whether consuming `tail_len` existing instructions preserves every
     /// registered control-flow landing point.
     fn can_fuse_tail(&self, tail_len: usize) -> bool {
-        self.chunk.code.len() >= tail_len
-            && self.chunk.code.len() - tail_len >= self.fusion_floor
+        self.chunk.code.len() >= tail_len && self.chunk.code.len() - tail_len >= self.fusion_floor
     }
 
     /// Capture the current offset as a control-flow landing point.
@@ -493,14 +483,17 @@ impl Compiler {
     fn add_const(&mut self, c: Constant) -> ConstIdx {
         // Dedup numbers and strings so the pool doesn't grow quadratically
         // on programs that reuse literals heavily.
-        if let Some(i) = self.chunk.constants.iter().position(|existing| {
-            match (existing, &c) {
+        if let Some(i) = self
+            .chunk
+            .constants
+            .iter()
+            .position(|existing| match (existing, &c) {
                 (Constant::Int(a), Constant::Int(b)) => a == b,
                 (Constant::Number(a), Constant::Number(b)) => a.to_bits() == b.to_bits(),
                 (Constant::Str(a), Constant::Str(b)) => a == b,
                 _ => false,
-            }
-        }) {
+            })
+        {
             return ConstIdx(i as u32);
         }
         let idx = ConstIdx(self.chunk.constants.len() as u32);
@@ -626,16 +619,12 @@ impl Compiler {
     fn compile_scoped_block(&mut self, stmts: &[Stmt], line: u32) -> Result<(), BopError> {
         let fast = self.current_resolver().is_some();
         let needs_runtime_import_scope = fast
-            && stmts
-                .iter()
-                .any(|stmt| {
-                    matches!(
-                        &stmt.kind,
-                        StmtKind::Use { .. }
-                            | StmtKind::StructDecl { .. }
-                            | StmtKind::EnumDecl { .. }
-                    )
-                });
+            && stmts.iter().any(|stmt| {
+                matches!(
+                    &stmt.kind,
+                    StmtKind::Use { .. } | StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. }
+                )
+            });
         if fast {
             self.current_resolver_mut().unwrap().push_scope();
             if needs_runtime_import_scope {
@@ -659,7 +648,11 @@ impl Compiler {
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), BopError> {
         let line = stmt.line;
         match &stmt.kind {
-            StmtKind::Let { name, value, is_const: _ } => {
+            StmtKind::Let {
+                name,
+                value,
+                is_const: _,
+            } => {
                 self.compile_expr(value)?;
                 if let Some(resolver) = self.current_resolver_mut() {
                     // Inside a function body: bind to a slot so
@@ -719,8 +712,12 @@ impl Compiler {
                 self.compile_expr(count)?;
                 self.emit(Instr::MakeRepeatCount, line);
                 let loop_start = self.mark_jump_target();
-                let exit_jmp =
-                    self.emit(Instr::RepeatNext { target: CodeOffset(0) }, line);
+                let exit_jmp = self.emit(
+                    Instr::RepeatNext {
+                        target: CodeOffset(0),
+                    },
+                    line,
+                );
 
                 self.loops.push(LoopCtx {
                     continue_target: loop_start,
@@ -752,8 +749,12 @@ impl Compiler {
                 self.compile_expr(iterable)?;
                 self.emit(Instr::MakeIter, line);
                 let loop_start = self.mark_jump_target();
-                let exit_jmp =
-                    self.emit(Instr::IterNext { target: CodeOffset(0) }, line);
+                let exit_jmp = self.emit(
+                    Instr::IterNext {
+                        target: CodeOffset(0),
+                    },
+                    line,
+                );
 
                 // Inside a fn body the loop variable gets its own
                 // slot and the body's nested lets get fresh slots
@@ -894,9 +895,7 @@ impl Compiler {
                             shape: match &v.kind {
                                 VariantKind::Unit => EnumVariantShape::Unit,
                                 VariantKind::Tuple(fs) => EnumVariantShape::Tuple(fs.clone()),
-                                VariantKind::Struct(fs) => {
-                                    EnumVariantShape::Struct(fs.clone())
-                                }
+                                VariantKind::Struct(fs) => EnumVariantShape::Struct(fs.clone()),
                             },
                         })
                         .collect(),
@@ -1151,7 +1150,14 @@ impl Compiler {
                 self.emit(Instr::LoadConst(c), line);
             }
             ExprKind::Bool(b) => {
-                self.emit(if *b { Instr::LoadTrue } else { Instr::LoadFalse }, line);
+                self.emit(
+                    if *b {
+                        Instr::LoadTrue
+                    } else {
+                        Instr::LoadFalse
+                    },
+                    line,
+                );
             }
             ExprKind::None => {
                 self.emit(Instr::LoadNone, line);
@@ -1227,7 +1233,13 @@ impl Compiler {
                     } else {
                         let name_idx = self.add_name(name);
                         self.note_free_var(name);
-                        self.emit(Instr::PrepareCall { name: name_idx, site }, line);
+                        self.emit(
+                            Instr::PrepareCall {
+                                name: name_idx,
+                                site,
+                            },
+                            line,
+                        );
                     }
                 } else {
                     self.compile_expr(callee)?;
@@ -1309,8 +1321,7 @@ impl Compiler {
                 else_expr,
             } => {
                 self.compile_expr(condition)?;
-                let else_jmp =
-                    self.emit(Instr::JumpIfFalse(CodeOffset(0)), line);
+                let else_jmp = self.emit(Instr::JumpIfFalse(CodeOffset(0)), line);
                 self.compile_expr(then_expr)?;
                 let end_jmp = self.emit(Instr::Jump(CodeOffset(0)), line);
 
@@ -1335,9 +1346,8 @@ impl Compiler {
             } => {
                 let type_idx = self.add_name(type_name);
                 let namespace = namespace.as_ref().map(|ns| self.add_namespace_ref(ns));
-                let construct_fields = self.add_construct_fields(
-                    fields.iter().map(|(name, _)| name.clone()).collect(),
-                );
+                let construct_fields = self
+                    .add_construct_fields(fields.iter().map(|(name, _)| name.clone()).collect());
                 self.emit(
                     Instr::ValidateStructConstruct {
                         namespace,
@@ -1384,9 +1394,7 @@ impl Compiler {
                 });
                 let shape = match payload {
                     VariantPayload::Unit => EnumConstructShape::Unit,
-                    VariantPayload::Tuple(args) => {
-                        EnumConstructShape::Tuple(args.len() as u32)
-                    }
+                    VariantPayload::Tuple(args) => EnumConstructShape::Tuple(args.len() as u32),
                     VariantPayload::Struct(fields) => {
                         EnumConstructShape::Struct(fields.len() as u32)
                     }
@@ -1663,8 +1671,7 @@ impl Compiler {
         // free-var list stays isolated.
         let saved_chunk = core::mem::take(&mut self.chunk);
         let saved_fusion_floor = core::mem::replace(&mut self.fusion_floor, 0);
-        let saved_runtime_scope_depth =
-            core::mem::replace(&mut self.runtime_scope_depth, 0);
+        let saved_runtime_scope_depth = core::mem::replace(&mut self.runtime_scope_depth, 0);
         let saved_loops = core::mem::take(&mut self.loops);
         let saved_free = self.free_vars.take();
         let saved_runtime_bindings = core::mem::take(&mut self.runtime_bindings);
@@ -1688,10 +1695,8 @@ impl Compiler {
         let free = self.free_vars.take().expect("free-vars set above");
         let mut chunk = core::mem::replace(&mut self.chunk, saved_chunk);
         self.fusion_floor = saved_fusion_floor;
-        let function_runtime_scope_depth = core::mem::replace(
-            &mut self.runtime_scope_depth,
-            saved_runtime_scope_depth,
-        );
+        let function_runtime_scope_depth =
+            core::mem::replace(&mut self.runtime_scope_depth, saved_runtime_scope_depth);
         self.loops = saved_loops;
         self.free_vars = saved_free;
         self.runtime_bindings = saved_runtime_bindings;
@@ -1745,9 +1750,7 @@ impl Compiler {
             // source. Example: `fn f() { let x = 1; return fn() {
             // return fn() { return x } } }` — the inner lambda's
             // capture of x propagates outward via this re-note.
-            if parent_is_function
-                && matches!(source, CaptureSource::ParentScope(_))
-            {
+            if parent_is_function && matches!(source, CaptureSource::ParentScope(_)) {
                 self.note_free_var(&name);
             }
             capture_names.push(name);

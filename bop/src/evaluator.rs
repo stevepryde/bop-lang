@@ -1,12 +1,17 @@
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{format, string::{String, ToString}, vec, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use alloc_import::collections::BTreeMap;
 
-#[cfg(any(feature = "std", not(feature = "no_std")))]
-use std as alloc_import;
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc as alloc_import;
+#[cfg(any(feature = "std", not(feature = "no_std")))]
+use std as alloc_import;
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::rc::Rc;
@@ -142,7 +147,12 @@ fn restore_failed_module_environment(
     binding_origins: &BTreeMap<String, BindingOrigin>,
 ) {
     let failed_environment = scopes.first_mut().map(core::mem::take).unwrap_or_default();
-    put_live_environment(environments, module_path, failed_environment, binding_origins);
+    put_live_environment(
+        environments,
+        module_path,
+        failed_environment,
+        binding_origins,
+    );
     // Forwarded values have been returned to their authoritative origins. The
     // failed module's own partial state must not become cacheable.
     environments.borrow_mut().remove(module_path);
@@ -197,7 +207,9 @@ fn snapshot_module_bindings(
                 .get(name)
                 .cloned()
                 .or_else(|| local_snapshots.remove(name))
-                .ok_or_else(|| error(line, format!("Missing compatibility snapshot for `{name}`")))?;
+                .ok_or_else(|| {
+                    error(line, format!("Missing compatibility snapshot for `{name}`"))
+                })?;
             Ok((name.clone(), value))
         })
         .collect()
@@ -287,11 +299,7 @@ impl FreeVariableCollector {
             .insert(name.to_string());
     }
 
-    fn visit_scoped_block(
-        &mut self,
-        bindings: impl IntoIterator<Item = String>,
-        body: &[Stmt],
-    ) {
+    fn visit_scoped_block(&mut self, bindings: impl IntoIterator<Item = String>, body: &[Stmt]) {
         self.scopes.push(bindings.into_iter().collect());
         self.visit_statements(body);
         self.scopes.pop();
@@ -432,17 +440,17 @@ impl FreeVariableCollector {
                     self.reference(namespace);
                 }
                 match payload {
-                VariantPayload::Unit => {}
-                VariantPayload::Tuple(values) => {
-                    for value in values {
-                        self.visit_expr(value);
+                    VariantPayload::Unit => {}
+                    VariantPayload::Tuple(values) => {
+                        for value in values {
+                            self.visit_expr(value);
+                        }
                     }
-                }
-                VariantPayload::Struct(fields) => {
-                    for (_, value) in fields {
-                        self.visit_expr(value);
+                    VariantPayload::Struct(fields) => {
+                        for (_, value) in fields {
+                            self.visit_expr(value);
+                        }
                     }
-                }
                 }
             }
             ExprKind::Index { object, index } => {
@@ -1003,9 +1011,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     }
 
     fn get_var_value(&self, name: &str) -> Option<Value> {
-        self.get_var(name)
-            .cloned()
-            .or_else(|| self.module_alias(name).map(|module| Value::Module(Rc::clone(module))))
+        self.get_var(name).cloned().or_else(|| {
+            self.module_alias(name)
+                .map(|module| Value::Module(Rc::clone(module)))
+        })
     }
 
     fn live_origin_value(&self, origin: &BindingOrigin) -> Option<Value> {
@@ -1018,9 +1027,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 return Some(value.clone());
             }
         }
-        if let Some(binding) = self.binding_origins.iter().find_map(|(binding, candidate)| {
-            (candidate == origin).then_some(binding)
-        }) {
+        if let Some(binding) = self
+            .binding_origins
+            .iter()
+            .find_map(|(binding, candidate)| (candidate == origin).then_some(binding))
+        {
             if let Some(value) = self
                 .scopes
                 .first()
@@ -1058,12 +1069,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 return Some(value);
             }
         }
-        if let Some(active_binding) = self.binding_origins.iter().find_map(
-            |(active_binding, active_origin)| {
-                (active_origin.0 == origin_module && active_origin.1 == origin_binding)
-                    .then_some(active_binding)
-            },
-        ) {
+        if let Some(active_binding) =
+            self.binding_origins
+                .iter()
+                .find_map(|(active_binding, active_origin)| {
+                    (active_origin.0 == origin_module && active_origin.1 == origin_binding)
+                        .then_some(active_binding)
+                })
+        {
             if let Some(value) = self
                 .scopes
                 .first()
@@ -1142,8 +1155,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     /// host's own `function_hint()` path — embedders often want
     /// to list theirs differently.
     fn callable_candidates_hint(&self, target: &str) -> Option<String> {
-        let mut candidates: Vec<String> =
-            self.functions.keys().cloned().collect();
+        let mut candidates: Vec<String> = self.functions.keys().cloned().collect();
         for builtin in crate::suggest::CORE_CALLABLE_BUILTINS {
             candidates.push((*builtin).to_string());
         }
@@ -1159,8 +1171,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             if module_path != crate::value::ROOT_MODULE_PATH {
                 let cache = self.imports.borrow();
                 if let Some(ImportSlot::Loaded(bindings)) = cache.get(module_path) {
-                    if let Some((_, function)) =
-                        bindings.fn_decls.iter().find(|(candidate, _)| candidate == name)
+                    if let Some((_, function)) = bindings
+                        .fn_decls
+                        .iter()
+                        .find(|(candidate, _)| candidate == name)
                     {
                         return Some(function.clone());
                     }
@@ -1204,7 +1218,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         self.tick(stmt.line)?;
 
         match &stmt.kind {
-            StmtKind::Let { name, value, is_const: _ } => {
+            StmtKind::Let {
+                name,
+                value,
+                is_const: _,
+            } => {
                 let val = self.eval_expr(value)?;
                 let module = match &val {
                     Value::Module(module) => Some(Rc::clone(module)),
@@ -1213,10 +1231,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 if self.is_module_top_scope() {
                     if let Some(origin) = self.binding_origins.get(name).cloned() {
                         if origin.0 != self.current_module || origin.1 != name.as_str() {
-                            if let Some(previous) = self
-                                .scopes
-                                .last_mut()
-                                .and_then(|scope| scope.remove(name))
+                            if let Some(previous) =
+                                self.scopes.last_mut().and_then(|scope| scope.remove(name))
                             {
                                 self.live_value_environments
                                     .borrow_mut()
@@ -1229,10 +1245,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 }
                 self.define(name.clone(), val);
                 if self.is_module_top_scope() {
-                    self.binding_origins.insert(
-                        name.clone(),
-                        (self.current_module.clone(), name.clone()),
-                    );
+                    self.binding_origins
+                        .insert(name.clone(), (self.current_module.clone(), name.clone()));
                 }
                 let aliases = self.module_aliases.last_mut().expect("module alias scope");
                 if let Some(module) = module {
@@ -1352,10 +1366,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 // directly, skipping the method-dispatch cost of
                 // the iterator protocol. Semantically identical
                 // to `for x in v.iter()` for these types.
-                if matches!(
-                    &val,
-                    Value::Array(_) | Value::Str(_) | Value::Dict(_)
-                ) {
+                if matches!(&val, Value::Array(_) | Value::Str(_) | Value::Dict(_)) {
                     let mut val = val;
                     let items: Vec<Value> = match &mut val {
                         Value::Array(arr) => arr.__take_in(&self.memory),
@@ -1409,9 +1420,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     other => {
                         return Err(error(
                             stmt.line,
-                            crate::error_messages::cant_iterate_over(
-                                other.type_name(),
-                            ),
+                            crate::error_messages::cant_iterate_over(other.type_name()),
                         ));
                     }
                 };
@@ -1453,7 +1462,12 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 result
             }
 
-            StmtKind::FnDecl { name, params, body, visibility } => {
+            StmtKind::FnDecl {
+                name,
+                params,
+                body,
+                visibility,
+            } => {
                 let is_direct_root = self.is_module_top_scope()
                     && self.current_module == crate::value::ROOT_MODULE_PATH;
                 let module_path = self
@@ -1466,10 +1480,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     body: body.clone(),
                     module_path,
                 };
-                self.functions.insert(
-                    name.clone(),
-                    definition.clone(),
-                );
+                self.functions.insert(name.clone(), definition.clone());
                 if is_direct_root {
                     let (param_names, param_modes) = parameter_metadata(&definition.params);
                     let entry_target = BopFn::try_new_ast_in_module_with_origin_and_modes(
@@ -1482,7 +1493,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         self.function_origin.clone(),
                         stmt.line,
                     )?;
-                    self.abi_declarations.retain(|(existing, _, _)| existing != name);
+                    self.abi_declarations
+                        .retain(|(existing, _, _)| existing != name);
                     self.abi_declarations
                         .push((name.clone(), *visibility, entry_target));
                 }
@@ -1503,17 +1515,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 // parse/emit consistency — fall back to the
                 // current module as the owner.
                 let type_key = (self.current_module.clone(), type_name.clone());
-                self.methods
-                    .entry(type_key)
-                    .or_default()
-                    .insert(
-                        method_name.clone(),
-                        FnDef {
-                            params: params.clone(),
-                            body: body.clone(),
-                            module_path: self.current_module.clone(),
-                        },
-                    );
+                self.methods.entry(type_key).or_default().insert(
+                    method_name.clone(),
+                    FnDef {
+                        params: params.clone(),
+                        body: body.clone(),
+                        module_path: self.current_module.clone(),
+                    },
+                );
                 Ok(Signal::None)
             }
 
@@ -1529,12 +1538,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             StmtKind::Continue => Ok(Signal::Continue),
 
             StmtKind::Use { path, items, alias } => {
-                self.exec_import(
-                    path,
-                    items.as_deref(),
-                    alias.as_deref(),
-                    stmt.line,
-                )?;
+                self.exec_import(path, items.as_deref(), alias.as_deref(), stmt.line)?;
                 Ok(Signal::None)
             }
 
@@ -1593,15 +1597,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if !seen_variants.insert(v.name.clone()) {
                         return Err(error(
                             stmt.line,
-                            format!(
-                                "Enum `{}` has duplicate variant `{}`",
-                                name, v.name
-                            ),
+                            format!("Enum `{}` has duplicate variant `{}`", name, v.name),
                         ));
                     }
-                    if let VariantKind::Struct(fields) | VariantKind::Tuple(fields) =
-                        &v.kind
-                    {
+                    if let VariantKind::Struct(fields) | VariantKind::Tuple(fields) = &v.kind {
                         let mut seen_fields = alloc_import::collections::BTreeSet::new();
                         for f in fields {
                             if !seen_fields.insert(f.clone()) {
@@ -1775,7 +1774,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 Some(fn_def.module_path.clone()),
                 self.function_origin.clone(),
                 line,
-            ).map(Value::Fn)?;
+            )
+            .map(Value::Fn)?;
             exports.push((name.clone(), value));
             fn_entries.insert(name.clone(), fn_def.clone());
         }
@@ -1865,7 +1865,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             let live_bindings = exports
                 .iter()
                 .map(|(name, _)| {
-                    let origin = bindings.binding_origins
+                    let origin = bindings
+                        .binding_origins
                         .get(name)
                         .cloned()
                         .unwrap_or_else(|| (path.to_string(), name.clone()));
@@ -1891,10 +1892,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             //      can resolve `m.Type` inside function bodies
             //      without needing the Value::Module in value
             //      scope.
-            self.define(
-                alias_name.to_string(),
-                Value::Module(Rc::clone(&module_rc)),
-            );
+            self.define(alias_name.to_string(), Value::Module(Rc::clone(&module_rc)));
             self.module_aliases
                 .last_mut()
                 .expect("module alias scope")
@@ -1936,7 +1934,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 }
                 let module = bindings.module_exports.get(&name).cloned();
                 if module_top_scope {
-                    let origin = bindings.binding_origins
+                    let origin = bindings
+                        .binding_origins
                         .get(&name)
                         .cloned()
                         .unwrap_or_else(|| (path.to_string(), name.clone()));
@@ -1952,7 +1951,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         }
                     }
                 } else {
-                    let origin = bindings.binding_origins
+                    let origin = bindings
+                        .binding_origins
                         .get(&name)
                         .cloned()
                         .unwrap_or_else(|| (path.to_string(), name.clone()));
@@ -2030,10 +2030,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(e),
             None => {
-                return Err(error(
-                    line,
-                    format!("Module `{}` not found", path),
-                ));
+                return Err(error(line, format!("Module `{}` not found", path)));
             }
         };
 
@@ -2162,7 +2159,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     top_scope,
                     &sub.binding_origins,
                 );
-                self.live_value_environments.borrow_mut().remove(module_path);
+                self.live_value_environments
+                    .borrow_mut()
+                    .remove(module_path);
                 self.live_binding_origins.borrow_mut().remove(module_path);
                 return Err(snapshot_error);
             }
@@ -2177,8 +2176,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         self.live_binding_origins
             .borrow_mut()
             .insert(module_path.to_string(), binding_origins.clone());
-        let fn_decls: Vec<(String, FnDef)> =
-            sub.functions.into_iter().collect();
+        let fn_decls: Vec<(String, FnDef)> = sub.functions.into_iter().collect();
         // Type decls and methods transfer with their full
         // identity. Engine builtins (`<builtin>` module path)
         // are seeded into every evaluator anyway, so we filter
@@ -2211,7 +2209,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         let lexical_context = Rc::new(ModuleLexicalContext {
             type_bindings: sub.type_bindings.into_iter().next().unwrap_or_default(),
             module_aliases: module_exports.clone(),
-            imported_functions: sub.imported_functions.into_iter().next().unwrap_or_default(),
+            imported_functions: sub
+                .imported_functions
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
         });
         Ok(ModuleBindings {
             bindings,
@@ -2310,24 +2312,26 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
             None => self
                 .resolve_type_ref(None, type_name)
-                .ok_or_else(|| {
-                    error(line, crate::error_messages::enum_not_declared(type_name))
-                })?,
+                .ok_or_else(|| error(line, crate::error_messages::enum_not_declared(type_name)))?,
         };
         let key = (module_path.clone(), type_name.to_string());
-        let variants = self.enum_defs.get(&key).ok_or_else(|| {
-            error(line, crate::error_messages::enum_not_declared(type_name))
-        })?
-        .clone();
-        let decl = variants.iter().find(|v| v.name == variant).ok_or_else(|| {
-            let msg = crate::error_messages::enum_has_no_variant(type_name, variant);
-            let names = variants.iter().map(|v| v.name.as_str());
-            match crate::suggest::did_you_mean(variant, names) {
-                Some(hint) => error_with_hint(line, msg, hint),
-                None => error(line, msg),
-            }
-        })?
-        .clone();
+        let variants = self
+            .enum_defs
+            .get(&key)
+            .ok_or_else(|| error(line, crate::error_messages::enum_not_declared(type_name)))?
+            .clone();
+        let decl = variants
+            .iter()
+            .find(|v| v.name == variant)
+            .ok_or_else(|| {
+                let msg = crate::error_messages::enum_has_no_variant(type_name, variant);
+                let names = variants.iter().map(|v| v.name.as_str());
+                match crate::suggest::did_you_mean(variant, names) {
+                    Some(hint) => error_with_hint(line, msg, hint),
+                    None => error(line, msg),
+                }
+            })?
+            .clone();
 
         match (&decl.kind, payload) {
             (VariantKind::Unit, VariantPayload::Unit) => Ok(Value::__new_enum_unit_in(
@@ -2378,9 +2382,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if !decl_fields.iter().any(|d| d == fname) {
                         return Err(error(
                             line,
-                            crate::error_messages::variant_has_no_field(
-                                type_name, variant, fname,
-                            ),
+                            crate::error_messages::variant_has_no_field(type_name, variant, fname),
                         ));
                     }
                 }
@@ -2399,8 +2401,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 for (fname, fexpr) in provided {
                     provided_map.insert(fname.clone(), self.eval_expr(fexpr)?);
                 }
-                let mut values: Vec<(String, Value)> =
-                    Vec::with_capacity(decl_fields.len());
+                let mut values: Vec<(String, Value)> = Vec::with_capacity(decl_fields.len());
                 for decl_field in decl_fields {
                     values.push((
                         decl_field.clone(),
@@ -2420,10 +2421,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
             (VariantKind::Unit, _) => Err(error(
                 line,
-                format!(
-                    "Variant `{}::{}` takes no payload",
-                    type_name, variant
-                ),
+                format!("Variant `{}::{}` takes no payload", type_name, variant),
             )),
             (VariantKind::Tuple(_), _) => Err(error(
                 line,
@@ -2454,11 +2452,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 let final_val = match op {
                     AssignOp::Eq => new_val,
                     _ => {
-                        let current = self
-                            .get_var_value(name)
-                            .ok_or_else(|| {
-                                error(line, crate::error_messages::variable_not_found(name))
-                            })?;
+                        let current = self.get_var_value(name).ok_or_else(|| {
+                            error(line, crate::error_messages::variable_not_found(name))
+                        })?;
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };
@@ -2607,10 +2603,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     other => {
                         return Err(error(
                             line,
-                            crate::error_messages::cant_assign_field(
-                                field,
-                                other.type_name(),
-                            ),
+                            crate::error_messages::cant_assign_field(field, other.type_name()),
                         ));
                     }
                 }
@@ -2652,11 +2645,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     match part {
                         StringPart::Literal(s) => result.push_str(s),
                         StringPart::Variable(name) => {
-                            let val = self
-                                .get_var_value(name)
-                                .ok_or_else(|| {
-                                    error_at(expr.line, expr.column, crate::error_messages::variable_not_found(name))
-                                })?;
+                            let val = self.get_var_value(name).ok_or_else(|| {
+                                error_at(
+                                    expr.line,
+                                    expr.column,
+                                    crate::error_messages::variable_not_found(name),
+                                )
+                            })?;
                             result.push_str(&format!("{}", val));
                         }
                     }
@@ -2686,7 +2681,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         Some(f.module_path.clone()),
                         self.function_origin.clone(),
                         expr.line,
-                    ).map(Value::Fn);
+                    )
+                    .map(Value::Fn);
                 }
                 // Typo? Offer a "did you mean" hint if something
                 // close is visible in the current scope / fn
@@ -2746,22 +2742,21 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     // silently dispatch to the builtin.
                     if let Some(v) = self.get_var(name).cloned() {
                         return match v {
-                            Value::Fn(func) => {
-                                self.eval_bop_call(func, args, expr.line, name)
-                            }
+                            Value::Fn(func) => self.eval_bop_call(func, args, expr.line, name),
                             other => Err(error(
                                 expr.line,
                                 format!("`{}` is a {}, not a function", name, other.type_name()),
                             )),
                         };
                     }
-                    let declaration_alias = self.active_lexical_contexts.last().and_then(|context| {
-                        if context.module_aliases.is_empty() {
-                            None
-                        } else {
-                            context.module_aliases.get(name).cloned()
-                        }
-                    });
+                    let declaration_alias =
+                        self.active_lexical_contexts.last().and_then(|context| {
+                            if context.module_aliases.is_empty() {
+                                None
+                            } else {
+                                context.module_aliases.get(name).cloned()
+                            }
+                        });
                     if declaration_alias.is_some() {
                         return Err(error(
                             expr.line,
@@ -2811,8 +2806,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         return self.eval_bop_call(func, args, expr.line, name);
                     }
 
-                    let actual_modes: Vec<ParamMode> =
-                        args.iter().map(|arg| arg.mode).collect();
+                    let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
                     crate::validate_value_only_call_modes(name, &actual_modes, expr.line)?;
                     self.validate_builtin_arity(name, args.len(), expr.line)?;
                     let mut eval_args = Vec::with_capacity(args.len());
@@ -2861,7 +2855,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     Some(module_path),
                     self.function_origin.clone(),
                     expr.line,
-                ).map(Value::Fn)
+                )
+                .map(Value::Fn)
             }
 
             ExprKind::MethodCall {
@@ -2869,8 +2864,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 method,
                 args,
             } => {
-                let actual_modes: Vec<ParamMode> =
-                    args.iter().map(|arg| arg.mode).collect();
+                let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
 
                 // A named built-in mutating receiver is a staged implicit-ref
                 // place. Classify it without cloning its value; ordinary
@@ -2902,10 +2896,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                                 crate::ref_params::invalid_ref_target(1, expr.line)
                             })?;
                             if self.active_capture_bindings.contains(&target) {
-                                return Err(crate::ref_params::captured_ref_target(
-                                    1,
-                                    expr.line,
-                                ));
+                                return Err(crate::ref_params::captured_ref_target(1, expr.line));
                             }
                             let mut eval_args = Vec::with_capacity(args.len());
                             for arg in args {
@@ -2936,14 +2927,12 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 // evaluate it once before mode/arity preflight and arguments.
                 let obj_val = self.eval_expr(object)?;
                 let type_key: Option<(String, String)> = match &obj_val {
-                    Value::Struct(s) => Some((
-                        s.module_path().to_string(),
-                        s.type_name().to_string(),
-                    )),
-                    Value::EnumVariant(e) => Some((
-                        e.module_path().to_string(),
-                        e.type_name().to_string(),
-                    )),
+                    Value::Struct(s) => {
+                        Some((s.module_path().to_string(), s.type_name().to_string()))
+                    }
+                    Value::EnumVariant(e) => {
+                        Some((e.module_path().to_string(), e.type_name().to_string()))
+                    }
                     _ => None,
                 };
                 if let Some(key) = type_key {
@@ -2988,10 +2977,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                                     error
                                 })?;
                             if self.active_capture_bindings.contains(&target) {
-                                return Err(crate::ref_params::captured_ref_target(
-                                    1,
-                                    expr.line,
-                                ));
+                                return Err(crate::ref_params::captured_ref_target(1, expr.line));
                             }
                             Some(target)
                         } else {
@@ -3018,23 +3004,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         let callee = self.module_binding(module, method).ok_or_else(|| {
                             error(
                                 expr.line,
-                                format!(
-                                    "`{}` isn't exported from `{}`",
-                                    method, module.path
-                                ),
+                                format!("`{}` isn't exported from `{}`", method, module.path),
                             )
                         })?;
                         return match callee {
-                            Value::Fn(func) => {
-                                self.eval_bop_call(func, args, expr.line, method)
-                            }
+                            Value::Fn(func) => self.eval_bop_call(func, args, expr.line, method),
                             other => Err(error(
                                 expr.line,
-                                format!(
-                                    "`{}` is a {}, not a function",
-                                    method,
-                                    other.type_name()
-                                ),
+                                format!("`{}` is a {}, not a function", method, other.type_name()),
                             )),
                         };
                     }
@@ -3083,11 +3060,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 if methods::is_builtin_result(&obj_val) {
                     if let Some(kind) = methods::is_result_callable_method(method) {
                         return self.call_result_callable_method(
-                            &obj_val,
-                            kind,
-                            method,
-                            eval_args,
-                            expr.line,
+                            &obj_val, kind, method, eval_args, expr.line,
                         );
                     }
                 }
@@ -3110,8 +3083,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 let obj = self.eval_expr(object)?;
                 match &obj {
                     Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
-                        let msg =
-                            crate::error_messages::struct_has_no_field(s.type_name(), field);
+                        let msg = crate::error_messages::struct_has_no_field(s.type_name(), field);
                         // Suggest from the struct's own declared
                         // field list — `p.z` when `Point` has `x`
                         // and `y` should point to `x`/`y`.
@@ -3151,19 +3123,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                                 format!("`{}` in `{}` is a type, not a value", field, m.path),
                                 format!(
                                     "construct through the alias: `{}.{} {{ ... }}` or `{}.{}::Variant(...)`",
-                                    alias,
-                                    field,
-                                    alias,
-                                    field,
+                                    alias, field, alias, field,
                                 ),
                             ));
                         }
                         Err(error(
                             expr.line,
-                            format!(
-                                "`{}` isn't exported from `{}`",
-                                field, m.path
-                            ),
+                            format!("`{}` isn't exported from `{}`", field, m.path),
                         ))
                     }
                     other => Err(error(
@@ -3197,23 +3163,24 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         self.resolve_type_ref(Some(ns), type_name)
                             .unwrap_or_else(|| self.current_module.clone())
                     }
-                    None => self
-                        .resolve_type_ref(None, type_name)
-                        .ok_or_else(|| {
-                            error(
-                                expr.line,
-                                crate::error_messages::struct_not_declared(type_name),
-                            )
-                        })?,
+                    None => self.resolve_type_ref(None, type_name).ok_or_else(|| {
+                        error(
+                            expr.line,
+                            crate::error_messages::struct_not_declared(type_name),
+                        )
+                    })?,
                 };
                 let key = (module_path.clone(), type_name.clone());
-                let decl_fields = self.struct_defs.get(&key).ok_or_else(|| {
-                    error(
-                        expr.line,
-                        crate::error_messages::struct_not_declared(type_name),
-                    )
-                })?
-                .clone();
+                let decl_fields = self
+                    .struct_defs
+                    .get(&key)
+                    .ok_or_else(|| {
+                        error(
+                            expr.line,
+                            crate::error_messages::struct_not_declared(type_name),
+                        )
+                    })?
+                    .clone();
                 // Enforce exactly-this-field-set at construction:
                 // no duplicates, no unknown fields, no missing
                 // fields. The per-field loops below produce the
@@ -3245,10 +3212,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     if !seen.contains(decl) {
                         return Err(error(
                             expr.line,
-                            format!(
-                                "Missing field `{}` in `{}` construction",
-                                decl, type_name
-                            ),
+                            format!("Missing field `{}` in `{}` construction", decl, type_name),
                         ));
                     }
                 }
@@ -3256,8 +3220,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 for (fname, fexpr) in fields {
                     provided.insert(fname.clone(), self.eval_expr(fexpr)?);
                 }
-                let mut values: Vec<(String, Value)> =
-                    Vec::with_capacity(decl_fields.len());
+                let mut values: Vec<(String, Value)> = Vec::with_capacity(decl_fields.len());
                 for decl in &decl_fields {
                     values.push((
                         decl.clone(),
@@ -3400,13 +3363,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     tn,
                 )
             };
-            if !pattern_matches_in(
-                &arm.pattern,
-                &value,
-                &mut bindings,
-                &resolver,
-                &self.memory,
-            ) {
+            if !pattern_matches_in(&arm.pattern, &value, &mut bindings, &resolver, &self.memory) {
                 continue;
             }
             // Pattern matched — open a fresh scope, bind every
@@ -3427,10 +3384,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             self.pop_scope();
             return result;
         }
-        Err(error(
-            line,
-            "No match arm matched the scrutinee",
-        ))
+        Err(error(line, "No match arm matched the scrutinee"))
     }
 
     // ─── Binary operations ─────────────────────────────────────────
@@ -3543,17 +3497,16 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 }
                 ParamMode::Ref => {
                     let target = target_iter.next().expect("target preflight matched modes");
-                    let snapshot = self.binding_value(target).ok_or_else(|| {
-                        crate::ref_params::invalid_ref_target(index + 1, line)
-                    })?;
+                    let snapshot = self
+                        .binding_value(target)
+                        .ok_or_else(|| crate::ref_params::invalid_ref_target(index + 1, line))?;
                     call_args.push(snapshot);
                     ref_positions.push(index);
                 }
             }
         }
 
-        let (value, staged) =
-            self.call_bop_fn_with_refs(&func, call_args, &ref_positions, line)?;
+        let (value, staged) = self.call_bop_fn_with_refs(&func, call_args, &ref_positions, line)?;
         self.commit_ref_targets(&targets, staged, line)?;
         Ok(value)
     }
@@ -3589,8 +3542,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // has a corresponding first parameter before we inspect ordinary
         // argument modes or evaluate any ordinary argument expressions.
         let non_receiver = &definition.params[1..];
-        let expected_modes: Vec<ParamMode> =
-            non_receiver.iter().map(|param| param.mode).collect();
+        let expected_modes: Vec<ParamMode> = non_receiver.iter().map(|param| param.mode).collect();
         let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
         crate::validate_call_modes(method, &expected_modes, &actual_modes, line)?;
         let explicit_targets = self.preflight_ref_targets(args, line)?;
@@ -3626,9 +3578,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 }
                 ParamMode::Ref => {
                     let target = target_iter.next().expect("target count matched ref modes");
-                    full_args.push(self.binding_value(target).ok_or_else(|| {
-                        crate::ref_params::invalid_ref_target(index + 1, line)
-                    })?);
+                    full_args.push(
+                        self.binding_value(target).ok_or_else(|| {
+                            crate::ref_params::invalid_ref_target(index + 1, line)
+                        })?,
+                    );
                     ref_positions.push(index + 1);
                 }
             }
@@ -3644,11 +3598,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             self.function_origin.clone(),
             line,
         )?;
-        let (value, staged) =
-            self.call_bop_fn_with_refs(&func, full_args, &ref_positions, line)?;
-        let mut targets = Vec::with_capacity(
-            explicit_targets.len() + usize::from(receiver.target.is_some()),
-        );
+        let (value, staged) = self.call_bop_fn_with_refs(&func, full_args, &ref_positions, line)?;
+        let mut targets =
+            Vec::with_capacity(explicit_targets.len() + usize::from(receiver.target.is_some()));
         if let Some(target) = receiver.target {
             targets.push(target);
         }
@@ -3657,12 +3609,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         Ok(value)
     }
 
-    fn validate_builtin_arity(
-        &self,
-        name: &str,
-        count: usize,
-        line: u32,
-    ) -> Result<(), BopError> {
+    fn validate_builtin_arity(&self, name: &str, count: usize, line: u32) -> Result<(), BopError> {
         let expected = match name {
             "rand" | "try_call" | "panic" => Some((1, 1)),
             "range" => Some((1, 3)),
@@ -3678,10 +3625,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 };
                 return Err(error(
                     line,
-                    format!(
-                        "`{}` expects {}, but got {}",
-                        name, expectation, count
-                    ),
+                    format!("`{}` expects {}, but got {}", name, expectation, count),
                 ));
             }
         }
@@ -3711,11 +3655,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             other => match name_hint {
                 Some(n) => Err(error(
                     line,
-                    format!(
-                        "`{}` is a {}, not a function",
-                        n,
-                        other.type_name()
-                    ),
+                    format!("`{}` is a {}, not a function", n, other.type_name()),
                 )),
                 None => Err(error(
                     line,
@@ -3819,10 +3759,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             BTreeMap::new()
         };
         let caller_binding_origins = core::mem::take(&mut self.binding_origins);
-        let caller_value_module = core::mem::replace(
-            &mut self.active_value_module,
-            function_module.clone(),
-        );
+        let caller_value_module =
+            core::mem::replace(&mut self.active_value_module, function_module.clone());
         self.live_binding_origins
             .borrow_mut()
             .insert(caller_value_module.clone(), caller_binding_origins.clone());
@@ -3891,9 +3829,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             Ok(Signal::None) => Ok(Value::None),
             Ok(Signal::Break) => Err(error(line, "break used outside of a loop")),
             Ok(Signal::Continue) => Err(error(line, "continue used outside of a loop")),
-            Err(err) if err.is_try_return => {
-                self.pending_try_return.take().ok_or(err)
-            }
+            Err(err) if err.is_try_return => self.pending_try_return.take().ok_or(err),
             Err(err) => Err(err),
         };
         // Allocation accounting can become exceeded during the final
@@ -3933,7 +3869,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 Vec::new()
             }
         };
-        let updated_defining_environment = self.scopes
+        let updated_defining_environment = self
+            .scopes
             .first_mut()
             .map(core::mem::take)
             .unwrap_or_default();
@@ -4006,18 +3943,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     /// Fatal errors (resource-limit violations — see
     /// `BopError::is_fatal`) bypass the wrap and propagate
     /// unchanged, preserving the sandbox invariant.
-    fn builtin_try_call(
-        &mut self,
-        args: Vec<Value>,
-        line: u32,
-    ) -> Result<Value, BopError> {
+    fn builtin_try_call(&mut self, args: Vec<Value>, line: u32) -> Result<Value, BopError> {
         if args.len() != 1 {
             return Err(error(
                 line,
-                format!(
-                    "`try_call` expects 1 argument, but got {}",
-                    args.len()
-                ),
+                format!("`try_call` expects 1 argument, but got {}", args.len()),
             ));
         }
         let callable = args.into_iter().next().unwrap();
@@ -4026,10 +3956,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             other => {
                 return Err(error(
                     line,
-                    format!(
-                        "`try_call` expects a function, got {}",
-                        other.type_name()
-                    ),
+                    format!("`try_call` expects a function, got {}", other.type_name()),
                 ));
             }
         };
@@ -4069,12 +3996,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // see `methods::common_method` and `methods::numeric_method`.
         match name {
             "range" => {
-                return builtins::builtin_range_in(
-                    &args,
-                    line,
-                    &mut self.rand_state,
-                    &self.memory,
-                );
+                return builtins::builtin_range_in(&args, line, &mut self.rand_state, &self.memory);
             }
             "rand" => return builtins::builtin_rand(&args, line, &mut self.rand_state),
             "print" => {
@@ -4108,11 +4030,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             // tips like "available host functions: …"), then a
             // bare error.
             if let Some(hint) = self.callable_candidates_hint(name) {
-                error_with_hint(
-                    line,
-                    crate::error_messages::function_not_found(name),
-                    hint,
-                )
+                error_with_hint(line, crate::error_messages::function_not_found(name), hint)
             } else {
                 let host_hint = self.host.function_hint().to_string();
                 if host_hint.is_empty() {
@@ -4159,14 +4077,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // priority so `fn MyType.iter(self)` wins over any
         // built-in method of the same name.
         let type_key: Option<(String, String)> = match obj {
-            Value::Struct(s) => Some((
-                s.module_path().to_string(),
-                s.type_name().to_string(),
-            )),
-            Value::EnumVariant(e) => Some((
-                e.module_path().to_string(),
-                e.type_name().to_string(),
-            )),
+            Value::Struct(s) => Some((s.module_path().to_string(), s.type_name().to_string())),
+            Value::EnumVariant(e) => Some((e.module_path().to_string(), e.type_name().to_string())),
             _ => None,
         };
         if let Some(key) = type_key {
@@ -4238,10 +4150,10 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         match obj {
             Value::Array(arr) => methods::array_method_in(arr, method, args, line, &self.memory),
             Value::Str(s) => methods::string_method_in(s, method, args, line, &self.memory),
-            Value::Dict(entries) => methods::dict_method_in(entries, method, args, line, &self.memory),
-            Value::Int(_) | Value::Number(_) => {
-                methods::numeric_method(obj, method, args, line)
+            Value::Dict(entries) => {
+                methods::dict_method_in(entries, method, args, line, &self.memory)
             }
+            Value::Int(_) | Value::Number(_) => methods::numeric_method(obj, method, args, line),
             Value::Bool(_) => methods::bool_method(obj, method, args, line),
             Value::Iter(_) => methods::iter_method_in(obj, method, args, line, &self.memory),
             _ => Err(error(
@@ -4264,9 +4176,12 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         line: u32,
     ) -> Result<Value, BopError> {
         use crate::builtins::expect_args;
-        use methods::{make_result_err_in, make_result_ok_in, ResultCallableKind};
+        use methods::{ResultCallableKind, make_result_err_in, make_result_ok_in};
         expect_args(method, &args, 1, line)?;
-        let callable = args.into_iter().next().expect("expect_args ensured len = 1");
+        let callable = args
+            .into_iter()
+            .next()
+            .expect("expect_args ensured len = 1");
         let variant_info = match receiver {
             Value::EnumVariant(e) => e,
             _ => return Err(error(line, "Result method called on non-Result")),
@@ -4380,7 +4295,10 @@ fn seed_builtin_types() -> BuiltinTypeTables {
     let mut enum_defs: BTreeMap<(String, String), Vec<VariantDecl>> = BTreeMap::new();
     let mut type_bindings: BTreeMap<String, String> = BTreeMap::new();
     struct_defs.insert(
-        (String::from(BUILTIN_MODULE_PATH), String::from("RuntimeError")),
+        (
+            String::from(BUILTIN_MODULE_PATH),
+            String::from("RuntimeError"),
+        ),
         crate::builtins::builtin_runtime_error_fields(),
     );
     type_bindings.insert(
@@ -4391,18 +4309,12 @@ fn seed_builtin_types() -> BuiltinTypeTables {
         (String::from(BUILTIN_MODULE_PATH), String::from("Result")),
         crate::builtins::builtin_result_variants(),
     );
-    type_bindings.insert(
-        String::from("Result"),
-        String::from(BUILTIN_MODULE_PATH),
-    );
+    type_bindings.insert(String::from("Result"), String::from(BUILTIN_MODULE_PATH));
     enum_defs.insert(
         (String::from(BUILTIN_MODULE_PATH), String::from("Iter")),
         crate::builtins::builtin_iter_variants(),
     );
-    type_bindings.insert(
-        String::from("Iter"),
-        String::from(BUILTIN_MODULE_PATH),
-    );
+    type_bindings.insert(String::from("Iter"), String::from(BUILTIN_MODULE_PATH));
     (struct_defs, enum_defs, type_bindings)
 }
 
@@ -4482,9 +4394,7 @@ fn resolve_type_in_evaluator_context(
         for scope in value_scopes.iter().rev() {
             if let Some(value) = scope.get(namespace) {
                 return match value {
-                    Value::Module(module) => {
-                        module.type_origin(type_name).map(str::to_string)
-                    }
+                    Value::Module(module) => module.type_origin(type_name).map(str::to_string),
                     _ => None,
                 };
             }
@@ -4657,10 +4567,7 @@ pub fn pattern_matches_in(
             }
             match (payload, ev.payload()) {
                 (VariantPatternPayload::Unit, crate::value::EnumPayload::Unit) => true,
-                (
-                    VariantPatternPayload::Tuple(pats),
-                    crate::value::EnumPayload::Tuple(items),
-                ) => {
+                (VariantPatternPayload::Tuple(pats), crate::value::EnumPayload::Tuple(items)) => {
                     if pats.len() != items.len() {
                         return false;
                     }
@@ -4674,9 +4581,7 @@ pub fn pattern_matches_in(
                 (
                     VariantPatternPayload::Struct { fields, rest },
                     crate::value::EnumPayload::Struct(entries),
-                ) => {
-                    match_struct_fields(fields, *rest, entries, bindings, resolver, memory)
-                }
+                ) => match_struct_fields(fields, *rest, entries, bindings, resolver, memory),
                 _ => false,
             }
         }
@@ -4694,9 +4599,7 @@ pub fn pattern_matches_in(
                 Some(mp) => mp,
                 None => return false,
             };
-            if st.module_path() != expected_mp.as_str()
-                || st.type_name() != type_name.as_str()
-            {
+            if st.module_path() != expected_mp.as_str() || st.type_name() != type_name.as_str() {
                 return false;
             }
             match_struct_fields(fields, *rest, st.fields(), bindings, resolver, memory)
@@ -4900,9 +4803,7 @@ impl ReplSession {
             type_bindings: vec![builtin_bindings],
             module_aliases: vec![BTreeMap::new()],
             imported_functions: vec![BTreeMap::new()],
-            imports: Rc::new(RefCell::new(
-                alloc_import::collections::BTreeMap::new(),
-            )),
+            imports: Rc::new(RefCell::new(alloc_import::collections::BTreeMap::new())),
             imported_here: vec![alloc_import::collections::BTreeSet::new()],
             rand_state: 0,
         }
@@ -5082,9 +4983,7 @@ impl ReplSession {
         self.abi_declarations
             .iter()
             .filter(|(_, visibility, _)| *visibility == Visibility::Public)
-            .map(|(name, _, target)| {
-                crate::EntryPoint::__new(name.clone(), target.params.len())
-            })
+            .map(|(name, _, target)| crate::EntryPoint::__new(name.clone(), target.params.len()))
             .collect()
     }
 
@@ -5096,15 +4995,14 @@ impl ReplSession {
         limits: &BopLimits,
         memory: &crate::memory::MemoryContext,
     ) -> Result<Value, BopError> {
-        let target = self.abi_declarations
+        let target = self
+            .abi_declarations
             .iter()
             .find(|(entry_name, visibility, _)| {
                 entry_name == name && *visibility == Visibility::Public
             })
             .map(|(_, _, target)| Rc::clone(target))
-            .ok_or_else(|| {
-            error(0, format!("Entry point `{}` is not available", name))
-        })?;
+            .ok_or_else(|| error(0, format!("Entry point `{}` is not available", name)))?;
         if args.len() != target.params.len() {
             return Err(error(
                 0,
@@ -5339,8 +5237,7 @@ mod array_mutation_tests {
             .unwrap()
             .1;
         for index in 0..FACADES {
-            let ImportSlot::Loaded(facade) = imports.get(&format!("facade{index}")).unwrap()
-            else {
+            let ImportSlot::Loaded(facade) = imports.get(&format!("facade{index}")).unwrap() else {
                 panic!("facade should be loaded")
             };
             let facade_items = &facade
@@ -5355,10 +5252,7 @@ mod array_mutation_tests {
 
     #[test]
     fn bare_array_mutation_observes_argument_effects_first() {
-        assert_eq!(
-            run("let a = [1, 2]\na.push(a.pop())\nprint(a)"),
-            ["[1, 2]"]
-        );
+        assert_eq!(run("let a = [1, 2]\na.push(a.pop())\nprint(a)"), ["[1, 2]"]);
     }
 
     #[test]

@@ -241,18 +241,16 @@ fn insert_semicolons(raw: Vec<SpannedToken>) -> Vec<SpannedToken> {
                     Some(Delimiter::Paren | Delimiter::Bracket)
                 );
                 let next = tokens.peek().map(|next| &next.token);
-                let before_closing_delimiter = matches!(
-                    next,
-                    Some(Token::RParen | Token::RBracket | Token::RBrace)
-                );
+                let before_closing_delimiter =
+                    matches!(next, Some(Token::RParen | Token::RBracket | Token::RBrace));
                 // A newline before `else` is branch layout, not a statement
                 // boundary. Suppressing its synthetic semicolon here keeps an
                 // explicit `;` distinguishable (and therefore invalid) at the
                 // same parser boundary.
-                let before_else = matches!(last.token, Token::RBrace)
-                    && matches!(next, Some(Token::Else));
-                let before_dot_continuation = matches!(next, Some(Token::Dot))
-                    && supports_dot_continuation(&last.token);
+                let before_else =
+                    matches!(last.token, Token::RBrace) && matches!(next, Some(Token::Else));
+                let before_dot_continuation =
+                    matches!(next, Some(Token::Dot)) && supports_dot_continuation(&last.token);
                 if !inside_soft_delimiter
                     && !before_closing_delimiter
                     && !before_else
@@ -398,11 +396,7 @@ impl<'source> Lexer<'source> {
         }
     }
 
-    fn error_with_hint(
-        &self,
-        message: impl Into<String>,
-        hint: impl Into<String>,
-    ) -> BopError {
+    fn error_with_hint(&self, message: impl Into<String>, hint: impl Into<String>) -> BopError {
         BopError {
             line: Some(self.line),
             column: Some(self.column),
@@ -449,7 +443,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::Newline,
                         line,
-                    column,
+                        column,
                     });
                 }
 
@@ -457,7 +451,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: self.lex_string()?,
                         line,
-                    column,
+                        column,
                     });
                 }
 
@@ -465,7 +459,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: self.lex_number(line, column)?,
                         line,
-                    column,
+                        column,
                     });
                 }
 
@@ -473,7 +467,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: self.lex_ident_or_keyword(),
                         line,
-                    column,
+                        column,
                     });
                 }
 
@@ -484,13 +478,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::PlusEq,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Plus,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -501,13 +495,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::MinusEq,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Minus,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -518,13 +512,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::StarEq,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Star,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -535,7 +529,7 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::SlashEq,
                             line,
-                        column,
+                            column,
                         });
                     } else if self.peek() == Some('/') {
                         // `//` — line comment. Runs to end of
@@ -555,7 +549,7 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::Slash,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -566,13 +560,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::PercentEq,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Percent,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -584,20 +578,20 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::EqEq,
                             line,
-                        column,
+                            column,
                         });
                     } else if self.peek() == Some('>') {
                         self.advance();
                         tokens.push(SpannedToken {
                             token: Token::FatArrow,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Eq,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -608,13 +602,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::BangEq,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Bang,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -625,13 +619,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::LtEq,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Lt,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -642,13 +636,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::GtEq,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Gt,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -660,7 +654,7 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::AmpAmp,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         return Err(
@@ -675,7 +669,7 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::PipePipe,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         // Single `|` is now the or-pattern
@@ -685,7 +679,7 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::Pipe,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -695,7 +689,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::LParen,
                         line,
-                    column,
+                        column,
                     });
                 }
                 ')' => {
@@ -703,7 +697,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::RParen,
                         line,
-                    column,
+                        column,
                     });
                 }
                 '[' => {
@@ -711,7 +705,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::LBracket,
                         line,
-                    column,
+                        column,
                     });
                 }
                 ']' => {
@@ -719,7 +713,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::RBracket,
                         line,
-                    column,
+                        column,
                     });
                 }
                 '{' => {
@@ -727,7 +721,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::LBrace,
                         line,
-                    column,
+                        column,
                     });
                 }
                 '}' => {
@@ -735,7 +729,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::RBrace,
                         line,
-                    column,
+                        column,
                     });
                 }
                 ',' => {
@@ -743,7 +737,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::Comma,
                         line,
-                    column,
+                        column,
                     });
                 }
                 ':' => {
@@ -753,13 +747,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::ColonColon,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Colon,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -770,13 +764,13 @@ impl<'source> Lexer<'source> {
                         tokens.push(SpannedToken {
                             token: Token::DotDot,
                             line,
-                        column,
+                            column,
                         });
                     } else {
                         tokens.push(SpannedToken {
                             token: Token::Dot,
                             line,
-                        column,
+                            column,
                         });
                     }
                 }
@@ -785,7 +779,7 @@ impl<'source> Lexer<'source> {
                     tokens.push(SpannedToken {
                         token: Token::Semicolon,
                         line,
-                    column,
+                        column,
                     });
                 }
 
@@ -812,23 +806,22 @@ impl<'source> Lexer<'source> {
         // or `42.` at EOF stays an Int so chained method calls
         // (`42.str()`) and inclusive array-rest patterns still
         // parse.
-        let is_float = if self.peek() == Some('.')
-            && self.peek_next().is_some_and(|c| c.is_ascii_digit())
-        {
-            s.push('.');
-            self.advance();
-            while let Some(ch) = self.peek() {
-                if ch.is_ascii_digit() {
-                    s.push(ch);
-                    self.advance();
-                } else {
-                    break;
+        let is_float =
+            if self.peek() == Some('.') && self.peek_next().is_some_and(|c| c.is_ascii_digit()) {
+                s.push('.');
+                self.advance();
+                while let Some(ch) = self.peek() {
+                    if ch.is_ascii_digit() {
+                        s.push(ch);
+                        self.advance();
+                    } else {
+                        break;
+                    }
                 }
-            }
-            true
-        } else {
-            false
-        };
+                true
+            } else {
+                false
+            };
         if is_float {
             let n: f64 = s
                 .parse()
@@ -842,11 +835,7 @@ impl<'source> Lexer<'source> {
             match s.parse::<u64>() {
                 Ok(n) if n <= i64::MAX as u64 => Ok(Token::Int(n as i64)),
                 Ok(I64_MIN_MAGNITUDE) => Ok(Token::IntMinMagnitude),
-                _ => Err(self.error_at(
-                    line,
-                    column,
-                    integer_literal_out_of_range(&s),
-                )),
+                _ => Err(self.error_at(line, column, integer_literal_out_of_range(&s))),
             }
         }
     }
@@ -1026,10 +1015,7 @@ mod tests {
 
     #[test]
     fn i64_min_magnitude_is_preserved_for_unary_minus_parsing() {
-        assert_eq!(
-            toks(I64_MIN_MAGNITUDE_TEXT),
-            vec![Token::IntMinMagnitude]
-        );
+        assert_eq!(toks(I64_MIN_MAGNITUDE_TEXT), vec![Token::IntMinMagnitude]);
     }
 
     #[test]
@@ -1073,10 +1059,7 @@ mod tests {
         // `\r` was added alongside `std.json` so carriage
         // returns can live in string literals (Windows line
         // endings, HTTP headers, etc.).
-        assert_eq!(
-            toks(r#""a\rb""#),
-            vec![Token::Str("a\rb".into())]
-        );
+        assert_eq!(toks(r#""a\rb""#), vec![Token::Str("a\rb".into())]);
     }
 
     #[test]
@@ -1222,10 +1205,7 @@ mod tests {
         // `|` is now the or-pattern separator inside `match`
         // arms. It parses at the lexer level regardless of
         // context; the parser decides whether it's accepted.
-        assert_eq!(
-            toks("|"),
-            vec![Token::Pipe]
-        );
+        assert_eq!(toks("|"), vec![Token::Pipe]);
     }
 
     // ─── Comments ──────────────────────────────────────────────────
@@ -1502,11 +1482,7 @@ mod tests {
     fn unmatched_closing_delimiter_does_not_corrupt_depth() {
         assert_eq!(
             toks("]\nx"),
-            vec![
-                Token::RBracket,
-                Token::Semicolon,
-                Token::Ident("x".into()),
-            ]
+            vec![Token::RBracket, Token::Semicolon, Token::Ident("x".into()),]
         );
     }
 

@@ -206,7 +206,15 @@ mod tests {
     #[test]
     fn value_shapes() {
         for name in [
-            "foo", "my_var", "camelCase", "doTheThing", "_foo", "_bar", "__baz", "x1", "_1",
+            "foo",
+            "my_var",
+            "camelCase",
+            "doTheThing",
+            "_foo",
+            "_bar",
+            "__baz",
+            "x1",
+            "_1",
         ] {
             assert_eq!(classify(name), IdentKind::Value, "{name} should be Value");
         }
@@ -215,7 +223,14 @@ mod tests {
     #[test]
     fn type_shapes_are_pascal_case() {
         for name in [
-            "Entity", "Result", "Ok", "Err", "HttpClient", "_Internal", "Foo", "BarBaz",
+            "Entity",
+            "Result",
+            "Ok",
+            "Err",
+            "HttpClient",
+            "_Internal",
+            "Foo",
+            "BarBaz",
         ] {
             assert_eq!(classify(name), IdentKind::Type, "{name} should be Type");
         }

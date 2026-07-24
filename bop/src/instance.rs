@@ -4,9 +4,9 @@
 use alloc::{format, string::String, vec::Vec};
 
 use crate::builtins::error;
+use crate::memory::MemoryContext;
 use crate::{BopError, BopHost, BopLimits, ReplSession, Value};
 use core::cell::Cell;
-use crate::memory::MemoryContext;
 
 /// A public root function exposed by a loaded [`crate::BopInstance`].
 ///
@@ -88,9 +88,11 @@ impl BopInstance {
         host: &mut dyn BopHost,
     ) -> Result<Value, BopError> {
         let _operation = OperationGuard::begin(&self.in_operation)?;
-        let entry = self.entries.iter().find(|entry| entry.name == name).ok_or_else(|| {
-            error(0, format!("Public entry point `{}` was not found", name))
-        })?;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| error(0, format!("Public entry point `{}` was not found", name)))?;
         if args.len() != entry.arity {
             return Err(error(
                 0,
@@ -124,7 +126,8 @@ impl BopInstance {
         host: &mut dyn BopHost,
     ) -> Result<Value, BopError> {
         let _operation = OperationGuard::begin(&self.in_operation)?;
-        self.session.validate_instance_callable(callable, args.len())?;
+        self.session
+            .validate_instance_callable(callable, args.len())?;
         if self.memory.__exceeded() {
             return Err(memory_limit_error());
         }
@@ -199,8 +202,17 @@ mod tests {
             .map(|entry| (entry.name(), entry.arity()))
             .collect();
         assert_eq!(entries, vec![("first", 1), ("last", 0)]);
-        assert_eq!(instance.call("first", &[Value::Int(9)], &mut host).unwrap().inspect(), "9");
-        assert_eq!(instance.call("last", &[], &mut host).unwrap().inspect(), "3");
+        assert_eq!(
+            instance
+                .call("first", &[Value::Int(9)], &mut host)
+                .unwrap()
+                .inspect(),
+            "9"
+        );
+        assert_eq!(
+            instance.call("last", &[], &mut host).unwrap().inspect(),
+            "3"
+        );
         assert!(instance.call("gone", &[], &mut host).is_err());
     }
 
@@ -213,8 +225,14 @@ mod tests {
             &BopLimits::standard(),
         )
         .unwrap();
-        assert_eq!(instance.call("next", &[], &mut host).unwrap().inspect(), "1");
-        assert_eq!(instance.call("next", &[], &mut host).unwrap().inspect(), "2");
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "1"
+        );
+        assert_eq!(
+            instance.call("next", &[], &mut host).unwrap().inspect(),
+            "2"
+        );
     }
 
     #[test]
@@ -234,7 +252,10 @@ mod tests {
             entry_error.message,
             "argument 1 to `update` must be passed with `ref`"
         );
-        assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "0");
+        assert_eq!(
+            instance.call("read", &[], &mut host).unwrap().inspect(),
+            "0"
+        );
 
         let callback = instance.call("make", &[], &mut host).unwrap();
         let callback_error = instance
@@ -244,7 +265,10 @@ mod tests {
             callback_error.message,
             "argument 1 to `fn` must be passed with `ref`"
         );
-        assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "0");
+        assert_eq!(
+            instance.call("read", &[], &mut host).unwrap().inspect(),
+            "0"
+        );
     }
 
     #[test]
@@ -257,8 +281,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(instance.entry_points().len(), 1);
-        assert_eq!(instance.call("entry", &[], &mut host).unwrap().inspect(), "1");
-        assert_eq!(instance.call("entry", &[], &mut host).unwrap().inspect(), "1");
+        assert_eq!(
+            instance.call("entry", &[], &mut host).unwrap().inspect(),
+            "1"
+        );
+        assert_eq!(
+            instance.call("entry", &[], &mut host).unwrap().inspect(),
+            "1"
+        );
         assert!(instance.call("skipped", &[], &mut host).is_err());
     }
 
@@ -280,7 +310,13 @@ mod tests {
         let mut host = Host;
         let mut first = BopInstance::load(source, &mut host, &BopLimits::standard()).unwrap();
         let callback = first.call("make", &[], &mut host).unwrap();
-        assert_eq!(first.call_value(&callback, &[], &mut host).unwrap().inspect(), "7");
+        assert_eq!(
+            first
+                .call_value(&callback, &[], &mut host)
+                .unwrap()
+                .inspect(),
+            "7"
+        );
         let mut second = BopInstance::load(source, &mut host, &BopLimits::standard()).unwrap();
         let error = second.call_value(&callback, &[], &mut host).unwrap_err();
         assert_eq!(error.line, Some(0));
@@ -292,7 +328,12 @@ mod tests {
     }
 
     impl BopHost for ModuleHost {
-        fn call(&mut self, _name: &str, _args: &[Value], _line: u32) -> Option<Result<Value, BopError>> {
+        fn call(
+            &mut self,
+            _name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
             None
         }
 
@@ -306,8 +347,7 @@ mod tests {
         let mut modules = BTreeMap::new();
         modules.insert(
             "leaf".to_string(),
-            "let count = 0\nlet items = [1]\nfn bump() { count += 1; return count }"
-                .to_string(),
+            "let count = 0\nlet items = [1]\nfn bump() { count += 1; return count }".to_string(),
         );
         modules.insert(
             "facade".to_string(),
@@ -351,11 +391,32 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[100, 7]");
-        assert_eq!(instance.call("leaf_read", &[], &mut host).unwrap().inspect(), "7");
-        assert_eq!(instance.call("leaf_bump", &[], &mut host).unwrap().inspect(), "8");
-        assert_eq!(instance.call("bump", &[], &mut host).unwrap().inspect(), "101");
-        assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[101, 8]");
+        assert_eq!(
+            instance.call("read", &[], &mut host).unwrap().inspect(),
+            "[100, 7]"
+        );
+        assert_eq!(
+            instance
+                .call("leaf_read", &[], &mut host)
+                .unwrap()
+                .inspect(),
+            "7"
+        );
+        assert_eq!(
+            instance
+                .call("leaf_bump", &[], &mut host)
+                .unwrap()
+                .inspect(),
+            "8"
+        );
+        assert_eq!(
+            instance.call("bump", &[], &mut host).unwrap().inspect(),
+            "101"
+        );
+        assert_eq!(
+            instance.call("read", &[], &mut host).unwrap().inspect(),
+            "[101, 8]"
+        );
     }
 
     #[test]
@@ -413,7 +474,9 @@ mod tests {
             "let items = []\nlet captured = none\nlet callback = none\nfn clear() { items = []; captured = none; callback = none }"
                 .to_string(),
         );
-        let mut empty_host = ModuleHost { modules: empty_modules };
+        let mut empty_host = ModuleHost {
+            modules: empty_modules,
+        };
         let empty = BopInstance::load(
             "use leaf as leaf\npub fn clear() { leaf.clear() }",
             &mut empty_host,
@@ -512,7 +575,9 @@ mod tests {
             "let child = none\nlet wrapped = none\nfn clear() { child = none; wrapped = none }"
                 .to_string(),
         );
-        let mut empty_host = WrappingModuleHost { modules: empty_modules };
+        let mut empty_host = WrappingModuleHost {
+            modules: empty_modules,
+        };
         let empty = BopInstance::load(root, &mut empty_host, &BopLimits::standard()).unwrap();
         assert_eq!(cleared_bytes, empty.memory.__used());
     }
@@ -527,9 +592,21 @@ mod tests {
         )
         .unwrap();
         let callback = instance.call("make", &[], &mut host).unwrap();
-        assert_eq!(instance.call_value(&callback, &[], &mut host).unwrap().inspect(), "1");
+        assert_eq!(
+            instance
+                .call_value(&callback, &[], &mut host)
+                .unwrap()
+                .inspect(),
+            "1"
+        );
         assert_eq!(instance.call("inc", &[], &mut host).unwrap().inspect(), "2");
-        assert_eq!(instance.call_value(&callback, &[], &mut host).unwrap().inspect(), "3");
+        assert_eq!(
+            instance
+                .call_value(&callback, &[], &mut host)
+                .unwrap()
+                .inspect(),
+            "3"
+        );
     }
 
     #[test]
@@ -571,7 +648,10 @@ mod tests {
             &BopLimits::standard(),
         )
         .unwrap();
-        assert_eq!(instance.call("call", &[], &mut host).unwrap().inspect(), "7");
+        assert_eq!(
+            instance.call("call", &[], &mut host).unwrap().inspect(),
+            "7"
+        );
     }
 
     #[test]
@@ -658,7 +738,12 @@ mod tests {
     }
 
     impl BopHost for RetainingHost {
-        fn call(&mut self, name: &str, _args: &[Value], _line: u32) -> Option<Result<Value, BopError>> {
+        fn call(
+            &mut self,
+            name: &str,
+            _args: &[Value],
+            _line: u32,
+        ) -> Option<Result<Value, BopError>> {
             if name != "retain_large" {
                 return None;
             }
@@ -669,7 +754,10 @@ mod tests {
 
     #[test]
     fn host_allocations_are_untracked_and_final_return_is_checked() {
-        let limits = BopLimits { max_steps: 100, max_memory: 32 };
+        let limits = BopLimits {
+            max_steps: 100,
+            max_memory: 32,
+        };
         let mut host = RetainingHost { retained: None };
         let mut instance = BopInstance::load(
             "pub fn host_only() { retain_large() }\npub fn too_large() { return \"abcdefghijklmnopqrstuvwxyz0123456789\" }",
@@ -704,8 +792,13 @@ mod tests {
     #[test]
     fn external_host_values_are_free_until_the_instance_first_mutates_them() {
         let external = Value::new_array((0..256).map(Value::Int).collect());
-        let limits = BopLimits { max_steps: 100, max_memory: 64 };
-        let mut host = ExternalValueHost { value: Some(external) };
+        let limits = BopLimits {
+            max_steps: 100,
+            max_memory: 64,
+        };
+        let mut host = ExternalValueHost {
+            value: Some(external),
+        };
         let mut instance = BopInstance::load(
             "let stored = none\npub fn keep() { stored = take_external() }\npub fn mutate() { stored.push(256) }\npub fn harmless() { return 1 }",
             &mut host,
@@ -820,8 +913,13 @@ mod tests {
 
     #[test]
     fn every_host_hook_leaves_instance_accounting_unchanged() {
-        let limits = BopLimits { max_steps: 100, max_memory: 64 };
-        let mut host = HookAllocatingHost { retained: RefCell::new(Vec::new()) };
+        let limits = BopLimits {
+            max_steps: 100,
+            max_memory: 64,
+        };
+        let mut host = HookAllocatingHost {
+            retained: RefCell::new(Vec::new()),
+        };
         let mut instance = BopInstance::load(
             "use hook\npub fn print_it() { print(\"ok\") }\npub fn host_it() { host_value() }\npub fn hint_it() { missing() }",
             &mut host,
@@ -834,10 +932,12 @@ mod tests {
         instance.call("host_it", &[], &mut host).unwrap();
         let error = instance.call("hint_it", &[], &mut host).unwrap_err();
         assert!(!error.is_fatal);
-        assert!(error
-            .friendly_hint
-            .as_deref()
-            .is_some_and(|hint| hint.contains("host hint")));
+        assert!(
+            error
+                .friendly_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("host hint"))
+        );
         assert_eq!(instance.memory.__used(), 0);
         assert!(host.retained.borrow().len() >= 8);
     }
@@ -845,12 +945,8 @@ mod tests {
     #[test]
     fn reentry_rejection_precedes_target_and_arity_preflight() {
         let mut host = Host;
-        let mut instance = BopInstance::load(
-            "pub fn entry() {}",
-            &mut host,
-            &BopLimits::standard(),
-        )
-        .unwrap();
+        let mut instance =
+            BopInstance::load("pub fn entry() {}", &mut host, &BopLimits::standard()).unwrap();
         instance.in_operation.set(true);
         let error = instance
             .call("missing", &[Value::None], &mut host)

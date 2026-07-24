@@ -98,10 +98,7 @@ pub fn captured_ref_target(position: usize, line: u32) -> BopError {
 
 pub fn ref_capture_error(line: u32) -> BopError {
     with_hint(
-        BopError::runtime(
-            "a `ref` parameter can't be captured by a closure",
-            line,
-        ),
+        BopError::runtime("a `ref` parameter can't be captured by a closure", line),
         "Pass it through an explicit `ref` parameter instead.",
     )
 }
@@ -128,8 +125,7 @@ mod tests {
             Some("Write `ref` before argument 2.")
         );
 
-        let extra = validate_value_only_call_modes("print", &[ParamMode::Ref], 8)
-            .unwrap_err();
+        let extra = validate_value_only_call_modes("print", &[ParamMode::Ref], 8).unwrap_err();
         assert_eq!(
             extra.message,
             "argument 1 to `print` is a value parameter and can't use `ref`"

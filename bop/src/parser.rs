@@ -1,5 +1,11 @@
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -8,8 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::BopError;
 use crate::lexer::{
-    I64_MIN_MAGNITUDE_TEXT, SpannedToken, StringPart, Token,
-    integer_literal_out_of_range,
+    I64_MIN_MAGNITUDE_TEXT, SpannedToken, StringPart, Token, integer_literal_out_of_range,
 };
 use crate::naming;
 
@@ -163,7 +168,11 @@ impl Expr {
     /// for call sites that don't have a token column handy
     /// (synthetic / desugared nodes, for instance).
     pub fn line(kind: ExprKind, line: u32) -> Self {
-        Self { kind, line, column: None }
+        Self {
+            kind,
+            line,
+            column: None,
+        }
     }
 
     /// Build an `Expr` with a full source position. `column`
@@ -391,9 +400,7 @@ impl Pattern {
     fn collect_namespace_names(&self, names: &mut BTreeSet<String>) {
         match self {
             Self::EnumVariant {
-                namespace,
-                payload,
-                ..
+                namespace, payload, ..
             } => {
                 if let Some(namespace) = namespace {
                     names.insert(namespace.clone());
@@ -540,7 +547,11 @@ impl Stmt {
     /// line, leaving `column` unset. See
     /// [`Expr::line`].
     pub fn line(kind: StmtKind, line: u32) -> Self {
-        Self { kind, line, column: None }
+        Self {
+            kind,
+            line,
+            column: None,
+        }
     }
 
     /// Build a `Stmt` with a full source position.
@@ -694,11 +705,17 @@ pub enum VariantPayload {
 #[derive(Debug, Clone)]
 pub enum AssignTarget {
     Variable(String),
-    Index { object: Expr, index: Expr },
+    Index {
+        object: Expr,
+        index: Expr,
+    },
     /// Assignment to a struct field: `obj.field = v`. Like
     /// `Index`, only a bare `Ident` for `object` is currently
     /// assignable — the runtime mutates directly through that binding.
-    Field { object: Expr, field: String },
+    Field {
+        object: Expr,
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -920,9 +937,7 @@ impl Parser {
     fn peek_pos(&self) -> (u32, Option<core::num::NonZeroU32>) {
         let tok = self.tokens.get(self.pos);
         let line = tok.map(|t| t.line).unwrap_or(0);
-        let column = tok
-            .map(|t| t.column)
-            .and_then(core::num::NonZeroU32::new);
+        let column = tok.map(|t| t.column).and_then(core::num::NonZeroU32::new);
         (line, column)
     }
 
@@ -1182,7 +1197,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::StructDecl { name, fields },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1207,7 +1222,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::EnumDecl { name, variants },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1321,7 +1336,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Use { path, items, alias },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1333,9 +1348,13 @@ impl Parser {
         self.expect(&Token::Eq)?;
         let value = self.parse_expr()?;
         Ok(Stmt {
-            kind: StmtKind::Let { name, value, is_const: false },
+            kind: StmtKind::Let {
+                name,
+                value,
+                is_const: false,
+            },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1353,9 +1372,13 @@ impl Parser {
         self.expect(&Token::Eq)?;
         let value = self.parse_expr()?;
         Ok(Stmt {
-            kind: StmtKind::Let { name, value, is_const: true },
+            kind: StmtKind::Let {
+                name,
+                value,
+                is_const: true,
+            },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1389,7 +1412,7 @@ impl Parser {
                 else_body,
             },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1401,7 +1424,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::While { condition, body },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1420,7 +1443,7 @@ impl Parser {
                 body,
             },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1432,7 +1455,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Repeat { count, body },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1440,17 +1463,12 @@ impl Parser {
         let (line, column) = self.peek_pos();
         self.advance();
         if self.block_depth != 0 {
-            return Err(self.error(
-                line,
-                "`pub fn` is only meaningful at the program root",
-            ));
+            return Err(self.error(line, "`pub fn` is only meaningful at the program root"));
         }
         if !matches!(self.peek(), Token::Fn) {
             return Err(self.error(line, "`pub` must be followed by `fn`"));
         }
-        if !matches!(self.peek_at(1), Token::Ident(_))
-            && self.peek_at(1).keyword_name().is_none()
-        {
+        if !matches!(self.peek_at(1), Token::Ident(_)) && self.peek_at(1).keyword_name().is_none() {
             return Err(self.error(line, "`pub` can only mark a named function"));
         }
         let mut stmt = self.parse_fn_decl(Visibility::Public)?;
@@ -1496,7 +1514,7 @@ impl Parser {
                     body,
                 },
                 line,
-                    column,
+                column,
             });
         }
 
@@ -1511,7 +1529,7 @@ impl Parser {
                 visibility,
             },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1526,7 +1544,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Return { value },
             line,
-                    column,
+            column,
         })
     }
 
@@ -1551,13 +1569,13 @@ impl Parser {
             Ok(Stmt {
                 kind: StmtKind::Assign { target, op, value },
                 line,
-                    column,
+                column,
             })
         } else {
             Ok(Stmt {
                 kind: StmtKind::ExprStmt(expr),
                 line,
-                    column,
+                column,
             })
         }
     }
@@ -1573,9 +1591,8 @@ impl Parser {
                 line,
                 column,
             );
-            error.friendly_hint = Some(
-                "use `range(start, end)` instead, for example `range(0, 3)`.".to_string(),
-            );
+            error.friendly_hint =
+                Some("use `range(start, end)` instead, for example `range(0, 3)`.".to_string());
             return Err(error);
         }
         Ok(expression)
@@ -1594,7 +1611,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
-                    column,
+                column,
             };
         }
         Ok(left)
@@ -1613,7 +1630,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
-                    column,
+                column,
             };
         }
         Ok(left)
@@ -1637,7 +1654,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
-                    column,
+                column,
             };
         }
         Ok(left)
@@ -1665,7 +1682,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
-                    column,
+                column,
             };
         }
         Ok(left)
@@ -1689,7 +1706,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
-                    column,
+                column,
             };
         }
         Ok(left)
@@ -1697,10 +1714,7 @@ impl Parser {
 
     fn parse_multiply(&mut self) -> Result<Expr, BopError> {
         let mut left = self.parse_unary()?;
-        while matches!(
-            self.peek(),
-            Token::Star | Token::Slash | Token::Percent
-        ) {
+        while matches!(self.peek(), Token::Star | Token::Slash | Token::Percent) {
             let (line, column) = self.peek_pos();
             let op = match self.peek() {
                 Token::Star => BinOp::Mul,
@@ -1716,7 +1730,7 @@ impl Parser {
                     right: Box::new(right),
                 },
                 line,
-                    column,
+                column,
             };
         }
         Ok(left)
@@ -1795,7 +1809,7 @@ impl Parser {
                             args,
                         },
                         line,
-                    column,
+                        column,
                     };
                 }
                 Token::LBracket => {
@@ -1809,7 +1823,7 @@ impl Parser {
                             index: Box::new(index),
                         },
                         line,
-                    column,
+                        column,
                     };
                 }
                 Token::Dot => {
@@ -1863,7 +1877,7 @@ impl Parser {
                                 args,
                             },
                             line,
-                    column,
+                            column,
                         };
                     } else {
                         // Bare field read: `.name`.
@@ -1873,7 +1887,7 @@ impl Parser {
                                 field: name,
                             },
                             line,
-                    column,
+                            column,
                         };
                     }
                 }
@@ -1920,10 +1934,9 @@ impl Parser {
                     column,
                 })
             }
-            Token::IntMinMagnitude => Err(self.error(
-                line,
-                integer_literal_out_of_range(I64_MIN_MAGNITUDE_TEXT),
-            )),
+            Token::IntMinMagnitude => {
+                Err(self.error(line, integer_literal_out_of_range(I64_MIN_MAGNITUDE_TEXT)))
+            }
             Token::Number(n) => {
                 let n = *n;
                 self.advance();
@@ -1989,9 +2002,7 @@ impl Parser {
                 // user fn or variable. Users who want the `Ok` /
                 // `Err` variants of a *different* enum have to
                 // name it explicitly (`MyEnum::Ok(...)`).
-                if (name == "Ok" || name == "Err")
-                    && matches!(self.peek(), Token::LParen)
-                {
+                if (name == "Ok" || name == "Err") && matches!(self.peek(), Token::LParen) {
                     return self.parse_result_shorthand(name, line, column);
                 }
                 // Enum variant construction: `Type::Variant…`.
@@ -2097,7 +2108,7 @@ impl Parser {
                 payload,
             },
             line,
-                    column,
+            column,
         })
     }
 
@@ -2176,7 +2187,7 @@ impl Parser {
                 fields,
             },
             line,
-                    column,
+            column,
         })
     }
 
@@ -2198,7 +2209,7 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Array(elements),
             line,
-                    column,
+            column,
         })
     }
 
@@ -2226,7 +2237,7 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Dict(entries),
             line,
-                    column,
+            column,
         })
     }
 
@@ -2269,7 +2280,7 @@ impl Parser {
                 arms,
             },
             line,
-                    column,
+            column,
         })
     }
 
@@ -2362,10 +2373,9 @@ impl Parser {
                 self.advance();
                 Ok(Pattern::Literal(LiteralPattern::Int(n)))
             }
-            Token::IntMinMagnitude => Err(self.error(
-                line,
-                integer_literal_out_of_range(I64_MIN_MAGNITUDE_TEXT),
-            )),
+            Token::IntMinMagnitude => {
+                Err(self.error(line, integer_literal_out_of_range(I64_MIN_MAGNITUDE_TEXT)))
+            }
             Token::Number(n) => {
                 let n = *n;
                 self.advance();
@@ -2408,10 +2418,7 @@ impl Parser {
                             Some(neg) => Ok(Pattern::Literal(LiteralPattern::Int(neg))),
                             None => Err(self.error(
                                 line,
-                                format!(
-                                    "Integer literal `-{}` is out of range for i64",
-                                    n
-                                ),
+                                format!("Integer literal `-{}` is out of range for i64", n),
                             )),
                         }
                     }
@@ -2442,9 +2449,7 @@ impl Parser {
                 // the expression-side shortcut. Reduces the
                 // `match r { Result::Ok(v) => ..., Result::Err(e)
                 // => ... }` boilerplate to plain `Ok(v)` / `Err(e)`.
-                if (name == "Ok" || name == "Err")
-                    && matches!(self.peek(), Token::LParen)
-                {
+                if (name == "Ok" || name == "Err") && matches!(self.peek(), Token::LParen) {
                     return self.parse_result_shorthand_pattern(name);
                 }
                 // `Type::Variant[...]` path pattern.
@@ -2456,9 +2461,7 @@ impl Parser {
                     // a struct pattern. Inside a match arm pattern
                     // it always is.
                     self.parse_pattern_struct(name, None)
-                } else if matches!(self.peek(), Token::Dot)
-                    && naming::is_value_name(&name)
-                {
+                } else if matches!(self.peek(), Token::Dot) && naming::is_value_name(&name) {
                     // `ns.Type...` — namespaced variant / struct
                     // pattern through a module alias. Only fires
                     // when the first segment is value-shaped
@@ -2491,12 +2494,7 @@ impl Parser {
                 } else {
                     // Bare identifier = binding. `_` is handled
                     // above as wildcard.
-                    ensure_value_name_at(
-                        &name,
-                        "`match` pattern binding",
-                        line,
-                        column,
-                    )?;
+                    ensure_value_name_at(&name, "`match` pattern binding", line, column)?;
                     Ok(Pattern::Binding(name))
                 }
             }
@@ -2528,12 +2526,7 @@ impl Parser {
                             let Token::Ident(n) = self.take() else {
                                 unreachable!("identifier variant checked before taking token")
                             };
-                            ensure_value_name_at(
-                                &n,
-                                "`match` pattern rest binding",
-                                line,
-                                column,
-                            )?;
+                            ensure_value_name_at(&n, "`match` pattern rest binding", line, column)?;
                             ArrayRest::Named(n)
                         }
                         other => {
@@ -2612,10 +2605,7 @@ impl Parser {
     /// `Result::Ok(p)` / `Result::Err(p)`. Caller has already
     /// advanced past the ident and verified `LParen` follows;
     /// `variant` must be `"Ok"` or `"Err"`.
-    fn parse_result_shorthand_pattern(
-        &mut self,
-        variant: String,
-    ) -> Result<Pattern, BopError> {
+    fn parse_result_shorthand_pattern(&mut self, variant: String) -> Result<Pattern, BopError> {
         debug_assert!(variant == "Ok" || variant == "Err");
         self.expect(&Token::LParen)?;
         let mut items: Vec<Pattern> = Vec::new();
@@ -2652,9 +2642,7 @@ impl Parser {
         })
     }
 
-    fn parse_pattern_field_list(
-        &mut self,
-    ) -> Result<(Vec<(String, Pattern)>, bool), BopError> {
+    fn parse_pattern_field_list(&mut self) -> Result<(Vec<(String, Pattern)>, bool), BopError> {
         self.expect(&Token::LBrace)?;
         let mut fields: Vec<(String, Pattern)> = Vec::new();
         let mut rest = false;
@@ -2705,7 +2693,7 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Lambda { params, body },
             line,
-                    column,
+            column,
         })
     }
 
@@ -2723,7 +2711,7 @@ impl Parser {
                 else_expr: Box::new(else_expr),
             },
             line,
-                    column,
+            column,
         })
     }
 
@@ -2851,19 +2839,14 @@ fn assign_target_root_name(target: &AssignTarget) -> Option<&str> {
 /// method cannot appear to mutate its caller while only changing a discarded
 /// local copy. `ref self` opts into the transactional mutable-receiver path.
 fn reject_value_receiver_mutation(body: &[Stmt], receiver: &str) -> Result<(), BopError> {
-    if let Some(line) =
-        value_receiver_mutation_line(body, receiver, false, &BTreeSet::new())
-    {
+    if let Some(line) = value_receiver_mutation_line(body, receiver, false, &BTreeSet::new()) {
         return Err(value_receiver_mutation_error(receiver, line));
     }
     Ok(())
 }
 
 fn value_receiver_mutation_error(receiver: &str, line: u32) -> BopError {
-    let mut error = BopError::runtime(
-        format!("can't mutate value receiver `{receiver}`"),
-        line,
-    );
+    let mut error = BopError::runtime(format!("can't mutate value receiver `{receiver}`"), line);
     error.friendly_hint = Some(format!(
         "Declare the receiver as `ref {receiver}` to mutate it, or return a new value."
     ));
@@ -2879,9 +2862,7 @@ fn value_receiver_mutation_line(
     let mut shadowed = initially_shadowed;
     for stmt in body {
         let expression_mutation = |expr: &Expr| {
-            (!shadowed
-                && expr_mutates_binding(expr, receiver, ref_methods))
-                .then_some(expr.line)
+            (!shadowed && expr_mutates_binding(expr, receiver, ref_methods)).then_some(expr.line)
         };
         match &stmt.kind {
             StmtKind::Let { name, value, .. } => {
@@ -2915,47 +2896,28 @@ fn value_receiver_mutation_line(
                     return Some(line);
                 }
                 for (condition, body) in else_ifs {
-                    if let Some(line) = expression_mutation(condition)
-                        .or_else(|| {
-                            value_receiver_mutation_line(
-                                body,
-                                receiver,
-                                shadowed,
-                                ref_methods,
-                            )
-                        })
-                    {
+                    if let Some(line) = expression_mutation(condition).or_else(|| {
+                        value_receiver_mutation_line(body, receiver, shadowed, ref_methods)
+                    }) {
                         return Some(line);
                     }
                 }
-                if let Some(line) = else_body
-                    .as_deref()
-                    .and_then(|body| {
-                        value_receiver_mutation_line(
-                            body,
-                            receiver,
-                            shadowed,
-                            ref_methods,
-                        )
-                    })
-                {
+                if let Some(line) = else_body.as_deref().and_then(|body| {
+                    value_receiver_mutation_line(body, receiver, shadowed, ref_methods)
+                }) {
                     return Some(line);
                 }
             }
             StmtKind::While { condition, body } => {
                 if let Some(line) = expression_mutation(condition)
-                    .or_else(|| {
-                        value_receiver_mutation_line(body, receiver, shadowed, ref_methods)
-                    })
+                    .or_else(|| value_receiver_mutation_line(body, receiver, shadowed, ref_methods))
                 {
                     return Some(line);
                 }
             }
             StmtKind::Repeat { count, body } => {
                 if let Some(line) = expression_mutation(count)
-                    .or_else(|| {
-                        value_receiver_mutation_line(body, receiver, shadowed, ref_methods)
-                    })
+                    .or_else(|| value_receiver_mutation_line(body, receiver, shadowed, ref_methods))
                 {
                     return Some(line);
                 }
@@ -2965,16 +2927,14 @@ fn value_receiver_mutation_line(
                 iterable,
                 body,
             } => {
-                if let Some(line) = expression_mutation(iterable)
-                    .or_else(|| {
-                        value_receiver_mutation_line(
-                            body,
-                            receiver,
-                            shadowed || var == receiver,
-                            ref_methods,
-                        )
-                    })
-                {
+                if let Some(line) = expression_mutation(iterable).or_else(|| {
+                    value_receiver_mutation_line(
+                        body,
+                        receiver,
+                        shadowed || var == receiver,
+                        ref_methods,
+                    )
+                }) {
                     return Some(line);
                 }
             }
@@ -2998,15 +2958,10 @@ fn value_receiver_mutation_line(
     None
 }
 
-fn expr_mutates_binding(
-    expr: &Expr,
-    binding: &str,
-    ref_methods: &BTreeSet<String>,
-) -> bool {
+fn expr_mutates_binding(expr: &Expr, binding: &str, ref_methods: &BTreeSet<String>) -> bool {
     let call_args_mutate = |args: &[CallArg]| {
         args.iter().any(|arg| {
-            (arg.mode == ParamMode::Ref
-                && assignable_root_name(&arg.value) == Some(binding))
+            (arg.mode == ParamMode::Ref && assignable_root_name(&arg.value) == Some(binding))
                 || expr_mutates_binding(&arg.value, binding, ref_methods)
         })
     };
@@ -3031,9 +2986,7 @@ fn expr_mutates_binding(
                 || expr_mutates_binding(object, binding, ref_methods)
                 || call_args_mutate(args)
         }
-        ExprKind::FieldAccess { object, .. } => {
-            expr_mutates_binding(object, binding, ref_methods)
-        }
+        ExprKind::FieldAccess { object, .. } => expr_mutates_binding(object, binding, ref_methods),
         ExprKind::StructConstruct { fields, .. } | ExprKind::Dict(fields) => fields
             .iter()
             .any(|(_, value)| expr_mutates_binding(value, binding, ref_methods)),
@@ -3073,9 +3026,7 @@ fn expr_mutates_binding(
                         && (arm
                             .guard
                             .as_ref()
-                            .is_some_and(|guard| {
-                                expr_mutates_binding(guard, binding, ref_methods)
-                            })
+                            .is_some_and(|guard| expr_mutates_binding(guard, binding, ref_methods))
                             || expr_mutates_binding(&arm.body, binding, ref_methods))
                 })
         }
@@ -3282,8 +3233,7 @@ mod integer_boundary_tests {
             assert_eq!(error.line, Some(1), "source: {source}");
             assert_eq!(error.column, Some(column), "source: {source}");
             assert_eq!(
-                error.message,
-                "Integer literal out of range for i64: 9223372036854775808",
+                error.message, "Integer literal out of range for i64: 9223372036854775808",
                 "source: {source}"
             );
         }
@@ -3305,8 +3255,8 @@ mod integer_boundary_tests {
             );
         }
 
-        let error = pattern("9223372036854775808")
-            .expect_err("positive boundary pattern must be rejected");
+        let error =
+            pattern("9223372036854775808").expect_err("positive boundary pattern must be rejected");
         assert_eq!(error.line, Some(1));
         assert_eq!(error.column, Some(1));
         assert_eq!(
@@ -3343,8 +3293,8 @@ mod token_ownership_tests {
 
     #[test]
     fn declaration_and_primary_payloads_move_from_tokens_into_the_ast() {
-        let tokens = crate::lexer::lex(r#"let owned_name = "owned_literal""#)
-            .expect("source should lex");
+        let tokens =
+            crate::lexer::lex(r#"let owned_name = "owned_literal""#).expect("source should lex");
         let name_ptr = ident_ptr(&tokens, "owned_name", 0);
         let literal_ptr = string_ptr(&tokens, "owned_literal");
 
@@ -3362,8 +3312,8 @@ mod token_ownership_tests {
 
     #[test]
     fn interpolation_and_dict_key_buffers_move_into_the_ast() {
-        let interpolation_tokens = crate::lexer::lex(r#""left {owned_var} right""#)
-            .expect("interpolation should lex");
+        let interpolation_tokens =
+            crate::lexer::lex(r#""left {owned_var} right""#).expect("interpolation should lex");
         let (parts_ptr, variable_ptr) = interpolation_tokens
             .iter()
             .find_map(|spanned| match &spanned.token {
@@ -3396,8 +3346,7 @@ mod token_ownership_tests {
         assert_eq!(parts.as_ptr(), parts_ptr);
         assert_eq!(ast_variable_ptr, variable_ptr);
 
-        let dict_tokens = crate::lexer::lex(r#"{"owned_key": 1}"#)
-            .expect("dictionary should lex");
+        let dict_tokens = crate::lexer::lex(r#"{"owned_key": 1}"#).expect("dictionary should lex");
         let key_ptr = string_ptr(&dict_tokens, "owned_key");
         let statements = parse(dict_tokens).expect("dictionary should parse");
         let StmtKind::ExprStmt(Expr {
@@ -3524,8 +3473,7 @@ mod targeted_diagnostic_tests {
             assert_eq!(error.line, Some(line), "source: {source}");
             assert_eq!(error.column, Some(column), "source: {source}");
             assert_eq!(
-                error.message,
-                "`..` range syntax is not supported in expressions",
+                error.message, "`..` range syntax is not supported in expressions",
                 "source: {source}"
             );
             assert_eq!(
@@ -3573,9 +3521,7 @@ mod pattern_binding_name_tests {
             .expect_err("constant- and type-shaped pattern bindings must be rejected");
         assert_eq!(
             error.message,
-            format!(
-                "{site} `{name}` looks like a {kind}, but a value name is required here"
-            ),
+            format!("{site} `{name}` looks like a {kind}, but a value name is required here"),
             "source: {source}"
         );
         assert_eq!(error.line, Some(line), "source: {source}");
@@ -3720,9 +3666,7 @@ mod or_pattern_binding_tests {
         );
         assert_eq!(
             error.friendly_hint.as_deref(),
-            Some(
-                "make every `|` alternative bind the same names; only in alternative 2: `y`"
-            )
+            Some("make every `|` alternative bind the same names; only in alternative 2: `y`")
         );
     }
 
@@ -3758,8 +3702,14 @@ mod or_pattern_binding_tests {
     #[test]
     fn reordered_relocated_and_duplicate_bindings_are_valid() {
         let cases = [
-            ("[left, right, ..tail] | [right, left, ..tail]", &["left", "right", "tail"][..]),
-            ("Pair::Both(left, right) | Pair::Both(right, left)", &["left", "right"]),
+            (
+                "[left, right, ..tail] | [right, left, ..tail]",
+                &["left", "right", "tail"][..],
+            ),
+            (
+                "Pair::Both(left, right) | Pair::Both(right, left)",
+                &["left", "right"],
+            ),
             (
                 "Node { left, right, .. } | Node { left: right, right: left, .. }",
                 &["left", "right"],

@@ -168,10 +168,10 @@ fn build_resolver(overrides: &[(&str, &str)]) -> Option<bop_compile::ModuleResol
         .collect();
     Some(std::rc::Rc::new(std::cell::RefCell::new(
         move |name: &str| {
-        if let Some(src) = map.get(name) {
-            return Some(Ok(src.clone()));
-        }
-        bop::stdlib::resolve(name).map(|s| Ok(s.to_string()))
+            if let Some(src) = map.get(name) {
+                return Some(Ok(src.clone()));
+            }
+            bop::stdlib::resolve(name).map(|s| Ok(s.to_string()))
         },
     )))
 }

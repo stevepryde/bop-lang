@@ -139,7 +139,7 @@ pub mod vm;
 
 pub use chunk::{
     Chunk, CodeOffset, ConstIdx, Constant, EnumConstructShape, EnumDef, EnumIdx, EnumVariantDef,
-    EnumVariantShape, FnDef, FnIdx, InterpIdx, InterpPart, InterpRecipe, Instr, LoopStateKind,
+    EnumVariantShape, FnDef, FnIdx, Instr, InterpIdx, InterpPart, InterpRecipe, LoopStateKind,
     NameIdx, StructDef, StructIdx,
 };
 pub use compiler::compile;

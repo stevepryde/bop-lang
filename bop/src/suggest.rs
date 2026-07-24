@@ -9,7 +9,12 @@
 //! which is plenty for scope sizes we ever see in a Bop program.
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{format, string::{String, ToString}, vec, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 /// Every core builtin callable by name, in a single canonical
 /// list. Each engine (walker / VM / AOT) feeds this into
@@ -19,24 +24,15 @@ use alloc::{format, string::{String, ToString}, vec, vec::Vec};
 /// stay out — they surface via each host's own
 /// `function_hint()` so embedder-specific tips stay embedder-
 /// owned.
-pub const CORE_CALLABLE_BUILTINS: &[&str] = &[
-    "range",
-    "rand",
-    "print",
-    "try_call",
-    "panic",
-];
+pub const CORE_CALLABLE_BUILTINS: &[&str] = &["range", "rand", "print", "try_call", "panic"];
 
 /// Methods every numeric receiver exposes. Produced as
 /// candidates when a user writes `(some_int).xyz(...)` and the
 /// name doesn't match — the "did you mean?" hint surfaces the
 /// whole numeric surface in one shot.
 pub const NUMERIC_METHODS: &[&str] = &[
-    "abs", "sqrt", "sin", "cos", "tan",
-    "floor", "ceil", "round", "exp", "log",
-    "pow", "min", "max",
-    "to_int", "to_float",
-    // Shared methods every value supports:
+    "abs", "sqrt", "sin", "cos", "tan", "floor", "ceil", "round", "exp", "log", "pow", "min",
+    "max", "to_int", "to_float", // Shared methods every value supports:
     "type", "to_str", "inspect",
 ];
 
@@ -163,10 +159,7 @@ mod tests {
         // Classic typo — one transposition, Levenshtein 2 on a
         // 6-char target → fits the per-target budget.
         let cands = ["length", "height", "width"];
-        assert_eq!(
-            closest_match("lenght", cands),
-            Some("length".to_string())
-        );
+        assert_eq!(closest_match("lenght", cands), Some("length".to_string()));
     }
 
     #[test]

@@ -17,7 +17,10 @@ use alloc::{
 };
 
 #[cfg(any(feature = "std", not(feature = "no_std")))]
-use std::{collections::BTreeMap, rc::{Rc, Weak}};
+use std::{
+    collections::BTreeMap,
+    rc::{Rc, Weak},
+};
 
 use core::cell::RefCell;
 
@@ -82,10 +85,22 @@ impl core::fmt::Debug for BopStr {
     }
 }
 
-impl PartialEq for BopStr { fn eq(&self, other: &Self) -> bool { self.0.text == other.0.text } }
+impl PartialEq for BopStr {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.text == other.0.text
+    }
+}
 impl Eq for BopStr {}
-impl PartialOrd for BopStr { fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> { Some(self.cmp(other)) } }
-impl Ord for BopStr { fn cmp(&self, other: &Self) -> core::cmp::Ordering { self.0.text.cmp(&other.0.text) } }
+impl PartialOrd for BopStr {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for BopStr {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0.text.cmp(&other.0.text)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BopArray(Rc<ArrayData>);
@@ -167,7 +182,12 @@ impl OrderedDepthCounts {
     }
 
     fn ensure_depth(&mut self, depth: u16, line: u32) -> Result<(), BopError> {
-        if depth == 0 || self.nested.iter().any(|(entry_depth, _)| *entry_depth == depth) {
+        if depth == 0
+            || self
+                .nested
+                .iter()
+                .any(|(entry_depth, _)| *entry_depth == depth)
+        {
             return Ok(());
         }
         self.nested
@@ -316,8 +336,7 @@ pub enum EnumPayload {
 
 impl ArrayData {
     fn tracked_bytes(&self) -> usize {
-        self.items.capacity() * core::mem::size_of::<Value>()
-            + self.depth_counts.tracked_bytes()
+        self.items.capacity() * core::mem::size_of::<Value>() + self.depth_counts.tracked_bytes()
     }
 
     fn clone_in(&self, memory: &MemoryContext) -> Self {
@@ -403,17 +422,14 @@ impl Clone for StructData {
 
 impl EnumVariantData {
     fn tracked_bytes(&self) -> usize {
-        let base = self.module_path.capacity() + self.type_name.capacity() + self.variant.capacity();
+        let base =
+            self.module_path.capacity() + self.type_name.capacity() + self.variant.capacity();
         match &self.payload {
             EnumPayload::Unit => base,
-            EnumPayload::Tuple(items) => {
-                base + items.capacity() * core::mem::size_of::<Value>()
-            }
+            EnumPayload::Tuple(items) => base + items.capacity() * core::mem::size_of::<Value>(),
             EnumPayload::Struct(fields) => {
                 let key_bytes: usize = fields.iter().map(|(key, _)| key.capacity()).sum();
-                base
-                    + fields.capacity() * core::mem::size_of::<(String, Value)>()
-                    + key_bytes
+                base + fields.capacity() * core::mem::size_of::<(String, Value)>() + key_bytes
             }
         }
     }
@@ -1570,15 +1586,8 @@ impl Value {
         module_path: String,
         line: u32,
     ) -> Result<Self, BopError> {
-        BopFn::try_new_ast_in_module(
-            params,
-            captures,
-            body,
-            self_name,
-            Some(module_path),
-            line,
-        )
-        .map(Value::Fn)
+        BopFn::try_new_ast_in_module(params, captures, body, self_name, Some(module_path), line)
+            .map(Value::Fn)
     }
 
     /// Build a closure value with an engine-opaque compiled body.
@@ -1680,8 +1689,7 @@ impl Value {
         type_exports: BopTypeExports,
         line: u32,
     ) -> Result<Self, BopError> {
-        BopModule::try_new_with_type_exports(path, bindings, type_exports, line)
-            .map(Value::Module)
+        BopModule::try_new_with_type_exports(path, bindings, type_exports, line).map(Value::Module)
     }
 }
 
@@ -1700,9 +1708,7 @@ impl Clone for Value {
             Value::Number(n) => Value::Number(*n),
             Value::Bool(b) => Value::Bool(*b),
             Value::None => Value::None,
-            Value::Str(s) => {
-                Value::Str(BopStr(Rc::clone(&s.0)))
-            }
+            Value::Str(s) => Value::Str(BopStr(Rc::clone(&s.0))),
             Value::Array(arr) => Value::Array(arr.clone()),
             Value::Dict(dict) => Value::Dict(dict.clone()),
             Value::Struct(value) => Value::Struct(value.clone()),
@@ -1770,9 +1776,7 @@ impl Value {
             (Self::Array(left), Self::Array(right)) => Rc::ptr_eq(&left.0, &right.0),
             (Self::Dict(left), Self::Dict(right)) => Rc::ptr_eq(&left.0, &right.0),
             (Self::Struct(left), Self::Struct(right)) => Rc::ptr_eq(&left.0, &right.0),
-            (Self::EnumVariant(left), Self::EnumVariant(right)) => {
-                Rc::ptr_eq(&left.0, &right.0)
-            }
+            (Self::EnumVariant(left), Self::EnumVariant(right)) => Rc::ptr_eq(&left.0, &right.0),
             (Self::Iter(left), Self::Iter(right)) => Rc::ptr_eq(left, right),
             (Self::Fn(left), Self::Fn(right)) => Rc::ptr_eq(left, right),
             (Self::Module(left), Self::Module(right)) => Rc::ptr_eq(left, right),
@@ -2305,12 +2309,7 @@ impl BopArray {
     }
 
     /// Insert a value at an already-normalized endpoint-inclusive index.
-    pub fn try_insert(
-        &mut self,
-        index: usize,
-        value: Value,
-        line: u32,
-    ) -> Result<(), BopError> {
+    pub fn try_insert(&mut self, index: usize, value: Value, line: u32) -> Result<(), BopError> {
         self.__try_insert_in(index, value, line, &MemoryContext::__legacy_current())
     }
 
@@ -2622,8 +2621,7 @@ impl BopDict {
                 .try_reserve(1)
                 .map_err(|_| BopError::fatal("Memory limit exceeded", line))?;
             data.sync_receipt();
-            data.key_index
-                .ensure_insert_capacity(&data.entries, line)?;
+            data.key_index.ensure_insert_capacity(&data.entries, line)?;
             data.sync_receipt();
             let key = owned_key.expect("absent dictionary key was copied before mutation");
             let entry_index = data.entries.len();
@@ -2772,13 +2770,9 @@ mod module_type_export_tests {
             ("Local".to_string(), "facade".to_string()),
             ("Point".to_string(), "replacement".to_string()),
         ]);
-        let module = BopModule::try_new_with_type_exports(
-            "facade".to_string(),
-            Vec::new(),
-            exports,
-            1,
-        )
-        .unwrap();
+        let module =
+            BopModule::try_new_with_type_exports("facade".to_string(), Vec::new(), exports, 1)
+                .unwrap();
 
         assert_eq!(module.type_origin("Point"), Some("replacement"));
         assert_eq!(module.type_origin("Local"), Some("facade"));
@@ -2979,20 +2973,11 @@ mod depth_tests {
         assert_depth_panic(|| Value::new_array(vec![child.clone()]));
         assert_depth_panic(|| Value::new_dict(vec![("x".into(), child.clone())]));
         assert_depth_panic(|| {
-            Value::new_struct(
-                "m".into(),
-                "S".into(),
-                vec![("x".into(), child.clone())],
-            )
+            Value::new_struct("m".into(), "S".into(), vec![("x".into(), child.clone())])
         });
         assert_depth_panic(|| Value::new_array_iter(vec![child.clone()]));
         assert_depth_panic(|| {
-            Value::new_enum_tuple(
-                "m".into(),
-                "E".into(),
-                "V".into(),
-                vec![child.clone()],
-            )
+            Value::new_enum_tuple("m".into(), "E".into(), "V".into(), vec![child.clone()])
         });
         assert_depth_panic(|| {
             Value::new_enum_struct(
@@ -3011,12 +2996,7 @@ mod depth_tests {
             )
         });
         assert_depth_panic(|| {
-            Value::new_compiled_fn(
-                Vec::new(),
-                vec![("x".into(), child)],
-                Rc::new(()),
-                None,
-            )
+            Value::new_compiled_fn(Vec::new(), vec![("x".into(), child)], Rc::new(()), None)
         });
     }
 
@@ -3045,8 +3025,8 @@ mod depth_tests {
         drop(cloned);
         assert!(weak.upgrade().is_none());
 
-        let plain = Value::try_new_fn(Vec::new(), Vec::new(), Vec::new(), None, 1)
-            .expect("plain function");
+        let plain =
+            Value::try_new_fn(Vec::new(), Vec::new(), Vec::new(), None, 1).expect("plain function");
         let Value::Fn(plain) = &plain else {
             unreachable!()
         };
@@ -3082,18 +3062,12 @@ mod depth_tests {
         assert_eq!(dict_value.0.depth, 1);
         assert_eq!(dict_value.0.depth_counts.child_depths, [0]);
         assert_eq!(dict_value.0.key_bytes, original_key_bytes);
-        assert_eq!(
-            dict_value.0.key_index.entry_count(),
-            original_index_entries
-        );
+        assert_eq!(dict_value.0.key_index.entry_count(), original_index_entries);
         assert_eq!(
             dict_value.0.key_index.get(&dict_value.0.entries, "x"),
             Some(0)
         );
-        assert_eq!(
-            dict_value.0.key_index.get(&dict_value.0.entries, "y"),
-            None
-        );
+        assert_eq!(dict_value.0.key_index.get(&dict_value.0.entries, "y"), None);
         assert!(matches!(
             dict_snapshot,
             Value::Dict(ref snapshot) if Rc::ptr_eq(&snapshot.0, &dict_value.0)
@@ -3438,10 +3412,7 @@ mod depth_tests {
             snapshot.0.depth_counts.nested,
             original.0.depth_counts.nested
         );
-        assert_eq!(
-            snapshot.0.depth_counts.flat,
-            original.0.depth_counts.flat
-        );
+        assert_eq!(snapshot.0.depth_counts.flat, original.0.depth_counts.flat);
         assert_eq!(
             snapshot.0.key_index.get(&snapshot.0.entries, "nested"),
             Some(1)
@@ -3459,11 +3430,8 @@ mod depth_tests {
 
     #[test]
     fn array_reordering_keeps_child_depths_aligned() {
-        let mut value = Value::try_new_array(
-            vec![nested_array(2), Value::Int(1), nested_array(1)],
-            1,
-        )
-        .unwrap();
+        let mut value =
+            Value::try_new_array(vec![nested_array(2), Value::Int(1), nested_array(1)], 1).unwrap();
         let Value::Array(array) = &mut value else {
             unreachable!()
         };
@@ -3471,20 +3439,14 @@ mod depth_tests {
         array.sort_by(|left, right| left.ownership_depth().cmp(&right.ownership_depth()));
         assert_eq!(array.0.depth_counts.child_depths, [0, 1, 2]);
         assert_eq!(
-            array
-                .iter()
-                .map(Value::ownership_depth)
-                .collect::<Vec<_>>(),
+            array.iter().map(Value::ownership_depth).collect::<Vec<_>>(),
             array.0.depth_counts.child_depths
         );
 
         array.reverse();
         assert_eq!(array.0.depth_counts.child_depths, [2, 1, 0]);
         assert_eq!(
-            array
-                .iter()
-                .map(Value::ownership_depth)
-                .collect::<Vec<_>>(),
+            array.iter().map(Value::ownership_depth).collect::<Vec<_>>(),
             array.0.depth_counts.child_depths
         );
     }
@@ -3563,13 +3525,9 @@ mod depth_tests {
         assert_eq!(bop_memory_used(), after_dict_detach);
         assert!(matches!(&dict_clone, Value::Dict(old) if matches!(&old[0].1, Value::Int(1))));
 
-        let mut structure = Value::try_new_struct(
-            "m".into(),
-            "S".into(),
-            vec![("x".into(), Value::Int(1))],
-            1,
-        )
-        .unwrap();
+        let mut structure =
+            Value::try_new_struct("m".into(), "S".into(), vec![("x".into(), Value::Int(1))], 1)
+                .unwrap();
         let before_struct_clone = bop_memory_used();
         let struct_clone = structure.clone();
         assert_eq!(bop_memory_used(), before_struct_clone);
@@ -3577,16 +3535,14 @@ mod depth_tests {
             unreachable!()
         };
         let old_struct_ptr = Rc::as_ptr(&struct_value.0);
-        struct_value
-            .try_set_field("x", Value::Int(2), 1)
-            .unwrap();
+        struct_value.try_set_field("x", Value::Int(2), 1).unwrap();
         assert_ne!(Rc::as_ptr(&struct_value.0), old_struct_ptr);
         let after_struct_detach = bop_memory_used();
-        struct_value
-            .try_set_field("x", Value::Int(3), 1)
-            .unwrap();
+        struct_value.try_set_field("x", Value::Int(3), 1).unwrap();
         assert_eq!(bop_memory_used(), after_struct_detach);
-        assert!(matches!(struct_clone, Value::Struct(ref old) if matches!(old.field("x"), Some(Value::Int(1)))));
+        assert!(
+            matches!(struct_clone, Value::Struct(ref old) if matches!(old.field("x"), Some(Value::Int(1))))
+        );
 
         let variant = Value::try_new_enum_struct(
             "m".into(),
