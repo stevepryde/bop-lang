@@ -90,6 +90,8 @@ print(PI)
 
 ## Quick start — CLI
 
+Building or installing Bop 0.4 requires Rust 1.88 or newer.
+
 ```
 cargo install bop-cli
 ```

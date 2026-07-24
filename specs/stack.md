@@ -3,7 +3,9 @@
 ## Committed choices
 
 - **Language:** Rust 2024 edition for all workspace crates.
-- **MSRV:** Rust 1.85, as declared by the workspace manifest.
+- **MSRV:** Rust 1.88, as declared by the workspace manifest. Verify the pinned
+  release dependency graph with
+  `cargo +1.88.0 check --workspace --all-targets --locked`.
 - **Core dependency policy:** `bop-lang` remains zero third-party Rust
   dependencies in its standard configuration; `alloc`/`core` support the
   portable core and the existing `libm` feature supports `no_std` math.
@@ -11,7 +13,7 @@
   `bop-sys`, and `bop-cli`; manifests and `Cargo.lock` own exact versions.
 - **Testing:** Cargo unit/integration tests plus VM differential and AOT
   three-way suites. `cargo clippy --workspace --all-targets` is the code-health
-  target.
+  target, and the explicit Rust 1.88 command above is the release MSRV gate.
 - **AOT runtime mode:** `bop-compile` supports opt-in sandbox emission, while
   `bop-cli compile` currently emits unsandboxed binaries.
 - **Website and documentation:** Zola templates, Tailwind CSS v4, and Markdown

@@ -14,7 +14,8 @@ path = "/docs/reference/operators/"
 
 # Command-line interface
 
-Install the current Bop command-line tool from crates.io:
+Building or installing Bop 0.4 requires Rust 1.88 or newer. Install the current
+Bop command-line tool from crates.io:
 
 ```sh
 cargo install bop-cli
