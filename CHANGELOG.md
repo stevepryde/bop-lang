@@ -56,6 +56,8 @@ embedding APIs across all three execution engines.
 
 - Bring the bytecode VM and AOT transpiler to language parity with the
   tree-walker, covered by an expanded three-engine differential suite.
+- Set Rust 1.88 as the minimum supported Rust version for the complete
+  workspace, including `bop-cli`.
 - Add public bytecode validation through `bop_vm::validate_chunk`.
 - Add copy-on-write runtime containers, in-place VM mutation paths, compact
   instruction pools, safe superinstructions, and allocation reductions.
@@ -98,3 +100,10 @@ published in dependency order:
 
 Wait for each package to become available in the crates.io index before
 publishing a dependent package.
+
+Before publishing, verify that the pinned release dependency graph builds on
+the minimum supported toolchain:
+
+```sh
+cargo +1.88.0 check --workspace --all-targets --locked
+```

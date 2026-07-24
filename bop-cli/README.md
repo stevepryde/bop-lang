@@ -2,6 +2,8 @@
 
 The `bop` command-line tool for the [Bop](https://github.com/stevepryde/bop-lang) programming language.
 
+Building or installing Bop 0.4 requires Rust 1.88 or newer.
+
 ```sh
 cargo install bop-cli
 ```
