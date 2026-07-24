@@ -212,7 +212,7 @@ pub use value_conversion::{FromValue, IntoValue, ValueConversionError, ValuePath
 /// The core pattern matcher. Re-exported so engines beyond the
 /// tree-walker (the bytecode VM, the AOT runtime) can apply the
 /// same structural rules without re-implementing them.
-pub use evaluator::pattern_matches;
+pub use evaluator::{pattern_matches, pattern_matches_in};
 
 /// Shared scope walker for resolving source-level type
 /// references to the declaring module. Re-exported because VM
@@ -2318,19 +2318,21 @@ let x = 1"#,
     }
 
     #[test]
-    fn safety_bounded_overshoot() {
+    fn safety_final_retained_allocation_is_checked() {
         let limits = BopLimits {
             max_steps: 500,
             max_memory: 64 * 1024,
         };
         let mut host = TestHost::new();
-        let result = run(
+        let error = run(
             r#"let s = "abababab" * 1000
 let parts = s.split("a")"#,
             &mut host,
             &limits,
-        );
-        assert!(result.is_ok(), "Expected success (bounded overshoot), got error");
+        )
+        .expect_err("retained allocations above the limit must fail at the return boundary");
+        assert!(error.is_fatal);
+        assert!(error.message.contains("Memory limit exceeded"));
     }
 
     #[test]

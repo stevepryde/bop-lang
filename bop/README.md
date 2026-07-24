@@ -113,7 +113,7 @@ macro to construct nested values while retaining Bop's depth checks.
 
 | feature | default | what it does |
 |---|---|---|
-| `std` | yes | enables Rust standard-library integration, including stderr diagnostics and thread-local execution state. If Cargo unifies `std` and `no_std`, this feature wins. |
+| `std` | yes | enables Rust standard-library integration, including stderr diagnostics and the std-only legacy ambient-memory compatibility APIs. If Cargo unifies `std` and `no_std`, this feature wins. |
 | `bop-std` | yes | bundles the Bop stdlib (`use std.math`, `std.json`, `std.collections`, `std.iter`, `std.string`, `std.test`) as `&'static str` constants reachable via [`bop::stdlib::resolve`] |
 | `no_std` | no | opt in for bare-metal / embedded / edge wasm targets. Pulls in `libm` for float math. Enable with `default-features = false, features = ["no_std"]` (add `"bop-std"` too if you want the bundled stdlib on those targets). |
 
@@ -126,6 +126,15 @@ bop-lang = { version = "0.4", default-features = false, features = ["std"] }
 For compatibility, omitting both `std` and `no_std` also retains std behavior;
 genuine no_std builds must explicitly select `no_std` with default features
 disabled.
+
+The walker and VM carry memory accounting through an explicit per-engine
+`MemoryContext`, so nested or concurrent executions cannot charge one another.
+This changes custom true-no_std runtime integrations: the legacy ambient
+`bop_memory_*` functions and `ActiveMemoryGuard` are now std-only. Code that
+used those hooks must pass a `MemoryContext` through the context-aware internal
+constructors and mutation helpers instead. Values created by a host through
+the public `Value` constructors are untracked until an engine mutation adopts
+their backing storage into its own account.
 
 ## WASM example
 

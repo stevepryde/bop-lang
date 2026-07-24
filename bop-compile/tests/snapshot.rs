@@ -287,7 +287,7 @@ fn compound_assign_routes_through_ops() {
         &out,
         &[
             "__bop_binding_mut_option(ctx, \"<root>\", \"x\")",
-            "::bop::ops::add(&",
+            "::bop::ops::add_in(&",
         ],
     );
 }
@@ -415,7 +415,20 @@ fn unknown_call_falls_back_to_host() {
 #[test]
 fn index_read_uses_ops_index_get() {
     let out = compile("let a = [1, 2]\nprint(a[0])");
-    contains_all(&out, &["::bop::ops::index_get(&__o, &__i,"]);
+    contains_all(&out, &["::bop::ops::index_get_in(&__o, &__i,"]);
+}
+
+#[test]
+fn range_snapshots_memory_before_mutably_borrowing_rng_state() {
+    let out = compile("let values = range(3)");
+    contains_all(
+        &out,
+        &[
+            "let __bop_memory = ctx.memory.clone();",
+            "&mut ctx.rand_state, &__bop_memory",
+        ],
+    );
+    assert!(!out.contains("&mut ctx.rand_state, &ctx.memory"));
 }
 
 #[test]
@@ -423,11 +436,20 @@ fn array_and_dict_literals_use_fallible_line_aware_constructors() {
     let arr = compile("let a = [1, 2, 3]");
     contains_all(
         &arr,
-        &["::bop::value::Value::try_new_array(vec![", "], 1)?"],
+        &[
+            "::bop::value::Value::__try_new_array_in(vec![",
+            "], 1, &ctx.memory)?",
+        ],
     );
 
     let dct = compile("\nlet d = {\"a\": 1, \"b\": 2}");
-    contains_all(&dct, &["::bop::value::Value::try_new_dict(vec![", "], 2)?"]);
+    contains_all(
+        &dct,
+        &[
+            "::bop::value::Value::__try_new_dict_in(vec![",
+            "], 2, &ctx.memory)?",
+        ],
+    );
 }
 
 #[test]
@@ -442,12 +464,12 @@ let r = Shape::Rect { w: [3] }"#,
     contains_all(
         &out,
         &[
-            "Value::try_new_struct(",
-            "], 3)?",
-            "Value::try_new_enum_tuple(",
-            "], 4)?",
-            "Value::try_new_enum_struct(",
-            "], 5)?",
+            "Value::__try_new_struct_in(",
+            "], 3, &ctx.memory)?",
+            "Value::__try_new_enum_tuple_in(",
+            "], 4, &ctx.memory)?",
+            "Value::__try_new_enum_struct_in(",
+            "], 5, &ctx.memory)?",
         ],
     );
 }
@@ -659,7 +681,7 @@ print("hi {name}!")"#,
             "__s.push_str(\"hi \")",
             "__s.push_str(&format!(\"{}\", __bop_read_binding(ctx, \"<root>\", \"name\", 2)?))",
             "__s.push_str(\"!\")",
-            "::bop::value::Value::new_str(__s)",
+            "::bop::value::Value::__new_str_in(__s, &ctx.memory)",
         ],
     );
 }
@@ -671,7 +693,7 @@ fn index_assign_routes_through_ops_index_set() {
         &out,
         &[
             "__bop_binding_mut_option(ctx, \"<root>\", \"a\")",
-            "::bop::ops::index_set(",
+            "::bop::ops::index_set_in(",
         ],
     );
 }
@@ -683,9 +705,9 @@ fn compound_index_assign_reads_then_writes() {
         &out,
         &[
             "__bop_binding_mut_option(ctx, \"<root>\", \"a\")",
-            "::bop::ops::index_get(",
-            "::bop::ops::add(",
-            "::bop::ops::index_set(",
+            "::bop::ops::index_get_in(",
+            "::bop::ops::add_in(",
+            "::bop::ops::index_set_in(",
         ],
     );
 }
@@ -789,8 +811,8 @@ fn const_index_reads_in_mutable_targets_still_emit_aot() {
         &[
             "__bop_read_binding(ctx, \"<root>\", \"INDEX\", 3)?",
             "__bop_binding_mut_option(ctx, \"<root>\", \"values\")",
-            "::bop::ops::index_get(",
-            "::bop::ops::index_set(",
+            "::bop::ops::index_get_in(",
+            "::bop::ops::index_set_in(",
         ],
     );
 }
@@ -818,9 +840,29 @@ fn sandbox_off_by_default_emits_no_tick_helper() {
         );
     }
     assert!(
-        out.contains("bop_memory_init(usize::MAX)"),
-        "non-sandbox init should disable the memory ceiling:\n{}",
+        out.contains("memory: ::bop::memory::MemoryContext::__untracked()"),
+        "non-sandbox init should use an explicit untracked context:\n{}",
         out
+    );
+    assert!(!out.contains("ActiveMemoryGuard"));
+    assert!(!out.contains("bop_memory_"));
+}
+
+#[test]
+fn lambda_final_memory_checks_are_sandbox_only() {
+    let source = "let callback = fn() { return [1] }";
+    let native = compile(source);
+    assert!(
+        !native.contains("__bop_check_memory"),
+        "native output must not pay sandbox memory-check overhead:\n{native}"
+    );
+
+    let sandbox = compile_sandbox(source);
+    assert!(
+        sandbox.contains(
+            "let value = __bop_value_result?; __bop_check_memory(ctx, 1)?;"
+        ),
+        "sandbox lambda must check memory before exposing its outcome:\n{sandbox}"
     );
 }
 
@@ -832,8 +874,7 @@ fn sandbox_on_emits_tick_helper_and_limits_param() {
         "fn __bop_tick(ctx: &mut Ctx<'_>, line: u32)",
         "ctx.max_steps",
         "pub struct BopInstance",
-        "let memory = ::bop::memory::MemoryAccount::__new(limits.max_memory);",
-        "let _active = ::bop::memory::ActiveMemoryGuard::__activate(&memory);",
+        "let memory = ::bop::memory::MemoryContext::__new(limits.max_memory);",
         "call_depth: 0",
         "pub fn run<H: ::bop::BopHost>( host: &mut H, limits: &::bop::BopLimits, )",
         "let limits = ::bop::BopLimits::standard();",
@@ -845,7 +886,8 @@ fn sandbox_on_emits_tick_helper_and_limits_param() {
             out
         );
     }
-    assert!(!out.contains("bop_memory_init(limits.max_memory)"));
+    assert!(!out.contains("ActiveMemoryGuard"));
+    assert!(!out.contains("bop_memory_"));
 }
 
 #[test]

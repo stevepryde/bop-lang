@@ -36,6 +36,7 @@ pub(super) const RUNTIME_HEADER: &str =
 
 pub(super) const CTX_BASE: &str = r#"pub struct Ctx<'h> {
     pub host: &'h mut dyn ::bop::BopHost,
+    pub memory: ::bop::memory::MemoryContext,
     pub rand_state: u64,
     /// Per-program module cache keyed by the Bop module path (the
     /// dot-joined string). `load` fns use this to memoise imports
@@ -162,6 +163,7 @@ struct __BopState {
 struct Ctx<'h> {
     host: &'h mut dyn ::bop::BopHost,
     state: &'h mut __BopState,
+    memory: ::bop::memory::MemoryContext,
     /// Tick counter — bumped by `__bop_tick` at every loop
     /// backedge and fn entry so runaway programs hit the step
     /// budget before they exhaust the host.
@@ -202,17 +204,14 @@ fn __bop_tick(ctx: &mut Ctx<'_>, line: u32) -> Result<(), ::bop::error::BopError
             "Check your loops — make sure they have a condition that eventually stops them.",
         ));
     }
-    if ::bop::memory::bop_memory_exceeded() {
+    if ctx.memory.__exceeded() {
         return Err(::bop::builtins::error_fatal_with_hint(
             line,
             "Memory limit exceeded",
             "Your code is using too much memory. Check for large strings or arrays growing in loops.",
         ));
     }
-    {
-        let _suspended = ::bop::memory::ActiveMemoryGuard::__suspend();
-        ctx.host.on_tick()?;
-    }
+    ctx.host.on_tick()?;
     Ok(())
 }
 
@@ -256,7 +255,6 @@ fn __bop_leave_aot_call(ctx: &mut Ctx<'_>) {
 }
 
 fn __bop_host_print(ctx: &mut Ctx<'_>, message: &str) {
-    let _suspended = ::bop::memory::ActiveMemoryGuard::__suspend();
     ctx.host.on_print(message);
 }
 
@@ -266,18 +264,17 @@ fn __bop_host_call(
     args: &[::bop::value::Value],
     line: u32,
 ) -> ::std::option::Option<Result<::bop::value::Value, ::bop::error::BopError>> {
-    let _suspended = ::bop::memory::ActiveMemoryGuard::__suspend();
     ctx.host.call(name, args, line)
 }
 
 fn __bop_host_function_hint(ctx: &mut Ctx<'_>) -> String {
-    let _suspended = ::bop::memory::ActiveMemoryGuard::__suspend();
     ctx.host.function_hint().to_string()
 }
 
 "#;
 
-pub(super) const RUNTIME_SHARED: &str = r#"/// Sentinel type inserted into `module_cache` while a module's
+pub(super) const RUNTIME_SHARED: &str = r#"/*__BOP_MEMORY_HELPER__*/
+/// Sentinel type inserted into `module_cache` while a module's
 /// body is evaluating. If a load fn hits its own entry in this
 /// state it means a circular import — the runtime returns a clear
 /// error and halts.
@@ -1152,16 +1149,21 @@ fn __bop_try_call(
 /*__BOP_TRY_ATTEMPT_INVOKE__*/
 /*__BOP_TRY_ATTEMPT_END__*/
     drop(func);
-    match attempted {
-        Ok(outcome) => ::bop::builtins::make_try_call_ok(outcome.value, line),
+    let wrapped = match attempted {
+        Ok(outcome) => ::bop::builtins::make_try_call_ok_in(
+            outcome.value,
+            line,
+            &ctx.memory,
+        ),
         Err(err) => {
             if err.is_fatal {
                 Err(err)
             } else {
-                Ok(::bop::builtins::make_try_call_err(&err))
+                Ok(::bop::builtins::make_try_call_err_in(&err, &ctx.memory))
             }
         }
-    }
+    };
+/*__BOP_TRY_MEMORY_CHECK__*/
 }
 
 /// Handle `r.map(f)` / `r.map_err(f)` / `r.and_then(f)` for a
@@ -1177,7 +1179,7 @@ fn __bop_result_callable_method(
     args: &[::bop::value::Value],
     line: u32,
 ) -> Result<::bop::value::Value, ::bop::error::BopError> {
-    use ::bop::methods::{make_result_err, make_result_ok, ResultCallableKind};
+    use ::bop::methods::{make_result_err_in, make_result_ok_in, ResultCallableKind};
     if args.len() != 1 {
         return Err(::bop::error::BopError::runtime(
             format!("`{}` expects 1 argument, but got {}", method, args.len()),
@@ -1211,9 +1213,21 @@ fn __bop_result_callable_method(
     // Short-circuit: these branches don't invoke the callable,
     // they just rebuild the Result with the existing payload.
     match kind {
-        ResultCallableKind::Map if !is_ok => return make_result_err(payload, line),
-        ResultCallableKind::MapErr if is_ok => return make_result_ok(payload, line),
-        ResultCallableKind::AndThen if !is_ok => return make_result_err(payload, line),
+        ResultCallableKind::Map if !is_ok => {
+            let wrapped = make_result_err_in(payload, line, &ctx.memory)?;
+            /*__BOP_MEMORY_CHECK__*/
+            return Ok(wrapped);
+        }
+        ResultCallableKind::MapErr if is_ok => {
+            let wrapped = make_result_ok_in(payload, line, &ctx.memory)?;
+            /*__BOP_MEMORY_CHECK__*/
+            return Ok(wrapped);
+        }
+        ResultCallableKind::AndThen if !is_ok => {
+            let wrapped = make_result_err_in(payload, line, &ctx.memory)?;
+            /*__BOP_MEMORY_CHECK__*/
+            return Ok(wrapped);
+        }
         _ => {}
     }
 
@@ -1247,13 +1261,16 @@ fn __bop_result_callable_method(
     };
     drop(func);
 /*__BOP_RESULT_INVOKE__*/
-    match kind {
-        ResultCallableKind::Map => make_result_ok(result.value, line),
-        ResultCallableKind::MapErr => make_result_err(result.value, line),
+    let wrapped = match kind {
+        ResultCallableKind::Map => make_result_ok_in(result.value, line, &ctx.memory),
+        ResultCallableKind::MapErr => make_result_err_in(result.value, line, &ctx.memory),
         // `and_then` trusts the closure to have produced a
         // Result already — pass it through untouched.
         ResultCallableKind::AndThen => Ok(result.value),
-    }
+    };
+    let wrapped = wrapped?;
+    /*__BOP_MEMORY_CHECK__*/
+    Ok(wrapped)
 }
 
 /// Field read for `Value::Struct`, struct-payload enum variants,
@@ -1462,6 +1479,7 @@ fn __bop_order_named_fields(
 /// Moving the value into this helper keeps a unique CoW backing store unique.
 #[inline]
 fn __bop_field_set(
+    memory: &::bop::memory::MemoryContext,
     mut obj: ::bop::value::Value,
     field: &str,
     value: ::bop::value::Value,
@@ -1470,7 +1488,7 @@ fn __bop_field_set(
     match &mut obj {
         ::bop::value::Value::Struct(s) => {
             let type_name = s.type_name().to_string();
-            if !s.try_set_field(field, value, line)? {
+            if !s.__try_set_field_in(field, value, line, memory)? {
                 return Err(::bop::error::BopError::runtime(
                     ::bop::error_messages::struct_has_no_field(&type_name, field),
                     line,
@@ -1504,7 +1522,9 @@ fn __bop_call_method(
     // check them first so walker / VM / AOT agree on the
     // common method surface without duplicating entries per
     // type-specific dispatcher.
-    if let Some(result) = ::bop::methods::common_method(obj, method, args, line)? {
+    if let Some(result) =
+        ::bop::methods::common_method_in(obj, method, args, line, &ctx.memory)?
+    {
         return Ok(result);
     }
     // Built-in `Result` combinators — pure methods inline;
@@ -1520,9 +1540,15 @@ fn __bop_call_method(
         }
     }
     match obj {
-        ::bop::value::Value::Array(arr) => ::bop::methods::array_method(arr, method, args, line),
-        ::bop::value::Value::Str(s) => ::bop::methods::string_method(s.as_str(), method, args, line),
-        ::bop::value::Value::Dict(d) => ::bop::methods::dict_method(d, method, args, line),
+        ::bop::value::Value::Array(arr) => {
+            ::bop::methods::array_method_in(arr, method, args, line, &ctx.memory)
+        }
+        ::bop::value::Value::Str(s) => {
+            ::bop::methods::string_method_in(s.as_str(), method, args, line, &ctx.memory)
+        }
+        ::bop::value::Value::Dict(d) => {
+            ::bop::methods::dict_method_in(d, method, args, line, &ctx.memory)
+        }
         ::bop::value::Value::Int(_) | ::bop::value::Value::Number(_) => {
             ::bop::methods::numeric_method(obj, method, args, line)
         }
@@ -1530,7 +1556,7 @@ fn __bop_call_method(
             ::bop::methods::bool_method(obj, method, args, line)
         }
         ::bop::value::Value::Iter(_) => {
-            ::bop::methods::iter_method(obj, method, args, line)
+            ::bop::methods::iter_method_in(obj, method, args, line, &ctx.memory)
         }
         ::bop::value::Value::Module(m) => {
             let binding = __bop_module_member(ctx, m, method).ok_or_else(|| {
@@ -1584,20 +1610,20 @@ fn __bop_iter_start(
 ) -> Result<__BopIterState, ::bop::error::BopError> {
     match &mut v {
         ::bop::value::Value::Array(arr) => Ok(__BopIterState::Eager {
-            items: arr.take(),
+            items: arr.__take_in(&ctx.memory),
             pos: 0,
         }),
         ::bop::value::Value::Str(s) => Ok(__BopIterState::Eager {
             items: s
                 .chars()
-                .map(|c| ::bop::value::Value::new_str(c.to_string()))
+                .map(|c| ::bop::value::Value::__new_str_in(c.to_string(), &ctx.memory))
                 .collect(),
             pos: 0,
         }),
         ::bop::value::Value::Dict(d) => Ok(__BopIterState::Eager {
             items: d
                 .iter()
-                .map(|(k, _)| ::bop::value::Value::new_str(k.clone()))
+                .map(|(k, _)| ::bop::value::Value::__new_str_in(k.clone(), &ctx.memory))
                 .collect(),
             pos: 0,
         }),
@@ -1697,16 +1723,13 @@ fn __bop_iter_step(
 
 pub(super) const PUBLIC_ENTRY: &str = r#"// ─── Public entry points ────────────────────────────────────────
 
-/// Run the compiled program with the supplied host. The memory
-/// tracker is initialised to a permissive ceiling so the
-/// `bop::memory` allocation hooks on `Value` don't fire spurious
-/// limit errors. Embedders that want a real sandbox should compile
-/// with `Options::sandbox = true` or call `bop_memory_init`
-/// themselves before invoking `run`.
+/// Run the compiled program with the supplied host. Unchecked output uses an
+/// explicit untracked allocation context. Embedders that need resource limits
+/// should compile with `Options::sandbox = true`.
 pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError> {
-    ::bop::memory::bop_memory_init(usize::MAX);
     let mut ctx = Ctx {
         host: host as &mut dyn ::bop::BopHost,
+        memory: ::bop::memory::MemoryContext::__untracked(),
         rand_state: 0,
         module_cache: ::std::collections::HashMap::new(),
         module_aliases: ::std::collections::HashMap::new(),
@@ -1750,8 +1773,8 @@ pub(super) const PUBLIC_ENTRY_SANDBOX: &str = r#"// ─── Public entry point
 fn __bop_load_state(
     host: &mut dyn ::bop::BopHost,
     limits: &::bop::BopLimits,
+    memory: ::bop::memory::MemoryContext,
 ) -> Result<__BopState, ::bop::error::BopError> {
-    let _memory = ::bop::memory::ActiveMemoryGuard::__activate_new_if_none(limits.max_memory);
     let mut state = __BopState {
         function_origin: ::bop::value::BopFnOrigin::__instance("aot"),
         rand_state: 0,
@@ -1772,6 +1795,7 @@ fn __bop_load_state(
         let mut ctx = Ctx {
             host,
             state: &mut state,
+            memory,
             steps: 0,
             call_depth: 0,
             max_steps: limits.max_steps,
@@ -1790,7 +1814,7 @@ pub struct BopInstance {
     entries: ::std::vec::Vec<::bop::EntryPoint>,
     limits: ::bop::BopLimits,
     in_operation: ::core::cell::Cell<bool>,
-    memory: ::std::rc::Rc<::bop::memory::MemoryAccount>,
+    memory: ::bop::memory::MemoryContext,
 }
 
 impl BopInstance {
@@ -1799,15 +1823,11 @@ impl BopInstance {
         host: &mut dyn ::bop::BopHost,
         limits: &::bop::BopLimits,
     ) -> Result<Self, ::bop::error::BopError> {
-        let memory = ::bop::memory::MemoryAccount::__new(limits.max_memory);
-        let state = {
-            let _active = ::bop::memory::ActiveMemoryGuard::__activate(&memory);
-            let state = __bop_load_state(host, limits)?;
-            if memory.__exceeded() {
-                return Err(__bop_instance_memory_error());
-            }
-            state
-        };
+        let memory = ::bop::memory::MemoryContext::__new(limits.max_memory);
+        let state = __bop_load_state(host, limits, memory.clone())?;
+        if memory.__exceeded() {
+            return Err(__bop_instance_memory_error());
+        }
         let entries = __bop_instance_entry_points(&state);
         Ok(Self {
             state,
@@ -1868,10 +1888,10 @@ impl BopInstance {
             return Err(__bop_instance_memory_error());
         }
         let result = {
-            let _active = ::bop::memory::ActiveMemoryGuard::__activate(&self.memory);
             let mut ctx = Ctx {
                 host,
                 state: &mut self.state,
+                memory: self.memory.clone(),
                 steps: 0,
                 call_depth: 0,
                 max_steps: self.limits.max_steps,
@@ -1929,10 +1949,10 @@ impl BopInstance {
             return Err(__bop_instance_memory_error());
         }
         let result = {
-            let _active = ::bop::memory::ActiveMemoryGuard::__activate(&self.memory);
             let mut ctx = Ctx {
                 host,
                 state: &mut self.state,
+                memory: self.memory.clone(),
                 steps: 0,
                 call_depth: 0,
                 max_steps: self.limits.max_steps,

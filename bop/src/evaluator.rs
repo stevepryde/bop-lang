@@ -588,6 +588,7 @@ pub struct Evaluator<'h, H: BopHost + ?Sized> {
     /// always-visible module/root frame at index 0.
     alias_scope_floors: Vec<usize>,
     limits: BopLimits,
+    memory: crate::memory::MemoryContext,
     rand_state: u64,
     /// Shared across nested evaluators so recursive imports see
     /// the same cache — every sub-evaluator inherits the parent's
@@ -631,6 +632,7 @@ fn write_runtime_warnings(warnings: &mut Vec<crate::error::BopWarning>) {
 
 impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     pub fn new(host: &'h mut H, limits: BopLimits) -> Self {
+        let memory = crate::memory::MemoryContext::__new(limits.max_memory);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
         let root_lexical_context = Rc::new(ModuleLexicalContext {
             type_bindings: builtin_bindings.clone(),
@@ -663,6 +665,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             function_modules: Vec::new(),
             alias_scope_floors: Vec::new(),
             limits,
+            memory,
             rand_state: 0,
             imports: Rc::new(RefCell::new(alloc_import::collections::BTreeMap::new())),
             imported_here: vec![alloc_import::collections::BTreeSet::new()],
@@ -679,6 +682,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     /// importer's locals. `module_path` is the dot-joined name the
     /// module is being loaded under; types it declares tag their
     /// runtime values with this path.
+    #[allow(clippy::too_many_arguments)]
     fn new_for_module(
         host: &'h mut H,
         limits: BopLimits,
@@ -687,6 +691,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         live_binding_origins: LiveBindingOrigins,
         function_origin: BopFnOrigin,
         module_path: String,
+        memory: crate::memory::MemoryContext,
     ) -> Self {
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
         let root_lexical_context = Rc::new(ModuleLexicalContext {
@@ -720,6 +725,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             function_modules: Vec::new(),
             alias_scope_floors: Vec::new(),
             limits,
+            memory,
             rand_state: 0,
             imports,
             imported_here: vec![alloc_import::collections::BTreeSet::new()],
@@ -731,10 +737,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     }
 
     pub fn run(mut self, stmts: &[Stmt]) -> Result<(), BopError> {
-        let _memory = crate::memory::ActiveMemoryGuard::__activate_new_if_none(
-            self.limits.max_memory,
-        );
-        let result = self.exec_block(stmts);
+        let mut result = self.exec_block(stmts);
+        if result.is_ok() && self.memory.__exceeded() {
+            result = Err(error_fatal_with_hint(
+                stmts.last().map_or(0, |stmt| stmt.line),
+                "Memory limit exceeded",
+                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+            ));
+        }
         // Surface warnings only after the root evaluator (including every
         // imported-module evaluator) has finished.
         write_runtime_warnings(&mut self.runtime_warnings);
@@ -772,14 +782,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 "Check your loops — make sure they have a condition that eventually stops them.",
             ));
         }
-        if crate::memory::bop_memory_exceeded() {
+        if self.memory.__exceeded() {
             return Err(error_fatal_with_hint(
                 line,
                 "Memory limit exceeded",
                 "Your code is using too much memory. Check for large strings or arrays growing in loops.",
             ));
         }
-        let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
         self.host.on_tick()?;
         Ok(())
     }
@@ -929,7 +938,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     }
 
     fn pending_memory_error(&self, line: u32) -> Option<BopError> {
-        crate::memory::bop_memory_exceeded().then(|| {
+        self.memory.__exceeded().then(|| {
             error_fatal_with_hint(
                 line,
                 "Memory limit exceeded",
@@ -1349,14 +1358,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 ) {
                     let mut val = val;
                     let items: Vec<Value> = match &mut val {
-                        Value::Array(arr) => arr.take(),
+                        Value::Array(arr) => arr.__take_in(&self.memory),
                         Value::Str(s) => s
                             .chars()
-                            .map(|c| Value::new_str(c.to_string()))
+                            .map(|c| Value::__new_str_in(c.to_string(), &self.memory))
                             .collect(),
                         Value::Dict(d) => d
                             .iter()
-                            .map(|(k, _)| Value::new_str(k.clone()))
+                            .map(|(k, _)| Value::__new_str_in(k.clone(), &self.memory))
                             .collect(),
                         _ => unreachable!(),
                     };
@@ -2016,10 +2025,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         }
 
         // Ask the host for source.
-        let resolved = {
-            let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
-            self.host.resolve_module(path)
-        };
+        let resolved = self.host.resolve_module(path);
         let source = match resolved {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(e),
@@ -2084,6 +2090,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             Rc::clone(&live_binding_origins),
             self.function_origin.clone(),
             module_path.to_string(),
+            self.memory.clone(),
         );
         sub.steps = self.steps;
         sub.rand_state = self.rand_state;
@@ -2323,10 +2330,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         .clone();
 
         match (&decl.kind, payload) {
-            (VariantKind::Unit, VariantPayload::Unit) => Ok(Value::new_enum_unit(
+            (VariantKind::Unit, VariantPayload::Unit) => Ok(Value::__new_enum_unit_in(
                 module_path,
                 type_name.to_string(),
                 variant.to_string(),
+                &self.memory,
             )),
             (VariantKind::Tuple(fields), VariantPayload::Tuple(args)) => {
                 if args.len() != fields.len() {
@@ -2346,12 +2354,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 for arg in args {
                     items.push(self.eval_expr(arg)?);
                 }
-                Value::try_new_enum_tuple(
+                Value::__try_new_enum_tuple_in(
                     module_path,
                     type_name.to_string(),
                     variant.to_string(),
                     items,
                     line,
+                    &self.memory,
                 )
             }
             (VariantKind::Struct(decl_fields), VariantPayload::Struct(provided)) => {
@@ -2400,12 +2409,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             .expect("variant shape validated before payload evaluation"),
                     ));
                 }
-                Value::try_new_enum_struct(
+                Value::__try_new_enum_struct_in(
                     module_path,
                     type_name.to_string(),
                     variant.to_string(),
                     values,
                     line,
+                    &self.memory,
                 )
             }
             (VariantKind::Unit, _) => Err(error(
@@ -2489,7 +2499,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             }
                         };
                         let current = if let Some(obj) = self.get_var(name) {
-                            ops::index_get(obj, &idx, line)?
+                            ops::index_get_in(obj, &idx, line, &self.memory)?
                         } else if self.has_active_declaration_alias(name) {
                             return Err(error(
                                 line,
@@ -2500,12 +2510,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             // not-found hint / named-function fallback on the
                             // error path without cloning ordinary receivers.
                             let obj = self.eval_expr(object)?;
-                            ops::index_get(&obj, &idx, line)?
+                            ops::index_get_in(&obj, &idx, line, &self.memory)?
                         };
                         self.apply_compound_op(&current, op, &new_val, line)?
                     }
                 };
                 if let ExprKind::Ident(name) = &object.kind {
+                    let memory = self.memory.clone();
                     let declaration_alias = self.has_active_declaration_alias(name);
                     let obj = self.get_var_mut(name).ok_or_else(|| {
                         if declaration_alias {
@@ -2517,7 +2528,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     // Mutate through the live binding. Cloning the receiver
                     // first would temporarily raise its CoW refcount and force
                     // an otherwise-unnecessary full backing-store detach.
-                    ops::index_set(obj, &idx, val_to_set, line)?;
+                    ops::index_set_in(obj, &idx, val_to_set, line, &memory)?;
                     Ok(())
                 } else {
                     Err(error(
@@ -2541,6 +2552,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         ));
                     }
                 };
+                let memory = self.memory.clone();
                 let declaration_alias = self.has_active_declaration_alias(&name);
                 let val_to_set = match op {
                     AssignOp::Eq => new_val,
@@ -2585,7 +2597,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 match obj {
                     Value::Struct(s) => {
                         let struct_type = s.type_name().to_string();
-                        if !s.try_set_field(field, val_to_set, line)? {
+                        if !s.__try_set_field_in(field, val_to_set, line, &memory)? {
                             return Err(error(
                                 line,
                                 crate::error_messages::struct_has_no_field(&struct_type, field),
@@ -2616,11 +2628,11 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
     ) -> Result<Value, BopError> {
         match op {
             AssignOp::Eq => Ok(right.clone()),
-            AssignOp::AddEq => ops::add(left, right, line),
-            AssignOp::SubEq => ops::sub(left, right, line),
-            AssignOp::MulEq => ops::mul(left, right, line),
-            AssignOp::DivEq => ops::div(left, right, line),
-            AssignOp::ModEq => ops::rem(left, right, line),
+            AssignOp::AddEq => ops::add_in(left, right, line, &self.memory),
+            AssignOp::SubEq => ops::sub_in(left, right, line, &self.memory),
+            AssignOp::MulEq => ops::mul_in(left, right, line, &self.memory),
+            AssignOp::DivEq => ops::div_in(left, right, line, &self.memory),
+            AssignOp::ModEq => ops::rem_in(left, right, line, &self.memory),
         }
     }
 
@@ -2630,7 +2642,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         match &expr.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
             ExprKind::Number(n) => Ok(Value::Number(*n)),
-            ExprKind::Str(s) => Ok(Value::new_str(s.clone())),
+            ExprKind::Str(s) => Ok(Value::__new_str_in(s.clone(), &self.memory)),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::None => Ok(Value::None),
 
@@ -2649,7 +2661,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         }
                     }
                 }
-                Ok(Value::new_str(result))
+                Ok(Value::__new_str_in(result, &self.memory))
             }
 
             ExprKind::Ident(name) => {
@@ -2909,11 +2921,12 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                                 .ok_or_else(|| {
                                     crate::ref_params::invalid_ref_target(1, expr.line)
                                 })?;
-                            return methods::transactional_array_method(
+                            return methods::transactional_array_method_in(
                                 binding,
                                 method,
                                 eval_args,
                                 expr.line,
+                                &self.memory,
                             );
                         }
                     }
@@ -3090,7 +3103,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             ExprKind::Index { object, index } => {
                 let obj = self.eval_expr(object)?;
                 let idx = self.eval_expr(index)?;
-                ops::index_get(&obj, &idx, expr.line)
+                ops::index_get_in(&obj, &idx, expr.line, &self.memory)
             }
 
             ExprKind::FieldAccess { object, field } => {
@@ -3253,7 +3266,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                             .expect("struct shape validated before payload evaluation"),
                     ));
                 }
-                Value::try_new_struct(module_path, type_name.clone(), values, expr.line)
+                Value::__try_new_struct_in(
+                    module_path,
+                    type_name.clone(),
+                    values,
+                    expr.line,
+                    &self.memory,
+                )
             }
 
             ExprKind::Array(elements) => {
@@ -3261,7 +3280,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 for elem in elements {
                     items.push(self.eval_expr(elem)?);
                 }
-                Value::try_new_array(items, expr.line)
+                Value::__try_new_array_in(items, expr.line, &self.memory)
             }
 
             ExprKind::Dict(entries) => {
@@ -3270,7 +3289,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     let val = self.eval_expr(value_expr)?;
                     result.push((key.clone(), val));
                 }
-                Value::try_new_dict(result, expr.line)
+                Value::__try_new_dict_in(result, expr.line, &self.memory)
             }
 
             ExprKind::IfExpr {
@@ -3381,7 +3400,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     tn,
                 )
             };
-            if !pattern_matches(&arm.pattern, &value, &mut bindings, &resolver) {
+            if !pattern_matches_in(
+                &arm.pattern,
+                &value,
+                &mut bindings,
+                &resolver,
+                &self.memory,
+            ) {
                 continue;
             }
             // Pattern matched — open a fresh scope, bind every
@@ -3418,17 +3443,17 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         line: u32,
     ) -> Result<Value, BopError> {
         match op {
-            BinOp::Add => ops::add(left, right, line),
-            BinOp::Sub => ops::sub(left, right, line),
-            BinOp::Mul => ops::mul(left, right, line),
-            BinOp::Div => ops::div(left, right, line),
-            BinOp::Mod => ops::rem(left, right, line),
+            BinOp::Add => ops::add_in(left, right, line, &self.memory),
+            BinOp::Sub => ops::sub_in(left, right, line, &self.memory),
+            BinOp::Mul => ops::mul_in(left, right, line, &self.memory),
+            BinOp::Div => ops::div_in(left, right, line, &self.memory),
+            BinOp::Mod => ops::rem_in(left, right, line, &self.memory),
             BinOp::Eq => Ok(ops::eq(left, right)),
             BinOp::NotEq => Ok(ops::not_eq(left, right)),
-            BinOp::Lt => ops::lt(left, right, line),
-            BinOp::Gt => ops::gt(left, right, line),
-            BinOp::LtEq => ops::lt_eq(left, right, line),
-            BinOp::GtEq => ops::gt_eq(left, right, line),
+            BinOp::Lt => ops::lt_in(left, right, line, &self.memory),
+            BinOp::Gt => ops::gt_in(left, right, line, &self.memory),
+            BinOp::LtEq => ops::lt_eq_in(left, right, line, &self.memory),
+            BinOp::GtEq => ops::gt_eq_in(left, right, line, &self.memory),
             BinOp::And | BinOp::Or => unreachable!("handled in eval_expr"),
         }
     }
@@ -3875,10 +3900,12 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // expression/statement even when that operation returns a nominal
         // value. Convert it to a fatal error before reading staged outputs or
         // restoring the caller, so no ref target can commit across the limit.
-        if result.is_ok() {
-            if let Some(error) = self.pending_memory_error(line) {
-                result = Err(error);
-            }
+        let final_memory_error = result
+            .is_ok()
+            .then(|| self.pending_memory_error(line))
+            .flatten();
+        if let Some(error) = final_memory_error {
+            result = Err(error);
         }
         let staged_result = if result.is_ok() {
             ref_positions
@@ -4007,15 +4034,24 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
         };
         drop(callable);
-        match self.call_bop_fn(&func, Vec::new(), line) {
-            Ok(value) => builtins::make_try_call_ok(value, line),
+        let result = match self.call_bop_fn(&func, Vec::new(), line) {
+            Ok(value) => builtins::make_try_call_ok_in(value, line, &self.memory),
             Err(err) => {
                 if err.is_fatal {
                     Err(err)
                 } else {
-                    Ok(builtins::make_try_call_err(&err))
+                    Ok(builtins::make_try_call_err_in(&err, &self.memory))
                 }
             }
+        };
+        if result.is_ok() && self.memory.__exceeded() {
+            Err(error_fatal_with_hint(
+                line,
+                "Memory limit exceeded",
+                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+            ))
+        } else {
+            result
         }
     }
 
@@ -4032,7 +4068,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // live here is now a method on the receiver's type —
         // see `methods::common_method` and `methods::numeric_method`.
         match name {
-            "range" => return builtins::builtin_range(&args, line, &mut self.rand_state),
+            "range" => {
+                return builtins::builtin_range_in(
+                    &args,
+                    line,
+                    &mut self.rand_state,
+                    &self.memory,
+                );
+            }
             "rand" => return builtins::builtin_rand(&args, line, &mut self.rand_state),
             "print" => {
                 let message = args
@@ -4040,7 +4083,6 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     .map(|a| format!("{}", a))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
                 self.host.on_print(&message);
                 return Ok(Value::None);
             }
@@ -4050,10 +4092,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         }
 
         // 2. Host-provided builtins
-        let host_result = {
-            let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
-            self.host.call(name, &args, line)
-        };
+        let host_result = self.host.call(name, &args, line);
         if let Some(result) = host_result {
             return result;
         }
@@ -4075,10 +4114,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     hint,
                 )
             } else {
-                let host_hint = {
-                    let _suspended = crate::memory::ActiveMemoryGuard::__suspend();
-                    self.host.function_hint().to_string()
-                };
+                let host_hint = self.host.function_hint().to_string();
                 if host_hint.is_empty() {
                     error(line, crate::error_messages::function_not_found(name))
                 } else {
@@ -4186,7 +4222,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         // Try the shared dispatcher first so we don't have to
         // duplicate those three names across every type-
         // specific method table.
-        if let Some(result) = methods::common_method(obj, method, args, line)? {
+        if let Some(result) = methods::common_method_in(obj, method, args, line, &self.memory)? {
             return Ok(result);
         }
         // Built-in Result combinators (`is_ok`, `is_err`,
@@ -4200,14 +4236,14 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
         }
         match obj {
-            Value::Array(arr) => methods::array_method(arr, method, args, line),
-            Value::Str(s) => methods::string_method(s, method, args, line),
-            Value::Dict(entries) => methods::dict_method(entries, method, args, line),
+            Value::Array(arr) => methods::array_method_in(arr, method, args, line, &self.memory),
+            Value::Str(s) => methods::string_method_in(s, method, args, line, &self.memory),
+            Value::Dict(entries) => methods::dict_method_in(entries, method, args, line, &self.memory),
             Value::Int(_) | Value::Number(_) => {
                 methods::numeric_method(obj, method, args, line)
             }
             Value::Bool(_) => methods::bool_method(obj, method, args, line),
-            Value::Iter(_) => methods::iter_method(obj, method, args, line),
+            Value::Iter(_) => methods::iter_method_in(obj, method, args, line, &self.memory),
             _ => Err(error(
                 line,
                 crate::error_messages::no_such_method(obj.type_name(), method),
@@ -4228,7 +4264,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         line: u32,
     ) -> Result<Value, BopError> {
         use crate::builtins::expect_args;
-        use methods::{make_result_err, make_result_ok, ResultCallableKind};
+        use methods::{make_result_err_in, make_result_ok_in, ResultCallableKind};
         expect_args(method, &args, 1, line)?;
         let callable = args.into_iter().next().expect("expect_args ensured len = 1");
         let variant_info = match receiver {
@@ -4251,20 +4287,20 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             ResultCallableKind::Map => {
                 if is_ok {
                     let new_value = self.call_value(callable, vec![payload], line, Some(method))?;
-                    make_result_ok(new_value, line)
+                    make_result_ok_in(new_value, line, &self.memory)
                 } else {
                     // Err passes through unchanged. Rebuild it so
                     // the caller sees the same type identity —
                     // matches the pure-Bop combinator's behaviour.
-                    make_result_err(payload, line)
+                    make_result_err_in(payload, line, &self.memory)
                 }
             }
             ResultCallableKind::MapErr => {
                 if !is_ok {
                     let new_value = self.call_value(callable, vec![payload], line, Some(method))?;
-                    make_result_err(new_value, line)
+                    make_result_err_in(new_value, line, &self.memory)
                 } else {
-                    make_result_ok(payload, line)
+                    make_result_ok_in(payload, line, &self.memory)
                 }
             }
             ResultCallableKind::AndThen => {
@@ -4275,7 +4311,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     // site catches misuse.
                     self.call_value(callable, vec![payload], line, Some(method))
                 } else {
-                    make_result_err(payload, line)
+                    make_result_err_in(payload, line, &self.memory)
                 }
             }
         }
@@ -4560,6 +4596,23 @@ pub fn pattern_matches(
     bindings: &mut Vec<(String, Value)>,
     resolver: TypeResolveFn<'_>,
 ) -> bool {
+    pattern_matches_in(
+        pattern,
+        value,
+        bindings,
+        resolver,
+        &crate::memory::MemoryContext::__legacy_current(),
+    )
+}
+
+#[doc(hidden)]
+pub fn pattern_matches_in(
+    pattern: &Pattern,
+    value: &Value,
+    bindings: &mut Vec<(String, Value)>,
+    resolver: TypeResolveFn<'_>,
+    memory: &crate::memory::MemoryContext,
+) -> bool {
     match pattern {
         Pattern::Wildcard => true,
         Pattern::Binding(name) => {
@@ -4612,7 +4665,7 @@ pub fn pattern_matches(
                         return false;
                     }
                     for (p, v) in pats.iter().zip(items.iter()) {
-                        if !pattern_matches(p, v, bindings, resolver) {
+                        if !pattern_matches_in(p, v, bindings, resolver, memory) {
                             return false;
                         }
                     }
@@ -4622,7 +4675,7 @@ pub fn pattern_matches(
                     VariantPatternPayload::Struct { fields, rest },
                     crate::value::EnumPayload::Struct(entries),
                 ) => {
-                    match_struct_fields(fields, *rest, entries, bindings, resolver)
+                    match_struct_fields(fields, *rest, entries, bindings, resolver, memory)
                 }
                 _ => false,
             }
@@ -4646,7 +4699,7 @@ pub fn pattern_matches(
             {
                 return false;
             }
-            match_struct_fields(fields, *rest, st.fields(), bindings, resolver)
+            match_struct_fields(fields, *rest, st.fields(), bindings, resolver, memory)
         }
         Pattern::Array { elements, rest } => {
             let items = match value {
@@ -4659,7 +4712,7 @@ pub fn pattern_matches(
                         return false;
                     }
                     for (p, v) in elements.iter().zip(items.iter()) {
-                        if !pattern_matches(p, v, bindings, resolver) {
+                        if !pattern_matches_in(p, v, bindings, resolver, memory) {
                             return false;
                         }
                     }
@@ -4670,13 +4723,17 @@ pub fn pattern_matches(
                         return false;
                     }
                     for (i, p) in elements.iter().enumerate() {
-                        if !pattern_matches(p, &items[i], bindings, resolver) {
+                        if !pattern_matches_in(p, &items[i], bindings, resolver, memory) {
                             return false;
                         }
                     }
                     if let ArrayRest::Named(name) = rest_kind {
                         let tail: Vec<Value> = items[elements.len()..].to_vec();
-                        bindings.push((name.clone(), Value::new_array(tail)));
+                        bindings.push((
+                            name.clone(),
+                            Value::__try_new_array_in(tail, 0, memory)
+                                .expect("an array-rest slice cannot increase ownership depth"),
+                        ));
                     }
                     true
                 }
@@ -4685,7 +4742,7 @@ pub fn pattern_matches(
         Pattern::Or(alts) => {
             for alt in alts {
                 let mut attempt: Vec<(String, Value)> = Vec::new();
-                if pattern_matches(alt, value, &mut attempt, resolver) {
+                if pattern_matches_in(alt, value, &mut attempt, resolver, memory) {
                     bindings.extend(attempt);
                     return true;
                 }
@@ -4701,6 +4758,7 @@ fn match_struct_fields(
     entries: &[(String, Value)],
     bindings: &mut Vec<(String, Value)>,
     resolver: TypeResolveFn<'_>,
+    memory: &crate::memory::MemoryContext,
 ) -> bool {
     // Every declared field-pattern must find its value in the
     // struct. `rest` just relaxes the requirement that *every*
@@ -4714,7 +4772,7 @@ fn match_struct_fields(
             Some((_, v)) => v,
             None => return false,
         };
-        if !pattern_matches(pat, value, bindings, resolver) {
+        if !pattern_matches_in(pat, value, bindings, resolver, memory) {
             return false;
         }
     }
@@ -4915,9 +4973,17 @@ impl ReplSession {
         host: &mut H,
         limits: &BopLimits,
     ) -> Result<Option<Value>, BopError> {
-        let _memory = crate::memory::ActiveMemoryGuard::__activate_new_if_none(
-            limits.max_memory,
-        );
+        let memory = crate::memory::MemoryContext::__new(limits.max_memory);
+        self.run_stmts_in(stmts, host, limits, &memory)
+    }
+
+    pub(crate) fn run_stmts_in<H: BopHost + ?Sized>(
+        &mut self,
+        stmts: &[Stmt],
+        host: &mut H,
+        limits: &BopLimits,
+        memory: &crate::memory::MemoryContext,
+    ) -> Result<Option<Value>, BopError> {
         // If the last stmt is a bare expression we strip it
         // off, run the rest, and then evaluate it as an
         // expression so we can return its value. Anything
@@ -4941,8 +5007,8 @@ impl ReplSession {
         // (possibly-mutated) state back so partial failures
         // still persist whatever changes happened before the
         // error.
-        let mut eval = self.take_evaluator(host, limits.clone());
-        let result: Result<Option<Value>, BopError> = (|| {
+        let mut eval = self.take_evaluator(host, limits.clone(), memory.clone());
+        let mut result: Result<Option<Value>, BopError> = (|| {
             let sig = eval.exec_block(body)?;
             match sig {
                 Signal::Break => Err(error(0, "break used outside of a loop")),
@@ -4954,6 +5020,13 @@ impl ReplSession {
                 },
             }
         })();
+        if result.is_ok() && memory.__exceeded() {
+            result = Err(error_fatal_with_hint(
+                stmts.last().map_or(0, |stmt| stmt.line),
+                "Memory limit exceeded",
+                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+            ));
+        }
         // Surface any warnings accumulated on this run
         // (currently: glob-import shadowing). Stderr delivery
         // matches `Evaluator::run`; embedders that want
@@ -4976,9 +5049,18 @@ impl ReplSession {
         host: &mut H,
         limits: &BopLimits,
     ) -> Result<Value, BopError> {
-        let _memory = crate::memory::ActiveMemoryGuard::__activate_new_if_none(
-            limits.max_memory,
-        );
+        let memory = crate::memory::MemoryContext::__new(limits.max_memory);
+        self.call_fn_in(func, args, host, limits, &memory)
+    }
+
+    pub(crate) fn call_fn_in<H: BopHost + ?Sized>(
+        &mut self,
+        func: Value,
+        args: Vec<Value>,
+        host: &mut H,
+        limits: &BopLimits,
+        memory: &crate::memory::MemoryContext,
+    ) -> Result<Value, BopError> {
         let func = match &func {
             Value::Fn(f) => Rc::clone(f),
             other => {
@@ -4989,7 +5071,7 @@ impl ReplSession {
             }
         };
 
-        let mut eval = self.take_evaluator(host, limits.clone());
+        let mut eval = self.take_evaluator(host, limits.clone(), memory.clone());
         let result = eval.call_bop_fn(&func, args, 0);
         write_runtime_warnings(&mut eval.runtime_warnings);
         self.put_evaluator(eval);
@@ -5012,6 +5094,7 @@ impl ReplSession {
         args: &[Value],
         host: &mut H,
         limits: &BopLimits,
+        memory: &crate::memory::MemoryContext,
     ) -> Result<Value, BopError> {
         let target = self.abi_declarations
             .iter()
@@ -5034,7 +5117,7 @@ impl ReplSession {
                 ),
             ));
         }
-        let mut eval = self.take_evaluator(host, limits.clone());
+        let mut eval = self.take_evaluator(host, limits.clone(), memory.clone());
         let result = eval.call_bop_fn(&target, args.to_vec(), 0);
         write_runtime_warnings(&mut eval.runtime_warnings);
         self.put_evaluator(eval);
@@ -5048,6 +5131,7 @@ impl ReplSession {
         &mut self,
         host: &'h mut H,
         limits: BopLimits,
+        memory: crate::memory::MemoryContext,
     ) -> Evaluator<'h, H> {
         let root_lexical_context = Rc::new(ModuleLexicalContext {
             type_bindings: self.type_bindings.first().cloned().unwrap_or_default(),
@@ -5083,6 +5167,7 @@ impl ReplSession {
             function_modules: Vec::new(),
             alias_scope_floors: Vec::new(),
             limits,
+            memory,
             pending_try_return: None,
             active_ref_bindings: alloc_import::collections::BTreeSet::new(),
             active_capture_bindings: alloc_import::collections::BTreeSet::new(),

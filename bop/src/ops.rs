@@ -12,10 +12,11 @@
 use alloc::{format, string::ToString, vec::Vec};
 
 use crate::builtins::{
-    check_array_concat_memory, check_string_concat_memory, check_string_repeat_memory, error,
-    error_with_hint,
+    check_array_concat_memory_in, check_string_concat_memory_in, check_string_repeat_memory_in,
+    error, error_with_hint,
 };
 use crate::error::BopError;
+use crate::memory::MemoryContext;
 use crate::value::{Value, values_equal};
 
 // ─── Numeric coercion helpers ──────────────────────────────────────
@@ -44,6 +45,16 @@ fn int_overflow(op: &str, line: u32) -> BopError {
 }
 
 pub fn add(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
+    add_in(left, right, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn add_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => a
             .checked_add(*b)
@@ -53,24 +64,24 @@ pub fn add(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
         (Value::Int(a), Value::Number(b)) => Ok(Value::Number(*a as f64 + b)),
         (Value::Number(a), Value::Int(b)) => Ok(Value::Number(a + *b as f64)),
         (Value::Str(a), Value::Str(b)) => {
-            check_string_concat_memory(a.len(), b.len(), line)?;
-            Ok(Value::new_str(format!("{}{}", a, b)))
+            check_string_concat_memory_in(a.len(), b.len(), line, memory)?;
+            Ok(Value::__new_str_in(format!("{}{}", a, b), memory))
         }
         (Value::Str(a), b) => {
             let b_display = format!("{}", b);
-            check_string_concat_memory(a.len(), b_display.len(), line)?;
-            Ok(Value::new_str(format!("{}{}", a, b_display)))
+            check_string_concat_memory_in(a.len(), b_display.len(), line, memory)?;
+            Ok(Value::__new_str_in(format!("{}{}", a, b_display), memory))
         }
         (a, Value::Str(b)) => {
             let a_display = format!("{}", a);
-            check_string_concat_memory(a_display.len(), b.len(), line)?;
-            Ok(Value::new_str(format!("{}{}", a_display, b)))
+            check_string_concat_memory_in(a_display.len(), b.len(), line, memory)?;
+            Ok(Value::__new_str_in(format!("{}{}", a_display, b), memory))
         }
         (Value::Array(a), Value::Array(b)) => {
-            check_array_concat_memory(a.len(), b.len(), line)?;
+            check_array_concat_memory_in(a.len(), b.len(), line, memory)?;
             let mut result = a.to_vec();
             result.extend(b.to_vec());
-            Value::try_new_array(result, line)
+            Value::__try_new_array_in(result, line, memory)
         }
         _ => Err(error(
             line,
@@ -99,7 +110,27 @@ pub fn sub(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
     }
 }
 
+#[doc(hidden)]
+pub fn sub_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    _memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    sub(left, right, line)
+}
+
 pub fn mul(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
+    mul_in(left, right, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn mul_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => a
             .checked_mul(*b)
@@ -117,8 +148,8 @@ pub fn mul(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
                 return Err(error(line, format!("Can't repeat a string {} times", n)));
             }
             let count = *n as usize;
-            check_string_repeat_memory(s.len(), count, line)?;
-            Ok(Value::new_str(s.repeat(count)))
+            check_string_repeat_memory_in(s.len(), count, line, memory)?;
+            Ok(Value::__new_str_in(s.repeat(count), memory))
         }
         (Value::Str(s), Value::Number(n)) | (Value::Number(n), Value::Str(s)) => {
             let nf = *n;
@@ -126,8 +157,8 @@ pub fn mul(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
                 return Err(error(line, format!("Can't repeat a string {} times", nf)));
             }
             let count = nf as usize;
-            check_string_repeat_memory(s.len(), count, line)?;
-            Ok(Value::new_str(s.repeat(count)))
+            check_string_repeat_memory_in(s.len(), count, line, memory)?;
+            Ok(Value::__new_str_in(s.repeat(count), memory))
         }
         _ => Err(error(
             line,
@@ -163,6 +194,16 @@ pub fn div(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
         ));
     }
     Ok(Value::Number(a / b))
+}
+
+#[doc(hidden)]
+pub fn div_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    _memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    div(left, right, line)
 }
 
 pub fn rem(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
@@ -213,6 +254,16 @@ pub fn rem(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
     }
 }
 
+#[doc(hidden)]
+pub fn rem_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    _memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    rem(left, right, line)
+}
+
 pub fn eq(left: &Value, right: &Value) -> Value {
     Value::Bool(values_equal(left, right))
 }
@@ -225,16 +276,56 @@ pub fn lt(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
     compare(left, right, |a, b| a < b, "<", line)
 }
 
+#[doc(hidden)]
+pub fn lt_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    _memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    lt(left, right, line)
+}
+
 pub fn gt(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
     compare(left, right, |a, b| a > b, ">", line)
+}
+
+#[doc(hidden)]
+pub fn gt_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    _memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    gt(left, right, line)
 }
 
 pub fn lt_eq(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
     compare(left, right, |a, b| a <= b, "<=", line)
 }
 
+#[doc(hidden)]
+pub fn lt_eq_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    _memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    lt_eq(left, right, line)
+}
+
 pub fn gt_eq(left: &Value, right: &Value, line: u32) -> Result<Value, BopError> {
     compare(left, right, |a, b| a >= b, ">=", line)
+}
+
+#[doc(hidden)]
+pub fn gt_eq_in(
+    left: &Value,
+    right: &Value,
+    line: u32,
+    _memory: &MemoryContext,
+) -> Result<Value, BopError> {
+    gt_eq(left, right, line)
 }
 
 pub fn neg(val: &Value, line: u32) -> Result<Value, BopError> {
@@ -305,6 +396,16 @@ fn signed_position(index: i64, len: usize) -> i128 {
 }
 
 pub fn index_get(obj: &Value, idx: &Value, line: u32) -> Result<Value, BopError> {
+    index_get_in(obj, idx, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn index_get_in(
+    obj: &Value,
+    idx: &Value,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<Value, BopError> {
     match obj {
         Value::Array(arr) => {
             let i = numeric_index(idx).ok_or_else(|| {
@@ -343,7 +444,7 @@ pub fn index_get(obj: &Value, idx: &Value, line: u32) -> Result<Value, BopError>
             let chars: Vec<char> = s.chars().collect();
             normalize_element_index(i, chars.len())
                 .and_then(|index| chars.get(index))
-                .map(|c| Value::new_str(c.to_string()))
+                .map(|c| Value::__new_str_in(c.to_string(), memory))
                 .ok_or_else(|| {
                     error(
                         line,
@@ -389,6 +490,17 @@ pub fn index_set(
     val: Value,
     line: u32,
 ) -> Result<(), BopError> {
+    index_set_in(obj, idx, val, line, &MemoryContext::__legacy_current())
+}
+
+#[doc(hidden)]
+pub fn index_set_in(
+    obj: &mut Value,
+    idx: &Value,
+    val: Value,
+    line: u32,
+    memory: &MemoryContext,
+) -> Result<(), BopError> {
     match obj {
         Value::Array(arr) => {
             let i = numeric_index(idx).ok_or_else(|| {
@@ -401,11 +513,11 @@ pub fn index_set(
                     format!("Index {} is out of bounds (array has {} items)", i, len),
                 )
             })?;
-            arr.try_set(actual, val, line)
+            arr.__try_set_in(actual, val, line, memory)
         }
         Value::Dict(entries) => match idx {
             Value::Str(key) => {
-                entries.try_set_key(key, val, line)
+                entries.__try_set_key_in(key, val, line, memory)
             }
             _ => Err(error(line, "Can't set index with these types")),
         },

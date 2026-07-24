@@ -5,7 +5,9 @@ use alloc::rc::Rc;
 #[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::rc::Rc;
 
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
+#[cfg(any(feature = "std", not(feature = "no_std")))]
+use core::cell::RefCell;
 
 /// One sandbox's persistent memory account. Allocation receipts retain their
 /// owner, so values outliving an operation remain charged to the instance that
@@ -48,73 +50,132 @@ impl MemoryAccount {
     pub fn __used(&self) -> usize {
         self.used.get()
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn used(&self) -> usize {
-        self.__used()
+/// Explicit allocation owner for one engine operation or persistent instance.
+///
+/// Runtime engines carry this value through their evaluator/VM/AOT context.
+/// It deliberately contains no process-global state, so independent no-std
+/// executions cannot race or charge one another's accounts.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct MemoryContext {
+    account: Option<Rc<MemoryAccount>>,
+}
+
+impl MemoryContext {
+    /// Create a tracked context with an independent byte ceiling.
+    #[doc(hidden)]
+    pub fn __new(limit: usize) -> Self {
+        Self {
+            account: Some(MemoryAccount::__new(limit)),
+        }
+    }
+
+    /// Create an untracked host/compatibility context.
+    #[doc(hidden)]
+    pub const fn __untracked() -> Self {
+        Self { account: None }
+    }
+
+    /// Compatibility context used by legacy public constructors. Current
+    /// engines never call this method.
+    #[doc(hidden)]
+    pub fn __legacy_current() -> Self {
+        #[cfg(any(feature = "std", not(feature = "no_std")))]
+        {
+            Self {
+                account: legacy_active(),
+            }
+        }
+        #[cfg(all(feature = "no_std", not(feature = "std")))]
+        {
+            Self::__untracked()
+        }
+    }
+
+    /// Reuse an existing persistent account.
+    #[doc(hidden)]
+    pub fn __from_account(account: &Rc<MemoryAccount>) -> Self {
+        Self {
+            account: Some(Rc::clone(account)),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __account(&self) -> Option<&Rc<MemoryAccount>> {
+        self.account.as_ref()
+    }
+
+    #[doc(hidden)]
+    pub fn __exceeded(&self) -> bool {
+        self.account
+            .as_ref()
+            .is_some_and(|account| account.__exceeded())
+    }
+
+    #[doc(hidden)]
+    pub fn __would_exceed(&self, bytes: usize) -> bool {
+        self.account
+            .as_ref()
+            .is_some_and(|account| account.__would_exceed(bytes))
+    }
+
+    #[doc(hidden)]
+    pub fn __used(&self) -> usize {
+        self.account.as_ref().map_or(0, |account| account.__used())
     }
 }
 
 #[cfg(any(feature = "std", not(feature = "no_std")))]
 thread_local! {
-    static ACTIVE: RefCell<Option<Rc<MemoryAccount>>> = const { RefCell::new(None) };
+    // Compatibility-only ambient account. Runtime engines never enter this
+    // stack; they pass MemoryContext explicitly.
+    static LEGACY_ACTIVE: RefCell<Option<Rc<MemoryAccount>>> = const { RefCell::new(None) };
 }
 
-#[cfg(all(feature = "no_std", not(feature = "std")))]
-struct SyncActive(RefCell<Option<Rc<MemoryAccount>>>);
-#[cfg(all(feature = "no_std", not(feature = "std")))]
-unsafe impl Sync for SyncActive {}
-#[cfg(all(feature = "no_std", not(feature = "std")))]
-static ACTIVE: SyncActive = SyncActive(RefCell::new(None));
-
-fn replace_active(next: Option<Rc<MemoryAccount>>) -> Option<Rc<MemoryAccount>> {
-    #[cfg(any(feature = "std", not(feature = "no_std")))]
-    {
-        ACTIVE.with(|active| core::mem::replace(&mut *active.borrow_mut(), next))
-    }
-    #[cfg(all(feature = "no_std", not(feature = "std")))]
-    {
-        core::mem::replace(&mut *ACTIVE.0.borrow_mut(), next)
-    }
+#[cfg(any(feature = "std", not(feature = "no_std")))]
+fn replace_legacy_active(next: Option<Rc<MemoryAccount>>) -> Option<Rc<MemoryAccount>> {
+    LEGACY_ACTIVE.with(|active| core::mem::replace(&mut *active.borrow_mut(), next))
 }
 
-fn active() -> Option<Rc<MemoryAccount>> {
-    #[cfg(any(feature = "std", not(feature = "no_std")))]
-    {
-        ACTIVE.with(|active| active.borrow().clone())
-    }
-    #[cfg(all(feature = "no_std", not(feature = "std")))]
-    {
-        ACTIVE.0.borrow().clone()
-    }
+#[cfg(any(feature = "std", not(feature = "no_std")))]
+fn legacy_active() -> Option<Rc<MemoryAccount>> {
+    LEGACY_ACTIVE.with(|active| active.borrow().clone())
 }
 
-/// Panic-safe active-account stack entry.
+/// Panic-safe legacy active-account stack entry.
+///
+/// This compatibility API exists only with `std`; runtime engines use
+/// [`MemoryContext`] directly.
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 #[doc(hidden)]
 pub struct ActiveMemoryGuard(Option<Rc<MemoryAccount>>);
 
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 impl ActiveMemoryGuard {
     #[doc(hidden)]
     pub fn __activate(account: &Rc<MemoryAccount>) -> Self {
-        Self(replace_active(Some(Rc::clone(account))))
+        Self(replace_legacy_active(Some(Rc::clone(account))))
     }
 
     #[doc(hidden)]
     pub fn __suspend() -> Self {
-        Self(replace_active(None))
+        Self(replace_legacy_active(None))
     }
 
     #[doc(hidden)]
     pub fn __activate_new_if_none(limit: usize) -> Self {
-        let next = active().or_else(|| Some(MemoryAccount::__new(limit)));
-        Self(replace_active(next))
+        let next = legacy_active().or_else(|| Some(MemoryAccount::__new(limit)));
+        Self(replace_legacy_active(next))
     }
 }
 
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 impl Drop for ActiveMemoryGuard {
     fn drop(&mut self) {
         let previous = self.0.take();
-        replace_active(previous);
+        replace_legacy_active(previous);
     }
 }
 
@@ -126,8 +187,8 @@ pub(crate) struct MemoryReceipt {
 }
 
 impl MemoryReceipt {
-    pub(crate) fn new(bytes: usize) -> Self {
-        let owner = active();
+    pub(crate) fn new_in(context: &MemoryContext, bytes: usize) -> Self {
+        let owner = context.account.clone();
         if let Some(account) = &owner {
             account.alloc(bytes);
         }
@@ -145,10 +206,10 @@ impl MemoryReceipt {
         self.bytes = bytes;
     }
 
-    pub(crate) fn owner_matches_active(&self) -> bool {
-        match (&self.owner, active()) {
+    pub(crate) fn owner_matches(&self, context: &MemoryContext) -> bool {
+        match (&self.owner, &context.account) {
             (None, None) => true,
-            (Some(owner), Some(active)) => Rc::ptr_eq(owner, &active),
+            (Some(owner), Some(active)) => Rc::ptr_eq(owner, active),
             _ => false,
         }
     }
@@ -163,93 +224,117 @@ impl Drop for MemoryReceipt {
 }
 
 /// Legacy one-shot compatibility: install a fresh account until another
-/// one-shot run replaces it. Allocation receipts make later drops safe.
+/// one-shot run replaces it. Runtime engines do not call this API.
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 pub fn bop_memory_init(limit: usize) {
-    replace_active(Some(MemoryAccount::__new(limit)));
+    replace_legacy_active(Some(MemoryAccount::__new(limit)));
 }
 
-/// Legacy mutation hook. New owned backings use internal allocation receipts
-/// directly.
+/// Legacy mutation hook. New owned backings use allocation receipts directly.
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 pub fn bop_alloc(bytes: usize) {
-    if let Some(account) = active() {
+    if let Some(account) = legacy_active() {
         account.alloc(bytes);
     }
 }
 
 /// Legacy mutation hook paired with [`bop_alloc`].
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 pub fn bop_dealloc(bytes: usize) {
-    if let Some(account) = active() {
+    if let Some(account) = legacy_active() {
         account.dealloc(bytes);
     }
 }
 
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 pub fn bop_memory_exceeded() -> bool {
-    active().is_some_and(|account| account.__exceeded())
+    legacy_active().is_some_and(|account| account.__exceeded())
 }
 
+#[cfg(any(feature = "std", not(feature = "no_std")))]
 pub fn bop_would_exceed(bytes: usize) -> bool {
-    active().is_some_and(|account| account.__would_exceed(bytes))
+    legacy_active().is_some_and(|account| account.__would_exceed(bytes))
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "std", not(feature = "no_std"))))]
 pub(crate) fn bop_memory_used() -> usize {
-    active().map_or(0, |account| account.used())
+    legacy_active().map_or(0, |account| account.__used())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Value;
-    #[cfg(all(feature = "no_std", not(feature = "std")))]
-    use alloc::vec::Vec;
-    #[cfg(any(feature = "std", not(feature = "no_std")))]
-    use std::vec::Vec;
 
     #[test]
     fn value_layout_stays_compact_with_allocation_receipts() {
-        assert_eq!(core::mem::size_of::<crate::value::BopStr>(), core::mem::size_of::<usize>());
+        assert_eq!(
+            core::mem::size_of::<crate::value::BopStr>(),
+            core::mem::size_of::<usize>()
+        );
         assert!(core::mem::size_of::<Value>() <= 32);
     }
 
     #[test]
-    fn mutation_detaches_to_the_active_allocation_owner() {
-        let external = {
-            let _suspended = ActiveMemoryGuard::__suspend();
-            Value::new_array(Vec::new())
-        };
-        let account = MemoryAccount::__new(1024 * 1024);
-        let mut external = external;
-        {
-            let _active = ActiveMemoryGuard::__activate(&account);
-            match &mut external {
-                Value::Array(array) => array.try_push(Value::Int(1), 0).unwrap(),
-                _ => unreachable!(),
-            }
-        }
-        assert!(account.used() > 0);
-        drop(external);
-        assert_eq!(account.used(), 0);
-
-        let first = MemoryAccount::__new(1024 * 1024);
-        let mut value = {
-            let _active = ActiveMemoryGuard::__activate(&first);
-            Value::new_array(Vec::new())
-        };
-        let second = MemoryAccount::__new(1024 * 1024);
-        {
-            let _active = ActiveMemoryGuard::__activate(&second);
-            match &mut value {
-                Value::Array(array) => array.try_push(Value::Int(2), 0).unwrap(),
-                _ => unreachable!(),
-            }
-        }
-        assert_eq!(first.used(), 0);
-        assert!(second.used() > 0);
+    fn explicit_contexts_are_independent() {
+        let first = MemoryContext::__new(1024 * 1024);
+        let second = MemoryContext::__new(1024 * 1024);
+        let first_receipt = MemoryReceipt::new_in(&first, 17);
+        let second_receipt = MemoryReceipt::new_in(&second, 29);
+        assert_eq!(first.__used(), 17);
+        assert_eq!(second.__used(), 29);
+        drop(first_receipt);
+        assert_eq!(first.__used(), 0);
+        assert_eq!(second.__used(), 29);
+        drop(second_receipt);
+        assert_eq!(second.__used(), 0);
     }
 
-    #[cfg(all(feature = "std", feature = "no_std"))]
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
     #[test]
-    fn unified_std_and_no_std_features_keep_memory_accounts_thread_local() {
+    fn explicit_value_accounts_stay_isolated_across_threads() {
+        use std::sync::{Arc, Barrier};
+
+        let ready = Arc::new(Barrier::new(2));
+        let finish = Arc::new(Barrier::new(2));
+        let handles = [17, 53].map(|len| {
+            let ready = Arc::clone(&ready);
+            let finish = Arc::clone(&finish);
+            std::thread::spawn(move || {
+                let memory = MemoryContext::__new(1024 * 1024);
+                let mut value = Value::__try_new_array_in(
+                    vec![Value::__new_str_in("x".repeat(len), &memory)],
+                    1,
+                    &memory,
+                )
+                .expect("test value fits");
+                ready.wait();
+                let before = memory.__used();
+                let Value::Array(array) = &mut value else {
+                    unreachable!("constructed an array");
+                };
+                array
+                    .__try_push_in(Value::Int(1), 1, &memory)
+                    .expect("test push fits");
+                assert!(memory.__used() >= before);
+                finish.wait();
+                drop(value);
+                assert_eq!(memory.__used(), 0);
+                before
+            })
+        });
+
+        let used = handles.map(|handle| {
+            handle
+                .join()
+                .expect("explicit memory-account worker panicked")
+        });
+        assert_ne!(used[0], used[1]);
+    }
+
+    #[cfg(any(feature = "std", not(feature = "no_std")))]
+    #[test]
+    fn legacy_ambient_accounts_remain_thread_local() {
         use std::sync::{Arc, Barrier};
 
         let ready = Arc::new(Barrier::new(2));

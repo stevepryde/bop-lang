@@ -52,6 +52,11 @@ embedding APIs across all three execution engines.
 - Make Rust standard-library integration an additive-safe default `std`
   feature. Genuine no_std builds use `default-features = false` with
   `features = ["no_std"]`; if Cargo unifies both features, `std` wins.
+- Replace ambient engine memory accounting with an explicit per-instance
+  context across the walker, VM, modules, and generated sandbox runtime.
+  Legacy `bop_memory_*` hooks are now std-only; custom no_std integrations
+  must use the context-aware internal runtime APIs. Host-created `Value`s are
+  untracked until an engine mutation adopts their backing allocation.
 - Improve imported-module diagnostics so parse and runtime failures render
   against the source and module that owns the error.
 

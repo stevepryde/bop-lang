@@ -31,7 +31,8 @@
 //! [`BopLimits`] is enforced exactly as in the tree-walker:
 //!
 //! - A tick fires at every bytecode dispatch. It bumps `steps`,
-//!   checks `max_steps`, checks [`bop::memory::bop_memory_exceeded`],
+//!   checks `max_steps`, checks its explicit
+//!   [`bop::memory::MemoryContext`],
 //!   and invokes [`BopHost::on_tick`]. `max_memory` is shared with the
 //!   tree-walker via the per-value allocation tracking in
 //!   [`bop::memory`], so no VM-specific bookkeeping is needed.
@@ -87,7 +88,7 @@ const STEP_SCALE: u64 = 8;
 /// power-of-two window lets us AND with a mask instead of
 /// dividing. 256 is a sweet spot — detection still lands within
 /// microseconds of the limit being breached, and a tight
-/// arithmetic loop pays the TLS load once per 256 instructions
+/// arithmetic loop reads the explicit account once per 256 instructions
 /// instead of every instruction.
 const TICK_MEMCHECK_MASK: u64 = 0xFF;
 
@@ -706,7 +707,7 @@ pub struct Vm<'h, H: BopHost + ?Sized> {
     root_function_visibility: BTreeMap<u32, Visibility>,
     abi_declarations: Vec<(String, Rc<FnEntry>)>,
     function_origin: BopFnOrigin,
-    operation_memory: Option<Rc<bop::memory::MemoryAccount>>,
+    memory: bop::memory::MemoryContext,
     live_value_environments: LiveValueEnvironments,
     binding_origins: BTreeMap<String, BindingOrigin>,
     live_binding_origins: LiveBindingOrigins,
@@ -747,7 +748,7 @@ pub struct BopInstance {
     entries: Vec<EntryPoint>,
     limits: BopLimits,
     in_operation: Cell<bool>,
-    memory: Rc<bop::memory::MemoryAccount>,
+    memory: bop::memory::MemoryContext,
 }
 
 impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
@@ -756,8 +757,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     /// Embedders executing a hand-built or deserialized [`Chunk`] should use
     /// [`execute`], which validates structural bytecode invariants first.
     pub fn new(chunk: Chunk, host: &'h mut H, limits: BopLimits) -> Self {
-        let memory = bop::memory::MemoryAccount::__new(limits.max_memory);
-        let mut vm = Self::new_internal(
+        let memory = bop::memory::MemoryContext::__new(limits.max_memory);
+        Self::new_internal(
             chunk,
             host,
             limits,
@@ -765,11 +766,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             String::from(bop::value::ROOT_MODULE_PATH),
             BTreeMap::new(),
             BopFnOrigin::__instance("vm"),
-        );
-        vm.operation_memory = Some(memory);
-        vm
+            memory,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_internal(
         chunk: Chunk,
         host: &'h mut H,
@@ -778,6 +779,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         current_module: String,
         root_function_visibility: BTreeMap<u32, Visibility>,
         function_origin: BopFnOrigin,
+        memory: bop::memory::MemoryContext,
     ) -> Self {
         let step_budget = limits.max_steps.saturating_mul(STEP_SCALE);
         let (struct_defs, enum_defs, builtin_bindings) = seed_builtin_types();
@@ -811,7 +813,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             root_function_visibility,
             abi_declarations: Vec::new(),
             function_origin,
-            operation_memory: None,
+            memory,
             live_value_environments: module_runtime.environments,
             binding_origins: BTreeMap::new(),
             live_binding_origins: module_runtime.origins,
@@ -847,7 +849,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
     }
 
-    fn from_state(state: VmState, host: &'h mut H, limits: BopLimits) -> Self {
+    fn from_state(
+        state: VmState,
+        host: &'h mut H,
+        limits: BopLimits,
+        memory: bop::memory::MemoryContext,
+    ) -> Self {
         Self {
             frames: state.frames,
             stack: state.stack,
@@ -872,7 +879,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             root_function_visibility: state.root_function_visibility,
             abi_declarations: state.abi_declarations,
             function_origin: state.function_origin,
-            operation_memory: None,
+            memory,
             live_value_environments: state.live_value_environments,
             binding_origins: state.binding_origins,
             live_binding_origins: state.live_binding_origins,
@@ -925,12 +932,6 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     }
 
     pub fn run(mut self) -> Result<(), BopError> {
-        let _memory = match &self.operation_memory {
-            Some(account) => bop::memory::ActiveMemoryGuard::__activate(account),
-            None => bop::memory::ActiveMemoryGuard::__activate_new_if_none(
-                self.limits.max_memory,
-            ),
-        };
         let result = (|| {
             let mut last_line: u32 = 0;
             while let Some((instr, line)) = self.fetch() {
@@ -958,7 +959,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             // cadence (see `TICK_MEMCHECK_MASK`) would otherwise slip
             // through silently. Catch them here — cheap, and a
             // program ending always runs this exactly once.
-            if bop::memory::bop_memory_exceeded() {
+            if self.memory.__exceeded() {
                 return Err(error_fatal_with_hint(
                     last_line,
                     "Memory limit exceeded",
@@ -1024,9 +1025,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 "Check your loops — make sure they have a condition that eventually stops them.",
             ));
         }
-        // Memory-limit check is a thread-local (or global Cell)
-        // lookup — cheap in absolute terms, but done every
-        // instruction it dominates a tight arithmetic loop.
+        // Reading the explicit memory account is cheap in absolute
+        // terms, but done every instruction it dominates a tight
+        // arithmetic loop.
         // Allocations enter through `Value::Clone` /
         // constructors, so we only need to notice when the
         // counter crosses the limit. Checking every 256 ticks
@@ -1034,7 +1035,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // allocations — negligible for a hard cap that's already
         // elastic by a few MB.
         if self.steps & TICK_MEMCHECK_MASK == 0
-            && bop::memory::bop_memory_exceeded()
+            && self.memory.__exceeded()
         {
             return Err(error_fatal_with_hint(
                 line,
@@ -1042,7 +1043,6 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 "Your code is using too much memory. Check for large strings or arrays growing in loops.",
             ));
         }
-        let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
         self.host.on_tick()?;
         Ok(())
     }
@@ -1699,7 +1699,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 let value = match self.current_chunk().constant(idx) {
                     Constant::Int(n) => Value::Int(*n),
                     Constant::Number(n) => Value::Number(*n),
-                    Constant::Str(s) => Value::new_str(s.clone()),
+                    Constant::Str(s) => Value::__new_str_in(s.clone(), &self.memory),
                 };
                 self.push_value(value);
             }
@@ -1874,7 +1874,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         }
                     }
                 };
-                let value = apply_in_place_assign(op, rhs, line, || Ok(current))?;
+                let value =
+                    apply_in_place_assign(op, rhs, line, &self.memory, || Ok(current))?;
                 match target {
                     crate::chunk::AssignBack::Slot(slot) => {
                         let target = self
@@ -1951,11 +1952,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     (Value::Int(x), Value::Int(y)) => x
                         .checked_add(*y)
                         .map(Value::Int)
-                        .map_or_else(|| ops::add(av, bv, line), Ok)?,
+                        .map_or_else(|| ops::add_in(av, bv, line, &self.memory), Ok)?,
                     // Cold path: delegate to the generic Value
                     // adder. Covers Number, String concat, array
                     // concat, etc.
-                    _ => ops::add(av, bv, line)?,
+                    _ => ops::add_in(av, bv, line, &self.memory)?,
                 };
                 self.push_value(result);
             }
@@ -1971,7 +1972,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let result = match (av, bv) {
                     (Value::Int(x), Value::Int(y)) => Value::Bool(x < y),
-                    _ => ops::lt(av, bv, line)?,
+                    _ => ops::lt_in(av, bv, line, &self.memory)?,
                 };
                 self.push_value(result);
             }
@@ -1981,6 +1982,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 // check. On non-Int, build an Int value and
                 // dispatch through generic add so `x = x + 1`
                 // still works when `x` is a Number.
+                let memory = &self.memory;
                 let frame = self.frames.last_mut().expect("frame present");
                 let i = slot.0 as usize;
                 let current = frame
@@ -1992,10 +1994,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         .checked_add(k as i64)
                         .map(Value::Int)
                         .map_or_else(
-                            || ops::add(current, &Value::Int(k as i64), line),
+                            || ops::add_in(current, &Value::Int(k as i64), line, memory),
                             Ok,
                         )?,
-                    _ => ops::add(current, &Value::Int(k as i64), line)?,
+                    _ => ops::add_in(current, &Value::Int(k as i64), line, memory)?,
                 };
                 frame.slots[i] = new;
             }
@@ -2011,8 +2013,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     Value::Int(x) => x
                         .checked_add(k as i64)
                         .map(Value::Int)
-                        .map_or_else(|| ops::add(v, &Value::Int(k as i64), line), Ok)?,
-                    _ => ops::add(v, &Value::Int(k as i64), line)?,
+                        .map_or_else(
+                            || ops::add_in(v, &Value::Int(k as i64), line, &self.memory),
+                            Ok,
+                        )?,
+                    _ => ops::add_in(v, &Value::Int(k as i64), line, &self.memory)?,
                 };
                 self.push_value(result);
             }
@@ -2027,7 +2032,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let result = match v {
                     Value::Int(x) => Value::Bool(*x < k as i64),
-                    _ => ops::lt(v, &Value::Int(k as i64), line)?,
+                    _ => ops::lt_in(v, &Value::Int(k as i64), line, &self.memory)?,
                 };
                 self.push_value(result);
             }
@@ -2064,9 +2069,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
 
             // ─── Binary ops ───────────────────────────────────────
-            Instr::Add => self.binary(line, ops::add)?,
+            Instr::Add => self.binary_tracked(line, ops::add_in)?,
             Instr::Sub => self.binary(line, ops::sub)?,
-            Instr::Mul => self.binary(line, ops::mul)?,
+            Instr::Mul => self.binary_tracked(line, ops::mul_in)?,
             Instr::Div => self.binary(line, ops::div)?,
             Instr::Rem => self.binary(line, ops::rem)?,
             Instr::Eq => self.binary_infallible(line, |a, b, _| Ok(ops::eq(a, b)))?,
@@ -2095,18 +2100,19 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Instr::GetIndex => {
                 let idx = self.pop_value(line)?;
                 let obj = self.pop_value(line)?;
-                self.push_value(ops::index_get(&obj, &idx, line)?);
+                self.push_value(ops::index_get_in(&obj, &idx, line, &self.memory)?);
             }
             Instr::SetIndex => {
                 let val = self.pop_value(line)?;
                 let idx = self.pop_value(line)?;
                 let mut obj = self.pop_value(line)?;
-                ops::index_set(&mut obj, &idx, val, line)?;
+                ops::index_set_in(&mut obj, &idx, val, line, &self.memory)?;
                 self.push_value(obj);
             }
             Instr::SetIndexInPlace { target, op } => {
                 let idx = self.pop_value(line)?;
                 let rhs = self.pop_value(line)?;
+                let memory = self.memory.clone();
                 match target {
                     crate::chunk::AssignBack::Slot(slot) => {
                         let value = self
@@ -2120,9 +2126,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             op,
                             rhs,
                             line,
-                            || ops::index_get(value, &idx, line),
+                            &memory,
+                            || ops::index_get_in(value, &idx, line, &memory),
                         )?;
-                        ops::index_set(value, &idx, val, line)?;
+                        ops::index_set_in(value, &idx, val, line, &memory)?;
                     }
                     crate::chunk::AssignBack::Name(name_idx) => {
                         let name = self.current_chunk().name(name_idx).to_string();
@@ -2133,9 +2140,16 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                                     op,
                                     rhs,
                                     line,
-                                    || ops::index_get(&value, &idx, line),
+                                    &memory,
+                                    || ops::index_get_in(&value, &idx, line, &memory),
                                 )?;
-                                ops::index_set(&mut value, &idx, val, line)?;
+                                ops::index_set_in(
+                                    &mut value,
+                                    &idx,
+                                    val,
+                                    line,
+                                    &memory,
+                                )?;
                                 return Ok(Next::Continue);
                             }
                             let hint = self.value_candidates_hint(&name).unwrap_or_else(|| {
@@ -2154,9 +2168,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             op,
                             rhs,
                             line,
-                            || ops::index_get(value, &idx, line),
+                            &memory,
+                            || ops::index_get_in(value, &idx, line, &memory),
                         )?;
-                        ops::index_set(value, &idx, val, line)?;
+                        ops::index_set_in(value, &idx, val, line, &memory)?;
                     }
                 }
             }
@@ -2170,7 +2185,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             // ─── Collections ──────────────────────────────────────
             Instr::MakeArray(n) => {
                 let items = self.pop_n_values(n as usize, line)?;
-                self.push_value(Value::try_new_array(items, line)?);
+                self.push_value(Value::__try_new_array_in(items, line, &self.memory)?);
             }
             Instr::MakeDict(n) => {
                 let flat = self.pop_n_values((n as usize) * 2, line)?;
@@ -2189,7 +2204,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     drop(key);
                     entries.push((key_str, val));
                 }
-                self.push_value(Value::try_new_dict(entries, line)?);
+                self.push_value(Value::__try_new_dict_in(entries, line, &self.memory)?);
             }
 
             // ─── Calls ────────────────────────────────────────────
@@ -2272,7 +2287,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 // `FrameWrap::IterStart`.
                 match &mut v {
                     Value::Array(arr) => {
-                        let mut items = arr.take();
+                        let mut items = arr.__take_in(&self.memory);
                         drop(v);
                         items.reverse();
                         self.stack.push(Slot::Iter(items));
@@ -2280,7 +2295,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     Value::Str(s) => {
                         let mut items: Vec<Value> = s
                             .chars()
-                            .map(|c| Value::new_str(c.to_string()))
+                            .map(|c| Value::__new_str_in(c.to_string(), &self.memory))
                             .collect();
                         drop(v);
                         items.reverse();
@@ -2289,7 +2304,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     Value::Dict(d) => {
                         let mut items: Vec<Value> = d
                             .iter()
-                            .map(|(k, _)| Value::new_str(k.clone()))
+                            .map(|(k, _)| Value::__new_str_in(k.clone(), &self.memory))
                             .collect();
                         drop(v);
                         items.reverse();
@@ -2338,11 +2353,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         // Rust, no bytecode frame push required.
                         if matches!(iter_val, Value::Iter(_)) {
                             let iter_clone = iter_val.clone();
-                            let (result, _) = methods::iter_method(
+                            let (result, _) = methods::iter_method_in(
                                 &iter_clone,
                                 "next",
                                 &[],
                                 line,
+                                &self.memory,
                             )?;
                             match unwrap_iter_step(&result) {
                                 IterStep::Next(v) => self.push_value(v),
@@ -2528,6 +2544,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Instr::FieldSetInPlace { target, field, op } => {
                 let field = self.current_chunk().name(field).to_string();
                 let rhs = self.pop_value(line)?;
+                let memory = self.memory.clone();
 
                 let value = match target {
                     crate::chunk::AssignBack::Slot(slot) => self
@@ -2546,6 +2563,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                                     op,
                                     rhs,
                                     line,
+                                    &memory,
                                     || self.field_get(&value, &field, line),
                                 )?;
                                 self.field_set(value, &field, val, line)?;
@@ -2571,6 +2589,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             op,
                             rhs,
                             line,
+                            &memory,
                             || {
                                 structure.field(&field).cloned().ok_or_else(|| {
                                     error(
@@ -2583,7 +2602,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                                 })
                             },
                         )?;
-                        if !structure.try_set_field(&field, val, line)? {
+                        if !structure.__try_set_field_in(&field, val, line, &memory)? {
                             return Err(error(
                                 line,
                                 bop::error_messages::struct_has_no_field(&type_name, &field),
@@ -2632,6 +2651,22 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         Ok(())
     }
 
+    fn binary_tracked(
+        &mut self,
+        line: u32,
+        op: fn(
+            &Value,
+            &Value,
+            u32,
+            &bop::memory::MemoryContext,
+        ) -> Result<Value, BopError>,
+    ) -> Result<(), BopError> {
+        let b = self.pop_value(line)?;
+        let a = self.pop_value(line)?;
+        self.push_value(op(&a, &b, line, &self.memory)?);
+        Ok(())
+    }
+
     fn binary_infallible(
         &mut self,
         line: u32,
@@ -2673,7 +2708,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
             }
         }
-        Ok(Value::new_str(result))
+        Ok(Value::__new_str_in(result, &self.memory))
     }
 
     // ─── Chunk accessor ──────────────────────────────────────────
@@ -3341,7 +3376,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     ) -> Result<Next, BopError> {
         match name {
             "range" => {
-                let value = builtins::builtin_range(&args, line, &mut self.rand_state)?;
+                let value = builtins::builtin_range_in(
+                    &args,
+                    line,
+                    &mut self.rand_state,
+                    &self.memory,
+                )?;
                 self.push_value(value);
                 return Ok(Next::Continue);
             }
@@ -3356,7 +3396,6 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .map(|arg| format!("{arg}"))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
                 self.host.on_print(&message);
                 self.push_value(Value::None);
                 return Ok(Next::Continue);
@@ -3369,10 +3408,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
             _ => {}
         }
-        let host_result = {
-            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
-            self.host.call(name, &args, line)
-        };
+        let host_result = self.host.call(name, &args, line);
         if let Some(result) = host_result {
             self.push_value(result?);
             return Ok(Next::Continue);
@@ -3384,10 +3420,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 hint,
             ));
         }
-        let host_hint = {
-            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
-            self.host.function_hint().to_string()
-        };
+        let host_hint = self.host.function_hint().to_string();
         Err(if host_hint.is_empty() {
             error(line, bop::error_messages::function_not_found(name))
         } else {
@@ -3551,7 +3584,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // `methods::numeric_method`.
         match name {
             "range" => {
-                let v = builtins::builtin_range(&args, line, &mut self.rand_state)?;
+                let v = builtins::builtin_range_in(
+                    &args,
+                    line,
+                    &mut self.rand_state,
+                    &self.memory,
+                )?;
                 self.push_value(v);
                 return Ok(Next::Continue);
             }
@@ -3566,7 +3604,6 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .map(|a| format!("{}", a))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
                 self.host.on_print(&message);
                 self.push_value(Value::None);
                 return Ok(Next::Continue);
@@ -3585,10 +3622,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
 
         // 2. Host-provided builtins.
-        let host_result = {
-            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
-            self.host.call(name, &args, line)
-        };
+        let host_result = self.host.call(name, &args, line);
         if let Some(result) = host_result {
             let v = result?;
             self.push_value(v);
@@ -3607,10 +3641,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 hint,
             ));
         }
-        let host_hint = {
-            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
-            self.host.function_hint().to_string()
-        };
+        let host_hint = self.host.function_hint().to_string();
         Err(if host_hint.is_empty() {
             error(line, bop::error_messages::function_not_found(name))
         } else {
@@ -3767,6 +3798,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         line: u32,
     ) -> Result<Next, BopError> {
         let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
+        let memory = self.memory.clone();
         let receiver_idx = target.name_idx();
         let receiver_name = chunk.name(receiver_idx);
         // The compiler only emits this instruction for a bare identifier and
@@ -3785,8 +3817,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 if matches!(value, Value::Array(_)) {
                     methods::reject_constant_array_mutation(receiver_name, method, line)?;
-                    let result =
-                        methods::transactional_array_method(value, method, args, line)?;
+                    let result = methods::transactional_array_method_in(
+                        value,
+                        method,
+                        args,
+                        line,
+                        &memory,
+                    )?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
@@ -3821,8 +3858,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .expect("binding checked above");
                 if matches!(value, Value::Array(_)) {
                     methods::reject_constant_array_mutation(receiver_name, method, line)?;
-                    let result =
-                        methods::transactional_array_method(value, method, args, line)?;
+                    let result = methods::transactional_array_method_in(
+                        value,
+                        method,
+                        args,
+                        line,
+                        &memory,
+                    )?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
@@ -3857,7 +3899,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // gated by whether the module happens to export that
         // name.
         if let Value::Module(ref m) = obj {
-            if let Some(result) = methods::common_method(&obj, method, &args, line)? {
+            if let Some(result) =
+                methods::common_method_in(&obj, method, &args, line, &self.memory)?
+            {
                 self.push_value(result.0);
                 return Ok(Next::Continue);
             }
@@ -3950,7 +3994,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // `type` / `to_str` / `inspect` work on every value —
         // dispatch them ahead of the type-specific tables so
         // walker / VM / AOT agree on the common method surface.
-        if let Some((ret, _)) = methods::common_method(&obj, method, &args, line)? {
+        if let Some((ret, _)) =
+            methods::common_method_in(&obj, method, &args, line, &self.memory)?
+        {
             self.push_value(ret);
             return Ok(Next::Continue);
         }
@@ -3972,13 +4018,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
 
         let (ret, mutated) = match &obj {
             Value::Array(arr) => {
-                methods::array_method(arr, method, &args, line)?
+                methods::array_method_in(arr, method, &args, line, &self.memory)?
             }
             Value::Str(s) => {
-                methods::string_method(s.as_str(), method, &args, line)?
+                methods::string_method_in(s.as_str(), method, &args, line, &self.memory)?
             }
             Value::Dict(entries) => {
-                methods::dict_method(entries, method, &args, line)?
+                methods::dict_method_in(entries, method, &args, line, &self.memory)?
             }
             Value::Int(_) | Value::Number(_) => {
                 methods::numeric_method(&obj, method, &args, line)?
@@ -3987,7 +4033,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 methods::bool_method(&obj, method, &args, line)?
             }
             Value::Iter(_) => {
-                methods::iter_method(&obj, method, &args, line)?
+                methods::iter_method_in(&obj, method, &args, line, &self.memory)?
             }
             _ => {
                 return Err(error(
@@ -4250,7 +4296,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
             }
         }
-        self.push_value(Value::try_new_struct(module_path, type_name_s, fields, line)?);
+        self.push_value(Value::__try_new_struct_in(
+            module_path,
+            type_name_s,
+            fields,
+            line,
+            &self.memory,
+        )?);
         Ok(())
     }
 
@@ -4459,7 +4511,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             })?;
         match (&variant_decl.1, shape) {
             (EnumVariantShape::Unit, EnumConstructShape::Unit) => {
-                self.push_value(Value::new_enum_unit(module_path, type_name_s, variant_s));
+                self.push_value(Value::__new_enum_unit_in(
+                    module_path,
+                    type_name_s,
+                    variant_s,
+                    &self.memory,
+                ));
             }
             (EnumVariantShape::Tuple(fields), EnumConstructShape::Tuple(argc)) => {
                 if fields.len() as u32 != argc {
@@ -4476,12 +4533,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     ));
                 }
                 let items = self.pop_n_values(argc as usize, line)?;
-                self.push_value(Value::try_new_enum_tuple(
+                self.push_value(Value::__try_new_enum_tuple_in(
                     module_path,
                     type_name_s,
                     variant_s,
                     items,
                     line,
+                    &self.memory,
                 )?);
             }
             (EnumVariantShape::Struct(decl_fields), EnumConstructShape::Struct(count)) => {
@@ -4536,12 +4594,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         }
                     }
                 }
-                self.push_value(Value::try_new_enum_struct(
+                self.push_value(Value::__try_new_enum_struct_in(
                     module_path,
                     type_name_s,
                     variant_s,
                     fields,
                     line,
+                    &self.memory,
                 )?);
             }
             (EnumVariantShape::Unit, _) => {
@@ -4630,7 +4689,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         match &mut obj {
             Value::Struct(boxed) => {
                 let type_name = boxed.type_name().to_string();
-                if !boxed.try_set_field(field, value, line)? {
+                if !boxed.__try_set_field_in(field, value, line, &self.memory)? {
                     return Err(error(
                         line,
                         bop::error_messages::struct_has_no_field(&type_name, field),
@@ -4650,7 +4709,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     /// success, install the captured bindings into the current
     /// scope and fall through. On failure, jump to `on_fail`.
     ///
-    /// Delegates to `bop::pattern_matches` so the VM behaves
+    /// Delegates to `bop::pattern_matches_in` so the VM behaves
     /// exactly like the tree-walker on every pattern shape.
     fn match_fail(
         &mut self,
@@ -4699,7 +4758,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 tn,
             )
         };
-        let matched = bop::pattern_matches(&recipe.pattern, &value, &mut bindings, &resolver);
+        let matched = bop::pattern_matches_in(
+            &recipe.pattern,
+            &value,
+            &mut bindings,
+            &resolver,
+            &self.memory,
+        );
         if matched {
             for (name, v) in bindings {
                 self.define_local(name, v);
@@ -5437,10 +5502,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
         }
 
-        let resolved = {
-            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
-            self.host.resolve_module(path)
-        };
+        let resolved = self.host.resolve_module(path);
         let source = match resolved {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(e),
@@ -5500,6 +5562,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             module_path.to_string(),
             BTreeMap::new(),
             self.function_origin.clone(),
+            self.memory.clone(),
         );
         let module_result = sub.run_internal();
         // Nested module VMs are an implementation detail of the root
@@ -5656,7 +5719,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     }
 
     fn do_return(&mut self, value: Value, line: u32) -> Result<Next, BopError> {
-        if bop::memory::bop_memory_exceeded() {
+        if self.memory.__exceeded() {
             return Err(error_fatal_with_hint(
                 line,
                 "Memory limit exceeded",
@@ -5750,14 +5813,20 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // value through untouched.
         let final_value = match frame.wrap {
             FrameWrap::None => value,
-            FrameWrap::TryCall { line } => builtins::make_try_call_ok(value, line)?,
-            FrameWrap::ResultOk { line } => methods::make_result_ok(value, line)?,
-            FrameWrap::ResultErr { line } => methods::make_result_err(value, line)?,
+            FrameWrap::TryCall { line } => {
+                builtins::make_try_call_ok_in(value, line, &self.memory)?
+            }
+            FrameWrap::ResultOk { line } => {
+                methods::make_result_ok_in(value, line, &self.memory)?
+            }
+            FrameWrap::ResultErr { line } => {
+                methods::make_result_err_in(value, line, &self.memory)?
+            }
             FrameWrap::IterStart | FrameWrap::IterAdvance(_) => {
                 unreachable!("handled above")
             }
         };
-        if bop::memory::bop_memory_exceeded() {
+        if self.memory.__exceeded() {
             return Err(error_fatal_with_hint(
                 line,
                 "Memory limit exceeded",
@@ -5886,7 +5955,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if err.is_fatal {
                 return Err(err);
             }
-            self.push_value(builtins::make_try_call_err(&err));
+            self.push_value(builtins::make_try_call_err_in(&err, &self.memory));
+            if self.memory.__exceeded() {
+                return Err(error_fatal_with_hint(
+                    line,
+                    "Memory limit exceeded",
+                    "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+                ));
+            }
             return Ok(Next::Continue);
         }
         // The frame we just pushed is the one that should
@@ -5996,7 +6072,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         args: Vec<Value>,
         line: u32,
     ) -> Result<Next, BopError> {
-        use methods::{make_result_err, make_result_ok, ResultCallableKind};
+        use methods::{make_result_err_in, make_result_ok_in, ResultCallableKind};
         if args.len() != 1 {
             return Err(error(
                 line,
@@ -6033,7 +6109,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             ResultCallableKind::Map => {
                 if !is_ok {
                     // Err passes through unchanged — no closure call.
-                    self.push_value(make_result_err(payload, line)?);
+                    let value = make_result_err_in(payload, line, &self.memory)?;
+                    if self.memory.__exceeded() {
+                        return Err(error_fatal_with_hint(
+                            line,
+                            "Memory limit exceeded",
+                            "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+                        ));
+                    }
+                    self.push_value(value);
                     return Ok(Next::Continue);
                 }
                 let func = match &callable {
@@ -6054,7 +6138,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
             ResultCallableKind::MapErr => {
                 if is_ok {
-                    self.push_value(make_result_ok(payload, line)?);
+                    let value = make_result_ok_in(payload, line, &self.memory)?;
+                    if self.memory.__exceeded() {
+                        return Err(error_fatal_with_hint(
+                            line,
+                            "Memory limit exceeded",
+                            "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+                        ));
+                    }
+                    self.push_value(value);
                     return Ok(Next::Continue);
                 }
                 let func = match &callable {
@@ -6078,7 +6170,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
             ResultCallableKind::AndThen => {
                 if !is_ok {
-                    self.push_value(make_result_err(payload, line)?);
+                    let value = make_result_err_in(payload, line, &self.memory)?;
+                    if self.memory.__exceeded() {
+                        return Err(error_fatal_with_hint(
+                            line,
+                            "Memory limit exceeded",
+                            "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+                        ));
+                    }
+                    self.push_value(value);
                     return Ok(Next::Continue);
                 }
                 let func = match &callable {
@@ -6156,6 +6256,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             None => return Err(err),
         };
         let wrapper_stack_base = self.frames[wrap_idx].stack_base;
+        let wrapper_line = match self.frames[wrap_idx].wrap {
+            FrameWrap::TryCall { line } => line,
+            _ => unreachable!("try_call frame selected by wrapper kind"),
+        };
         // Drain the unwound frames through the freelist instead
         // of `truncate`, so their slot vecs get recycled.
         while self.frames.len() > wrap_idx {
@@ -6172,8 +6276,16 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
         self.restore_active_defining_environment();
         self.stack.truncate(wrapper_stack_base);
-        self.push_value(builtins::make_try_call_err(&err));
-        Ok(())
+        self.push_value(builtins::make_try_call_err_in(&err, &self.memory));
+        if self.memory.__exceeded() {
+            Err(error_fatal_with_hint(
+                wrapper_line,
+                "Memory limit exceeded",
+                "Your code is using too much memory. Check for large strings or arrays growing in loops.",
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -6228,6 +6340,7 @@ fn apply_in_place_assign<F>(
     op: crate::chunk::InPlaceAssignOp,
     rhs: Value,
     line: u32,
+    memory: &bop::memory::MemoryContext,
     current: F,
 ) -> Result<Value, BopError>
 where
@@ -6241,11 +6354,11 @@ where
     let left = current()?;
     match op {
         InPlaceAssignOp::Eq => unreachable!(),
-        InPlaceAssignOp::Add => ops::add(&left, &rhs, line),
-        InPlaceAssignOp::Sub => ops::sub(&left, &rhs, line),
-        InPlaceAssignOp::Mul => ops::mul(&left, &rhs, line),
-        InPlaceAssignOp::Div => ops::div(&left, &rhs, line),
-        InPlaceAssignOp::Rem => ops::rem(&left, &rhs, line),
+        InPlaceAssignOp::Add => ops::add_in(&left, &rhs, line, memory),
+        InPlaceAssignOp::Sub => ops::sub_in(&left, &rhs, line, memory),
+        InPlaceAssignOp::Mul => ops::mul_in(&left, &rhs, line, memory),
+        InPlaceAssignOp::Div => ops::div_in(&left, &rhs, line, memory),
+        InPlaceAssignOp::Rem => ops::rem_in(&left, &rhs, line, memory),
     }
 }
 
@@ -6259,7 +6372,7 @@ impl BopInstance {
         let statements = bop::parse(source)?;
         let compiled = crate::compiler::compile_program(&statements)?;
         crate::validate_chunk(&compiled.chunk)?;
-        let memory = bop::memory::MemoryAccount::__new(limits.max_memory);
+        let memory = bop::memory::MemoryContext::__new(limits.max_memory);
         let mut vm = Vm::new_internal(
             compiled.chunk,
             host,
@@ -6268,15 +6381,13 @@ impl BopInstance {
             bop::value::ROOT_MODULE_PATH.to_string(),
             compiled.root_function_visibility,
             BopFnOrigin::__instance("vm"),
+            memory.clone(),
         );
-        {
-            let _active = bop::memory::ActiveMemoryGuard::__activate(&memory);
-            let execution = vm.run_internal();
-            vm.write_runtime_warnings();
-            execution?;
-            if memory.__exceeded() {
-                return Err(instance_memory_error());
-            }
+        let execution = vm.run_internal();
+        vm.write_runtime_warnings();
+        execution?;
+        if memory.__exceeded() {
+            return Err(instance_memory_error());
         }
         let entries = vm
             .abi_declarations
@@ -6332,9 +6443,13 @@ impl BopInstance {
             return Err(instance_memory_error());
         }
         let state = self.state.take().expect("instance state present");
-        let mut vm = Vm::from_state(state, host, self.limits.clone());
+        let mut vm = Vm::from_state(
+            state,
+            host,
+            self.limits.clone(),
+            self.memory.clone(),
+        );
         let result = {
-            let _active = bop::memory::ActiveMemoryGuard::__activate(&self.memory);
             for argument in args {
                 vm.push_value(argument.clone());
             }
@@ -6399,9 +6514,13 @@ impl BopInstance {
             return Err(instance_memory_error());
         }
         let state = self.state.take().expect("instance state present");
-        let mut vm = Vm::from_state(state, host, self.limits.clone());
+        let mut vm = Vm::from_state(
+            state,
+            host,
+            self.limits.clone(),
+            self.memory.clone(),
+        );
         let result = {
-            let _active = bop::memory::ActiveMemoryGuard::__activate(&self.memory);
             let execution = vm
                 .call_closure(&function, args.to_vec(), 0)
                 .and_then(|_| vm.run_internal());
@@ -6787,7 +6906,7 @@ let read = fn() { return [missing, present] }"#,
     }
 
     #[test]
-    fn instance_suspends_host_allocations_and_checks_final_returns() {
+    fn instance_leaves_host_allocations_untracked_and_checks_final_returns() {
         let limits = BopLimits { max_steps: 100, max_memory: 32 };
         let mut host = RetainingHost { retained: None };
         let mut instance = BopInstance::load(
@@ -6823,10 +6942,7 @@ let read = fn() { return [missing, present] }"#,
 
     #[test]
     fn external_values_are_free_until_detach_and_memory_poison_is_fail_fast() {
-        let external = {
-            let _suspended = bop::memory::ActiveMemoryGuard::__suspend();
-            Value::new_array((0..256).map(Value::Int).collect())
-        };
+        let external = Value::new_array((0..256).map(Value::Int).collect());
         let limits = BopLimits { max_steps: 100, max_memory: 64 };
         let mut host = ExternalValueHost { value: Some(external) };
         let mut instance = BopInstance::load(
@@ -6919,7 +7035,7 @@ let read = fn() { return [missing, present] }"#,
     }
 
     #[test]
-    fn every_instance_host_hook_runs_with_accounting_suspended() {
+    fn every_instance_host_hook_leaves_accounting_unchanged() {
         let limits = BopLimits { max_steps: 100, max_memory: 64 };
         let mut host = HookAllocatingHost { retained: RefCell::new(Vec::new()) };
         let mut instance = BopInstance::load(

@@ -775,11 +775,12 @@ impl ::bop::BopHost for Host {
 fn main() {
     let limits = ::bop::BopLimits::standard();
     let mut host = Host;
-    let mut state = __bop_load_state(&mut host, &limits).unwrap();
+    let memory = ::bop::memory::MemoryContext::__new(limits.max_memory);
+    let mut state = __bop_load_state(&mut host, &limits, memory.clone()).unwrap();
     let entries = __bop_instance_entry_points(&state);
     println!("{}", entries.iter().map(|entry| format!("{}/{}", entry.name(), entry.arity())).collect::<Vec<_>>().join(","));
     let site = state.abi_declarations.iter().copied().find(|site| __BOP_FUNCTION_SITES[*site].name == "first" && __BOP_FUNCTION_SITES[*site].is_public).unwrap();
-    let mut ctx = Ctx { host: &mut host, state: &mut state, steps: 0, call_depth: 0, max_steps: limits.max_steps };
+    let mut ctx = Ctx { host: &mut host, state: &mut state, memory, steps: 0, call_depth: 0, max_steps: limits.max_steps };
     println!("{}", __bop_call_function_site(&mut ctx, site, vec![::bop::value::Value::Int(7)], 0).unwrap());
     println!("{}", __bop_call_active_function(&mut ctx, "<root>", "first", vec![::bop::value::Value::Int(7)], 0).unwrap());
 }
@@ -1226,7 +1227,8 @@ impl ::bop::BopHost for Host {
 fn main() {
     let limits = ::bop::BopLimits::standard();
     let mut host = Host;
-    let state = __bop_load_state(&mut host, &limits).unwrap();
+    let memory = ::bop::memory::MemoryContext::__new(limits.max_memory);
+    let state = __bop_load_state(&mut host, &limits, memory).unwrap();
     assert!(!state.active_function_sites.keys().any(|(module, _)| module == "bad"));
     assert!(!state.bindings.contains_key("bad"));
     assert!(!state.binding_origins.contains_key("bad"));
