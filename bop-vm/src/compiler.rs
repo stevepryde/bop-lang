@@ -3,24 +3,19 @@
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{
+    collections::BTreeMap,
     rc::Rc,
     string::{String, ToString},
-    vec,
     vec::Vec,
 };
 #[cfg(any(feature = "std", not(feature = "no_std")))]
-use std::rc::Rc;
+use std::{collections::BTreeMap, rc::Rc};
 
 use bop::error::BopError;
 use bop::parser::{
     AssignOp, AssignTarget, BinOp, CallArg, Expr, ExprKind, ParamMode, Parameter, Stmt, StmtKind,
     UnaryOp, Visibility,
 };
-
-#[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::collections::BTreeMap;
-#[cfg(any(feature = "std", not(feature = "no_std")))]
-use std::collections::BTreeMap;
 
 use crate::chunk::{
     CallSite, CallSiteIdx, CaptureSource, Chunk, CodeOffset, ConstIdx, Constant,
@@ -32,125 +27,12 @@ use crate::chunk::{
 use bop::parser::{MatchArm, Pattern, VariantKind};
 
 mod free_variables;
+mod local_resolver;
 mod pool_index;
 
 use free_variables::FreeVariables;
+use local_resolver::LocalResolver;
 use pool_index::{ConstantPoolIndex, NamePoolIndex};
-
-// ─── Local slot resolver ───────────────────────────────────────────
-//
-// Tracks the name → slot mapping for the function currently being
-// compiled. Each nested block (if / while / for-in body, match
-// arm, etc.) pushes a fresh scope; exiting a block pops it. Slot
-// indices only ever grow — a popped block's slots stay allocated
-// in `next_slot`, so blocks never reuse slot numbers. That's
-// slightly wasteful on memory (an unused `Value::None` per
-// abandoned slot) but keeps `LoadLocal(i)` a trivial `Vec` read
-// with no per-call setup beyond the one initial resize. `max_slot`
-// records the high-water mark so the VM can pre-size its slot
-// array exactly once at call time.
-
-struct LocalResolver {
-    /// Stack of scopes. Each scope holds the names that `let` /
-    /// `for-in` / parameter introduced at this depth, paired with
-    /// the slot index they claimed. Inner scopes shadow outer ones
-    /// during name lookup (walked `.iter().rev()`).
-    scopes: Vec<Vec<(String, SlotIdx)>>,
-    /// Next slot number to hand out. Increments on every new
-    /// binding and never rolls back.
-    next_slot: u32,
-    /// High-water mark across the whole function body. Becomes
-    /// `FnDef::slot_count`.
-    max_slot: u32,
-    ref_param_slots: Vec<SlotIdx>,
-}
-
-impl LocalResolver {
-    fn new(params: &[Parameter]) -> Self {
-        let mut scopes: Vec<Vec<(String, SlotIdx)>> = vec![Vec::with_capacity(params.len())];
-        let mut next_slot = 0u32;
-        let mut ref_param_slots = Vec::new();
-        for p in params {
-            let slot = SlotIdx(next_slot);
-            scopes[0].push((p.name.clone(), slot));
-            if p.mode == ParamMode::Ref {
-                ref_param_slots.push(slot);
-            }
-            next_slot += 1;
-        }
-        Self {
-            scopes,
-            next_slot,
-            max_slot: next_slot,
-            ref_param_slots,
-        }
-    }
-
-    /// Allocate a fresh slot for `name` in the innermost scope.
-    /// Returns the slot so the caller can emit a matching
-    /// `StoreLocal(slot)`. If the name is already bound at this
-    /// depth, it shadows — matches Bop's `let x = 1; let x = 2`
-    /// semantics where the second binding wins.
-    fn declare(&mut self, name: &str) -> SlotIdx {
-        let slot = SlotIdx(self.next_slot);
-        self.next_slot += 1;
-        if self.next_slot > self.max_slot {
-            self.max_slot = self.next_slot;
-        }
-        self.scopes
-            .last_mut()
-            .expect("resolver always has a scope")
-            .push((name.to_string(), slot));
-        slot
-    }
-
-    /// Resolve `name` to its slot by walking scopes inner-to-outer.
-    /// Returns `None` if the name isn't a function-level local —
-    /// the caller then falls back to the name-based `LoadVar` /
-    /// `StoreVar` machinery so captures, imports, fn declarations
-    /// and builtins still resolve.
-    fn resolve(&self, name: &str) -> Option<SlotIdx> {
-        for scope in self.scopes.iter().rev() {
-            for (n, slot) in scope.iter().rev() {
-                if n == name {
-                    return Some(*slot);
-                }
-            }
-        }
-        None
-    }
-
-    /// Names bound in the innermost scope, sorted and deduped.
-    /// Recorded into a [`crate::chunk::UseSpec`] at each `use` site
-    /// so the runtime import clash check can see slot-allocated
-    /// locals and parameters, which never appear in the VM's
-    /// dynamic scope maps. Innermost scope only: the walker's
-    /// clash check consults just its current scope map, and outer
-    /// blocks correspond to outer scopes there too.
-    fn innermost_scope_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .scopes
-            .last()
-            .map(|scope| scope.iter().map(|(name, _)| name.clone()).collect())
-            .unwrap_or_default();
-        names.sort();
-        names.dedup();
-        names
-    }
-
-    fn push_scope(&mut self) {
-        self.scopes.push(Vec::new());
-    }
-
-    fn pop_scope(&mut self) {
-        self.scopes.pop();
-        // next_slot intentionally unchanged: a slot allocated
-        // inside a now-dead block stays alive in the frame's
-        // vec. Re-using the index would require tracking liveness
-        // across control flow — not worth the complexity for a
-        // few extra `Value::None` slots per function.
-    }
-}
 
 /// Compile a parsed program into a top-level chunk.
 pub fn compile(program: &[Stmt]) -> Result<Chunk, BopError> {
