@@ -34,8 +34,8 @@ Net result (release, Apple silicon):
 
 ```toml
 [dependencies]
-bop-lang = "0.3"
-bop-vm = "0.3"
+bop-lang = "0.4"
+bop-vm = "0.4"
 ```
 
 ```rust
@@ -87,6 +87,23 @@ assert_eq!(second.inspect(), "2");
 The walker and VM instance APIs are equivalent: `load`, `entry_points`,
 `call`, and `call_value`.
 
+The VM implements Bop's transactional `ref` parameters with the same
+copy-in/copy-out, target validation, commit, rollback, and diagnostic behavior
+as the walker and AOT engine. Rust `BopInstance::call` and `call_value`
+arguments remain value-only; expose a value-only `pub fn` that performs any
+ref call inside Bop. See the [reference-parameters
+guide](https://bop-lang.com/docs/functions/reference-parameters/).
+User-defined methods may declare `ref self` for a transactional mutable
+receiver; ordinary `self` receivers are read-only.
+
+## Bytecode tooling
+
+For tooling and caches, `compile` returns a public `Chunk`,
+`validate_chunk(&chunk)` rejects malformed operands, pool indices, control
+flow, and nested function chunks, and `disassemble(&chunk)` renders a readable
+instruction listing. `execute` validates every chunk before running it,
+including hand-built or deserialized bytecode.
+
 ## Features
 
 | feature | default | what it does |
@@ -98,8 +115,8 @@ The walker and VM instance APIs are equivalent: `load`, `entry_points`,
 
 ```toml
 [dependencies]
-bop-lang = { version = "0.3", default-features = false, features = ["no_std", "bop-std"] }
-bop-vm   = { version = "0.3", default-features = false, features = ["no_std", "bop-std"] }
+bop-lang = { version = "0.4", default-features = false, features = ["no_std", "bop-std"] }
+bop-vm   = { version = "0.4", default-features = false, features = ["no_std", "bop-std"] }
 ```
 
 Tested and working end-to-end on `wasm32-unknown-unknown` with `lol_alloc` as the global allocator.

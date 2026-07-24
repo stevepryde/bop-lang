@@ -168,7 +168,8 @@ pub fn bop_memory_init(limit: usize) {
     replace_active(Some(MemoryAccount::__new(limit)));
 }
 
-/// Legacy mutation hook. New owned backings use [`MemoryReceipt`] directly.
+/// Legacy mutation hook. New owned backings use internal allocation receipts
+/// directly.
 pub fn bop_alloc(bytes: usize) {
     if let Some(account) = active() {
         account.alloc(bytes);

@@ -4,14 +4,14 @@
 //! as an `&'static str` via `include_str!`. When a Bop script
 //! does `use std.math`, the engine asks its `BopHost` to
 //! resolve the module — embedders route that call to
-//! [`resolve`], which returns the bundled source text.
+//! [`crate::stdlib::resolve`], which returns the bundled source text.
 //!
 //! Gated behind the `bop-std` feature (on by default). Disable
 //! with `default-features = false` when you want a truly minimal
 //! core with no bundled modules:
 //!
 //! ```toml
-//! bop-lang = { version = "0.3", default-features = false }
+//! bop-lang = { version = "0.4", default-features = false }
 //! ```
 //!
 //! Available modules:

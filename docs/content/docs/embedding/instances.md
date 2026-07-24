@@ -65,7 +65,7 @@ value to an ordinary name cannot redirect the host ABI.
 
 Instance calls accept owned `Value` arguments and therefore cannot identify a
 mutable Bop binding for a [`ref`
-parameter](/docs/functions/defining-functions/#reference-parameters).
+parameter](/docs/functions/reference-parameters/).
 `call` and `call_value` reject ref-bearing functions before execution. Keep
 host-facing entries value-only and put ref-based mutation behind an ordinary
 Bop wrapper when needed.

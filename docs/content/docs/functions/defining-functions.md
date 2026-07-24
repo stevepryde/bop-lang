@@ -8,8 +8,8 @@ page_template = "docs/page.html"
 title = "Structs & Enums"
 path = "/docs/data/structs-and-enums/"
 [extra.next]
-title = "Modules"
-path = "/docs/modules/"
+title = "Reference Parameters"
+path = "/docs/functions/reference-parameters/"
 +++
 
 # Defining Functions
@@ -89,36 +89,10 @@ grow(ref values, 3)
 print(values)    // [0, 0, 0]
 ```
 
-A ref argument must be a mutable plain variable. Constants, expressions,
-collection indexes, fields, and variables captured by a closure cannot be
-passed by ref. The same variable cannot occupy two ref positions in one call.
-Grouping is transparent, so `grow(ref (values), 1)` is equivalent to
-`grow(ref values, 1)`.
-
-Refs use copy-in/copy-out rather than observable aliases. The function works on
-a staged local value and writes all ref parameters back together only when it
-returns normally. If it raises a runtime or sandbox error, none of that call's
-ref targets change—even when `try_call` catches the error. A returned
-`Result::Err` is an ordinary return and therefore does write back.
-
-```bop
-fn update_then_fail(ref items) {
-  items.push(2)
-  panic("not committed")
-}
-
-let items = [1]
-fn attempt() {
-  update_then_fail(ref items)
-}
-let result = try_call(attempt)
-print(result.is_err(), items)    // true [1]
-```
-
-A ref parameter can be forwarded with `inner(ref value)`. It cannot be
-captured by a nested function or lambda. Built-in and host functions accept
-value arguments only; user-defined methods may declare ref parameters after
-their ordinary value receiver.
+Refs use transactional copy-in/copy-out rather than observable aliases. Read
+[Reference Parameters](/docs/functions/reference-parameters/) for valid
+targets, atomic commit and rollback, forwarding, evaluation order, closure and
+method rules, diagnostics, and the value-only Rust host boundary.
 
 ## Return values
 

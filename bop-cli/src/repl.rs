@@ -33,7 +33,7 @@
 //! **Meta-commands** (lines that start with `:`):
 //! - `:help` — print this list.
 //! - `:vars` — list current session bindings.
-//! - `:reset` — drop all bindings and start fresh.
+//! - `:reset` / `:clear` — drop all bindings and start fresh.
 //! - `:quit` / `:q` / `:exit` — exit.
 //!
 //! **History** lives at `$HOME/.bop_history`. Save-on-exit is
@@ -70,7 +70,7 @@ const KEYWORDS: &[&str] = &[
 const META_HELP: &[(&str, &str)] = &[
     (":help", "show this help"),
     (":vars", "list bindings in the current session"),
-    (":reset", "drop all session state and start fresh"),
+    (":reset | :clear", "drop all session state and start fresh"),
     (":quit | :q | :exit", "exit the REPL"),
 ];
 

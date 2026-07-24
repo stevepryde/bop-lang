@@ -17,15 +17,18 @@ If you're writing a command-line tool or a desktop / server app that runs Bop sc
 - `read_file(path)` / `write_file(path, contents)` / `append_file(path, contents)` / `file_exists(path)` — filesystem basics
 - `env(var_name)` — read an environment variable
 - `unix_time()` / `unix_time_ms()` — current time, seconds / milliseconds since epoch
-- `args()` — command-line arguments (for compiled Bop binaries)
 - `print` is provided by `bop-lang` itself; `StdHost` routes output to stdout
+
+Host functions always receive value arguments. Explicit `ref` arguments are
+supported only by user-defined Bop functions; write a Bop wrapper when a
+script needs to update one of its own variables transactionally.
 
 ## Quick start
 
 ```toml
 [dependencies]
-bop-lang = "0.3"
-bop-sys  = "0.3"
+bop-lang = "0.4"
+bop-sys  = "0.4"
 ```
 
 ```rust

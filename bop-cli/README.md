@@ -17,6 +17,28 @@ Then:
 | `bop compile --emit-rs ...`   | emit the transpiled Rust source only                  |
 | `bop --help`                  | full usage                                            |
 
+## REPL
+
+`bop` and `bop repl` open the same stateful session. Declarations survive
+between submissions, bare expressions echo their value, incomplete blocks
+continue on a secondary prompt, and tab completion includes keywords,
+built-ins, and current bindings.
+
+History is persisted at `$HOME/.bop_history`. Meta-commands are:
+
+- `:vars` — list live top-level bindings
+- `:reset` or `:clear` — clear the session
+- `:help` — show REPL help
+- `:quit`, `:q`, or `:exit` — leave
+
+Piped input uses the same multiline submission rules. A parse or runtime error
+sets a failing exit status but does not discard later transcript input.
+
+The REPL, `bop run`, and `bop compile` all support transactional `ref`
+parameters. See the [reference-parameters
+guide](https://bop-lang.com/docs/functions/reference-parameters/) for syntax,
+target restrictions, rollback, and host-boundary rules.
+
 ## `bop compile`
 
 Transpiles the script via [`bop-compile`](https://crates.io/crates/bop-compile), drops the result into a scratch cargo project, builds it, and copies the binary next to the script (or wherever `-o` points).

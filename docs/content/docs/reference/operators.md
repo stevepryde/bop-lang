@@ -5,8 +5,8 @@ weight = 17
 template = "docs/page.html"
 page_template = "docs/page.html"
 [extra.previous]
-title = "REPL"
-path = "/docs/repl/"
+title = "Command-line interface"
+path = "/docs/cli/"
 [extra.next]
 title = "Built-in Functions"
 path = "/docs/reference/builtins/"

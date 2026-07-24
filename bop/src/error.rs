@@ -103,7 +103,7 @@ impl BopError {
     /// Callers that have an AST node handy (`expr.line`,
     /// `expr.column`) should prefer this over
     /// [`Self::runtime`] so the error renderer can point a
-    /// carat at the offending character.
+    /// caret at the offending character.
     pub fn runtime_at(
         message: impl Into<String>,
         line: u32,
@@ -238,7 +238,7 @@ impl core::fmt::Display for BopError {
 
 impl BopError {
     /// Render the error with an inline source snippet and a
-    /// `^` carat under the offending position. Needs the full
+    /// `^` caret under the offending position. Needs the full
     /// program source that produced the error — pass the same
     /// string you handed to `bop::run` / `bop::parse`.
     ///
@@ -246,8 +246,8 @@ impl BopError {
     /// - No line set → just the message.
     /// - Line set but out of range (e.g. source was truncated)
     ///   → message + "[line N]" without the snippet.
-    /// - No column set → message + snippet, no carat.
-    /// - Column set → message + snippet + carat.
+    /// - No column set → message + snippet, no caret.
+    /// - Column set → message + snippet + caret.
     ///
     /// Appends the `friendly_hint` as a `hint:` line when
     /// present. Used by `bop-cli` to render program failures;
@@ -287,7 +287,7 @@ impl BopError {
                             if i >= col_idx {
                                 break;
                             }
-                            // Preserve tab alignment so the carat
+                            // Preserve tab alignment so the caret
                             // lands under the right column even
                             // in tab-indented source.
                             pad.push(if ch == '\t' { '\t' } else { ' ' });
@@ -393,7 +393,7 @@ impl BopWarning {
             is_try_return: false,
         };
         // Swap the leading `error:` for `warning:` so the
-        // output is visually distinct. The rest of the carat /
+        // output is visually distinct. The rest of the caret /
         // snippet logic is identical to `BopError::render`.
         err.render(source).replacen("error:", "warning:", 1)
     }
@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn render_with_line_and_column_places_carat() {
+    fn render_with_line_and_column_places_caret() {
         let src = "let x = 1\nlet abc = foo()\nlet z = 3";
         let err = BopError {
             line: Some(2),
@@ -497,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn render_preserves_tab_alignment_in_carat() {
-        // Source has a leading tab. Carat padding should use a
+    fn render_preserves_tab_alignment_in_caret() {
+        // Source has a leading tab. Caret padding should use a
         // tab too so it lines up under the offending char.
         let src = "\tlet x = bad_call()";
         let err = BopError {
@@ -512,7 +512,7 @@ mod tests {
             is_try_return: false,
         };
         let rendered = err.render(src);
-        // The carat line has one tab (from column 1's tab in
+        // The caret line has one tab (from column 1's tab in
         // source) plus 8 spaces for columns 2–9, then `^`.
         assert!(rendered.contains("\t        ^"), "rendered:\n{}", rendered);
     }

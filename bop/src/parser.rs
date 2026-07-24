@@ -153,7 +153,7 @@ pub struct Expr {
     /// to a specific source position. Niche-packed into 4 bytes
     /// so the column field costs nothing beyond a plain `u32`
     /// — runtime error construction reads it out to render a
-    /// carat under the offending character.
+    /// caret under the offending character.
     pub column: Option<core::num::NonZeroU32>,
 }
 
@@ -178,14 +178,18 @@ impl Expr {
 /// call preflight before evaluating argument expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamMode {
+    /// An ordinary positional argument passed with value semantics.
     Value,
+    /// A transactional copy-in/copy-out argument marked with `ref`.
     Ref,
 }
 
 /// One declared function parameter, including its call-site passing mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
+    /// The binding name visible inside the function body.
     pub name: String,
+    /// Whether the parameter is value-only or must be called with `ref`.
     pub mode: ParamMode,
 }
 
@@ -193,7 +197,9 @@ pub struct Parameter {
 /// makes mode information survive aliases and dynamic callable dispatch.
 #[derive(Debug, Clone)]
 pub struct CallArg {
+    /// The source expression associated with this positional argument.
     pub value: Expr,
+    /// Whether the call site wrote an explicit `ref` marker.
     pub mode: ParamMode,
 }
 
@@ -326,10 +332,8 @@ pub struct MatchArm {
     pub line: u32,
 }
 
-/// A pattern appears in `match` arms (phase 4 introduces this;
-/// future phases may reuse it in `let` destructuring and fn
-/// params). Structurally mirrors the runtime `Value` enum so each
-/// variant's matcher reads as "does this value fit here?".
+/// A pattern in a `match` arm. Structurally mirrors the runtime `Value` enum
+/// so each variant's matcher reads as "does this value fit here?".
 #[derive(Debug, Clone)]
 pub enum Pattern {
     /// Matches a specific value verbatim: `1`, `"foo"`, `true`,
@@ -527,7 +531,7 @@ pub struct Stmt {
     pub line: u32,
     /// 1-indexed column where this statement starts. See
     /// [`Expr::column`] — same niche-packed shape, same
-    /// purpose (carat rendering on runtime errors).
+    /// purpose (caret rendering on runtime errors).
     pub column: Option<core::num::NonZeroU32>,
 }
 
@@ -551,8 +555,7 @@ pub enum StmtKind {
     /// = expr` (constant binding, immutable). The `is_const` flag
     /// flips enforcement at use/assign sites: reassigning a
     /// constant is a compile-time error (the parser refuses any
-    /// assignment whose LHS is an all-uppercase identifier — see
-    /// [`parse_assign`]).
+    /// assignment whose LHS is an all-uppercase identifier).
     Let {
         name: String,
         value: Expr,
@@ -592,7 +595,8 @@ pub enum StmtKind {
     /// on a user-defined struct or enum. At call time
     /// (`obj.method(...)`) the receiver is passed as the first
     /// parameter (conventionally named `self`), followed by the
-    /// rest.
+    /// rest. A `ref` first parameter is an implicit mutable receiver
+    /// at the call site; an ordinary first parameter is read-only.
     MethodDecl {
         type_name: String,
         method_name: String,
@@ -713,7 +717,67 @@ const MAX_PARSE_DEPTH: usize = 128;
 
 pub fn parse(tokens: Vec<SpannedToken>) -> Result<Vec<Stmt>, BopError> {
     let mut parser = Parser::new(tokens);
-    parser.parse_program()
+    let program = parser.parse_program()?;
+    reject_value_receivers_calling_ref_methods(&program)?;
+    Ok(program)
+}
+
+#[derive(Default)]
+struct ParsedMethodCollector {
+    methods: Vec<(String, String, Vec<Parameter>, Vec<Stmt>)>,
+}
+
+impl crate::ast_visit::DeclarationSiteVisitor for ParsedMethodCollector {
+    fn visit_struct(&mut self, _name: &str, _fields: &[String], _stmt: &Stmt) {}
+
+    fn visit_enum(&mut self, _name: &str, _variants: &[VariantDecl], _stmt: &Stmt) {}
+
+    fn visit_method(
+        &mut self,
+        type_name: &str,
+        method_name: &str,
+        params: &[Parameter],
+        body: &[Stmt],
+        _stmt: &Stmt,
+    ) {
+        self.methods.push((
+            type_name.to_string(),
+            method_name.to_string(),
+            params.to_vec(),
+            body.to_vec(),
+        ));
+    }
+}
+
+fn reject_value_receivers_calling_ref_methods(program: &[Stmt]) -> Result<(), BopError> {
+    let mut collector = ParsedMethodCollector::default();
+    crate::ast_visit::visit_declaration_sites(program, &mut collector);
+    for (type_name, _, params, body) in &collector.methods {
+        let Some(receiver) = params
+            .first()
+            .filter(|param| param.mode == ParamMode::Value)
+            .map(|param| param.name.as_str())
+        else {
+            continue;
+        };
+        let ref_methods = collector
+            .methods
+            .iter()
+            .filter(|(candidate_type, _, params, _)| {
+                candidate_type == type_name
+                    && params
+                        .first()
+                        .is_some_and(|param| param.mode == ParamMode::Ref)
+            })
+            .map(|(_, method_name, _, _)| method_name.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(line) =
+            value_receiver_mutation_line(body, receiver, false, &ref_methods)
+        {
+            return Err(value_receiver_mutation_error(receiver, line));
+        }
+    }
+    Ok(())
 }
 
 struct Parser {
@@ -765,7 +829,7 @@ impl Parser {
     }
 
     /// 1-indexed column of the current token's first character.
-    /// Used for parse-error reporting so the carat under the
+    /// Used for parse-error reporting so the caret under the
     /// offending line points at the right place.
     fn peek_column(&self) -> u32 {
         self.tokens.get(self.pos).map(|t| t.column).unwrap_or(0)
@@ -1339,18 +1403,14 @@ impl Parser {
             let (method_name, method_line) = self.expect_ident()?;
             ensure_value_name(&method_name, "method name", method_line)?;
             let params = self.parse_parameters("method parameter")?;
-            if params.first().is_some_and(|param| param.mode == ParamMode::Ref) {
-                let mut error = BopError::runtime(
-                    "a method receiver can't be declared with `ref`",
-                    line,
-                );
-                error.friendly_hint = Some(
-                    "Remove `ref` from the receiver; only non-receiver parameters can use it."
-                        .to_string(),
-                );
-                return Err(error);
-            }
             let body = self.parse_block()?;
+            if let Some(receiver) = params
+                .first()
+                .filter(|param| param.mode == ParamMode::Value)
+                .map(|param| param.name.as_str())
+            {
+                reject_value_receiver_mutation(&body, receiver)?;
+            }
             return Ok(Stmt {
                 kind: StmtKind::MethodDecl {
                     type_name: name,
@@ -2698,6 +2758,257 @@ fn assignable_root_name(expr: &Expr) -> Option<&str> {
             assignable_root_name(object)
         }
         _ => None,
+    }
+}
+
+fn assign_target_root_name(target: &AssignTarget) -> Option<&str> {
+    match target {
+        AssignTarget::Variable(name) => Some(name),
+        AssignTarget::Index { object, .. } | AssignTarget::Field { object, .. } => {
+            assignable_root_name(object)
+        }
+    }
+}
+
+/// A value receiver is a read-only snapshot. Reject writes while parsing so a
+/// method cannot appear to mutate its caller while only changing a discarded
+/// local copy. `ref self` opts into the transactional mutable-receiver path.
+fn reject_value_receiver_mutation(body: &[Stmt], receiver: &str) -> Result<(), BopError> {
+    if let Some(line) =
+        value_receiver_mutation_line(body, receiver, false, &BTreeSet::new())
+    {
+        return Err(value_receiver_mutation_error(receiver, line));
+    }
+    Ok(())
+}
+
+fn value_receiver_mutation_error(receiver: &str, line: u32) -> BopError {
+    let mut error = BopError::runtime(
+        format!("can't mutate value receiver `{receiver}`"),
+        line,
+    );
+    error.friendly_hint = Some(format!(
+        "Declare the receiver as `ref {receiver}` to mutate it, or return a new value."
+    ));
+    error
+}
+
+fn value_receiver_mutation_line(
+    body: &[Stmt],
+    receiver: &str,
+    initially_shadowed: bool,
+    ref_methods: &BTreeSet<String>,
+) -> Option<u32> {
+    let mut shadowed = initially_shadowed;
+    for stmt in body {
+        let expression_mutation = |expr: &Expr| {
+            (!shadowed
+                && expr_mutates_binding(expr, receiver, ref_methods))
+                .then_some(expr.line)
+        };
+        match &stmt.kind {
+            StmtKind::Let { name, value, .. } => {
+                if let Some(line) = expression_mutation(value) {
+                    return Some(line);
+                }
+                if name == receiver {
+                    shadowed = true;
+                }
+            }
+            StmtKind::Assign { target, value, .. } => {
+                if !shadowed && assign_target_root_name(target) == Some(receiver) {
+                    return Some(stmt.line);
+                }
+                if let Some(line) = expression_mutation(value) {
+                    return Some(line);
+                }
+            }
+            StmtKind::If {
+                condition,
+                body,
+                else_ifs,
+                else_body,
+            } => {
+                if let Some(line) = expression_mutation(condition) {
+                    return Some(line);
+                }
+                if let Some(line) =
+                    value_receiver_mutation_line(body, receiver, shadowed, ref_methods)
+                {
+                    return Some(line);
+                }
+                for (condition, body) in else_ifs {
+                    if let Some(line) = expression_mutation(condition)
+                        .or_else(|| {
+                            value_receiver_mutation_line(
+                                body,
+                                receiver,
+                                shadowed,
+                                ref_methods,
+                            )
+                        })
+                    {
+                        return Some(line);
+                    }
+                }
+                if let Some(line) = else_body
+                    .as_deref()
+                    .and_then(|body| {
+                        value_receiver_mutation_line(
+                            body,
+                            receiver,
+                            shadowed,
+                            ref_methods,
+                        )
+                    })
+                {
+                    return Some(line);
+                }
+            }
+            StmtKind::While { condition, body } => {
+                if let Some(line) = expression_mutation(condition)
+                    .or_else(|| {
+                        value_receiver_mutation_line(body, receiver, shadowed, ref_methods)
+                    })
+                {
+                    return Some(line);
+                }
+            }
+            StmtKind::Repeat { count, body } => {
+                if let Some(line) = expression_mutation(count)
+                    .or_else(|| {
+                        value_receiver_mutation_line(body, receiver, shadowed, ref_methods)
+                    })
+                {
+                    return Some(line);
+                }
+            }
+            StmtKind::ForIn {
+                var,
+                iterable,
+                body,
+            } => {
+                if let Some(line) = expression_mutation(iterable)
+                    .or_else(|| {
+                        value_receiver_mutation_line(
+                            body,
+                            receiver,
+                            shadowed || var == receiver,
+                            ref_methods,
+                        )
+                    })
+                {
+                    return Some(line);
+                }
+            }
+            StmtKind::Return { value: Some(value) } | StmtKind::ExprStmt(value) => {
+                if let Some(line) = expression_mutation(value) {
+                    return Some(line);
+                }
+            }
+            // Callable bodies get their own parameter/capture bindings; they
+            // cannot write the receiver binding owned by this method call.
+            StmtKind::FnDecl { .. }
+            | StmtKind::MethodDecl { .. }
+            | StmtKind::Return { value: None }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Use { .. }
+            | StmtKind::StructDecl { .. }
+            | StmtKind::EnumDecl { .. } => {}
+        }
+    }
+    None
+}
+
+fn expr_mutates_binding(
+    expr: &Expr,
+    binding: &str,
+    ref_methods: &BTreeSet<String>,
+) -> bool {
+    let call_args_mutate = |args: &[CallArg]| {
+        args.iter().any(|arg| {
+            (arg.mode == ParamMode::Ref
+                && assignable_root_name(&arg.value) == Some(binding))
+                || expr_mutates_binding(&arg.value, binding, ref_methods)
+        })
+    };
+    match &expr.kind {
+        ExprKind::BinaryOp { left, right, .. } => {
+            expr_mutates_binding(left, binding, ref_methods)
+                || expr_mutates_binding(right, binding, ref_methods)
+        }
+        ExprKind::UnaryOp { expr, .. } | ExprKind::Try(expr) => {
+            expr_mutates_binding(expr, binding, ref_methods)
+        }
+        ExprKind::Call { callee, args } => {
+            expr_mutates_binding(callee, binding, ref_methods) || call_args_mutate(args)
+        }
+        ExprKind::MethodCall {
+            object,
+            method,
+            args,
+        } => {
+            (matches!(&object.kind, ExprKind::Ident(name) if name == binding)
+                && ref_methods.contains(method))
+                || expr_mutates_binding(object, binding, ref_methods)
+                || call_args_mutate(args)
+        }
+        ExprKind::FieldAccess { object, .. } => {
+            expr_mutates_binding(object, binding, ref_methods)
+        }
+        ExprKind::StructConstruct { fields, .. } | ExprKind::Dict(fields) => fields
+            .iter()
+            .any(|(_, value)| expr_mutates_binding(value, binding, ref_methods)),
+        ExprKind::EnumConstruct { payload, .. } => match payload {
+            VariantPayload::Unit => false,
+            VariantPayload::Tuple(values) => values
+                .iter()
+                .any(|value| expr_mutates_binding(value, binding, ref_methods)),
+            VariantPayload::Struct(fields) => fields
+                .iter()
+                .any(|(_, value)| expr_mutates_binding(value, binding, ref_methods)),
+        },
+        ExprKind::Index { object, index } => {
+            expr_mutates_binding(object, binding, ref_methods)
+                || expr_mutates_binding(index, binding, ref_methods)
+        }
+        ExprKind::Array(values) => values
+            .iter()
+            .any(|value| expr_mutates_binding(value, binding, ref_methods)),
+        ExprKind::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_mutates_binding(condition, binding, ref_methods)
+                || expr_mutates_binding(then_expr, binding, ref_methods)
+                || expr_mutates_binding(else_expr, binding, ref_methods)
+        }
+        // Lambda bodies mutate their own captured snapshot, never the outer
+        // receiver binding.
+        ExprKind::Lambda { .. } => false,
+        ExprKind::Match { scrutinee, arms } => {
+            expr_mutates_binding(scrutinee, binding, ref_methods)
+                || arms.iter().any(|arm| {
+                    let shadowed = arm.pattern.binding_names().contains(binding);
+                    !shadowed
+                        && (arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(|guard| {
+                                expr_mutates_binding(guard, binding, ref_methods)
+                            })
+                            || expr_mutates_binding(&arm.body, binding, ref_methods))
+                })
+        }
+        ExprKind::Int(_)
+        | ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::StringInterp(_)
+        | ExprKind::Bool(_)
+        | ExprKind::None
+        | ExprKind::Ident(_) => false,
     }
 }
 

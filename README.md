@@ -3,6 +3,7 @@
 A small, dynamically-typed, **embeddable** programming language for Rust hosts — give your users or your agent a real scripting language at runtime, with the sandbox treated as a first-class invariant instead of a bolted-on afterthought.
 
 [Website](https://bop-lang.com/) · [Documentation](https://bop-lang.com/docs/)
+· [Bop 0.4 guide](https://bop-lang.com/docs/whats-new-0-4/)
 
 > **Note:** Bop is experimental and not yet battle-tested. Good for tooling, scripting, embedding experiments, and sandbox-first workloads; use with care in production.
 
@@ -14,11 +15,14 @@ A small, dynamically-typed, **embeddable** programming language for Rust hosts �
 - **One-shot or persistent.** Run isolated scripts, or load a `BopInstance`
   whose `pub fn` entries, globals, modules, callbacks, types, methods, and RNG
   state remain live across host calls.
-- **Explicit in-place APIs.** Second-class `ref` parameters make caller
-  mutation visible at both sites and commit transactionally on normal return.
+- **Explicit in-place APIs.** Second-class `ref` parameters and `ref self`
+  method receivers make caller mutation visible in declarations and commit
+  transactionally on normal return. Ordinary `self` receivers are read-only.
+  Read the [reference-parameters
+  guide](https://bop-lang.com/docs/functions/reference-parameters/).
 - **`no_std` + WASM.** Core crate builds clean for `wasm32-unknown-unknown` and bare-metal targets. Enable the `no_std` feature for a `libm`-backed math facade.
 - **Small, stable grammar.** Functions, closures, arrays, dicts, structs, enums, pattern matching, string interpolation, modules, `Result` / `Iter` built-ins. Deliberately small — easy to teach, easy for tooling to target.
-- **Helpful errors.** Parse and runtime errors include the source snippet, a carat under the offending column, and `hint:` suggestions (`"I don't know what 'pritn' is — did you mean 'print'?"`).
+- **Helpful errors.** Parse and runtime errors include the source snippet, a caret under the offending column, and `hint:` suggestions (`"I don't know what 'pritn' is — did you mean 'print'?"`).
 
 ## Three engines, one language
 
@@ -64,6 +68,21 @@ fn parse_positive(s) {
     return Ok(n)
 }
 
+// Explicit, transactional caller updates
+fn add_score(ref score, amount) {
+    score += amount
+}
+let score = 10
+add_score(ref score, 5)
+
+// Mutable method receivers (the call site stays natural)
+struct Counter { value }
+fn Counter.increment(ref self) {
+    self.value += 1
+}
+let counter = Counter { value: 0 }
+counter.increment()
+
 // Stdlib
 use std.math
 print(PI)
@@ -87,9 +106,9 @@ cargo install bop-cli
 
 ```toml
 [dependencies]
-bop-lang = "0.3"
-bop-vm   = "0.3"       # optional — drop in for 2–3× speed
-bop-sys  = "0.3"       # ready-made filesystem / stdio / env / time host
+bop-lang = "0.4"
+bop-vm   = "0.4"       # optional — drop in for 2–3× speed
+bop-sys  = "0.4"       # ready-made filesystem / stdio / env / time host
 ```
 
 ```rust
@@ -158,8 +177,8 @@ Bop builds clean for `wasm32-unknown-unknown`. Walker + VM + libm + `lol_alloc` 
 
 ```toml
 [dependencies]
-bop-lang = { version = "0.3", default-features = false, features = ["no_std"] }
-bop-vm   = { version = "0.3", default-features = false, features = ["no_std"] }
+bop-lang = { version = "0.4", default-features = false, features = ["no_std"] }
+bop-vm   = { version = "0.4", default-features = false, features = ["no_std"] }
 ```
 
 ## Crates in this workspace
@@ -169,6 +188,9 @@ bop-vm   = { version = "0.3", default-features = false, features = ["no_std"] }
 - [`bop-compile`](bop-compile/) — Bop → Rust AOT transpiler
 - [`bop-sys`](bop-sys/) — `StdHost`, the default OS-backed host
 - [`bop-cli`](bop-cli/) — the `bop` command-line tool
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete `0.4.0` release notes and
+the publishing order for the crates.
 
 ## Website
 

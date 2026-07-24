@@ -10,7 +10,7 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "bop-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bop-compile",
  "bop-lang",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "bop-compile"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bop-lang",
  "bop-vm",
@@ -29,21 +29,21 @@ dependencies = [
 
 [[package]]
 name = "bop-lang"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "libm",
 ]
 
 [[package]]
 name = "bop-sys"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bop-lang",
 ]
 
 [[package]]
 name = "bop-vm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bop-lang",
 ]

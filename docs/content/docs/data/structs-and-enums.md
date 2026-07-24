@@ -159,9 +159,10 @@ type is declared. It keeps dispatch ownership coherent at the cost of the
 extensions you'd get in Swift / Kotlin / Ruby. Within the owning module,
 execution order still determines when a method becomes available.
 
-### Methods return a new value
+### Value and mutable receivers
 
-Because values are copy-by-value, a method can't mutate the receiver in place. Return a new instance and reassign:
+An ordinary `self` receiver is a read-only value snapshot. Use it for queries
+and functional transformations that return a new value:
 
 ```bop
 fn Point.shift(self, dx, dy) {
@@ -180,6 +181,30 @@ let final = Point { x: 0, y: 0 }
   .shift(0, 2)
   .shift(5, 5)
 ```
+
+To update the caller's binding in place, declare the first parameter as
+`ref self`:
+
+```bop
+fn Point.shift_in_place(ref self, dx, dy) {
+  self.x += dx
+  self.y += dy
+}
+
+let p = Point { x: 0, y: 0 }
+p.shift_in_place(3, 4)
+print(p)    // Point { x: 3, y: 4 }
+```
+
+The call site does not write another `ref`: method syntax supplies the receiver
+implicitly. A mutable receiver must be a mutable plain-variable binding, and it
+uses the same transactional copy-in/copy-out rules as an explicit [`ref`
+parameter](/docs/functions/reference-parameters/). A normal return commits it;
+an error rolls it back.
+
+Assigning to `self`, `self.field`, or `self[index]` in a value-receiver method
+is a parse error with a hint to use `ref self`. This prevents a method from
+silently changing a discarded copy.
 
 ## Equality
 

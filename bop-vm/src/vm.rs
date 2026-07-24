@@ -1,13 +1,14 @@
 //! Bytecode VM execution.
 //!
-//! This is step 2b of the execution-modes roadmap: a stack-based
-//! dispatch loop that walks a [`Chunk`] produced by [`crate::compile`]
-//! and produces the same observable behaviour as the tree-walking
-//! evaluator in `bop-lang`.
+//! The stack-based dispatch loop executes a validated [`Chunk`] produced by
+//! [`crate::compile`] and preserves the observable behavior of the
+//! tree-walking evaluator in `bop-lang`. The public surface includes
+//! one-shot [`run`] / [`execute`] calls, the lower-level [`Vm`], and
+//! persistent [`BopInstance`] programs.
 //!
 //! # Stack model
 //!
-//! All runtime values live on a single [`Slot`] stack. A [`Slot`] is
+//! All runtime values live on a single internal slot stack. A slot is
 //! either a [`Value`], an in-progress `for`-loop iterator, or an
 //! in-progress `repeat` counter. Iterators and counters are sidecar
 //! items pushed by [`Instr::MakeIter`] / [`Instr::MakeRepeatCount`]
@@ -19,7 +20,7 @@
 //! # Frames
 //!
 //! Each function call — including the top-level program — runs in its
-//! own [`Frame`]. A frame owns its chunk (wrapped in `Rc` so repeated
+//! own internal frame. A frame owns its chunk (wrapped in `Rc` so repeated
 //! calls share the compiled code), its instruction pointer, and its
 //! lexical scope stack. Returning from a function pops the frame and
 //! truncates the value stack back to the frame's base in case the body
@@ -34,7 +35,7 @@
 //!   and invokes [`BopHost::on_tick`]. `max_memory` is shared with the
 //!   tree-walker via the per-value allocation tracking in
 //!   [`bop::memory`], so no VM-specific bookkeeping is needed.
-//! - The VM scales `max_steps` internally by [`STEP_SCALE`] so a single
+//! - The VM scales `max_steps` internally so a single
 //!   source-level step, which typically maps to several bytecode ops,
 //!   still fits under the tree-walker's calibration of
 //!   `BopLimits::standard()` / `BopLimits::demo()`.
@@ -321,6 +322,7 @@ enum PreparedCallable {
     UserMethod {
         entry: Rc<FnEntry>,
         receiver: Value,
+        receiver_target: Option<NamespaceRef>,
     },
     DeferredMethod {
         receiver: Value,
@@ -359,6 +361,7 @@ struct PreparedCall {
     callable: PreparedCallable,
     display_name: String,
     refs: Vec<PreparedRef>,
+    receiver_ref: Option<NamespaceRef>,
     value_count: usize,
 }
 
@@ -2209,7 +2212,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 nested_place,
             } => {
                 let receiver = self.pop_value(line)?;
-                self.prepare_method_call(receiver, method, site, nested_place, line)?;
+                self.prepare_method_call(receiver, None, method, site, nested_place, line)?;
             }
             Instr::PrepareMethodNamed {
                 target,
@@ -2779,6 +2782,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     fn prepare_method_call(
         &mut self,
         receiver: Value,
+        receiver_target: Option<NamespaceRef>,
         method_idx: NameIdx,
         site: CallSiteIdx,
         nested_place: bool,
@@ -2827,7 +2831,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 .cloned()
             {
                 return self.preflight_call(
-                    PreparedCallable::UserMethod { entry, receiver },
+                    PreparedCallable::UserMethod {
+                        entry,
+                        receiver,
+                        receiver_target,
+                    },
                     format!("{}.{}", type_key.1, method),
                     site,
                     line,
@@ -2892,6 +2900,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                                 )?;
                             return self.prepare_method_call(
                                 Value::Fn(function),
+                                None,
                                 method_idx,
                                 site,
                                 false,
@@ -2901,6 +2910,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         if let Some(module) = self.module_alias(&receiver_name).cloned() {
                             return self.prepare_method_call(
                                 Value::Module(module),
+                                None,
                                 method_idx,
                                 site,
                                 false,
@@ -2928,7 +2938,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 line,
             );
         }
-        self.prepare_method_call(receiver, method_idx, site, false, line)
+        self.prepare_method_call(receiver, Some(target), method_idx, site, false, line)
     }
 
     fn preflight_call(
@@ -2945,7 +2955,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let expected_modes: Option<&[ParamMode]> = match &callable {
             PreparedCallable::User(entry) => Some(&entry.param_modes),
             PreparedCallable::Closure(function) => Some(&function.param_modes),
-            PreparedCallable::UserMethod { entry, .. } => {
+            PreparedCallable::UserMethod {
+                entry,
+                receiver_target,
+                ..
+            } => {
                 let actual_arity = site.arg_modes.len() + 1;
                 if entry.param_modes.len() != actual_arity {
                     return Err(error(
@@ -2958,8 +2972,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         ),
                     ));
                 }
-                if entry.param_modes.first() != Some(&ParamMode::Value) {
-                    return Err(error(line, "VM: user method receiver cannot be `ref`"));
+                if entry.param_modes.first() == Some(&ParamMode::Ref)
+                    && receiver_target.is_none()
+                {
+                    let mut error = BopError::runtime(
+                        "a `ref` method receiver must be a variable",
+                        line,
+                    );
+                    error.friendly_hint = Some(
+                        "Store the value in a `let` binding before calling this method."
+                            .to_string(),
+                    );
+                    return Err(error);
                 }
                 Some(&entry.param_modes[1..])
             }
@@ -3025,7 +3049,37 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
         }
 
+        let receiver_ref = match &callable {
+            PreparedCallable::UserMethod {
+                entry,
+                receiver_target,
+                ..
+            } if entry.param_modes.first() == Some(&ParamMode::Ref) => {
+                let recipe = receiver_target.expect("mutable receiver target was preflighted");
+                let name = self.current_chunk().name(recipe.name_idx());
+                if bop::naming::is_constant_name(name) {
+                    return Err(bop::error_messages::constant_mutation_error(name, line));
+                }
+                if recipe.slot_idx().is_none()
+                    && self
+                        .frames
+                        .last()
+                        .is_some_and(|frame| frame.captured_names.contains(name))
+                {
+                    return Err(bop::ref_params::captured_ref_target(1, line));
+                }
+                Some(recipe)
+            }
+            _ => None,
+        };
         let mut seen = BTreeSet::new();
+        if let Some(recipe) = receiver_ref {
+            let identity = match recipe.slot_idx() {
+                Some(slot) => (0_u8, slot.0),
+                None => (1_u8, recipe.name_idx().0),
+            };
+            seen.insert(identity);
+        }
         let mut refs = Vec::new();
         for (index, (mode, target)) in site
             .arg_modes
@@ -3080,6 +3134,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 callable,
                 display_name,
                 refs,
+                receiver_ref,
                 value_count,
             });
         Ok(())
@@ -3115,7 +3170,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
         }
 
-        let mut pending = Vec::with_capacity(prepared.refs.len());
+        let mut pending =
+            Vec::with_capacity(prepared.refs.len() + usize::from(prepared.receiver_ref.is_some()));
+        let receiver_snapshot = if let Some(recipe) = prepared.receiver_ref {
+            let (target, snapshot) = self.resolve_ref_target(recipe, 0, line)?;
+            pending.push(PendingWriteBack {
+                param_slot: SlotIdx(0),
+                target,
+            });
+            Some(snapshot)
+        } else {
+            None
+        };
         for prepared_ref in prepared.refs {
             let (target, snapshot) =
                 self.resolve_ref_target(prepared_ref.recipe, prepared_ref.param, line)?;
@@ -3140,9 +3206,13 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let next = match prepared.callable {
             PreparedCallable::User(entry) => self.enter_user_fn_args(entry, args, line)?,
             PreparedCallable::Closure(function) => self.call_closure(&function, args, line)?,
-            PreparedCallable::UserMethod { entry, receiver } => {
+            PreparedCallable::UserMethod {
+                entry,
+                receiver,
+                ..
+            } => {
                 let mut method_args = Vec::with_capacity(args.len() + 1);
-                method_args.push(receiver);
+                method_args.push(receiver_snapshot.unwrap_or(receiver));
                 method_args.extend(args);
                 self.enter_user_fn_args(entry, method_args, line)?
             }
@@ -3864,10 +3934,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     FrameWrap::None,
                 );
                 self.apply_entry_alias_context(&entry);
-                // User methods don't do mutation back-assign
-                // — the receiver is passed by value, and the
-                // method returns a fresh instance if it wants to
-                // "mutate". Matches the walker's convention.
+                // Legacy `CallMethod` only reaches value-only methods. Calls
+                // with a `ref` receiver or explicit ref arguments use the
+                // prepared-call path above, which owns their atomic
+                // write-backs. Keep the legacy assignment recipe unused here.
                 let _ = assign_back_to;
                 return Ok(Next::Continue);
             }

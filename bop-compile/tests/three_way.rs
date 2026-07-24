@@ -484,6 +484,40 @@ print(output)
 "#,
     ),
     (
+        "user_ref_receiver_commit_order_rollback_and_explicit_targets",
+        r#"struct Counter { value }
+fn Counter.add(ref self, amount) {
+    self.value += amount
+    return self.value
+}
+fn Counter.add_from(ref self, ref other) {
+    self.value += other
+    other += 1
+    return self.value
+}
+fn Counter.fail(ref self) {
+    self.value = 99
+    panic("rollback")
+}
+enum Switch { Off, On }
+fn Switch.turn_on(ref self) {
+    self = Switch::On
+}
+let counter = Counter { value: 1 }
+fn side() {
+    counter.value = 10
+    return 2
+}
+print(counter.add(side()), counter.value)
+let other = 3
+print(counter.add_from(ref other), counter.value, other)
+fn attempt() { counter.fail() }
+print(try_call(attempt), counter.value)
+let switch = Switch::Off
+switch.turn_on()
+print(switch)"#,
+    ),
+    (
         "captured_implicit_ref_receiver_fences_before_arguments",
         r#"fn side() { print("arg"); return 1 }
 fn run() {
@@ -1439,9 +1473,9 @@ print(try_call(install_then_fail).is_err())
 print(box.kept())"#,
     ),
     (
-        "methods_register_before_type_and_receive_self_by_value",
-        r#"fn Later.bump(self) { self.value += 1
-    return self.value
+        "methods_register_before_type_and_read_self_by_value",
+        r#"fn Later.bump(self) {
+    return self.value + 1
 }
 struct Later { value }
 let value = Later { value: 4 }

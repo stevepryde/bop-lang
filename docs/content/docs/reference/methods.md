@@ -21,7 +21,7 @@ Bop dispatches methods with `.name(args...)`. Every built-in method on primitive
 Array methods such as `push`, `pop`, `insert`, `remove`, `reverse`, and `sort`
 mutate a mutable plain-variable receiver using the same transactional
 copy-in/copy-out model as a [`ref`
-parameter](/docs/functions/defining-functions/#reference-parameters). Method
+parameter](/docs/functions/reference-parameters/). Method
 arguments run first, then Bop snapshots the receiver, and a normal return writes
 the updated value back.
 
@@ -33,21 +33,28 @@ places become referenceable, `groups[0].push(x)` and
 `record.items.push(x)` raise a catchable error with an assign-mutate-reassign
 hint.
 
-User-defined methods always receive `self` by value, even if their name matches
-a built-in mutator. They may declare explicit ref parameters after the receiver:
+User-defined methods choose their receiver mode explicitly. An ordinary `self`
+is a read-only value snapshot; assigning through it is a parse error. Declare
+`ref self` when the method should update the caller's binding:
 
 ```bop
 struct Counter { amount }
 
-fn Counter.add_to(self, ref total) {
-  total += self.amount
+fn Counter.add(ref self, amount) {
+  self.amount += amount
 }
 
 let counter = Counter { amount: 3 }
-let total = 4
-counter.add_to(ref total)
-print(total)    // 7
+counter.add(4)
+print(counter.amount)    // 7
 ```
+
+The receiver marker appears only in the declaration: `counter.add(4)`, not
+`ref counter.add(4)`. The receiver must be a mutable plain-variable binding.
+It is snapshotted after ordinary arguments, commits on a normal return, and
+rolls back on an error. A method may also declare explicit `ref` parameters
+after its receiver; all receiver and argument targets must be distinct and
+commit as one transaction.
 
 ## Methods on every value
 

@@ -333,7 +333,7 @@ pub fn error(line: u32, message: impl Into<String>) -> BopError {
 
 /// Like [`error`] but takes a niche-packed column alongside
 /// the line. Call sites with an `Expr` or `Stmt` in hand
-/// prefer this over `error` so the rendered carat points at
+/// prefer this over `error` so the rendered caret points at
 /// the offending character rather than just the line start.
 pub fn error_at(
     line: u32,
@@ -369,7 +369,7 @@ pub fn error_with_hint(
 
 /// Column-aware variant of [`error_with_hint`]. Same hint
 /// payload, plus a `column` slot so the renderer can draw the
-/// carat.
+/// caret.
 pub fn error_with_hint_at(
     line: u32,
     column: Option<core::num::NonZeroU32>,

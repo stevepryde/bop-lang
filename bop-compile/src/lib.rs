@@ -1,40 +1,88 @@
-//! AOT Bop → Rust transpiler.
+//! Ahead-of-time Bop-to-Rust transpiler.
 //!
-//! [`transpile`] takes a Bop source string, parses it with `bop-lang`,
-//! and emits Rust source that links against `bop-lang` (for
-//! [`Value`](bop::value::Value), operators, and language-level
-//! builtins) and optionally `bop-sys` (for the standard host).
+//! [`transpile`] parses a Bop program and emits readable Rust source that
+//! links against `bop-lang` for runtime values, operators, built-ins, host
+//! calls, and diagnostics. The generated source can be compiled as a native
+//! binary or included as a module in a larger Rust application.
 //!
-//! The emitted code is intentionally human-readable: user-defined
-//! Bop functions become top-level Rust fns, the top-level program
-//! becomes `run_program`, and the `main` entry point drives it
-//! against [`bop_sys::StandardHost`]. Run the output with `rustc` or
-//! `cargo build` to produce a native binary.
+//! The AOT engine implements the same language semantics as the tree-walker
+//! and bytecode VM, including methods, closures, string interpolation,
+//! indexed and field mutation, transactional `ref` parameters, structs and
+//! enums, pattern matching, `Result`, lazy iteration, and all forms of `use`.
+//! A three-engine differential suite exercises their observable behavior
+//! together.
 //!
-//! # Scope (v1 starter)
+//! # Basic transpilation
 //!
-//! Supported today:
+//! ```
+//! use bop_compile::{Options, transpile};
 //!
-//! - All literals (numbers, strings, bools, `none`, arrays, dicts)
-//! - Binary / unary operators, including short-circuit `&&` / `||`
-//! - `let`, assign, compound assign on plain variables
-//! - `if` / `else` (both as statement and expression)
-//! - `while`, `repeat`, `for x in ...` (over arrays, ranges, or
-//!   strings)
-//! - `break`, `continue`
-//! - Built-in function calls (`print`, `range`, `str`, `int`, `type`,
-//!   `abs`, `min`, `max`, `rand`, `len`, `inspect`)
-//! - User-defined functions with recursion
-//! - Indexed reads (`arr[i]`, `dict[k]`, `"str"[i]`)
+//! let rust_source = transpile(
+//!     r#"let answer = 6 * 7
+//! print("answer = {answer}")"#,
+//!     &Options::default(),
+//! ).unwrap();
+//! assert!(rust_source.contains("fn main()"));
+//! ```
 //!
-//! Not yet emitted (tracked for follow-ups — the transpiler returns
-//! an error naming the missing feature):
+//! `use` statements need a compile-time [`ModuleResolver`]. For bundled
+//! stdlib modules, callers normally delegate that resolver to
+//! `bop::stdlib::resolve`; for in-memory programs, [`modules_from_map`] is
+//! convenient:
 //!
-//! - Method calls (e.g. `arr.push(1)`)
-//! - String interpolation (`"hi {name}"`)
-//! - Indexed writes (`arr[i] = val`, `arr[i] += 1`)
-//! - `BopLimits` sandbox mode (step / memory enforcement in the
-//!   emitted code)
+//! ```
+//! use bop_compile::{Options, modules_from_map, transpile};
+//!
+//! let rust_source = transpile(
+//!     "use config.{answer}\nprint(answer)",
+//!     &Options {
+//!         module_resolver: Some(modules_from_map([
+//!             ("config", "let answer = 42"),
+//!         ])),
+//!         ..Options::default()
+//!     },
+//! ).unwrap();
+//! assert!(rust_source.contains("42"));
+//! ```
+//!
+//! With the default options, the output contains `fn main()` and constructs
+//! `bop_sys::StandardHost`. Set [`Options::emit_main`] and
+//! [`Options::use_bop_sys`] to `false` for a library surface driven by a
+//! custom [`bop::BopHost`].
+//!
+//! # Sandboxed output
+//!
+//! [`Options::sandbox`] adds [`bop::BopLimits`] accounting and host tick
+//! callbacks to generated code. With `sandbox: true` and `emit_main: false`,
+//! direct root-level `pub fn` declarations also generate a persistent
+//! `BopInstance` API with `load`, `entry_points`, `call`, and `call_value`.
+//! Globals, modules, functions, callbacks, types, methods, and random-number
+//! state remain live between calls.
+//!
+//! Rust calls into the generated `BopInstance` remain value-only and reject
+//! ref-bearing entries or callbacks before execution. A value-only public
+//! entry can use reference parameters internally. Generated ref calls preserve
+//! the language's target validation, copy-in/copy-out staging, atomic commit,
+//! error rollback, forwarding, and mutating receiver behavior. See the
+//! [reference-parameters
+//! guide](https://bop-lang.com/docs/functions/reference-parameters/).
+//! Generated user methods also preserve `ref self` receiver write-back and
+//! rollback; ordinary `self` receivers are read-only.
+//!
+//! Unsandboxed library output exposes the one-shot `run` API and deliberately
+//! omits accounting overhead. Do not run untrusted programs through that
+//! mode.
+//!
+//! # Output shaping
+//!
+//! [`Options::module_name`] wraps the generated items in a public Rust module,
+//! which lets one crate include several transpiled programs without name
+//! collisions. [`transpile_ast`] accepts an already parsed Bop AST for build
+//! tools that perform their own parse and diagnostic pass.
+//!
+//! See the [embedding guide](https://bop-lang.com/docs/embedding/) and
+//! [stateful instance guide](https://bop-lang.com/docs/embedding/instances/)
+//! for generated signatures, dependency setup, limits, and lifecycle rules.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -78,7 +126,7 @@ pub fn modules_from_map<S: Into<String>>(
 #[derive(Clone)]
 pub struct Options {
     /// If true, emit a `fn main()` that drives the program with
-    /// [`bop_sys::StandardHost`]. If false, emit only the library
+    /// `bop_sys::StandardHost`. If false, emit only the library
     /// surface (the caller is expected to provide their own
     /// entry point and host).
     pub emit_main: bool,

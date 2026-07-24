@@ -1286,32 +1286,148 @@ fn collect_nested_fns_in_expr(expr: &Expr, all: &mut HashMap<String, Vec<Paramet
 }
 
 fn callable_assignment_names(stmts: &[Stmt]) -> HashSet<String> {
+    fn visit_expr(expr: &Expr, names: &mut HashSet<String>) {
+        match &expr.kind {
+            ExprKind::BinaryOp { left, right, .. }
+            | ExprKind::Index {
+                object: left,
+                index: right,
+            } => {
+                visit_expr(left, names);
+                visit_expr(right, names);
+            }
+            ExprKind::UnaryOp { expr, .. }
+            | ExprKind::Try(expr)
+            | ExprKind::FieldAccess { object: expr, .. } => visit_expr(expr, names),
+            ExprKind::Call { callee, args } => {
+                visit_expr(callee, names);
+                for arg in args {
+                    if arg.mode == ParamMode::Ref {
+                        if let ExprKind::Ident(name) = &arg.value.kind {
+                            names.insert(name.clone());
+                        }
+                    }
+                    visit_expr(&arg.value, names);
+                }
+            }
+            ExprKind::MethodCall { object, args, .. } => {
+                visit_expr(object, names);
+                for arg in args {
+                    if arg.mode == ParamMode::Ref {
+                        if let ExprKind::Ident(name) = &arg.value.kind {
+                            names.insert(name.clone());
+                        }
+                    }
+                    visit_expr(&arg.value, names);
+                }
+            }
+            ExprKind::StructConstruct { fields, .. } | ExprKind::Dict(fields) => {
+                for (_, value) in fields {
+                    visit_expr(value, names);
+                }
+            }
+            ExprKind::EnumConstruct { payload, .. } => match payload {
+                VariantPayload::Unit => {}
+                VariantPayload::Tuple(values) => {
+                    for value in values {
+                        visit_expr(value, names);
+                    }
+                }
+                VariantPayload::Struct(fields) => {
+                    for (_, value) in fields {
+                        visit_expr(value, names);
+                    }
+                }
+            },
+            ExprKind::Array(values) => {
+                for value in values {
+                    visit_expr(value, names);
+                }
+            }
+            ExprKind::IfExpr {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                visit_expr(condition, names);
+                visit_expr(then_expr, names);
+                visit_expr(else_expr, names);
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                visit_expr(scrutinee, names);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        visit_expr(guard, names);
+                    }
+                    visit_expr(&arm.body, names);
+                }
+            }
+            // Nested lambdas are separate callable mutation domains.
+            ExprKind::Lambda { .. }
+            | ExprKind::Int(_)
+            | ExprKind::Number(_)
+            | ExprKind::Str(_)
+            | ExprKind::StringInterp(_)
+            | ExprKind::Bool(_)
+            | ExprKind::None
+            | ExprKind::Ident(_) => {}
+        }
+    }
+
     fn visit(stmts: &[Stmt], names: &mut HashSet<String>) {
         for stmt in stmts {
             match &stmt.kind {
+                StmtKind::Let { value, .. } => visit_expr(value, names),
                 StmtKind::Assign {
                     target: AssignTarget::Variable(name),
+                    value,
                     ..
                 } => {
                     names.insert(name.clone());
+                    visit_expr(value, names);
+                }
+                StmtKind::Assign { target, value, .. } => {
+                    match target {
+                        AssignTarget::Index { object, index } => {
+                            visit_expr(object, names);
+                            visit_expr(index, names);
+                        }
+                        AssignTarget::Field { object, .. } => visit_expr(object, names),
+                        AssignTarget::Variable(_) => unreachable!(),
+                    }
+                    visit_expr(value, names);
                 }
                 StmtKind::If {
+                    condition,
                     body,
                     else_ifs,
                     else_body,
-                    ..
                 } => {
+                    visit_expr(condition, names);
                     visit(body, names);
-                    for (_, body) in else_ifs {
+                    for (condition, body) in else_ifs {
+                        visit_expr(condition, names);
                         visit(body, names);
                     }
                     if let Some(body) = else_body {
                         visit(body, names);
                     }
                 }
-                StmtKind::While { body, .. }
-                | StmtKind::Repeat { body, .. }
-                | StmtKind::ForIn { body, .. } => visit(body, names),
+                StmtKind::While { condition, body } => {
+                    visit_expr(condition, names);
+                    visit(body, names);
+                }
+                StmtKind::Repeat { count, body } => {
+                    visit_expr(count, names);
+                    visit(body, names);
+                }
+                StmtKind::ForIn { iterable, body, .. } => {
+                    visit_expr(iterable, names);
+                    visit(body, names);
+                }
+                StmtKind::Return { value: Some(value) } | StmtKind::ExprStmt(value) => {
+                    visit_expr(value, names);
+                }
                 // Nested named functions and lambdas are separate callable
                 // mutation domains and are analysed when emitted.
                 _ => {}
@@ -4260,6 +4376,12 @@ impl Emitter {
         .unwrap();
         if arity == 0 {
             writeln!(self.out, "    {body}(ctx)").unwrap();
+        } else if site.params[0].mode == ParamMode::Ref {
+            writeln!(
+                self.out,
+                "    let _ = (ctx, obj, args); let mut error = ::bop::error::BopError::runtime(\"a `ref` method receiver must be a variable\", line); error.friendly_hint = Some(\"Store the value in a `let` binding before calling this method.\".to_string()); Err(error)"
+            )
+            .unwrap();
         } else {
             for index in 0..arity.saturating_sub(1) {
                 writeln!(self.out, "    let mut __a{index} = args[{index}].clone();").unwrap();
@@ -4284,7 +4406,7 @@ impl Emitter {
         let outcome_adapter = method_site_outcome_adapter_name(site.id);
         writeln!(
             self.out,
-            "fn {outcome_adapter}(ctx: &mut Ctx<'_>, obj: ::bop::value::Value, mut args: ::std::vec::Vec<::bop::value::Value>, line: u32) -> Result<__BopCallOutcome, ::bop::error::BopError> {{"
+            "fn {outcome_adapter}(ctx: &mut Ctx<'_>, mut obj: ::bop::value::Value, mut args: ::std::vec::Vec<::bop::value::Value>, line: u32) -> Result<__BopMethodOutcome, ::bop::error::BopError> {{"
         )
         .unwrap();
         writeln!(
@@ -4322,13 +4444,18 @@ impl Emitter {
         if arity == 0 {
             writeln!(
                 self.out,
-                "    let value = {body}(ctx)?;\n    Ok(__BopCallOutcome {{ value, args: ::std::vec::Vec::new() }})"
+                "    let value = {body}(ctx)?;\n    Ok(__BopMethodOutcome {{ value, receiver: obj, args: ::std::vec::Vec::new() }})"
             )
             .unwrap();
         } else {
+            let receiver = if site.params[0].mode == ParamMode::Ref {
+                "&mut obj"
+            } else {
+                "obj.clone()"
+            };
             writeln!(
                 self.out,
-                "    let value = {body}(ctx, obj{call_args})?;\n    Ok(__BopCallOutcome {{ value, args: vec![{final_args}] }})"
+                "    let value = {body}(ctx, {receiver}{call_args})?;\n    Ok(__BopMethodOutcome {{ value, receiver: obj, args: vec![{final_args}] }})"
             )
             .unwrap();
         }
@@ -4405,7 +4532,7 @@ impl Emitter {
             "fn __bop_user_method_type_key(obj: &::bop::value::Value) -> ::std::option::Option<(&str, &str)> {\n    match obj {\n        ::bop::value::Value::Struct(value) => Some((value.module_path(), value.type_name())),\n        ::bop::value::Value::EnumVariant(value) => Some((value.module_path(), value.type_name())),\n        _ => None,\n    }\n}\n\n",
         );
         self.out.push_str(
-            "fn __bop_preflight_user_method(\n    ctx: &Ctx<'_>,\n    obj: &::bop::value::Value,\n    method: &str,\n    actual_modes: &[::bop::parser::ParamMode],\n    line: u32,\n) -> Result<::std::option::Option<__BopMethodFn>, ::bop::error::BopError> {\n    let Some((module_path, type_name)) = __bop_user_method_type_key(obj) else { return Ok(None); };\n    match (module_path, type_name, method) {\n",
+            "fn __bop_preflight_user_method(\n    ctx: &Ctx<'_>,\n    obj: &::bop::value::Value,\n    method: &str,\n    actual_modes: &[::bop::parser::ParamMode],\n    receiver_is_place: bool,\n    line: u32,\n) -> Result<::std::option::Option<__BopMethodFn>, ::bop::error::BopError> {\n    let Some((module_path, type_name)) = __bop_user_method_type_key(obj) else { return Ok(None); };\n    match (module_path, type_name, method) {\n",
         );
         for (slot, (module_path, type_name, method_name)) in
             self.types.method_slots.iter().enumerate()
@@ -4439,9 +4566,18 @@ impl Emitter {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
+                let receiver_check = if site
+                    .params
+                    .first()
+                    .is_some_and(|param| param.mode == ParamMode::Ref)
+                {
+                    "if !receiver_is_place { let mut error = ::bop::error::BopError::runtime(\"a `ref` method receiver must be a variable\", line); error.friendly_hint = Some(\"Store the value in a `let` binding before calling this method.\".to_string()); return Err(error); } "
+                } else {
+                    ""
+                };
                 writeln!(
                     self.out,
-                    "            Some(adapter) if adapter as usize == {adapter} as *const () as usize => {{ if actual_modes.len() + 1 != {arity}usize {{ return Err(::bop::error::BopError::runtime(format!({arity_message}, actual_modes.len() + 1), line)); }} ::bop::validate_call_modes({label}, &[{modes}], actual_modes, line)?; Ok(Some(adapter)) }},",
+                    "            Some(adapter) if adapter as usize == {adapter} as *const () as usize => {{ {receiver_check}if actual_modes.len() + 1 != {arity}usize {{ return Err(::bop::error::BopError::runtime(format!({arity_message}, actual_modes.len() + 1), line)); }} ::bop::validate_call_modes({label}, &[{modes}], actual_modes, line)?; Ok(Some(adapter)) }},",
                     adapter = method_site_adapter_name(site.id),
                     label = rust_string_literal(&format!("{type_name}.{method_name}")),
                     arity = site.params.len(),
@@ -4461,7 +4597,25 @@ impl Emitter {
         self.out.push_str("        _ => Ok(None),\n    }\n}\n\n");
 
         self.out.push_str(
-            "fn __bop_call_preflighted_user_method_outcome(\n    ctx: &mut Ctx<'_>,\n    adapter: __BopMethodFn,\n    obj: ::bop::value::Value,\n    args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<__BopCallOutcome, ::bop::error::BopError> {\n    match adapter as usize {\n",
+            "fn __bop_user_method_receiver_is_ref(adapter: __BopMethodFn) -> bool {\n    match adapter as usize {\n",
+        );
+        for site in &self.types.method_sites {
+            let is_ref = site
+                .params
+                .first()
+                .is_some_and(|param| param.mode == ParamMode::Ref);
+            writeln!(
+                self.out,
+                "        value if value == {adapter} as *const () as usize => {is_ref},",
+                adapter = method_site_adapter_name(site.id),
+            )
+            .unwrap();
+        }
+        self.out
+            .push_str("        _ => false,\n    }\n}\n\n");
+
+        self.out.push_str(
+            "fn __bop_call_preflighted_user_method_outcome(\n    ctx: &mut Ctx<'_>,\n    adapter: __BopMethodFn,\n    obj: ::bop::value::Value,\n    args: ::std::vec::Vec<::bop::value::Value>,\n    line: u32,\n) -> Result<__BopMethodOutcome, ::bop::error::BopError> {\n    match adapter as usize {\n",
         );
         for site in &self.types.method_sites {
             let invoke = if self.opts.sandbox {
@@ -6190,7 +6344,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             for name in &names {
                 self.bind_local(name);
                 src.push_str(&format!(
-                    "                let {}: ::bop::value::Value = __bindings.iter().rev().find(|(k, _)| k == {}).map(|(_, v)| v.clone()).unwrap_or(::bop::value::Value::None);\n",
+                    "                let mut {}: ::bop::value::Value = __bindings.iter().rev().find(|(k, _)| k == {}).map(|(_, v)| v.clone()).unwrap_or(::bop::value::Value::None);\n",
                     rust_user_ident(name),
                     rust_string_literal(name)
                 ));
@@ -7023,6 +7177,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         if args.iter().any(|arg| arg.mode == ParamMode::Ref) {
             let object_src = self.expr_src(object)?;
             let object_tmp = self.fresh_tmp();
+            let user_method = self.fresh_tmp();
             let modes = args
                 .iter()
                 .map(|arg| match arg.mode {
@@ -7109,7 +7264,6 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 .collect::<Vec<_>>()
                 .join(", ");
             let outcome = self.fresh_tmp();
-            let user_method = self.fresh_tmp();
             let module_callable = self.fresh_tmp();
             let mut commits = String::new();
             for (index, target) in targets.iter().enumerate() {
@@ -7118,26 +7272,98 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 };
                 write!(
                     commits,
-                    "{{ let __target: &mut ::bop::value::Value = {target}; *__target = {outcome}.args[{index}].clone(); }} "
+                    "{{ let __target: &mut ::bop::value::Value = {target}; *__target = __bop_staged_args[{index}].clone(); }} "
                 )
                 .unwrap();
             }
+            let (receiver_fence, receiver_snapshot, receiver_commit) =
+                if let ExprKind::Ident(name) = &object.kind {
+                    let storage = self.binding_storage(name).or_else(|| {
+                        (!self.fn_info.all_fns.contains_key(name)).then(|| {
+                            BindingStorage::Persistent {
+                                module: self.current_module.clone(),
+                                name: name.clone(),
+                            }
+                        })
+                    });
+                    let Some(storage) = storage else {
+                        return Ok(format!(
+                            "{{ let {object_tmp} = {object_src}; \
+                             let {user_method} = __bop_preflight_user_method(ctx, &{object_tmp}, {method}, &[{modes}], true, {line})?; \
+                             let {module_callable} = if {user_method}.is_some() {{ ::std::option::Option::None }} else {{ __bop_preflight_module_call(ctx, &{object_tmp}, {method}, &[{modes}], {line})? }}; \
+                             if {user_method}.is_none() && {module_callable}.is_none() {{ ::bop::validate_value_only_call_modes({method}, &[{modes}], {line})?; unreachable!(); }} \
+                             {fences}{ordinary}{snapshots}\
+                             let (__bop_result, __bop_staged_args) = if let ::std::option::Option::Some(__bop_method_adapter) = {user_method} {{ \
+                                 let {outcome} = __bop_call_preflighted_user_method_outcome(ctx, __bop_method_adapter, {object_tmp}.clone(), vec![{values}], {line})?; ({outcome}.value, {outcome}.args) \
+                             }} else {{ let {outcome} = __bop_call_value(ctx, {module_callable}.expect(\"preflight selected a live module export\"), vec![{values}], {line})?; ({outcome}.value, {outcome}.args) }}; \
+                             {commits}__bop_result }}",
+                            method = rust_string_literal(method),
+                        ));
+                    };
+                    let (target_preflight, target_read, target_write) =
+                        self.ref_target_sources(&storage, name, line);
+                    let mut receiver_fence = target_preflight;
+                    if self.is_constant_binding(name) {
+                        write!(
+                            receiver_fence,
+                            "if {user_method}.is_some_and(__bop_user_method_receiver_is_ref) {{ return Err(::bop::error_messages::constant_mutation_error({}, {line})); }} ",
+                            rust_string_literal(name),
+                        )
+                        .unwrap();
+                    }
+                    if self.is_captured_binding(name) {
+                        write!(
+                            receiver_fence,
+                            "if {user_method}.is_some_and(__bop_user_method_receiver_is_ref) {{ return Err(::bop::ref_params::captured_ref_target(1, {line})); }} "
+                        )
+                        .unwrap();
+                    }
+                    if seen.contains(name) {
+                        write!(
+                            receiver_fence,
+                            "if {user_method}.is_some_and(__bop_user_method_receiver_is_ref) {{ return Err(::bop::ref_params::duplicate_ref_target({line})); }} "
+                        )
+                        .unwrap();
+                    }
+                    (
+                        receiver_fence,
+                        format!(
+                            "let __bop_receiver_snapshot = if {user_method}.is_some_and(__bop_user_method_receiver_is_ref) {{ ::std::option::Option::Some({target_read}) }} else {{ ::std::option::Option::None }}; "
+                        ),
+                        format!(
+                            "if let ::std::option::Option::Some(__bop_staged_receiver) = __bop_staged_receiver {{ let __target: &mut ::bop::value::Value = {target_write}; *__target = __bop_staged_receiver; }} "
+                        ),
+                    )
+                } else {
+                    (String::new(), String::new(), String::new())
+                };
+            let user_receiver = if matches!(&object.kind, ExprKind::Ident(_)) {
+                format!(
+                    "__bop_receiver_snapshot.unwrap_or_else(|| {object_tmp}.clone())"
+                )
+            } else {
+                format!("{object_tmp}.clone()")
+            };
             return Ok(format!(
                 "{{ let {object_tmp} = {object_src}; \
-                 let {user_method} = __bop_preflight_user_method(ctx, &{object_tmp}, {method}, &[{modes}], {line})?; \
+                 let {user_method} = __bop_preflight_user_method(ctx, &{object_tmp}, {method}, &[{modes}], {receiver_is_place}, {line})?; \
                  let {module_callable} = if {user_method}.is_some() {{ ::std::option::Option::None }} else {{ __bop_preflight_module_call(ctx, &{object_tmp}, {method}, &[{modes}], {line})? }}; \
                  if {user_method}.is_none() && {module_callable}.is_none() {{ \
                      ::bop::validate_value_only_call_modes({method}, &[{modes}], {line})?; \
                      unreachable!(); \
                  }} \
-                 {fences}{ordinary}{snapshots}\
-                 let {outcome} = if let ::std::option::Option::Some(__bop_method_adapter) = {user_method} {{ \
-                     __bop_call_preflighted_user_method_outcome(ctx, __bop_method_adapter, {object_tmp}, vec![{values}], {line})? \
+                 {receiver_fence}{fences}{ordinary}{receiver_snapshot}{snapshots}\
+                 let (__bop_result, __bop_staged_args, __bop_staged_receiver) = if let ::std::option::Option::Some(__bop_method_adapter) = {user_method} {{ \
+                     let {outcome} = __bop_call_preflighted_user_method_outcome(ctx, __bop_method_adapter, {user_receiver}, vec![{values}], {line})?; \
+                     let __bop_receiver = if __bop_user_method_receiver_is_ref(__bop_method_adapter) {{ ::std::option::Option::Some({outcome}.receiver) }} else {{ ::std::option::Option::None }}; \
+                     ({outcome}.value, {outcome}.args, __bop_receiver) \
                  }} else {{ \
-                     __bop_call_value(ctx, {module_callable}.expect(\"preflight selected a live module export\"), vec![{values}], {line})? \
+                     let {outcome} = __bop_call_value(ctx, {module_callable}.expect(\"preflight selected a live module export\"), vec![{values}], {line})?; \
+                     ({outcome}.value, {outcome}.args, ::std::option::Option::None) \
                  }}; \
-                 {commits}{outcome}.value }}",
+                 {receiver_commit}{commits}__bop_result }}",
                 method = rust_string_literal(method),
+                receiver_is_place = matches!(&object.kind, ExprKind::Ident(_)),
             ));
         }
         let mutating = methods::is_mutating_method(method);
@@ -7147,6 +7373,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
         let mut resolved_module_callee = None;
         let mut named_user_method = None;
         let mut named_user_receiver = None;
+        let mut named_user_ref_target: Option<(String, String)> = None;
         let mut object_preflight = String::new();
         if !named_mutating {
             let src = self.expr_src(object)?;
@@ -7160,10 +7387,42 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 .join(", ");
             write!(
                 object_preflight,
-                "let {tmp} = {src}; let {user_tmp} = __bop_preflight_user_method(ctx, &{tmp}, {method}, &[{value_modes}], {line})?; let {module_tmp} = if {user_tmp}.is_some() {{ ::std::option::Option::None }} else {{ __bop_preflight_module_call(ctx, &{tmp}, {method}, &[{value_modes}], {line})? }}; ",
+                "let {tmp} = {src}; let {user_tmp} = __bop_preflight_user_method(ctx, &{tmp}, {method}, &[{value_modes}], {receiver_is_place}, {line})?; let {module_tmp} = if {user_tmp}.is_some() {{ ::std::option::Option::None }} else {{ __bop_preflight_module_call(ctx, &{tmp}, {method}, &[{value_modes}], {line})? }}; ",
                 method = rust_string_literal(method),
+                receiver_is_place = matches!(&object.kind, ExprKind::Ident(_)),
             )
             .unwrap();
+            if let ExprKind::Ident(name) = &object.kind {
+                let storage = self.binding_storage(name).or_else(|| {
+                    (!self.fn_info.all_fns.contains_key(name)).then(|| {
+                        BindingStorage::Persistent {
+                            module: self.current_module.clone(),
+                            name: name.clone(),
+                        }
+                    })
+                });
+                if let Some(storage) = storage {
+                    let (target_preflight, target_read, target_write) =
+                        self.ref_target_sources(&storage, name, line);
+                    object_preflight.push_str(&target_preflight);
+                    if self.is_constant_binding(name) {
+                        write!(
+                            object_preflight,
+                            "if {user_tmp}.is_some_and(__bop_user_method_receiver_is_ref) {{ return Err(::bop::error_messages::constant_mutation_error({}, {line})); }} ",
+                            rust_string_literal(name),
+                        )
+                        .unwrap();
+                    }
+                    if self.is_captured_binding(name) {
+                        write!(
+                            object_preflight,
+                            "if {user_tmp}.is_some_and(__bop_user_method_receiver_is_ref) {{ return Err(::bop::ref_params::captured_ref_target(1, {line})); }} "
+                        )
+                        .unwrap();
+                    }
+                    named_user_ref_target = Some((target_read, target_write));
+                }
+            }
             if let Some(expected) = methods::builtin_method_arity(method) {
                 write!(
                     object_preflight,
@@ -7250,7 +7509,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             };
             write!(
                 arg_lets,
-                "let ({user_tmp}, {receiver_tmp}, {receiver_is_array_tmp}) = {{ let __bop_preflight_receiver: &::bop::value::Value = {receiver}; let __bop_method_adapter = __bop_preflight_user_method(ctx, __bop_preflight_receiver, {}, &[{}], {line})?; let __bop_saved_receiver = if __bop_method_adapter.is_some() {{ ::std::option::Option::Some(__bop_preflight_receiver.clone()) }} else {{ ::std::option::Option::None }}; let __bop_receiver_is_array = matches!(__bop_preflight_receiver, ::bop::value::Value::Array(_)); (__bop_method_adapter, __bop_saved_receiver, __bop_receiver_is_array) }}; if {user_tmp}.is_none() && {receiver_is_array_tmp} {{ {captured_guard}::bop::methods::reject_constant_array_mutation({}, {}, {line})?; if {actual}usize != {expected}usize {{ return Err(::bop::error::BopError::runtime({}, {line})); }} }} ",
+                "let ({user_tmp}, {receiver_tmp}, {receiver_is_array_tmp}) = {{ let __bop_preflight_receiver: &::bop::value::Value = {receiver}; let __bop_method_adapter = __bop_preflight_user_method(ctx, __bop_preflight_receiver, {}, &[{}], true, {line})?; let __bop_saved_receiver = if __bop_method_adapter.is_some() {{ ::std::option::Option::Some(__bop_preflight_receiver.clone()) }} else {{ ::std::option::Option::None }}; let __bop_receiver_is_array = matches!(__bop_preflight_receiver, ::bop::value::Value::Array(_)); (__bop_method_adapter, __bop_saved_receiver, __bop_receiver_is_array) }}; if {user_tmp}.is_none() && {receiver_is_array_tmp} {{ {captured_guard}::bop::methods::reject_constant_array_mutation({}, {}, {line})?; if {actual}usize != {expected}usize {{ return Err(::bop::error::BopError::runtime({}, {line})); }} }} ",
                 rust_string_literal(method),
                 args.iter()
                     .map(|_| "::bop::parser::ParamMode::Value")
@@ -7267,8 +7526,33 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 actual = args.len(),
             )
             .unwrap();
+            let storage =
+                self.binding_storage(target_name)
+                    .unwrap_or_else(|| BindingStorage::Persistent {
+                        module: self.current_module.clone(),
+                        name: target_name.clone(),
+                    });
+            let (target_preflight, target_read, target_write) =
+                self.ref_target_sources(&storage, target_name, line);
+            arg_lets.push_str(&target_preflight);
+            if self.is_constant_binding(target_name) {
+                write!(
+                    arg_lets,
+                    "if {user_tmp}.is_some_and(__bop_user_method_receiver_is_ref) {{ return Err(::bop::error_messages::constant_mutation_error({}, {line})); }} ",
+                    rust_string_literal(target_name),
+                )
+                .unwrap();
+            }
+            if self.is_captured_binding(target_name) {
+                write!(
+                    arg_lets,
+                    "if {user_tmp}.is_some_and(__bop_user_method_receiver_is_ref) {{ return Err(::bop::ref_params::captured_ref_target(1, {line})); }} "
+                )
+                .unwrap();
+            }
             named_user_method = Some(user_tmp);
             named_user_receiver = Some(receiver_tmp);
+            named_user_ref_target = Some((target_read, target_write));
         }
         for arg in args {
             let src = self.expr_src(arg)?;
@@ -7334,6 +7618,16 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 format!("::std::vec![{}]", arg_tmps.join(", "))
             };
             let obj_tmp = self.fresh_tmp();
+            let (user_target_read, user_target_write) = named_user_ref_target
+                .clone()
+                .expect("named user receiver has ref target accessors");
+            let user_dispatch = format!(
+                "{{ let __bop_receiver_is_ref = __bop_user_method_receiver_is_ref(__bop_method_adapter); \
+                    let __bop_receiver = if __bop_receiver_is_ref {{ {user_target_read} }} else {{ {user_receiver}.as_ref().expect(\"preflighted user receiver\").clone() }}; \
+                    let __bop_outcome = __bop_call_preflighted_user_method_outcome(ctx, __bop_method_adapter, __bop_receiver, {owned_args}, {line})?; \
+                    if __bop_receiver_is_ref {{ let __target: &mut ::bop::value::Value = {user_target_write}; *__target = __bop_outcome.receiver; }} \
+                    __bop_outcome.value }}"
+            );
             let constant_guard = format!(
                 "::bop::methods::reject_constant_array_mutation({}, {}, {})?; ",
                 rust_string_literal(&target_name),
@@ -7354,7 +7648,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         "{{ {}let __ret = if matches!({}.overlay.as_ref(), ::std::option::Option::Some(::bop::value::Value::Array(_))) {{ \
                             {constant_guard}::bop::methods::transactional_array_method({}.overlay.as_mut().expect(\"array overlay\"), {}, {}, {})? \
                         }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
-                            __bop_call_preflighted_user_method(ctx, __bop_method_adapter, {user_receiver}.as_ref().expect(\"preflighted user receiver\"), &{}, {})? \
+                            {user_dispatch} \
                         }} else {{ \
                             let {} = {}; \
                                     let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
@@ -7367,8 +7661,6 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         method_lit,
                         owned_args,
                         line,
-                        args_arr,
-                        line,
                         obj_tmp,
                         read,
                         obj_tmp,
@@ -7376,6 +7668,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                         args_arr,
                         line,
                         overlay,
+                        user_dispatch = user_dispatch,
                     )
                     .unwrap();
                     return Ok(body);
@@ -7405,7 +7698,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     "{{ {}let __bop_receiver_is_array = {{ let {target_tmp}: &mut ::bop::value::Value = {target_src}; matches!(&*{target_tmp}, ::bop::value::Value::Array(_)) }}; let __ret = if __bop_receiver_is_array {{ \
                         let {target_tmp}: &mut ::bop::value::Value = {target_src}; {constant_guard}::bop::methods::transactional_array_method({target_tmp}, {}, {}, {})? \
                     }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
-                        __bop_call_preflighted_user_method(ctx, __bop_method_adapter, {user_receiver}.as_ref().expect(\"preflighted user receiver\"), &{}, {})? \
+                        {user_dispatch} \
                     }} else {{ \
                         let {} = {read_src}; \
                                 let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
@@ -7416,14 +7709,13 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                     method_lit,
                     owned_args,
                     line,
-                    args_arr,
-                    line,
                     obj_tmp,
                     obj_tmp,
                     method_lit,
                     args_arr,
                     line,
                     overlay_sync = overlay_sync,
+                    user_dispatch = user_dispatch,
                 )
                 .unwrap();
                 return Ok(body);
@@ -7435,7 +7727,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 "{{ {}let __ret = if matches!(&{}, ::bop::value::Value::Array(_)) {{ \
                     {constant_guard}::bop::methods::transactional_array_method(&mut {}, {}, {}, {})? \
                 }} else if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
-                    __bop_call_preflighted_user_method(ctx, __bop_method_adapter, {user_receiver}.as_ref().expect(\"preflighted user receiver\"), &{}, {})? \
+                    {user_dispatch} \
                 }} else {{ \
                     let {} = {}.clone(); \
                             let (__r, __mutated) = __bop_call_method(ctx, &{}, {}, &{}, {})?; \
@@ -7448,8 +7740,6 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 method_lit,
                 owned_args,
                 line,
-                args_arr,
-                line,
                 obj_tmp,
                 target,
                 obj_tmp,
@@ -7457,6 +7747,7 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
                 args_arr,
                 line,
                 target,
+                user_dispatch = user_dispatch,
             )
             .unwrap();
             return Ok(body);
@@ -7487,21 +7778,44 @@ fn __bop_instance_entry_points(state: &__BopState) -> ::std::vec::Vec<::bop::Ent
             )
             })
             .unwrap_or_default();
+        let user_token =
+            resolved_user_method.unwrap_or_else(|| "::std::option::Option::None".to_string());
+        let user_dispatch = if let Some((target_read, target_write)) = named_user_ref_target {
+            let owned_args = if arg_tmps.is_empty() {
+                "::std::vec::Vec::new()".to_string()
+            } else {
+                format!(
+                    "::std::vec![{}]",
+                    arg_tmps
+                        .iter()
+                        .map(|tmp| format!("{tmp}.clone()"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!(
+                "{{ let __bop_receiver_is_ref = __bop_user_method_receiver_is_ref(__bop_method_adapter); \
+                    let __bop_receiver = if __bop_receiver_is_ref {{ {target_read} }} else {{ {obj_tmp}.clone() }}; \
+                    let __bop_outcome = __bop_call_preflighted_user_method_outcome(ctx, __bop_method_adapter, __bop_receiver, {owned_args}, {line})?; \
+                    if __bop_receiver_is_ref {{ let __target: &mut ::bop::value::Value = {target_write}; *__target = __bop_outcome.receiver; }} \
+                    __bop_outcome.value }}"
+            )
+        } else {
+            format!(
+                "__bop_call_preflighted_user_method(ctx, __bop_method_adapter, &{obj_tmp}, &{args_arr}, {line})?"
+            )
+        };
         write!(
             body,
-            "let __ret = {module_dispatch}{{ if let ::std::option::Option::Some(__bop_method_adapter) = {} {{ \
-                __bop_call_preflighted_user_method(ctx, __bop_method_adapter, &{}, &{}, {})? \
+            "let __ret = {module_dispatch}{{ if let ::std::option::Option::Some(__bop_method_adapter) = {user_token} {{ \
+                {user_dispatch} \
             }} else {{ \
                     let (__r, _) = __bop_call_method(ctx, &{}, {}, &{}, {})?; __r \
             }} }}; __ret }}",
-            resolved_user_method.unwrap_or_else(|| "::std::option::Option::None".to_string()),
-            obj_tmp,
-            args_arr,
-            line,
             obj_tmp,
             method_lit,
             args_arr,
-            line
+            line,
         )
         .unwrap();
         Ok(body)

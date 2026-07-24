@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+documentation = "https://docs.rs/bop-lang"
 readme = "README.md"
 keywords = ["language", "interpreter", "scripting", "embedded"]
 categories = ["compilers"]

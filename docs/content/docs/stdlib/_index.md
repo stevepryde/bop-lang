@@ -1,6 +1,6 @@
 +++
 title = "Overview"
-description = "`bop-std` ships a small set of modules written in Bop itself. They live under the `std.*` namespace and are resolved by the default host (`StandardHost` in `bop-sys`) — any host that defers to `StandardHost::resolve_module` picks them up for free."
+description = "`bop-lang` bundles a small standard library behind its default `bop-std` feature. The modules are written in Bop, live under `std.*`, and can be resolved by `bop-sys::StandardHost` or a custom host."
 weight = 21
 template = "docs/section.html"
 page_template = "docs/page.html"
@@ -14,7 +14,11 @@ path = "/docs/stdlib/math/"
 
 # Standard Library — overview
 
-`bop-std` ships a small set of modules written in Bop itself. They live under the `std.*` namespace and are resolved by the default host (`StandardHost` in `bop-sys`) — any host that defers to `StandardHost::resolve_module` picks them up for free.
+`bop-lang` bundles a small set of modules written in Bop itself behind the
+default `bop-std` Cargo feature. They live under the `std.*` namespace.
+`bop-sys::StandardHost` resolves them automatically before its filesystem
+fallback; custom hosts can delegate `std.*` names to
+`bop::stdlib::resolve`.
 
 The stdlib is deliberately thin. Core math and `Result` operations are [methods on values](/docs/reference/methods/) (`(-5).abs()`, `(9).sqrt()`, `r.unwrap_or(0)`, `r.map(f)`) — they don't need a module. The stdlib covers what's left: constants, higher-order helpers on arrays, data-structure types, string formatting, JSON, test assertions.
 
@@ -39,7 +43,7 @@ use std.iter.{map, filter}     // selective
 use std.json as j              // aliased
 ```
 
-The modules are plain Bop source — you can find the implementations in `bop/src/modules/*.bop` if you want to see how a helper is wired, or copy-paste the source into a host that doesn't ship `bop-std`.
+The modules are plain Bop source — you can find the implementations in `bop/src/modules/*.bop` if you want to see how a helper is wired.
 
 ## Things you might expect to find here
 
@@ -49,4 +53,13 @@ The modules are plain Bop source — you can find the implementations in `bop/sr
 
 ## Hosts without the stdlib
 
-Embedders who don't want `bop-std` on the host side can leave `resolve_module` unimplemented; any `use std.*` then fails with "can't resolve module". Nothing about the language depends on the stdlib — it's a convenience, not a runtime prerequisite.
+Disable default Cargo features to omit the bundled source:
+
+```toml
+bop = { package = "bop-lang", version = "0.4", default-features = false }
+```
+
+Embedders that keep the feature still choose whether to expose it: a custom
+host must call `bop::stdlib::resolve` from `BopHost::resolve_module`.
+Conversely, a host can bundle or load its own `std.*` source even when the
+feature is disabled. Nothing in the core language depends on the stdlib.

@@ -1,6 +1,6 @@
 +++
 title = "std.iter"
-description = "Functional helpers on arrays. Array-in, array-out — there's no lazy iterator protocol. If you care about allocation, a hand-written `for` loop will always beat these."
+description = "Eager functional helpers over arrays: map, filter, reduce, slicing, combining, and reductions. Bop's separate `.iter()` protocol remains lazy."
 weight = 23
 template = "docs/page.html"
 page_template = "docs/page.html"
@@ -14,7 +14,14 @@ path = "/docs/stdlib/collections/"
 
 # std.iter
 
-Functional helpers on arrays. Array-in, array-out — there's no lazy iterator protocol. If you care about allocation, a hand-written `for` loop will always beat these.
+`std.iter` provides eager functional helpers over arrays. Array-in,
+array-out helpers such as `map` and `filter` allocate their result; a
+hand-written `for` loop can avoid that work when allocation matters.
+
+This module is separate from Bop's built-in lazy
+[`.iter()` / `.next()` protocol](/docs/reference/methods/#iter-methods-iter).
+You do not need `use std.iter` to write `for value in collection`, and the
+built-in protocol does not make these array helpers lazy.
 
 Every helper handles empty arrays gracefully and preserves relative order.
 

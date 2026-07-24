@@ -17,7 +17,9 @@ Hand your users or your AI a real programming language at runtime, without shipp
   remain live
 - **`BopHost` trait** — the only thing embedders need to implement to wire Bop into their Rust app
 - **`Value` type + builtin operators** — the shared runtime surface every Bop engine uses
-- **Resource limits** (`BopLimits`) — step count and memory caps for safe sandboxing
+- **Transactional `ref` parameters** — explicit copy-in/copy-out updates to
+  mutable caller variables, with rollback on errors
+- **Resource limits** (`BopLimits`) — step and tracked-memory budgets, plus a fixed function-call depth cap
 
 For a faster runtime (2–3× this crate's tree-walker, same semantics), add [`bop-vm`](https://crates.io/crates/bop-vm). For an AOT path to native Rust, see [`bop-compile`](https://crates.io/crates/bop-compile).
 
@@ -27,13 +29,13 @@ For a faster runtime (2–3× this crate's tree-walker, same semantics), add [`b
 - **Zero Rust deps** Nothing to audit in your supply chain.
 - **`no_std` support** via the `no_std` feature (uses the `libm` crate internally for float math, nothing else).
 - **WASM-compatible.** Builds clean for `wasm32-unknown-unknown`. Use it in browsers, edge workers, or wherever you can run Rust.
-- **Sandboxed by default.** `BopLimits` caps step count and memory so a runaway user script can't hang or OOM your process.
+- **Sandboxed by default.** `BopLimits` caps step count and tracked memory, and the runtime caps function-call depth, so runaway user scripts halt cleanly.
 
 ## Quick start
 
 ```toml
 [dependencies]
-bop-lang = "0.3"
+bop-lang = "0.4"
 ```
 
 ```rust
@@ -61,9 +63,27 @@ impl BopHost for MyHost {
 fn main() {
     let mut host = MyHost;
     let limits = BopLimits::standard();
-    run(r#"print(greet())"#, &mut host, &limits).unwrap();
+run(r#"print(greet())"#, &mut host, &limits).unwrap();
 }
 ```
+
+The language normally passes independent values. A user-defined function can
+opt into a caller update with `ref` at both sites:
+
+```bop
+fn increment(ref value) {
+  value += 1
+}
+
+let count = 0
+increment(ref count)
+print(count)    // 1
+```
+
+Reference calls stage their changes and commit only after a normal return.
+See the [reference-parameters
+guide](https://bop-lang.com/docs/functions/reference-parameters/) for target,
+rollback, forwarding, method, and host-boundary rules.
 
 For a stateful plugin rather than a one-shot script, declare root entry points
 with `pub fn`, then load and call an instance:
@@ -99,14 +119,14 @@ macro to construct nested values while retaining Bop's depth checks.
 A truly minimal build — core language only, no bundled stdlib:
 
 ```toml
-bop-lang = { version = "0.3", default-features = false }
+bop-lang = { version = "0.4", default-features = false }
 ```
 
 ## WASM example
 
 ```toml
 [dependencies]
-bop-lang = { version = "0.3", default-features = false, features = ["no_std", "bop-std"] }
+bop-lang = { version = "0.4", default-features = false, features = ["no_std", "bop-std"] }
 ```
 
 Build for `wasm32-unknown-unknown` as usual. See [`bop-vm`](https://crates.io/crates/bop-vm) for the faster runtime if you need it.

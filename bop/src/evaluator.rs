@@ -241,6 +241,11 @@ struct BindingIdentity {
     name: String,
 }
 
+struct MethodReceiver {
+    value: Value,
+    target: Option<BindingIdentity>,
+}
+
 /// Lexical free-variable analysis for walker-created lambdas.
 ///
 /// The VM performs the same analysis while compiling a lambda. The walker
@@ -2935,8 +2940,60 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                         .and_then(|ms| ms.get(method))
                         .cloned();
                     if let Some(m) = user {
+                        let receiver_target = if m
+                            .params
+                            .first()
+                            .is_some_and(|param| param.mode == ParamMode::Ref)
+                        {
+                            let ExprKind::Ident(name) = &object.kind else {
+                                let mut error = BopError::runtime(
+                                    "a `ref` method receiver must be a variable",
+                                    expr.line,
+                                );
+                                error.friendly_hint = Some(
+                                    "Store the value in a `let` binding before calling this method."
+                                        .to_string(),
+                                );
+                                return Err(error);
+                            };
+                            if crate::naming::is_constant_name(name) {
+                                return Err(crate::error_messages::constant_mutation_error(
+                                    name, expr.line,
+                                ));
+                            }
+                            let target = self
+                                .resolve_binding_identity(name)
+                                .ok_or_else(|| {
+                                    let mut error = BopError::runtime(
+                                        "a `ref` method receiver must be a variable",
+                                        expr.line,
+                                    );
+                                    error.friendly_hint = Some(
+                                        "Store the value in a `let` binding before calling this method."
+                                            .to_string(),
+                                    );
+                                    error
+                                })?;
+                            if self.active_capture_bindings.contains(&target) {
+                                return Err(crate::ref_params::captured_ref_target(
+                                    1,
+                                    expr.line,
+                                ));
+                            }
+                            Some(target)
+                        } else {
+                            None
+                        };
                         return self.eval_user_method_call(
-                            obj_val, &key.1, method, m, args, expr.line,
+                            MethodReceiver {
+                                value: obj_val,
+                                target: receiver_target,
+                            },
+                            &key.1,
+                            method,
+                            m,
+                            args,
+                            expr.line,
                         );
                     }
                 }
@@ -3478,7 +3535,7 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
 
     fn eval_user_method_call(
         &mut self,
-        receiver: Value,
+        receiver: MethodReceiver,
         receiver_type: &str,
         method: &str,
         definition: FnDef,
@@ -3511,7 +3568,12 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             non_receiver.iter().map(|param| param.mode).collect();
         let actual_modes: Vec<ParamMode> = args.iter().map(|arg| arg.mode).collect();
         crate::validate_call_modes(method, &expected_modes, &actual_modes, line)?;
-        let targets = self.preflight_ref_targets(args, line)?;
+        let explicit_targets = self.preflight_ref_targets(args, line)?;
+        if let Some(receiver_target) = &receiver.target {
+            if explicit_targets.contains(receiver_target) {
+                return Err(crate::ref_params::duplicate_ref_target(line));
+            }
+        }
 
         let mut evaluated = Vec::with_capacity(args.len());
         for arg in args {
@@ -3520,10 +3582,18 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                 ParamMode::Ref => None,
             });
         }
-        let mut target_iter = targets.iter();
+        let mut target_iter = explicit_targets.iter();
         let mut full_args = Vec::with_capacity(args.len() + 1);
-        full_args.push(receiver);
         let mut ref_positions = Vec::new();
+        if let Some(target) = &receiver.target {
+            full_args.push(
+                self.binding_value(target)
+                    .ok_or_else(|| crate::ref_params::invalid_ref_target(1, line))?,
+            );
+            ref_positions.push(0);
+        } else {
+            full_args.push(receiver.value);
+        }
         for (index, (arg, value)) in args.iter().zip(evaluated).enumerate() {
             match arg.mode {
                 ParamMode::Value => {
@@ -3551,6 +3621,13 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
         )?;
         let (value, staged) =
             self.call_bop_fn_with_refs(&func, full_args, &ref_positions, line)?;
+        let mut targets = Vec::with_capacity(
+            explicit_targets.len() + usize::from(receiver.target.is_some()),
+        );
+        if let Some(target) = receiver.target {
+            targets.push(target);
+        }
+        targets.extend(explicit_targets);
         self.commit_ref_targets(&targets, staged, line)?;
         Ok(value)
     }
@@ -4330,8 +4407,7 @@ fn variants_equivalent(a: &[VariantDecl], b: &[VariantDecl]) -> bool {
 }
 
 /// Walk a pair of scope stacks to resolve a source-level type
-/// reference — the same logic as
-/// [`Evaluator::resolve_type_ref`], but free-standing so the
+/// reference. This is free-standing so the
 /// pattern matcher can be called with a borrow of the
 /// evaluator's tables without needing the evaluator itself.
 /// Returns `None` if the name isn't in scope.

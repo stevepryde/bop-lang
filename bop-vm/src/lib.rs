@@ -1,88 +1,122 @@
-//! Bytecode compiler and stack VM for Bop.
+//! Bytecode compiler and stack VM for the Bop programming language.
 //!
-//! Steps 2a (compiler + instruction set) and 2b (VM + limits) have
-//! landed. The differential harness against the tree-walker is step 2c.
+//! `bop-vm` implements the same language, host interface, values, limits, and
+//! diagnostics as the tree-walker in [`bop-lang`](https://docs.rs/bop-lang),
+//! while compiling source to reusable bytecode. It is the usual choice for
+//! scripts that run hot loops or are executed repeatedly at runtime.
 //!
-//! # Instruction set (stack-based)
+//! # One-shot execution
 //!
-//! The VM is a stack machine. All operators consume their arguments
-//! from the top of the stack and push their result. Every instruction
-//! carries a source line (stored in a parallel `lines` table) so
-//! runtime errors can be reported against the original program.
+//! [`run`] parses, compiles, validates, and executes one isolated program:
 //!
-//! ## Literals
-//! - `LoadConst(idx)` — push a pooled number or string.
-//! - `LoadNone` / `LoadTrue` / `LoadFalse` — push the singleton.
+//! ```
+//! use bop::{BopError, BopHost, BopLimits, Value};
 //!
-//! ## Variables (names indexed into the chunk's name pool)
-//! - `LoadVar(n)` — push the value bound to name `n`.
-//! - `DefineLocal(n)` — pop and bind as a new local in current scope.
-//! - `StoreVar(n)` — pop and assign to an existing variable.
+//! struct Host;
+//! impl BopHost for Host {
+//!     fn call(
+//!         &mut self,
+//!         _: &str,
+//!         _: &[Value],
+//!         _: u32,
+//!     ) -> Option<Result<Value, BopError>> {
+//!         None
+//!     }
 //!
-//! ## Scope
-//! - `PushScope` / `PopScope` — open / close a block scope.
+//!     fn on_print(&mut self, message: &str) {
+//!         assert_eq!(message, "42");
+//!     }
+//! }
 //!
-//! ## Stack
-//! - `Pop` — discard top.
-//! - `Dup` / `Dup2` — duplicate top (or top two).
+//! let mut host = Host;
+//! bop_vm::run(
+//!     "print(6 * 7)",
+//!     &mut host,
+//!     &BopLimits::standard(),
+//! ).unwrap();
+//! ```
 //!
-//! ## Operators
-//! One opcode per primitive (`Add`, `Sub`, `Mul`, `Div`, `Rem`, `Eq`,
-//! `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq`, `Neg`, `Not`). Short-circuit
-//! `&&` / `||` compile to explicit jumps + `TruthyToBool`, not to a
-//! dedicated opcode.
+//! # Compile once, execute with fresh state
 //!
-//! ## Indexing
-//! - `GetIndex` — `[obj, idx]` → `[obj[idx]]`.
-//! - `SetIndex` — `[obj, idx, val]` → `[obj']` with `obj'[idx] = val`.
-//! - `SetIndexInPlace { target, op }` — consumes RHS + index and applies the
-//!   assignment through the live named binding without a receiver clone.
+//! Use [`compile`] and [`execute`] when the bytecode should be reused but each
+//! run should start with fresh globals:
 //!
-//! ## Collections
-//! - `MakeArray(n)` — pop `n` items, push an array.
-//! - `MakeDict(n)` — pop `n` key-value pairs (key, then value, per
-//!   entry), push a dict.
+//! ```
+//! # use bop::{BopError, BopHost, BopLimits, Value};
+//! # struct Host;
+//! # impl BopHost for Host {
+//! #     fn call(&mut self, _: &str, _: &[Value], _: u32)
+//! #         -> Option<Result<Value, BopError>> { None }
+//! # }
+//! let statements = bop::parse("let answer = 6 * 7").unwrap();
+//! let chunk = bop_vm::compile(&statements).unwrap();
+//! bop_vm::validate_chunk(&chunk).unwrap();
 //!
-//! ## String interpolation
-//! - `StringInterp(idx)` — run the recipe at `idx`, loading variable
-//!   parts from their compiler-resolved local slot or named binding,
-//!   and push the result.
+//! let mut host = Host;
+//! bop_vm::execute(
+//!     chunk,
+//!     &mut host,
+//!     &BopLimits::standard(),
+//! ).unwrap();
+//! ```
 //!
-//! ## Calls
-//! - `Call { name, argc }` — call a named function (builtin, host, or
-//!   user) with `argc` args popped in reverse order.
-//! - `CallMethod { method, argc, assign_back_to, nested_place }` — method call on
-//!   an object above the already-evaluated args. If the method is mutating and
-//!   `assign_back_to` is set, the mutated object is written back to
-//!   that variable (matching the tree-walker's semantics for
-//!   `arr.push(x)` etc.).
-//! - `CallMethodInPlace { target, method, argc }` — mutating method on
-//!   a named receiver. Arguments are evaluated first, then an array binding is
-//!   mutated directly without forcing a copy-on-write detach.
+//! [`validate_chunk`] rejects malformed control flow, operands, pool indices,
+//! and nested chunks before execution. [`disassemble`] provides a readable
+//! representation for tooling and diagnostics.
 //!
-//! ## Functions
-//! - `DefineFn(idx)` — register the compiled function at `idx`.
-//! - `Return` / `ReturnNone` — return from the current call frame.
+//! # Persistent programs
 //!
-//! ## Iteration and repeat
-//! - `MakeIter` + `IterNext { target }` — iterate over the top value.
-//! - `MakeRepeatCount` + `RepeatNext { target }` — counted loop.
-//! - `PopLoopState(kind)` — discard a loop-owned iterator/counter on `break`.
+//! [`BopInstance`] loads and compiles once, then retains globals, modules,
+//! functions, types, methods, callbacks, and random-number state across host
+//! calls. Root-level `pub fn` declarations define the callable ABI.
 //!
-//! ## Control flow (absolute offsets within the chunk)
-//! - `Jump(t)`, `JumpIfFalse(t)`, `JumpIfFalsePeek(t)`, `JumpIfTruePeek(t)`.
+//! ```
+//! # use bop::{BopError, BopHost, BopLimits, Value};
+//! # struct Host;
+//! # impl BopHost for Host {
+//! #     fn call(&mut self, _: &str, _: &[Value], _: u32)
+//! #         -> Option<Result<Value, BopError>> { None }
+//! # }
+//! let mut host = Host;
+//! let mut instance = bop_vm::BopInstance::load(
+//!     "let count = 0\npub fn next() { count += 1; return count }",
+//!     &mut host,
+//!     &BopLimits::standard(),
+//! ).unwrap();
+//! assert_eq!(
+//!     instance.call("next", &[], &mut host).unwrap().inspect(),
+//!     "1",
+//! );
+//! ```
 //!
-//! ## Termination
-//! - `Halt` — only emitted at the end of the top-level chunk.
+//! # Reference parameters
 //!
-//! # Using the VM
+//! The VM implements Bop's explicit `ref` parameters with the same
+//! transactional copy-in/copy-out semantics as the tree-walker and AOT
+//! engine. Mutable plain-variable targets commit together after a normal
+//! return and roll back together on runtime or resource errors. Parameter
+//! modes remain attached to first-class callable values.
 //!
-//! Call [`run`] with Bop source to parse, compile, and execute through
-//! the VM. For finer control, compile a [`Chunk`] with [`compile`] and
-//! hand it to [`execute`] (or construct [`Vm`] directly).
+//! Rust [`BopInstance::call`] and [`BopInstance::call_value`] arguments are
+//! value-only and reject ref-bearing callables before execution. See the
+//! [reference-parameters
+//! guide](https://bop-lang.com/docs/functions/reference-parameters/) for the
+//! complete target, forwarding, evaluation-order, and method rules.
+//! User-defined `ref self` receivers use the same transactional commit and
+//! rollback path as explicit reference arguments; ordinary `self` is
+//! read-only.
 //!
-//! The VM shares [`bop::BopHost`] / [`bop::BopLimits`] semantics with
-//! the tree-walking evaluator in `bop-lang`.
+//! # Features
+//!
+//! - `bop-std` (default) forwards to `bop-lang/bop-std` so hosts can
+//!   resolve the bundled `std.*` modules.
+//! - `no_std` forwards to `bop-lang/no_std`; combine it with
+//!   `default-features = false` for bare-metal or
+//!   `wasm32-unknown-unknown` builds.
+//!
+//! See the [embedding guide](https://bop-lang.com/docs/embedding/) and
+//! [stateful instance guide](https://bop-lang.com/docs/embedding/instances/)
+//! for lifecycle, limits, callback affinity, and engine-selection details.
 
 #![cfg_attr(feature = "no_std", no_std)]
 

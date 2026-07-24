@@ -1,3 +1,155 @@
+//! Bop language core and tree-walking runtime.
+//!
+//! Bop is a small, dynamically typed scripting language designed to be
+//! embedded in Rust applications. The core runtime has no ambient access to
+//! the filesystem, network, environment, clock, or standard I/O: a program
+//! can only reach capabilities exposed through [`BopHost`].
+//!
+//! # Choose an execution API
+//!
+//! - [`run`] parses and executes one isolated program with the tree-walker.
+//! - [`BopInstance`] loads a program once and lets a host repeatedly call
+//!   root-level `pub fn` entry points while program state remains live.
+//! - [`ReplSession`] retains declarations across source submissions and is
+//!   intended for interactive tools.
+//! - [`parse`], [`parse_with_warnings`], and
+//!   [`parse_with_warnings_and_resolver`] expose the parser and static
+//!   diagnostics without executing the program.
+//!
+//! The [`bop-vm`](https://docs.rs/bop-vm) crate provides a faster bytecode
+//! implementation with equivalent one-shot and persistent APIs.
+//! [`bop-compile`](https://docs.rs/bop-compile) transpiles the same language
+//! to Rust.
+//!
+//! # One-shot embedding
+//!
+//! ```
+//! use bop::{BopError, BopHost, BopLimits, Value};
+//!
+//! struct Host {
+//!     output: Vec<String>,
+//! }
+//!
+//! impl BopHost for Host {
+//!     fn call(
+//!         &mut self,
+//!         name: &str,
+//!         args: &[Value],
+//!         line: u32,
+//!     ) -> Option<Result<Value, BopError>> {
+//!         match (name, args) {
+//!             ("double", [Value::Int(value)]) => {
+//!                 Some(Ok(Value::Int(value * 2)))
+//!             }
+//!             ("double", _) => Some(Err(BopError::runtime(
+//!                 "double(value) expects one int",
+//!                 line,
+//!             ))),
+//!             _ => None,
+//!         }
+//!     }
+//!
+//!     fn on_print(&mut self, message: &str) {
+//!         self.output.push(message.to_owned());
+//!     }
+//! }
+//!
+//! let mut host = Host { output: Vec::new() };
+//! bop::run(
+//!     "print(double(21))",
+//!     &mut host,
+//!     &BopLimits::standard(),
+//! ).unwrap();
+//! assert_eq!(host.output, ["42"]);
+//! ```
+//!
+//! # Reference parameters
+//!
+//! Bop normally passes independent values. User-defined functions may opt
+//! into explicit, second-class reference parameters by writing `ref` at both
+//! the declaration and call:
+//!
+//! ```bop
+//! fn increment(ref value) {
+//!   value += 1
+//! }
+//!
+//! let count = 0
+//! increment(ref count)
+//! print(count)    // 1
+//! ```
+//!
+//! A reference argument must be a distinct mutable plain-variable binding.
+//! The callee receives a staged copy; every reference target commits together
+//! only after a normal return and rolls back together on runtime or resource
+//! errors. Reference parameters may be forwarded but not captured. Built-in
+//! and host functions are value-only.
+//!
+//! User-defined methods may declare `ref self` to update a mutable
+//! plain-variable receiver. Method-call syntax supplies that reference
+//! implicitly (`counter.increment()`); the receiver joins explicit reference
+//! arguments in the same transaction. Ordinary `self` receivers are read-only,
+//! and assigning through one is a parse error with a `ref self` hint.
+//!
+//! [`BopInstance::call`] and [`BopInstance::call_value`] also accept values,
+//! not Bop bindings, and reject ref-bearing callables before execution. Keep
+//! host-facing `pub fn` entries value-only and perform ref calls inside Bop.
+//! The complete language contract is in the [reference-parameters
+//! guide](https://bop-lang.com/docs/functions/reference-parameters/).
+//!
+//! # Persistent programs
+//!
+//! A persistent program explicitly publishes its host-callable ABI with
+//! direct root-level `pub fn` declarations:
+//!
+//! ```
+//! # use bop::{BopError, BopHost, BopInstance, BopLimits, Value};
+//! # struct Host;
+//! # impl BopHost for Host {
+//! #     fn call(&mut self, _: &str, _: &[Value], _: u32)
+//! #         -> Option<Result<Value, BopError>> { None }
+//! # }
+//! let mut host = Host;
+//! let mut instance = BopInstance::load(
+//!     "let count = 0\npub fn next() { count += 1; return count }",
+//!     &mut host,
+//!     &BopLimits::standard(),
+//! ).unwrap();
+//!
+//! assert_eq!(
+//!     instance.call("next", &[], &mut host).unwrap().inspect(),
+//!     "1",
+//! );
+//! assert_eq!(
+//!     instance.call("next", &[], &mut host).unwrap().inspect(),
+//!     "2",
+//! );
+//! ```
+//!
+//! # Rust values
+//!
+//! [`Value::to_rust`], [`IntoValue`], [`FromValue`], and the
+//! [`bop_value!`] macro provide checked conversions at host boundaries.
+//! Conversions include strict numeric scalars, borrowed and owned strings,
+//! `Vec<T>`, `Option<T>`, `Result<T, E>`, and deterministic
+//! `BTreeMap<String, T>` dictionaries. Recursive construction remains
+//! fallible so Bop's maximum value-depth invariant cannot be bypassed.
+//!
+//! # Limits and features
+//!
+//! [`BopLimits`] bounds executed steps and tracked allocations. All engines
+//! also enforce a fixed function-call depth. Limit failures are fatal and
+//! cannot be swallowed by Bop's `try_call`.
+//!
+//! The default `bop-std` feature bundles the `std.math`, `std.iter`,
+//! `std.collections`, `std.string`, `std.json`, and `std.test` modules as Bop
+//! source; resolve them through [`stdlib::resolve`]. Disable default features
+//! for the smallest core build. The opt-in `no_std` feature replaces
+//! standard-library floating-point operations with `libm`.
+//!
+//! The complete language and embedding guides live at
+//! <https://bop-lang.com/docs/>.
+
 #![cfg_attr(feature = "no_std", no_std)]
 
 #[cfg(feature = "no_std")]
@@ -33,8 +185,8 @@ pub mod suggest;
 pub mod check;
 mod instance;
 /// Bundled Bop standard library (`use std.math`, `std.json`,
-/// `std.collections`, `std.iter`, `std.string`, `std.result`,
-/// `std.test`). Feature-gated behind `bop-std` (on by default).
+/// `std.collections`, `std.iter`, `std.string`, `std.test`).
+/// Feature-gated behind `bop-std` (on by default).
 ///
 /// The module is named `stdlib` rather than `std` specifically
 /// to avoid shadowing Rust's own `::std` when a consumer does
@@ -72,8 +224,8 @@ pub use evaluator::resolve_type_in_scoped;
 /// Type alias for the resolver closure `pattern_matches` expects.
 pub use evaluator::TypeResolveFn;
 
-/// Persistent state for an interactive REPL session. Unlike
-/// the one-shot [`run`] / [`Evaluator::run`] pair, a
+/// Persistent state for an interactive REPL session. Unlike the one-shot
+/// [`run`] API, a
 /// `ReplSession` carries its scopes, fns, user types, method
 /// tables, and import cache across calls, so
 /// `session.eval("let x = 5")` followed by
@@ -92,6 +244,7 @@ pub struct BopLimits {
 }
 
 impl BopLimits {
+    /// The general-purpose preset: 10,000 steps and 10 MiB of tracked memory.
     pub fn standard() -> Self {
         Self {
             max_steps: 10_000,
@@ -99,6 +252,7 @@ impl BopLimits {
         }
     }
 
+    /// A smaller preset for demos: 1,000 steps and 1 MiB of tracked memory.
     pub fn demo() -> Self {
         Self {
             max_steps: 1_000,
@@ -135,7 +289,7 @@ pub trait BopHost {
         Ok(())
     }
 
-    /// Resolve an `use` target to Bop source.
+    /// Resolve a `use` target to Bop source.
     ///
     /// The core language doesn't know where modules live — a
     /// filesystem embedder reads `.bop` files, a browser embedder
@@ -150,7 +304,7 @@ pub trait BopHost {
     ///   bad path, …); the engine propagates the error as-is.
     ///
     /// The default impl returns `None`, so by default a program
-    /// that imports anything halts with *module not found*.
+    /// that uses another module halts with *module not found*.
     fn resolve_module(&mut self, name: &str) -> Option<Result<String, BopError>> {
         let _ = name;
         None
@@ -978,8 +1132,16 @@ print([items, hits, result.is_err()])"#,
             ),
             "[[], [], true]"
         );
-        assert!(parse_err("struct Box { value }\nfn Box.set(ref self) { }")
-            .contains("receiver can't be declared with `ref`"));
+        assert_eq!(
+            say(
+                r#"struct Box { value }
+fn Box.set(ref self, value) { self.value = value }
+let item = Box { value: 1 }
+item.set(4)
+print(item.value)"#
+            ),
+            "4"
+        );
     }
 
     #[test]
@@ -1616,13 +1778,13 @@ print(d.len())"#),
     }
 
     #[test]
-    fn parse_error_renders_with_snippet_and_carat() {
+    fn parse_error_renders_with_snippet_and_caret() {
         let src = "let 42";
         let err = parse_err_full(src);
         let rendered = err.render(src);
         assert!(rendered.contains("--> line 1:5"), "rendered:\n{}", rendered);
         assert!(rendered.contains("let 42"));
-        // Four spaces for `let ` before the carat at col 5.
+        // Four spaces for `let ` before the caret at col 5.
         assert!(rendered.contains("    ^"), "rendered:\n{}", rendered);
     }
 
@@ -1650,7 +1812,7 @@ print(d.len())"#),
         let rendered = err.render(src);
         assert!(rendered.contains("--> line 1"));
         assert!(rendered.contains("let x = 1 / 0"));
-        // No carat line (column unknown).
+        // No caret line (column unknown).
         assert!(!rendered.contains("^"), "rendered:\n{}", rendered);
     }
 
@@ -3954,18 +4116,12 @@ print(c.n)"#),
     }
 
     #[test]
-    fn method_does_not_mutate_receiver() {
-        // Mutating `self` inside a method doesn't propagate —
-        // Bop passes self by value like any other parameter.
-        // Users who want mutation rebind the result.
-        assert_eq!(
-            say(r#"struct Counter { n }
-fn Counter.bump(self) { self.n = self.n + 1 }
-let c = Counter { n: 5 }
-c.bump()
-print(c.n)"#),
-            "5"
+    fn value_method_receiver_cannot_be_mutated() {
+        let error = parse_err(
+            r#"struct Counter { n }
+fn Counter.bump(self) { self.n = self.n + 1 }"#,
         );
+        assert!(error.contains("can't mutate value receiver `self`"));
     }
 
     #[test]
@@ -4516,9 +4672,9 @@ print(label(o.Color::Green))"#,
     }
 
     #[test]
-    fn runtime_error_column_renders_with_carat() {
+    fn runtime_error_column_renders_with_caret() {
         // Smoke-test for the end-to-end UX: a rendered
-        // runtime error shows `--> line:col` and a carat at
+        // runtime error shows `--> line:col` and a caret at
         // the offending column.
         let src = "let x = 1\nprint(undefined)";
         let err = run_err_full(src);
@@ -4530,7 +4686,7 @@ print(label(o.Color::Green))"#,
         );
         assert!(
             rendered.contains("^"),
-            "rendered should draw a carat, got:\n{}",
+            "rendered should draw a caret, got:\n{}",
             rendered
         );
     }

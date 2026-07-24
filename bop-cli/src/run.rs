@@ -11,7 +11,7 @@ use bop_sys::StdHost;
 ///
 /// Errors (file I/O, parse, runtime) render with
 /// `BopError::render`/`BopWarning::render` so the terminal output
-/// has source snippets + carats under the offending column when
+/// has source snippets + carets under the offending column when
 /// the error carries one.
 pub fn run_file(path: &str, no_vm: bool) -> ExitCode {
     let source = match std::fs::read_to_string(path) {

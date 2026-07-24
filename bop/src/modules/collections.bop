@@ -35,8 +35,7 @@ fn Stack.size(self) {
 
 // Return a new stack with `v` pushed onto the top.
 fn Stack.push(self, v) {
-    self.items = self.items + [v]
-    return self
+    return Stack { items: self.items + [v] }
 }
 
 // Peek at the top value, or `none` when empty.
@@ -50,8 +49,7 @@ fn Stack.top(self) {
 // check `is_empty` or `top` first.
 fn Stack.pop(self) {
     if self.is_empty() { return self }
-    self.items = self.items.slice(0, self.items.len() - 1)
-    return self
+    return Stack { items: self.items.slice(0, self.items.len() - 1) }
 }
 
 // ─── Queue (FIFO) ─────────────────────────────────────────────
@@ -74,8 +72,7 @@ fn Queue.size(self) {
 
 // Return a new queue with `v` appended at the back.
 fn Queue.enqueue(self, v) {
-    self.items = self.items + [v]
-    return self
+    return Queue { items: self.items + [v] }
 }
 
 // Peek at the front element, or `none` when empty.
@@ -90,8 +87,7 @@ fn Queue.front(self) {
 // pay for itself at larger scales.
 fn Queue.dequeue(self) {
     if self.is_empty() { return self }
-    self.items = self.items.slice(1, self.items.len())
-    return self
+    return Queue { items: self.items.slice(1, self.items.len()) }
 }
 
 // ─── Set (unique elements, insertion-ordered) ────────────────
@@ -129,8 +125,7 @@ fn Set.has(self, v) {
 // already-present value is a no-op.
 fn Set.add(self, v) {
     if self.items.has(v) { return self }
-    self.items = self.items + [v]
-    return self
+    return Set { items: self.items + [v] }
 }
 
 // Return a new set with `v` removed. Removing an absent value
@@ -140,8 +135,7 @@ fn Set.remove(self, v) {
     if idx < 0 { return self }
     let before = self.items.slice(0, idx)
     let after = self.items.slice(idx + 1, self.items.len())
-    self.items = before + after
-    return self
+    return Set { items: before + after }
 }
 
 // Return the set's elements as an array (insertion order).

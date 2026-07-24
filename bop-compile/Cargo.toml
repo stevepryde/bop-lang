@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+documentation = "https://docs.rs/bop-compile"
 readme = "README.md"
 keywords = ["language", "compiler", "aot", "rust"]
 categories = ["compilers"]
@@ -19,7 +20,7 @@ name = "bop_compile"
 # AOT transpilation always runs on a std host, so we explicitly
 # drop `default-features` only to avoid pulling the `bop-std`
 # stdlib blob when the transpiler doesn't need it.
-bop = { version = "0.3.0", path = "../bop", package = "bop-lang", default-features = false }
+bop = { version = "0.4.0", path = "../bop", package = "bop-lang", default-features = false }
 
 [features]
 default = ["bop-std"]
@@ -30,4 +31,4 @@ default = ["bop-std"]
 bop-std = ["bop/bop-std"]
 
 [dev-dependencies]
-bop-vm = { version = "0.3.0", path = "../bop-vm" }
+bop-vm = { version = "0.4.0", path = "../bop-vm" }

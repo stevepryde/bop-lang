@@ -1,0 +1,100 @@
+# Changelog
+
+All notable changes to Bop are documented here. Versions apply to the
+publishable workspace crates unless a section says otherwise.
+
+## 0.4.0 - Unreleased
+
+`0.4.0` is the first coordinated release after `0.3.0`. It expands Bop from a
+small one-shot scripting runtime into a module-aware language with persistent
+embedding APIs across all three execution engines.
+
+### Language
+
+- Replace `import` with four `use` forms: glob, selective, aliased, and
+  selective-plus-aliased imports.
+- Add module-qualified struct and enum construction/patterns, declaration
+  origin tracking, live module bindings, and transitive re-exports.
+- Add `const` and enforce lowercase value names, ALL_CAPS constants, and
+  UpperCamel-style type/variant names at parse time.
+- Add explicit second-class `ref` parameters to user-defined functions,
+  method parameters, and method receivers. `ref self` updates a mutable
+  plain-variable receiver; ordinary `self` is read-only and mutation through it
+  is a parse error. Calls use transactional copy-in/copy-out: distinct mutable
+  targets commit together after a normal return and roll back together on
+  runtime or resource errors.
+- Restore `//` line comments. Integer division now uses
+  `(left / right).to_int()` because `/` always returns `number`.
+- Move introspection, conversion, collection, string, and math operations to
+  methods such as `.type()`, `.to_str()`, `.to_int()`, `.len()`, and `.sqrt()`.
+- Add the built-in `Result` and `Iter` types, `Ok(...)` / `Err(...)`
+  shorthand, Result combinators, `try_call`, `panic`, universal
+  `.is_none()` / `.is_some()`, and the lazy `.iter()` / `.next()` protocol.
+- Make a missing dictionary key evaluate to `none`.
+- Support multiline expressions inside `()` and `[]`, leading-dot
+  continuations, first-class closures, match guards, namespaced patterns, and
+  declaration-aware exhaustiveness diagnostics.
+- Accept the full signed `i64` literal range, including
+  `-9223372036854775808`.
+
+### Embedding and Rust APIs
+
+- Add `bop::BopInstance` and `bop_vm::BopInstance`. A program is loaded once,
+  then direct root-level `pub fn` entries can be called while globals,
+  modules, callbacks, types, methods, and RNG state remain live.
+- Add the equivalent generated `BopInstance` API to sandboxed AOT library
+  output.
+- Add strict, path-aware Rust ↔ `Value` conversion through `IntoValue`,
+  `FromValue`, `Value::to_rust`, and `bop_value!`.
+- Add in-memory module helpers in `bop::host`.
+- Move the Bop standard library into `bop-lang` behind the default `bop-std`
+  feature. The old standalone `bop-std` crate is no longer needed.
+- Improve imported-module diagnostics so parse and runtime failures render
+  against the source and module that owns the error.
+
+### Engines and tools
+
+- Bring the bytecode VM and AOT transpiler to language parity with the
+  tree-walker, covered by an expanded three-engine differential suite.
+- Add public bytecode validation through `bop_vm::validate_chunk`.
+- Add copy-on-write runtime containers, in-place VM mutation paths, compact
+  instruction pools, safe superinstructions, and allocation reductions.
+- Add a persistent, multiline REPL with expression echo, tab completion,
+  history, `:vars`, `:reset`, and non-TTY transcript support.
+- Keep `bop run` on the VM by default, with `--novm` for the tree-walker, and
+  support native builds or Rust-source emission through `bop compile`.
+
+### Safety and diagnostics
+
+- Add source columns and caret rendering to more parse/runtime diagnostics.
+- Add targeted naming, match-arm, range, module, shadowing, and `try` hints.
+- Harden parser/runtime nesting, range sizes, copy-on-write mutation,
+  constant containers, VM scope unwinding, jump targets, and malformed
+  bytecode handling.
+- Align warnings, resource-limit failures, module errors, and observable
+  behavior across walker, VM, and AOT execution.
+
+### Migration from 0.3
+
+- Change dependency requirements from `"0.3"` to `"0.4"`.
+- Replace `import path` with `use path`.
+- Replace `# comment` with `// comment`.
+- Replace removed global helpers such as `type(x)`, `str(x)`, `int(x)`,
+  `float(x)`, and `len(x)` with methods on the value.
+- Replace `a // b` integer division with `(a / b).to_int()`.
+- Remove a standalone `bop-std` dependency; enable `bop-lang`'s `bop-std`
+  feature instead (it is enabled by default).
+
+### Publishing order
+
+The crates use `0.4.0` requirements for workspace dependencies and should be
+published in dependency order:
+
+1. `bop-lang`
+2. `bop-sys`
+3. `bop-vm`
+4. `bop-compile`
+5. `bop-cli`
+
+Wait for each package to become available in the crates.io index before
+publishing a dependent package.

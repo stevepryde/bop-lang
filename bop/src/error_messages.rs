@@ -24,17 +24,17 @@
 #[cfg(feature = "no_std")]
 use alloc::{format, string::String};
 
-/// `Variable `<name>` not found`.
+/// Format the diagnostic for an unknown variable.
 pub fn variable_not_found(name: &str) -> String {
     format!("Variable `{}` not found", name)
 }
 
-/// `Function `<name>` not found`.
+/// Format the diagnostic for an unknown function.
 pub fn function_not_found(name: &str) -> String {
     format!("Function `{}` not found", name)
 }
 
-/// `Struct `<type_name>` has no field `<field>``.
+/// Format the diagnostic for a missing struct field.
 /// Used by the walker's `FieldAccess` path, the VM's
 /// `ConstructStruct` / `FieldGet` / `FieldSet`, and the AOT's
 /// runtime `__bop_field_get` helper.
@@ -42,7 +42,7 @@ pub fn struct_has_no_field(type_name: &str, field: &str) -> String {
     format!("Struct `{}` has no field `{}`", type_name, field)
 }
 
-/// `Variant `<type_name>::<variant>` has no field `<field>``.
+/// Format the diagnostic for a missing field on a struct-shaped enum variant.
 /// For struct-shaped enum-variant field reads.
 pub fn variant_has_no_field(type_name: &str, variant: &str, field: &str) -> String {
     format!(
@@ -51,46 +51,43 @@ pub fn variant_has_no_field(type_name: &str, variant: &str, field: &str) -> Stri
     )
 }
 
-/// `Struct `<type_name>` is not declared`.
+/// Format the diagnostic for an unknown struct type.
 pub fn struct_not_declared(type_name: &str) -> String {
     format!("Struct `{}` is not declared", type_name)
 }
 
-/// `Enum `<type_name>` is not declared`.
+/// Format the diagnostic for an unknown enum type.
 pub fn enum_not_declared(type_name: &str) -> String {
     format!("Enum `{}` is not declared", type_name)
 }
 
-/// `Enum `<type_name>` has no variant `<variant>``.
+/// Format the diagnostic for an unknown enum variant.
 pub fn enum_has_no_variant(type_name: &str, variant: &str) -> String {
     format!("Enum `{}` has no variant `{}`", type_name, variant)
 }
 
-/// `Can't read field `<field>` on <kind>` — `kind` is the
-/// pretty type name (`"array"`, `"int"`, etc.).
+/// Format an invalid field-read diagnostic. `kind` is the pretty type name
+/// (`"array"`, `"int"`, etc.).
 pub fn cant_read_field(field: &str, kind: &str) -> String {
     format!("Can't read field `{}` on {}", field, kind)
 }
 
-/// `Can't assign to field `<field>` on <kind>`.
+/// Format an invalid field-assignment diagnostic.
 pub fn cant_assign_field(field: &str, kind: &str) -> String {
     format!("Can't assign to field `{}` on {}", field, kind)
 }
 
-/// `Can't call a <kind>` — when a non-`Value::Fn` value lands
-/// in a call position.
+/// Format the diagnostic for calling a non-function value.
 pub fn cant_call_a(kind: &str) -> String {
     format!("Can't call a {}", kind)
 }
 
-/// `Can't iterate over <kind>` — when `for x in …` gets a
-/// value that isn't array-like or string-like.
+/// Format the diagnostic for iterating over a non-iterable value.
 pub fn cant_iterate_over(kind: &str) -> String {
     format!("Can't iterate over {}", kind)
 }
 
-/// `<kind> doesn't have a .<method>() method` — the terminal
-/// error from the method dispatcher when nothing matches.
+/// Format the terminal method-dispatch diagnostic when nothing matches.
 pub fn no_such_method(kind: &str, method: &str) -> String {
     format!("{} doesn't have a .{}() method", kind, method)
 }

@@ -1570,17 +1570,72 @@ print(w.len())"#),
 }
 
 #[test]
-fn method_self_value_semantics_diff() {
-    // Mutations to `self` inside a method don't propagate;
-    // matching behaviour across walker and VM is the contract.
-    assert_eq!(
-        say(r#"struct Counter { n }
-fn Counter.bump(self) { self.n = self.n + 1 }
-let c = Counter { n: 5 }
-c.bump()
-print(c.n)"#),
-        "5"
+fn value_receiver_mutation_is_a_parse_error_diff() {
+    let error = run_err(
+        r#"struct Counter { n }
+fn Counter.bump(self) { self.n = self.n + 1 }"#,
     );
+    assert!(error.contains("can't mutate value receiver `self`"));
+
+    let delegated = run_err(
+        r#"struct Counter { n }
+fn Counter.bump(ref self) { self.n += 1 }
+fn Counter.bump_twice(self) {
+  self.bump()
+  self.bump()
+}"#,
+    );
+    assert!(delegated.contains("can't mutate value receiver `self`"));
+}
+
+#[test]
+fn ref_method_receiver_commits_after_arguments_and_rolls_back_errors_diff() {
+    let out = run_both(
+        r#"struct Counter { n }
+fn Counter.bump(ref self, amount) {
+  self.n = self.n + amount
+  return self.n
+}
+fn Counter.fail(ref self) {
+  self.n = 99
+  panic("stop")
+}
+let counter = Counter { n: 1 }
+fn side() {
+  counter.n = 10
+  return 2
+}
+print(counter.bump(side()), counter.n)
+fn attempt() { counter.fail() }
+print(try_call(attempt), counter.n)"#,
+        &standard(),
+    );
+    assert!(out.is_ok(), "{:?}", out.error);
+    assert_eq!(
+        out.prints,
+        vec![
+            "12 12",
+            "Result::Err(RuntimeError { message: \"stop\", line: 8 }) 12"
+        ]
+    );
+}
+
+#[test]
+fn ref_method_receiver_must_be_a_unique_mutable_binding_diff() {
+    let temporary = run_err(
+        r#"struct Counter { n }
+fn Counter.bump(ref self) { self.n = self.n + 1 }
+Counter { n: 1 }.bump()"#,
+    );
+    assert!(temporary.contains("a `ref` method receiver must be a variable"));
+
+    let duplicate = run_err(
+        r#"struct Counter { n }
+fn Counter.copy(ref self, ref other) { self.n = other.n }
+let counter = Counter { n: 1 }
+counter.copy(ref counter)"#,
+    );
+    assert!(duplicate.contains("same variable"));
 }
 
 // ─── Pattern matching ─────────────────────────────────────────────
