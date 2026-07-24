@@ -3353,6 +3353,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.host.on_print(&message);
+                if let Some(error) = self.host.print_error(line) {
+                    return Err(error);
+                }
                 self.push_value(Value::None);
                 return Ok(Next::Continue);
             }
@@ -3553,6 +3556,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.host.on_print(&message);
+                if let Some(error) = self.host.print_error(line) {
+                    return Err(error);
+                }
                 self.push_value(Value::None);
                 return Ok(Next::Continue);
             }

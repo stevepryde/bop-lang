@@ -150,14 +150,14 @@ fn empty_program_still_produces_runnable_shell() {
 #[test]
 fn print_42_emits_on_print_call() {
     let out = compile("print(42)");
-    // The body must format args via __bop_format_print and send to
-    // ctx.host.on_print — mirroring the tree-walker's print impl.
+    // The body must format args via __bop_format_print and use the fallible
+    // host-print helper so generated programs propagate output failures.
     // `42` is an int literal in phase 6, so the emitted value is
     // `Value::Int`.
     contains_all(
         &out,
         &[
-            "ctx.host.on_print(&__bop_format_print(",
+            "__bop_host_print(ctx, &__bop_format_print(",
             "::bop::value::Value::Int(42",
         ],
     );
