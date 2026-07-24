@@ -1,17 +1,18 @@
 mod diagnostics;
 mod model;
 
-use diagnostics::check_match_exhaustive;
 use crate::error::{BopError, BopWarning};
-use crate::parser::{
-    AssignTarget, Expr, ExprKind, Parameter, Stmt, StmtKind, VariantPayload,
-};
+use crate::parser::{AssignTarget, Expr, ExprKind, Parameter, Stmt, StmtKind, VariantPayload};
+use diagnostics::check_match_exhaustive;
 use model::*;
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{string::{String, ToString}, vec::Vec};
-#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::{BTreeMap, BTreeSet};
+#[cfg(all(feature = "no_std", not(feature = "std")))]
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 #[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -116,9 +117,7 @@ where
                     ..
                 } => {
                     if let Some(frame) = env.invalidate_visible_namespace(name) {
-                        effects
-                            .invalidated_namespaces
-                            .insert(name.clone(), frame);
+                        effects.invalidated_namespaces.insert(name.clone(), frame);
                     }
                 }
                 StmtKind::Assign { .. } => {}
@@ -212,7 +211,8 @@ where
         if self.cycle_tainted_modules.remove(path) {
             knowledge = ModuleKnowledge::Opaque;
         }
-        self.module_cache.insert(path.to_string(), knowledge.clone());
+        self.module_cache
+            .insert(path.to_string(), knowledge.clone());
         knowledge
     }
 
@@ -235,10 +235,9 @@ where
                         .namespaces
                         .insert(alias_name.to_string(), NamespaceBinding::Opaque);
                 } else {
-                    frame.namespaces.insert(
-                        alias_name.to_string(),
-                        NamespaceBinding::Known(projected),
-                    );
+                    frame
+                        .namespaces
+                        .insert(alias_name.to_string(), NamespaceBinding::Known(projected));
                 }
             }
             (ModuleKnowledge::Opaque, Some(alias_name)) => {
@@ -257,8 +256,7 @@ where
                     frame.types.entry(name).or_insert(binding);
                 }
                 for (name, binding) in projected.namespaces {
-                    if !frame.value_shadows.contains(&name)
-                        && !frame.alias_blockers.contains(&name)
+                    if !frame.value_shadows.contains(&name) && !frame.alias_blockers.contains(&name)
                     {
                         frame.namespaces.entry(name).or_insert(binding);
                     }
@@ -317,14 +315,7 @@ where
     ) -> FlowEffects {
         let mut effects = FlowEffects::default();
         for stmt in stmts {
-            effects.merge(self.check_stmt(
-                stmt,
-                env,
-                callable_base,
-                module_path,
-                sites,
-                warnings,
-            ));
+            effects.merge(self.check_stmt(stmt, env, callable_base, module_path, sites, warnings));
         }
         effects
     }
@@ -349,9 +340,7 @@ where
                 self.check_target(target, env, callable_base, module_path, sites, warnings);
                 if let AssignTarget::Variable(name) = target {
                     if let Some(frame) = env.invalidate_visible_namespace(name) {
-                        effects
-                            .invalidated_namespaces
-                            .insert(name.clone(), frame);
+                        effects.invalidated_namespaces.insert(name.clone(), frame);
                     }
                 }
             }
@@ -379,14 +368,7 @@ where
                     warnings,
                 ));
                 for (condition, body) in else_ifs {
-                    self.check_expr(
-                        condition,
-                        env,
-                        callable_base,
-                        module_path,
-                        sites,
-                        warnings,
-                    );
+                    self.check_expr(condition, env, callable_base, module_path, sites, warnings);
                     effects.merge(self.check_child(
                         body,
                         env,
@@ -432,7 +414,11 @@ where
                 ));
                 apply_inherited_effects(env, &mut effects);
             }
-            StmtKind::ForIn { var, iterable, body } => {
+            StmtKind::ForIn {
+                var,
+                iterable,
+                body,
+            } => {
                 self.check_expr(iterable, env, callable_base, module_path, sites, warnings);
                 let mut child = env.clone();
                 child.push_frame();
@@ -448,31 +434,14 @@ where
                 apply_inherited_effects(env, &mut effects);
             }
             StmtKind::FnDecl {
-                name,
-                params,
-                body,
-                ..
+                name, params, body, ..
             } => {
-                self.check_callable(
-                    params,
-                    body,
-                    callable_base,
-                    module_path,
-                    sites,
-                    warnings,
-                );
+                self.check_callable(params, body, callable_base, module_path, sites, warnings);
                 env.block_future_namespace(name);
                 effects.alias_blockers.insert(name.clone());
             }
             StmtKind::MethodDecl { params, body, .. } => {
-                self.check_callable(
-                    params,
-                    body,
-                    callable_base,
-                    module_path,
-                    sites,
-                    warnings,
-                );
+                self.check_callable(params, body, callable_base, module_path, sites, warnings);
             }
             StmtKind::Use { path, items, alias } => {
                 self.apply_use(env, path, items.as_deref(), alias.as_deref());
@@ -639,26 +608,12 @@ where
                 VariantPayload::Unit => {}
                 VariantPayload::Tuple(values) => {
                     for value in values {
-                        self.check_expr(
-                            value,
-                            env,
-                            callable_base,
-                            module_path,
-                            sites,
-                            warnings,
-                        );
+                        self.check_expr(value, env, callable_base, module_path, sites, warnings);
                     }
                 }
                 VariantPayload::Struct(fields) => {
                     for (_, value) in fields {
-                        self.check_expr(
-                            value,
-                            env,
-                            callable_base,
-                            module_path,
-                            sites,
-                            warnings,
-                        );
+                        self.check_expr(value, env, callable_base, module_path, sites, warnings);
                     }
                 }
             },
@@ -686,14 +641,7 @@ where
                 self.check_expr(else_expr, env, callable_base, module_path, sites, warnings);
             }
             ExprKind::Lambda { params, body } => {
-                self.check_callable(
-                    params,
-                    body,
-                    callable_base,
-                    module_path,
-                    sites,
-                    warnings,
-                );
+                self.check_callable(params, body, callable_base, module_path, sites, warnings);
             }
             ExprKind::Int(_)
             | ExprKind::Number(_)

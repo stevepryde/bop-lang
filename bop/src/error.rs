@@ -167,7 +167,7 @@ impl BopError {
         module_path: impl Into<String>,
         source: impl Into<String>,
     ) -> Self {
-let module_path = module_path.into();
+        let module_path = module_path.into();
         match &mut self.source_context {
             None => {
                 self.source_context = Some(Box::new(SourceContext {
@@ -175,9 +175,7 @@ let module_path = module_path.into();
                     source: Some(source.into()),
                 }));
             }
-            Some(context)
-                if context.module_path == module_path && context.source.is_none() =>
-            {
+            Some(context) if context.module_path == module_path && context.source.is_none() => {
                 context.source = Some(source.into());
             }
             Some(_) => {}
@@ -255,7 +253,10 @@ impl BopError {
     pub fn render(&self, source: &str) -> String {
         let mut out = String::new();
         let (source, module_path) = match self.render_context() {
-            Some(context) => (context.source.as_deref(), Some(context.module_path.as_str())),
+            Some(context) => (
+                context.source.as_deref(),
+                Some(context.module_path.as_str()),
+            ),
             None => (Some(source), None),
         };
         match self.line {
@@ -528,11 +529,8 @@ mod tests {
     fn module_source_context_renders_its_own_snippet() {
         let root = "use bad";
         let module = "let okay = 1\nlet broken =";
-        let mut err = BopError::runtime_at(
-            "Expected expression",
-            2,
-            core::num::NonZeroU32::new(13),
-        );
+        let mut err =
+            BopError::runtime_at("Expected expression", 2, core::num::NonZeroU32::new(13));
         err.friendly_hint = Some("finish the assignment".into());
         let err = err.with_module_source("bad", module);
 
@@ -600,8 +598,8 @@ mod tests {
     #[test]
     fn root_sentinel_context_renders_root_source() {
         let root = "let a = 1\nlet zero = 0\nlet b = a / zero";
-        let err = BopError::runtime("Division by zero", 3)
-            .with_module(crate::value::ROOT_MODULE_PATH);
+        let err =
+            BopError::runtime("Division by zero", 3).with_module(crate::value::ROOT_MODULE_PATH);
 
         let rendered = err.render(root);
 

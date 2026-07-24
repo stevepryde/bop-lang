@@ -5,7 +5,11 @@
 //! file I/O live in `bop-sys` instead.
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{format, string::{String, ToString}, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use crate::error::BopError;
 use crate::memory::MemoryContext;
@@ -123,22 +127,13 @@ pub fn make_iter_done_in(memory: &MemoryContext) -> Value {
 // parser module already uses `alloc::vec!` under no_std, so the
 // engines follow the same convention here. Nothing clever — just a
 // re-export that picks the right `vec!` macro per config.
-#[cfg(any(feature = "std", not(feature = "no_std")))]
-use std as alloc_import;
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc as alloc_import;
+#[cfg(any(feature = "std", not(feature = "no_std")))]
+use std as alloc_import;
 
-pub fn builtin_range(
-    args: &[Value],
-    line: u32,
-    rand_state: &mut u64,
-) -> Result<Value, BopError> {
-    builtin_range_in(
-        args,
-        line,
-        rand_state,
-        &MemoryContext::__legacy_current(),
-    )
+pub fn builtin_range(args: &[Value], line: u32, rand_state: &mut u64) -> Result<Value, BopError> {
+    builtin_range_in(args, line, rand_state, &MemoryContext::__legacy_current())
 }
 
 #[doc(hidden)]
@@ -212,7 +207,10 @@ fn range_cardinality(start: i64, end: i64, step: i64) -> u128 {
     let (distance, stride) = if step > 0 && start < end {
         ((end as i128 - start as i128) as u128, step as u128)
     } else if step < 0 && start > end {
-        ((start as i128 - end as i128) as u128, -(step as i128) as u128)
+        (
+            (start as i128 - end as i128) as u128,
+            -(step as i128) as u128,
+        )
     } else {
         return 0;
     };
@@ -231,11 +229,7 @@ fn range_memory_error(line: u32) -> BopError {
 }
 
 fn range_limit_error(line: u32) -> BopError {
-    error_fatal_with_hint(
-        line,
-        RANGE_LIMIT_ERROR_MESSAGE,
-        RANGE_LIMIT_HINT,
-    )
+    error_fatal_with_hint(line, RANGE_LIMIT_ERROR_MESSAGE, RANGE_LIMIT_HINT)
 }
 
 /// Convert a finite `f64` that's already integer-valued into a
@@ -287,12 +281,7 @@ pub fn builtin_rand(args: &[Value], line: u32, rand_state: &mut u64) -> Result<V
 
 // ─── Helpers (also used by evaluator / VM / AOT) ────────────────────────────
 
-pub fn expect_args(
-    name: &str,
-    args: &[Value],
-    expected: usize,
-    line: u32,
-) -> Result<(), BopError> {
+pub fn expect_args(name: &str, args: &[Value], expected: usize, line: u32) -> Result<(), BopError> {
     if args.len() != expected {
         Err(error(
             line,
@@ -309,11 +298,7 @@ pub fn expect_args(
     }
 }
 
-pub fn expect_number(
-    func_name: &str,
-    val: &Value,
-    line: u32,
-) -> Result<f64, BopError> {
+pub fn expect_number(func_name: &str, val: &Value, line: u32) -> Result<f64, BopError> {
     match val {
         Value::Int(n) => Ok(*n as f64),
         Value::Number(n) => Ok(*n),
@@ -332,11 +317,7 @@ pub fn expect_number(
 /// by builtins that have to produce exact integer counts
 /// (e.g. `range`, `rand`). `Number` inputs are rejected rather
 /// than silently truncated.
-pub fn expect_int(
-    func_name: &str,
-    val: &Value,
-    line: u32,
-) -> Result<i64, BopError> {
+pub fn expect_int(func_name: &str, val: &Value, line: u32) -> Result<i64, BopError> {
     match val {
         Value::Int(n) => Ok(*n),
         _ => Err(error(
@@ -382,11 +363,7 @@ pub fn error_at(
     }
 }
 
-pub fn error_with_hint(
-    line: u32,
-    message: impl Into<String>,
-    hint: impl Into<String>,
-) -> BopError {
+pub fn error_with_hint(line: u32, message: impl Into<String>, hint: impl Into<String>) -> BopError {
     BopError {
         line: Some(line),
         column: None,
@@ -535,12 +512,7 @@ pub fn make_try_call_err_in(err: &BopError, memory: &MemoryContext) -> Value {
 
 /// Pre-flight check for string repeat
 pub fn check_string_repeat_memory(len: usize, count: usize, line: u32) -> Result<(), BopError> {
-    check_string_repeat_memory_in(
-        len,
-        count,
-        line,
-        &MemoryContext::__legacy_current(),
-    )
+    check_string_repeat_memory_in(len, count, line, &MemoryContext::__legacy_current())
 }
 
 #[doc(hidden)]
@@ -564,12 +536,7 @@ pub fn check_string_repeat_memory_in(
 
 /// Pre-flight check for string concat
 pub fn check_string_concat_memory(a_len: usize, b_len: usize, line: u32) -> Result<(), BopError> {
-    check_string_concat_memory_in(
-        a_len,
-        b_len,
-        line,
-        &MemoryContext::__legacy_current(),
-    )
+    check_string_concat_memory_in(a_len, b_len, line, &MemoryContext::__legacy_current())
 }
 
 #[doc(hidden)]
@@ -593,12 +560,7 @@ pub fn check_string_concat_memory_in(
 
 /// Pre-flight check for array concat
 pub fn check_array_concat_memory(a_len: usize, b_len: usize, line: u32) -> Result<(), BopError> {
-    check_array_concat_memory_in(
-        a_len,
-        b_len,
-        line,
-        &MemoryContext::__legacy_current(),
-    )
+    check_array_concat_memory_in(a_len, b_len, line, &MemoryContext::__legacy_current())
 }
 
 #[doc(hidden)]
@@ -626,12 +588,7 @@ mod tests {
 
     fn run_range(args: &[Value]) -> Result<Value, BopError> {
         let mut rand_state = 0;
-        builtin_range_in(
-            args,
-            7,
-            &mut rand_state,
-            &MemoryContext::__new(usize::MAX),
-        )
+        builtin_range_in(args, 7, &mut rand_state, &MemoryContext::__new(usize::MAX))
     }
 
     fn array_ints(value: &Value) -> Vec<i64> {
@@ -654,10 +611,7 @@ mod tests {
         assert_eq!(range_cardinality(0, 10, -1), 0);
         assert_eq!(range_cardinality(10, 0, 1), 0);
         assert_eq!(range_cardinality(5, 5, 1), 0);
-        assert_eq!(
-            range_cardinality(i64::MIN, i64::MAX, 1),
-            u64::MAX as u128
-        );
+        assert_eq!(range_cardinality(i64::MIN, i64::MAX, 1), u64::MAX as u128);
         assert_eq!(range_cardinality(i64::MAX, i64::MIN, i64::MIN), 2);
     }
 
@@ -703,12 +657,8 @@ mod tests {
             .expect("10,000 stepped values should fit");
         assert_eq!(array_ints(&forward).len(), RANGE_MAX_ITEMS);
 
-        let reverse = run_range(&[
-            Value::Int(20_000),
-            Value::Int(0),
-            Value::Int(-2),
-        ])
-        .expect("10,000 reverse values should fit");
+        let reverse = run_range(&[Value::Int(20_000), Value::Int(0), Value::Int(-2)])
+            .expect("10,000 reverse values should fit");
         assert_eq!(array_ints(&reverse).len(), RANGE_MAX_ITEMS);
 
         for args in [

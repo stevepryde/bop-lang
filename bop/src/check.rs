@@ -25,10 +25,7 @@ pub fn check_program(stmts: &[Stmt]) -> Vec<BopWarning> {
 ///
 /// Resolver, parse, and cycle failures are treated as opaque module surfaces;
 /// they never turn a warning pass into a hard error.
-pub fn check_program_with_resolver<R>(
-    stmts: &[Stmt],
-    resolver: &mut R,
-) -> Vec<BopWarning>
+pub fn check_program_with_resolver<R>(stmts: &[Stmt], resolver: &mut R) -> Vec<BopWarning>
 where
     R: FnMut(&str) -> Option<Result<String, crate::error::BopError>>,
 {
@@ -94,7 +91,11 @@ let _ = match s {
             "msg: {}",
             ws[0].message
         );
-        assert!(ws[0].message.contains("`Shape::Triangle`"), "msg: {}", ws[0].message);
+        assert!(
+            ws[0].message.contains("`Shape::Triangle`"),
+            "msg: {}",
+            ws[0].message
+        );
     }
 
     #[test]
@@ -216,10 +217,7 @@ if true {
 
     /// Helper that wires a tiny `(&str, &str)` module map into
     /// the resolver closure shape.
-    fn warnings_with_modules(
-        source: &str,
-        modules: &[(&str, &str)],
-    ) -> Vec<BopWarning> {
+    fn warnings_with_modules(source: &str, modules: &[(&str, &str)]) -> Vec<BopWarning> {
         let stmts = parse(source).unwrap();
         let mut resolver = |name: &str| -> Option<Result<String, crate::error::BopError>> {
             modules
@@ -283,10 +281,7 @@ let _ = match c {
     Color::Red => "r",
     Color::Blue => "b",
 }"#,
-            &[
-                ("a", "use b"),
-                ("b", "enum Color { Red, Blue, Green }"),
-            ],
+            &[("a", "use b"), ("b", "enum Color { Red, Blue, Green }")],
         );
         assert_eq!(ws.len(), 1);
         assert!(
@@ -368,7 +363,10 @@ while false { enum LoopOnly { A, B } }
 let _ = match none { BranchOnly::A => 1 }
 let _ = match none { LoopOnly::A => 1 }"#,
         );
-        assert!(ws.is_empty(), "nested declarations escaped their frames: {ws:?}");
+        assert!(
+            ws.is_empty(),
+            "nested declarations escaped their frames: {ws:?}"
+        );
 
         let ws = warnings(
             r#"repeat 1 {
@@ -403,9 +401,19 @@ let f = fn(x) {
 }
 let g = fn(x) { return match x { LambdaPrivate::A => 1 } }"#,
         );
-        assert_eq!(ws.len(), 2, "only the two declaring callables should warn: {ws:?}");
-        assert!(ws.iter().any(|warning| warning.message.contains("`Private::B`")));
-        assert!(ws.iter().any(|warning| warning.message.contains("`LambdaPrivate::B`")));
+        assert_eq!(
+            ws.len(),
+            2,
+            "only the two declaring callables should warn: {ws:?}"
+        );
+        assert!(
+            ws.iter()
+                .any(|warning| warning.message.contains("`Private::B`"))
+        );
+        assert!(
+            ws.iter()
+                .any(|warning| warning.message.contains("`LambdaPrivate::B`"))
+        );
     }
 
     #[test]
@@ -415,7 +423,11 @@ let g = fn(x) { return match x { LambdaPrivate::A => 1 } }"#,
 enum E { Pair(x, y), End }
 fn f(value) { return match value { E::Pair(a, b) => a } }"#,
         );
-        assert_eq!(equivalent.len(), 1, "tuple field names are not runtime shape: {equivalent:?}");
+        assert_eq!(
+            equivalent.len(),
+            1,
+            "tuple field names are not runtime shape: {equivalent:?}"
+        );
         assert!(equivalent[0].message.contains("`E::End`"));
 
         for source in [
@@ -429,7 +441,10 @@ fn f(value) { return match value { E::Pair(a) => a } }"#,
 enum E { Item { right, left }, End }
 fn f(value) { return match value { E::Item { left, right } => left } }"#,
         ] {
-            assert!(warnings(source).is_empty(), "non-equivalent shape was treated as known");
+            assert!(
+                warnings(source).is_empty(),
+                "non-equivalent shape was treated as known"
+            );
         }
     }
 
@@ -439,7 +454,10 @@ fn f(value) { return match value { E::Item { left, right } => left } }"#,
             r#"enum E { A, B }
 let _ = match E::A { _ | E::A => 1 }"#,
         );
-        assert!(ws.is_empty(), "an OR catch-all must use any-alternative semantics: {ws:?}");
+        assert!(
+            ws.is_empty(),
+            "an OR catch-all must use any-alternative semantics: {ws:?}"
+        );
     }
 
     #[test]
@@ -451,7 +469,10 @@ if true { api = 1 }
 let _ = match none { api.E::A => 1 }"#,
             modules,
         );
-        assert!(inherited.is_empty(), "conditional outer write must poison the alias");
+        assert!(
+            inherited.is_empty(),
+            "conditional outer write must poison the alias"
+        );
 
         let child_local = warnings_with_modules(
             r#"use types as api
@@ -462,7 +483,11 @@ if true {
 let _ = match none { api.E::A => 1 }"#,
             modules,
         );
-        assert_eq!(child_local.len(), 1, "child-local write poisoned the outer alias");
+        assert_eq!(
+            child_local.len(),
+            1,
+            "child-local write poisoned the outer alias"
+        );
         assert!(child_local[0].message.contains("`E::B`"));
     }
 
@@ -474,7 +499,11 @@ fn api() { return 1 }
 let _ = match none { api.E::A => 1 }"#,
             &[("types", "enum E { A, B }")],
         );
-        assert_eq!(ws.len(), 1, "function registry entry incorrectly hid the alias: {ws:?}");
+        assert_eq!(
+            ws.len(),
+            1,
+            "function registry entry incorrectly hid the alias: {ws:?}"
+        );
         assert!(ws[0].message.contains("`E::B`"));
     }
 
@@ -486,7 +515,10 @@ use types as api
 let _ = match none { api.E::A => 1 }"#,
             &[("types", "enum E { A, B }")],
         );
-        assert!(ws.is_empty(), "checker trusted an alias the runtime rejects: {ws:?}");
+        assert!(
+            ws.is_empty(),
+            "checker trusted an alias the runtime rejects: {ws:?}"
+        );
     }
 
     #[test]
@@ -545,11 +577,14 @@ let _ = match none { api.E::A => 1 }"#,
                 "imported value failed to shadow outer alias for {imported}"
             );
 
-            let same_frame = format!(
-                "use types as api\nuse {imported}\nlet _ = match none {{ api.E::A => 1 }}"
-            );
+            let same_frame =
+                format!("use types as api\nuse {imported}\nlet _ = match none {{ api.E::A => 1 }}");
             let ws = warnings_with_modules(&same_frame, modules);
-            assert_eq!(ws.len(), 1, "same-frame first winner was not preserved: {ws:?}");
+            assert_eq!(
+                ws.len(),
+                1,
+                "same-frame first winner was not preserved: {ws:?}"
+            );
             assert!(ws[0].message.contains("`E::B`"));
         }
     }
@@ -562,7 +597,10 @@ if true { api = 1 }
 fn f(value) { return match value { api.E::A => 1 } }"#,
             &[("types", "enum E { A, B }")],
         );
-        assert!(ws.is_empty(), "callable base ignored a possible outer alias write: {ws:?}");
+        assert!(
+            ws.is_empty(),
+            "callable base ignored a possible outer alias write: {ws:?}"
+        );
     }
 
     #[test]
@@ -586,10 +624,7 @@ for api in [1] { let _ = match none { api.E::A => 1 } }"#,
 
     #[test]
     fn direct_selective_aliased_and_transitive_imports_preserve_origin() {
-        let modules = &[
-            ("types", "enum E { A, B }"),
-            ("bridge", "use types.{E}"),
-        ];
+        let modules = &[("types", "enum E { A, B }"), ("bridge", "use types.{E}")];
         for source in [
             "use types\nlet _ = match none { E::A => 1 }",
             "use types.{E}\nlet _ = match none { E::A => 1 }",
@@ -621,7 +656,10 @@ for api in [1] { let _ = match none { api.E::A => 1 } }"#,
             "use record\nuse left\nlet _ = match none { E::A => 1 }",
             modules,
         );
-        assert!(struct_first.is_empty(), "later enum bypassed first imported type");
+        assert!(
+            struct_first.is_empty(),
+            "later enum bypassed first imported type"
+        );
     }
 
     #[test]
@@ -630,7 +668,10 @@ for api in [1] { let _ = match none { api.E::A => 1 } }"#,
             "use a as api\nlet _ = match none { api.E::A => 1 }",
             &[("a", "use b"), ("b", "enum E { A, B }\nuse a")],
         );
-        assert!(ws.is_empty(), "partial surface escaped a circular import: {ws:?}");
+        assert!(
+            ws.is_empty(),
+            "partial surface escaped a circular import: {ws:?}"
+        );
     }
 
     #[test]
@@ -646,7 +687,11 @@ if false {
 }
 let _ = match none { E::Outer => 1 }"#,
         );
-        assert_eq!(ws.len(), 2, "all arms plus restored outer type must be analyzed: {ws:?}");
+        assert_eq!(
+            ws.len(),
+            2,
+            "all arms plus restored outer type must be analyzed: {ws:?}"
+        );
         assert!(ws[0].message.contains("`E::BranchMissing`"));
         assert!(ws[1].message.contains("`E::Missing`"));
     }
@@ -677,7 +722,11 @@ fn Holder.inspect(self, value) {
     return match value { MethodOnly::A => 1 }
 }"#,
         );
-        assert_eq!(ws.len(), 1, "lambda captured block-local type or method local was missed: {ws:?}");
+        assert_eq!(
+            ws.len(),
+            1,
+            "lambda captured block-local type or method local was missed: {ws:?}"
+        );
         assert!(ws[0].message.contains("`MethodOnly::B`"));
     }
 
@@ -688,7 +737,11 @@ fn Holder.inspect(self, value) {
             "enum E { A, B }\nstruct E { value }\nlet _ = match none { E::A => 1 }",
         ] {
             let ws = warnings(source);
-            assert_eq!(ws.len(), 1, "struct declaration erased same-module enum: {ws:?}");
+            assert_eq!(
+                ws.len(),
+                1,
+                "struct declaration erased same-module enum: {ws:?}"
+            );
             assert!(ws[0].message.contains("`E::B`"));
         }
     }
@@ -703,7 +756,11 @@ let _ = match 1 {
 let _ = match none { api.E::A => 1 }"#,
             &[("types", "enum E { A, B }")],
         );
-        assert_eq!(ws.len(), 1, "pattern binding did not shadow alias only within its arm: {ws:?}");
+        assert_eq!(
+            ws.len(),
+            1,
+            "pattern binding did not shadow alias only within its arm: {ws:?}"
+        );
         assert!(ws[0].message.contains("`E::B`"));
     }
 
@@ -730,7 +787,11 @@ let _ = match none { r.E::A => 1 }
 let _ = match none { l.E::A => 1, r.E::A => 2 }"#,
             modules,
         );
-        assert_eq!(ws.len(), 2, "mixed runtime identities should suppress only their match: {ws:?}");
+        assert_eq!(
+            ws.len(),
+            2,
+            "mixed runtime identities should suppress only their match: {ws:?}"
+        );
         assert!(ws[0].message.contains("`E::LeftMissing`"));
         assert!(ws[1].message.contains("`E::RightMissing`"));
     }
@@ -739,12 +800,13 @@ let _ = match none { l.E::A => 1, r.E::A => 2 }"#,
     fn transitive_aliased_reexport_keeps_leaf_runtime_origin() {
         let ws = warnings_with_modules(
             "use bridge as api\nlet _ = match none { api.E::A => 1 }",
-            &[
-                ("leaf", "enum E { A, B }"),
-                ("bridge", "use leaf.{E}"),
-            ],
+            &[("leaf", "enum E { A, B }"), ("bridge", "use leaf.{E}")],
         );
-        assert_eq!(ws.len(), 1, "leaf origin was lost through aliased re-export: {ws:?}");
+        assert_eq!(
+            ws.len(),
+            1,
+            "leaf origin was lost through aliased re-export: {ws:?}"
+        );
         assert!(ws[0].message.contains("`E::B`"));
     }
 
@@ -771,7 +833,11 @@ values[match none { E::A => 0 }] = Box {
     value: Wrap::Value(try (match none { E::A => 1 })),
 }"#,
         );
-        assert_eq!(ws.len(), 2, "an assignment-target or payload/try edge was skipped: {ws:?}");
+        assert_eq!(
+            ws.len(),
+            2,
+            "an assignment-target or payload/try edge was skipped: {ws:?}"
+        );
         assert!(ws.iter().all(|warning| warning.message.contains("`E::B`")));
     }
 
@@ -785,7 +851,10 @@ values[match none { E::A => 0 }] = Box {
     let _ = match none { Choice::Right => 1 }
 }"#,
         );
-        assert!(ws.is_empty(), "earlier sibling contaminated the later exact site: {ws:?}");
+        assert!(
+            ws.is_empty(),
+            "earlier sibling contaminated the later exact site: {ws:?}"
+        );
     }
 
     #[test]
@@ -818,6 +887,9 @@ struct E { value }
 fn f(input) { return match input { E::A => 1 } }"#,
             &[("dep", "enum E { A, B }")],
         );
-        assert!(ws.is_empty(), "imported enum survived a local struct binding: {ws:?}");
+        assert!(
+            ws.is_empty(),
+            "imported enum survived a local struct binding: {ws:?}"
+        );
     }
 }

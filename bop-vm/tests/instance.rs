@@ -52,8 +52,14 @@ fn top_level_return_retains_prior_root_state_and_skips_later_entries() {
     )
     .unwrap();
     assert_eq!(instance.entry_points().len(), 1);
-    assert_eq!(instance.call("next", &[], &mut host).unwrap().inspect(), "5");
-    assert_eq!(instance.call("next", &[], &mut host).unwrap().inspect(), "6");
+    assert_eq!(
+        instance.call("next", &[], &mut host).unwrap().inspect(),
+        "5"
+    );
+    assert_eq!(
+        instance.call("next", &[], &mut host).unwrap().inspect(),
+        "6"
+    );
     assert!(instance.call("skipped", &[], &mut host).is_err());
 }
 
@@ -121,9 +127,7 @@ pub fn make_ref_callback() {
         "0"
     );
 
-    let callback = instance
-        .call("make_ref_callback", &[], &mut host)
-        .unwrap();
+    let callback = instance.call("make_ref_callback", &[], &mut host).unwrap();
     let callback_error = instance
         .call_value(&callback, &[Value::Int(1)], &mut host)
         .unwrap_err();
@@ -175,9 +179,15 @@ fn uncaught_errors_unwind_transient_state_but_keep_prior_mutations() {
     )
     .unwrap();
     assert!(instance.call("fail", &[], &mut host).is_err());
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "1"
+    );
     assert!(instance.call("fail", &[], &mut host).is_err());
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "2");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "2"
+    );
 }
 
 #[test]
@@ -189,20 +199,28 @@ fn callback_preframe_errors_do_not_erase_live_root_state() {
         &BopLimits::standard(),
     )
     .unwrap();
-    assert_eq!(instance.call("bump", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(
+        instance.call("bump", &[], &mut host).unwrap().inspect(),
+        "1"
+    );
 
     let opaque_body: Rc<dyn std::any::Any> = Rc::new(17_u8);
     let external = Value::Fn(
-        BopFn::try_new_compiled(Vec::new(), Vec::new(), opaque_body, None, 0, 0)
-            .unwrap(),
+        BopFn::try_new_compiled(Vec::new(), Vec::new(), opaque_body, None, 0, 0).unwrap(),
     );
     assert!(instance.call_value(&external, &[], &mut host).is_err());
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "1"
+    );
 }
 
 #[test]
 fn step_budget_resets_for_each_call() {
-    let limits = BopLimits { max_steps: 20, max_memory: 1024 * 1024 };
+    let limits = BopLimits {
+        max_steps: 20,
+        max_memory: 1024 * 1024,
+    };
     let mut host = Host;
     let mut instance = BopInstance::load(
         "pub fn work() { let total = 0; repeat 5 { total += 1 }; return total }",
@@ -210,8 +228,14 @@ fn step_budget_resets_for_each_call() {
         &limits,
     )
     .unwrap();
-    assert_eq!(instance.call("work", &[], &mut host).unwrap().inspect(), "5");
-    assert_eq!(instance.call("work", &[], &mut host).unwrap().inspect(), "5");
+    assert_eq!(
+        instance.call("work", &[], &mut host).unwrap().inspect(),
+        "5"
+    );
+    assert_eq!(
+        instance.call("work", &[], &mut host).unwrap().inspect(),
+        "5"
+    );
 }
 
 struct ModuleHost {
@@ -295,7 +319,10 @@ fn facade_reexports_share_authoritative_values_with_the_declaring_module() {
     );
     let callback = instance.call("make", &[], &mut host).unwrap();
     assert_eq!(
-        instance.call_value(&callback, &[], &mut host).unwrap().inspect(),
+        instance
+            .call_value(&callback, &[], &mut host)
+            .unwrap()
+            .inspect(),
         "2"
     );
     assert_eq!(
@@ -319,8 +346,17 @@ fn flat_imports_read_current_authoritative_values_at_root_and_in_functions() {
     )
     .unwrap();
 
-    assert_eq!(instance.call("next", &[], &mut host).unwrap().inspect(), "1");
-    assert_eq!(instance.call("read_root", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(
+        instance.call("next", &[], &mut host).unwrap().inspect(),
+        "1"
+    );
+    assert_eq!(
+        instance
+            .call("read_root", &[], &mut host)
+            .unwrap()
+            .inspect(),
+        "1"
+    );
     assert_eq!(
         instance
             .call("read_selective", &[], &mut host)
@@ -328,8 +364,17 @@ fn flat_imports_read_current_authoritative_values_at_root_and_in_functions() {
             .inspect(),
         "1"
     );
-    assert_eq!(instance.call("next", &[], &mut host).unwrap().inspect(), "2");
-    assert_eq!(instance.call("read_glob", &[], &mut host).unwrap().inspect(), "2");
+    assert_eq!(
+        instance.call("next", &[], &mut host).unwrap().inspect(),
+        "2"
+    );
+    assert_eq!(
+        instance
+            .call("read_glob", &[], &mut host)
+            .unwrap()
+            .inspect(),
+        "2"
+    );
 }
 
 #[test]
@@ -349,9 +394,15 @@ fn failed_facade_load_restores_forwarded_values_and_remains_retryable() {
     .unwrap();
 
     assert!(instance.call("load_bad", &[], &mut host).is_err());
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "1"
+    );
     assert!(instance.call("load_bad", &[], &mut host).is_err());
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "2");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "2"
+    );
 }
 
 #[test]
@@ -374,11 +425,32 @@ fn facade_local_overwrite_returns_the_forwarded_value_to_its_origin() {
     )
     .unwrap();
 
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[100, 7]");
-    assert_eq!(instance.call("leaf_read", &[], &mut host).unwrap().inspect(), "7");
-    assert_eq!(instance.call("leaf_bump", &[], &mut host).unwrap().inspect(), "8");
-    assert_eq!(instance.call("bump", &[], &mut host).unwrap().inspect(), "101");
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[101, 8]");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "[100, 7]"
+    );
+    assert_eq!(
+        instance
+            .call("leaf_read", &[], &mut host)
+            .unwrap()
+            .inspect(),
+        "7"
+    );
+    assert_eq!(
+        instance
+            .call("leaf_bump", &[], &mut host)
+            .unwrap()
+            .inspect(),
+        "8"
+    );
+    assert_eq!(
+        instance.call("bump", &[], &mut host).unwrap().inspect(),
+        "101"
+    );
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "[101, 8]"
+    );
 }
 
 #[test]
@@ -406,9 +478,18 @@ fn recursive_and_cross_module_calls_restore_authoritative_environments_in_order(
         instance.call("cross", &[], &mut host).unwrap().inspect(),
         "[[11, 110], 111]"
     );
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[111, 110]");
-    assert_eq!(instance.call("recurse", &[], &mut host).unwrap().inspect(), "114");
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "[114, 110]");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "[111, 110]"
+    );
+    assert_eq!(
+        instance.call("recurse", &[], &mut host).unwrap().inspect(),
+        "114"
+    );
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "[114, 110]"
+    );
 }
 
 #[test]
@@ -450,7 +531,10 @@ fn lazy_modules_borrow_the_currently_active_origin_on_success_and_error() {
 #[test]
 fn fatal_step_and_call_depth_errors_leave_the_instance_reusable() {
     let mut host = Host;
-    let step_limits = BopLimits { max_steps: 20, max_memory: 1024 * 1024 };
+    let step_limits = BopLimits {
+        max_steps: 20,
+        max_memory: 1024 * 1024,
+    };
     let mut step_instance = BopInstance::load(
         "pub fn spin() { while true {} }\npub fn ok() { return 7 }",
         &mut host,
@@ -459,17 +543,30 @@ fn fatal_step_and_call_depth_errors_leave_the_instance_reusable() {
     .unwrap();
     let step_error = step_instance.call("spin", &[], &mut host).unwrap_err();
     assert!(step_error.is_fatal);
-    assert_eq!(step_instance.call("ok", &[], &mut host).unwrap().inspect(), "7");
+    assert_eq!(
+        step_instance.call("ok", &[], &mut host).unwrap().inspect(),
+        "7"
+    );
 
     let mut depth_instance = BopInstance::load(
         "pub fn dive() { return dive() }\npub fn ok() { return 8 }",
         &mut host,
-        &BopLimits { max_steps: 1_000_000, max_memory: 1024 * 1024 },
+        &BopLimits {
+            max_steps: 1_000_000,
+            max_memory: 1024 * 1024,
+        },
     )
     .unwrap();
     let depth_error = depth_instance.call("dive", &[], &mut host).unwrap_err();
-    assert!(depth_error.message.contains("Too many nested function calls"));
-    assert_eq!(depth_instance.call("ok", &[], &mut host).unwrap().inspect(), "8");
+    assert!(
+        depth_error
+            .message
+            .contains("Too many nested function calls")
+    );
+    assert_eq!(
+        depth_instance.call("ok", &[], &mut host).unwrap().inspect(),
+        "8"
+    );
 }
 
 struct CountingModuleHost {
@@ -510,13 +607,22 @@ fn lazy_imports_are_cached_even_when_a_later_host_changes_source() {
     )
     .unwrap();
     assert_eq!(host.resolutions, 0);
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "1");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "1"
+    );
     assert_eq!(host.resolutions, 1);
 
     host.modules
         .insert("dynamic".to_string(), "let value = 2".to_string());
-    assert_eq!(instance.call("read", &[], &mut host).unwrap().inspect(), "1");
-    assert_eq!(instance.call("method", &[], &mut host).unwrap().inspect(), "2");
+    assert_eq!(
+        instance.call("read", &[], &mut host).unwrap().inspect(),
+        "1"
+    );
+    assert_eq!(
+        instance.call("method", &[], &mut host).unwrap().inspect(),
+        "2"
+    );
     assert_eq!(host.resolutions, 1);
 }
 
@@ -525,8 +631,14 @@ fn retained_types_methods_rng_and_cow_values_survive_across_calls() {
     let mut host = Host;
     let source = "struct Counter { value }\nfn Counter.inc(self) { return Counter { value: self.value + 1 } }\nlet stored = Counter { value: 3 }\nlet items = [1]\npub fn method() { stored = stored.inc(); return stored.value }\npub fn take(value) { value.push(2); return value }\npub fn get() { return items }\npub fn push() { items.push(3); return items }\npub fn random() { return rand(1000000) }\npub fn random_pair() { return [rand(1000000), rand(1000000)] }";
     let mut instance = BopInstance::load(source, &mut host, &BopLimits::standard()).unwrap();
-    assert_eq!(instance.call("method", &[], &mut host).unwrap().inspect(), "4");
-    assert_eq!(instance.call("method", &[], &mut host).unwrap().inspect(), "5");
+    assert_eq!(
+        instance.call("method", &[], &mut host).unwrap().inspect(),
+        "4"
+    );
+    assert_eq!(
+        instance.call("method", &[], &mut host).unwrap().inspect(),
+        "5"
+    );
 
     let original = Value::new_array(vec![Value::Int(1)]);
     assert_eq!(
@@ -544,15 +656,24 @@ fn retained_types_methods_rng_and_cow_values_survive_across_calls() {
     };
     external.try_push(Value::Int(2), 0).unwrap();
     assert_eq!(external.len(), 2);
-    assert_eq!(instance.call("get", &[], &mut host).unwrap().inspect(), "[1]");
-    assert_eq!(instance.call("push", &[], &mut host).unwrap().inspect(), "[1, 3]");
+    assert_eq!(
+        instance.call("get", &[], &mut host).unwrap().inspect(),
+        "[1]"
+    );
+    assert_eq!(
+        instance.call("push", &[], &mut host).unwrap().inspect(),
+        "[1, 3]"
+    );
     assert_eq!(external.len(), 2);
 
     let first = instance.call("random", &[], &mut host).unwrap();
     let second = instance.call("random", &[], &mut host).unwrap();
     let mut comparison = BopInstance::load(source, &mut host, &BopLimits::standard()).unwrap();
     assert_eq!(
-        comparison.call("random_pair", &[], &mut host).unwrap().inspect(),
+        comparison
+            .call("random_pair", &[], &mut host)
+            .unwrap()
+            .inspect(),
         format!("[{}, {}]", first.inspect(), second.inspect())
     );
 }
@@ -562,12 +683,7 @@ struct NestedInstanceHost {
 }
 
 impl BopHost for NestedInstanceHost {
-    fn call(
-        &mut self,
-        name: &str,
-        _args: &[Value],
-        _line: u32,
-    ) -> Option<Result<Value, BopError>> {
+    fn call(&mut self, name: &str, _args: &[Value], _line: u32) -> Option<Result<Value, BopError>> {
         if name != "nested_call" {
             return None;
         }
@@ -587,7 +703,9 @@ fn host_calls_may_nest_a_different_instance_without_crossing_state() {
         &BopLimits::standard(),
     )
     .unwrap();
-    let mut host = NestedInstanceHost { nested: Some(nested) };
+    let mut host = NestedInstanceHost {
+        nested: Some(nested),
+    };
     let mut outer = BopInstance::load(
         "pub fn invoke() { return nested_call() }",
         &mut host,

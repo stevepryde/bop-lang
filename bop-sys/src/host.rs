@@ -23,10 +23,7 @@ pub use StandardHost as StdHost;
 /// A missing module returns `None`. Every other read failure is returned as a
 /// real [`BopError`], so permission, directory, and device errors cannot be
 /// mistaken for "module not found".
-pub fn resolve_module_from_root(
-    root: &Path,
-    name: &str,
-) -> Option<Result<String, BopError>> {
+pub fn resolve_module_from_root(root: &Path, name: &str) -> Option<Result<String, BopError>> {
     if let Err(error) = validate_module_name(name) {
         return Some(Err(error));
     }
@@ -34,10 +31,7 @@ pub fn resolve_module_from_root(
     resolve_validated_module_from_root(root, name)
 }
 
-fn resolve_validated_module_from_root(
-    root: &Path,
-    name: &str,
-) -> Option<Result<String, BopError>> {
+fn resolve_validated_module_from_root(root: &Path, name: &str) -> Option<Result<String, BopError>> {
     let mut path = root.to_path_buf();
     for segment in name.split('.') {
         path.push(segment);
@@ -140,9 +134,8 @@ fn is_valid_module_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    name.split('.').all(|seg| {
-        !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
+    name.split('.')
+        .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
 }
 
 fn validate_module_name(name: &str) -> Result<(), BopError> {
@@ -251,10 +244,7 @@ mod tests {
 
     #[test]
     fn resolve_module_maps_dotted_path_to_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "bop_sys_resolve_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("bop_sys_resolve_{}", std::process::id()));
         let sub = dir.join("math");
         std::fs::create_dir_all(&sub).unwrap();
         let file = sub.join("util.bop");
@@ -272,10 +262,7 @@ mod tests {
 
     #[test]
     fn resolve_module_missing_returns_none() {
-        let dir = std::env::temp_dir().join(format!(
-            "bop_sys_resolve_none_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("bop_sys_resolve_none_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut host = StandardHost::new().with_module_root(&dir);
@@ -286,10 +273,8 @@ mod tests {
 
     #[test]
     fn resolve_module_surfaces_non_not_found_read_errors() {
-        let dir = std::env::temp_dir().join(format!(
-            "bop_sys_resolve_error_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("bop_sys_resolve_error_{}", std::process::id()));
         std::fs::create_dir_all(dir.join("broken.bop")).unwrap();
 
         let mut host = StandardHost::new().with_module_root(&dir);

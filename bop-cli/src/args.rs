@@ -10,7 +10,10 @@ pub enum Command {
     /// `bop` or `bop repl` — launch the interactive REPL.
     Repl,
     /// `bop run FILE [--novm]` — execute a script.
-    Run { file: String, no_vm: bool },
+    Run {
+        file: String,
+        no_vm: bool,
+    },
     /// `bop compile FILE [-o OUT] [--emit-rs] [--keep]` —
     /// transpile to Rust and (by default) build a native binary.
     Compile {
@@ -62,8 +65,7 @@ fn parse_run(rest: &[String]) -> Result<Command, String> {
                 if let Some(previous) = file.as_ref() {
                     return Err(format!(
                         "`run`: only one script file accepted (got `{}` after `{}`)",
-                        other,
-                        previous
+                        other, previous
                     ));
                 }
                 file = Some(other.to_string());
@@ -99,8 +101,7 @@ fn parse_compile(rest: &[String]) -> Result<Command, String> {
                 if let Some(previous) = file.as_ref() {
                     return Err(format!(
                         "`compile`: only one script file accepted (got `{}` after `{}`)",
-                        other,
-                        previous
+                        other, previous
                     ));
                 }
                 file = Some(other.to_string());
@@ -121,10 +122,7 @@ fn forbid_extras(name: &str, rest: &[String]) -> Result<(), String> {
     if rest.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "`{name}`: unexpected extra argument `{}`",
-            rest[0]
-        ))
+        Err(format!("`{name}`: unexpected extra argument `{}`", rest[0]))
     }
 }
 

@@ -859,9 +859,7 @@ fn lambda_final_memory_checks_are_sandbox_only() {
 
     let sandbox = compile_sandbox(source);
     assert!(
-        sandbox.contains(
-            "let value = __bop_value_result?; __bop_check_memory(ctx, 1)?;"
-        ),
+        sandbox.contains("let value = __bop_value_result?; __bop_check_memory(ctx, 1)?;"),
         "sandbox lambda must check memory before exposing its outcome:\n{sandbox}"
     );
 }
@@ -1327,7 +1325,7 @@ fn module_loader_clears_declaration_alias_context_after_failure() {
     assert!(loader.contains("ctx.module_aliases.retain(|(module, _), _| module != \"holder\")"));
     assert!(
         loader.contains(
-        "let __saved_type_bindings = ctx.module_type_bindings.get(\"holder\").cloned()"
+            "let __saved_type_bindings = ctx.module_type_bindings.get(\"holder\").cloned()"
         )
     );
     assert!(loader.contains("ctx.module_type_bindings.remove(\"holder\")"));
@@ -1731,7 +1729,7 @@ fn lazy_import_edges_do_not_create_false_cycles() {
 #[test]
 fn nested_import_missing_and_eager_cycle_diagnostics_keep_source_lines() {
     let missing = compile_with_modules("fn run() {\n    let before = 1\n    use absent\n}", &[])
-    .expect_err("nested missing module must fail during graph discovery");
+        .expect_err("nested missing module must fail during graph discovery");
     assert_eq!(missing.message, "Module `absent` not found");
     assert_eq!(missing.line, Some(3));
 

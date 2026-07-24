@@ -31,10 +31,7 @@ pub trait DeclarationSiteVisitor {
 
 /// Walk every statement, assignment-target, and expression edge in source
 /// order, reporting struct, enum, and method declaration sites.
-pub fn visit_declaration_sites(
-    stmts: &[Stmt],
-    visitor: &mut impl DeclarationSiteVisitor,
-) {
+pub fn visit_declaration_sites(stmts: &[Stmt], visitor: &mut impl DeclarationSiteVisitor) {
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::StructDecl { name, fields } => {

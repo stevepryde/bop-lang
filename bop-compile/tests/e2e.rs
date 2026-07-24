@@ -529,7 +529,12 @@ print(output)
             ..Options::default()
         },
     );
-    assert_eq!(sandbox.status, Some(0), "sandbox stderr:\n{}", sandbox.stderr);
+    assert_eq!(
+        sandbox.status,
+        Some(0),
+        "sandbox stderr:\n{}",
+        sandbox.stderr
+    );
     assert_eq!(sandbox.stdout, "7\n7");
 }
 
@@ -559,10 +564,7 @@ print(local_capture())
 print(optional_implicit())
 print(optional_explicit())
 "#;
-    let modules = [
-        ("dep", "let ready = true"),
-        ("optional", "let values = []"),
-    ];
+    let modules = [("dep", "let ready = true"), ("optional", "let values = []")];
     for (name, opts) in [
         ("captured_ref_fences_native", Options::default()),
         (

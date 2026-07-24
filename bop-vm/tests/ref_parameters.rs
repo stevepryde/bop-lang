@@ -204,10 +204,7 @@ fn mode_and_target_diagnostics_are_actionable() {
 #[test]
 fn constants_and_captured_targets_are_rejected() {
     let constant = run_error("fn f(ref x) {}\nconst VALUE = 1\nf(ref VALUE)");
-    assert_eq!(
-        constant.message,
-        "can't reassign `VALUE` — it's a constant"
-    );
+    assert_eq!(constant.message, "can't reassign `VALUE` — it's a constant");
 
     let capture = run_error(
         r#"

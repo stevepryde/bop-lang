@@ -26,14 +26,14 @@
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
-#[cfg(any(feature = "std", not(feature = "no_std")))]
-use std::collections::BTreeMap;
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::BTreeMap;
+#[cfg(any(feature = "std", not(feature = "no_std")))]
+use std::collections::BTreeMap;
 
+use crate::BopHost;
 use crate::error::BopError;
 use crate::value::Value;
-use crate::BopHost;
 
 /// Build a [`BopHost::resolve_module`] implementation from an
 /// in-memory table of `(module_path, source)` pairs.
@@ -107,7 +107,12 @@ impl StringModuleHost {
 }
 
 impl BopHost for StringModuleHost {
-    fn call(&mut self, _name: &str, _args: &[Value], _line: u32) -> Option<Result<Value, BopError>> {
+    fn call(
+        &mut self,
+        _name: &str,
+        _args: &[Value],
+        _line: u32,
+    ) -> Option<Result<Value, BopError>> {
         None
     }
 

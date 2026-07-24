@@ -6,6 +6,9 @@
 - **MSRV:** Rust 1.88, as declared by the workspace manifest. Verify the pinned
   release dependency graph with
   `cargo +1.88.0 check --workspace --all-targets --locked`.
+- **Formatting:** The rustfmt bundled with Rust 1.88 is canonical. Install it
+  with `rustup component add rustfmt --toolchain 1.88`, then verify the tree
+  with `cargo +1.88 fmt --all -- --check`.
 - **Core dependency policy:** `bop-lang` remains zero third-party Rust
   dependencies in its standard configuration; `alloc`/`core` support the
   portable core and the existing `libm` feature supports `no_std` math.

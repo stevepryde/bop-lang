@@ -2,9 +2,13 @@ use crate::ast_visit::{DeclarationSiteVisitor, visit_declaration_sites};
 use crate::parser::{Parameter, Stmt, VariantDecl, VariantKind};
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{string::{String, ToString}, vec, vec::Vec};
-#[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::{BTreeMap, BTreeSet};
+#[cfg(all(feature = "no_std", not(feature = "std")))]
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 #[cfg(any(feature = "std", not(feature = "no_std")))]
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -48,9 +52,7 @@ impl EnumShape {
                     payload: match &variant.kind {
                         VariantKind::Unit => EnumPayloadShape::Unit,
                         VariantKind::Tuple(fields) => EnumPayloadShape::Tuple(fields.len()),
-                        VariantKind::Struct(fields) => {
-                            EnumPayloadShape::Struct(fields.clone())
-                        }
+                        VariantKind::Struct(fields) => EnumPayloadShape::Struct(fields.clone()),
                     },
                 })
                 .collect(),

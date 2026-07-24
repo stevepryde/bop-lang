@@ -55,10 +55,10 @@ use std::rc::Rc;
 
 use core::cell::{Cell, RefCell};
 
-#[cfg(any(feature = "std", not(feature = "no_std")))]
-use std::collections::{BTreeMap, BTreeSet};
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::collections::{BTreeMap, BTreeSet};
+#[cfg(any(feature = "std", not(feature = "no_std")))]
+use std::collections::{BTreeMap, BTreeSet};
 
 use bop::builtins::{self, error, error_fatal_with_hint, error_with_hint};
 use bop::error::{BopError, BopWarning};
@@ -380,10 +380,7 @@ struct PendingWriteBack {
 /// only (payload names are positional stubs with no runtime
 /// meaning), struct variants still require matching field
 /// names.
-fn shapes_match(
-    a: &[(String, EnumVariantShape)],
-    b: &[(String, EnumVariantShape)],
-) -> bool {
+fn shapes_match(a: &[(String, EnumVariantShape)], b: &[(String, EnumVariantShape)]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -425,7 +422,8 @@ fn seed_builtin_types() -> BuiltinTypeTables {
     use bop::parser::VariantKind;
     let builtin_mp = bop::value::BUILTIN_MODULE_PATH.to_string();
     let mut struct_defs: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    let mut enum_defs: BTreeMap<(String, String), Vec<(String, EnumVariantShape)>> = BTreeMap::new();
+    let mut enum_defs: BTreeMap<(String, String), Vec<(String, EnumVariantShape)>> =
+        BTreeMap::new();
     let mut bindings: BTreeMap<String, String> = BTreeMap::new();
     struct_defs.insert(
         (builtin_mp.clone(), String::from("RuntimeError")),
@@ -567,7 +565,9 @@ fn snapshot_module_bindings(
                 .get(name)
                 .cloned()
                 .or_else(|| local_snapshots.remove(name))
-                .ok_or_else(|| error(line, format!("Missing compatibility snapshot for `{name}`")))?;
+                .ok_or_else(|| {
+                    error(line, format!("Missing compatibility snapshot for `{name}`"))
+                })?;
             Ok((name.clone(), value))
         })
         .collect()
@@ -1034,9 +1034,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // caps detection latency at ~256 instructions worth of
         // allocations — negligible for a hard cap that's already
         // elastic by a few MB.
-        if self.steps & TICK_MEMCHECK_MASK == 0
-            && self.memory.__exceeded()
-        {
+        if self.steps & TICK_MEMCHECK_MASK == 0 && self.memory.__exceeded() {
             return Err(error_fatal_with_hint(
                 line,
                 "Memory limit exceeded",
@@ -1134,11 +1132,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             }
         };
         if popped {
-            let type_scope_base = self
-                .frames
-                .last()
-                .expect("frame present")
-                .type_scope_base;
+            let type_scope_base = self.frames.last().expect("frame present").type_scope_base;
             debug_assert!(
                 self.type_bindings.len() > type_scope_base,
                 "value and type scope stacks must stay paired"
@@ -1253,12 +1247,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 .first_mut()
                 .map(core::mem::take)
                 .unwrap_or_default();
-            put_live_environment(
-                &self.live_value_environments,
-                module,
-                environment,
-                &origins,
-            );
+            put_live_environment(&self.live_value_environments, module, environment, &origins);
         }
         self.live_binding_origins
             .borrow_mut()
@@ -1279,8 +1268,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             return;
         }
         let origins = self.binding_origins_for(&module);
-        let environment =
-            take_live_environment(&self.live_value_environments, &module, &origins);
+        let environment = take_live_environment(&self.live_value_environments, &module, &origins);
         if let Some(scope) = self
             .frames
             .last_mut()
@@ -1291,7 +1279,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     }
 
     fn module_alias(&self, name: &str) -> Option<&Rc<bop::value::BopModule>> {
-        let floor = self.frames.last().filter(|frame| frame.is_function).map(|frame| frame.alias_scope_base);
+        let floor = self
+            .frames
+            .last()
+            .filter(|frame| frame.is_function)
+            .map(|frame| frame.alias_scope_base);
         self.module_aliases
             .iter()
             .enumerate()
@@ -1325,12 +1317,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
             }
             let active_origins = self.binding_origins_for(active_module);
-            if let Some(active_binding) = active_origins.iter().find_map(
-                |(active_binding, active_origin)| {
-                    (active_origin.0 == origin_module && active_origin.1 == origin_binding)
-                        .then_some(active_binding)
-                },
-            ) {
+            if let Some(active_binding) =
+                active_origins
+                    .iter()
+                    .find_map(|(active_binding, active_origin)| {
+                        (active_origin.0 == origin_module && active_origin.1 == origin_binding)
+                            .then_some(active_binding)
+                    })
+            {
                 if let Some(value) = environment.get(active_binding) {
                     return Some(value.clone());
                 }
@@ -1364,9 +1358,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
             }
             let active_origins = self.binding_origins_for(active_module);
-            if let Some(binding) = active_origins.iter().find_map(|(binding, candidate)| {
-                (candidate == origin).then_some(binding)
-            }) {
+            if let Some(binding) = active_origins
+                .iter()
+                .find_map(|(binding, candidate)| (candidate == origin).then_some(binding))
+            {
                 if let Some(value) = environment.get(binding) {
                     return Some(value.clone());
                 }
@@ -1380,7 +1375,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     }
 
     fn imported_function(&self, name: &str) -> Option<&Rc<FnEntry>> {
-        let floor = self.frames.last().filter(|frame| frame.is_function).map(|frame| frame.alias_scope_base);
+        let floor = self
+            .frames
+            .last()
+            .filter(|frame| frame.is_function)
+            .map(|frame| frame.alias_scope_base);
         self.imported_functions
             .iter()
             .enumerate()
@@ -1395,7 +1394,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     }
 
     fn is_module_top_scope(&self) -> bool {
-        self.frames.last().is_some_and(|frame| !frame.is_function && frame.scopes.len() == frame.scope_base)
+        self.frames
+            .last()
+            .is_some_and(|frame| !frame.is_function && frame.scopes.len() == frame.scope_base)
     }
 
     fn define_local(&mut self, name: String, value: Value) {
@@ -1452,8 +1453,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             (
                 frame.chunk.name(idx).to_string(),
                 frame.is_function
-                    && frame.function_module.as_deref()
-                        == Some(bop::value::ROOT_MODULE_PATH),
+                    && frame.function_module.as_deref() == Some(bop::value::ROOT_MODULE_PATH),
             )
         };
         let current_index = self.frames.len().checked_sub(1)?;
@@ -1496,11 +1496,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             frame.is_function
                 && frame.function_module.as_deref() == Some(bop::value::ROOT_MODULE_PATH)
         }) {
-            if let Some(slot) = self
-                .frames
-                .first_mut()
-                .and_then(|root| root.scopes.iter_mut().rev().find_map(|scope| scope.get_mut(name)))
-            {
+            if let Some(slot) = self.frames.first_mut().and_then(|root| {
+                root.scopes
+                    .iter_mut()
+                    .rev()
+                    .find_map(|scope| scope.get_mut(name))
+            }) {
                 *slot = value;
                 return true;
             }
@@ -1589,8 +1590,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     /// `function_hint()` (the call site falls back to that path
     /// when no user-level suggestion fits).
     fn callable_candidates_hint(&self, target: &str) -> Option<String> {
-        let mut candidates: Vec<String> =
-            self.functions.keys().cloned().collect();
+        let mut candidates: Vec<String> = self.functions.keys().cloned().collect();
         for b in bop::suggest::CORE_CALLABLE_BUILTINS {
             candidates.push((*b).to_string());
         }
@@ -1637,8 +1637,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if module_path != bop::value::ROOT_MODULE_PATH {
                 let cache = self.imports.borrow();
                 if let Some(ImportSlot::Loaded(artifacts)) = cache.get(module_path) {
-                    if let Some((_, entry)) =
-                        artifacts.fn_decls.iter().find(|(candidate, _)| candidate == name)
+                    if let Some((_, entry)) = artifacts
+                        .fn_decls
+                        .iter()
+                        .find(|(candidate, _)| candidate == name)
                     {
                         return Some(entry.clone());
                     }
@@ -1743,17 +1745,16 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             self.function_origin.clone(),
                             0,
                             line,
-                        ).map(Value::Fn)?;
+                        )
+                        .map(Value::Fn)?;
                         self.push_value(v);
                     } else {
                         // "did you mean?" first, else the generic
                         // "use `let`" nudge. Mirrors the walker's
                         // behaviour for consistency across engines.
-                        let hint = self
-                            .value_candidates_hint(name)
-                            .unwrap_or_else(|| {
-                                "Did you forget to create it with `let`?".to_string()
-                            });
+                        let hint = self.value_candidates_hint(name).unwrap_or_else(|| {
+                            "Did you forget to create it with `let`?".to_string()
+                        });
                         return Err(error_with_hint(
                             line,
                             bop::error_messages::variable_not_found(name),
@@ -1791,10 +1792,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
                 self.define_local(name.clone(), v);
                 if self.is_module_top_scope() {
-                    self.binding_origins.insert(
-                        name.clone(),
-                        (self.current_module.clone(), name.clone()),
-                    );
+                    self.binding_origins
+                        .insert(name.clone(), (self.current_module.clone(), name.clone()));
                 }
                 self.sync_top_level_module_alias(name, module);
             }
@@ -1810,9 +1809,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .is_module_top_scope()
                     .then(|| self.current_chunk().name(n).to_string());
                 let runtime_alias_without_value_binding = {
-                    let chunk = Rc::clone(
-                        &self.frames.last().expect("frame present").chunk,
-                    );
+                    let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
                     let name = chunk.name(n);
                     self.lookup_var_by_idx(n).is_none() && self.module_alias(name).is_some()
                 };
@@ -1840,9 +1837,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 let rhs = self.pop_value(line)?;
                 let runtime_alias_without_value_binding = match target {
                     crate::chunk::AssignBack::Name(name_idx) => {
-                        let chunk = Rc::clone(
-                            &self.frames.last().expect("frame present").chunk,
-                        );
+                        let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
                         self.lookup_var_by_idx(name_idx).is_none()
                             && self.module_alias(chunk.name(name_idx)).is_some()
                     }
@@ -1859,9 +1854,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         if let Some(value) = self.lookup_var_by_idx(name_idx).cloned() {
                             value
                         } else {
-                            let chunk = Rc::clone(
-                                &self.frames.last().expect("frame present").chunk,
-                            );
+                            let chunk =
+                                Rc::clone(&self.frames.last().expect("frame present").chunk);
                             let name = chunk.name(name_idx);
                             if let Some(module) = self.module_alias(name).cloned() {
                                 Value::Module(module)
@@ -1874,8 +1868,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         }
                     }
                 };
-                let value =
-                    apply_in_place_assign(op, rhs, line, &self.memory, || Ok(current))?;
+                let value = apply_in_place_assign(op, rhs, line, &self.memory, || Ok(current))?;
                 match target {
                     crate::chunk::AssignBack::Slot(slot) => {
                         let target = self
@@ -1894,9 +1887,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             return Ok(Next::Continue);
                         }
                         if !self.set_existing_by_idx(name, value) {
-                            let chunk = Rc::clone(
-                                &self.frames.last().expect("frame present").chunk,
-                            );
+                            let chunk =
+                                Rc::clone(&self.frames.last().expect("frame present").chunk);
                             return Err(error(
                                 line,
                                 bop::error_messages::variable_not_found(chunk.name(name)),
@@ -1917,9 +1909,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .slots
                     .get(slot.0 as usize)
                     .cloned()
-                    .ok_or_else(|| {
-                        error(line, "VM: local slot out of range")
-                    })?;
+                    .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 self.push_value(v);
             }
             Instr::StoreLocal(slot) => {
@@ -1990,13 +1980,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .get(i)
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let new = match current {
-                    Value::Int(x) => x
-                        .checked_add(k as i64)
-                        .map(Value::Int)
-                        .map_or_else(
-                            || ops::add_in(current, &Value::Int(k as i64), line, memory),
-                            Ok,
-                        )?,
+                    Value::Int(x) => x.checked_add(k as i64).map(Value::Int).map_or_else(
+                        || ops::add_in(current, &Value::Int(k as i64), line, memory),
+                        Ok,
+                    )?,
                     _ => ops::add_in(current, &Value::Int(k as i64), line, memory)?,
                 };
                 frame.slots[i] = new;
@@ -2010,13 +1997,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .get(slot.0 as usize)
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 let result = match v {
-                    Value::Int(x) => x
-                        .checked_add(k as i64)
-                        .map(Value::Int)
-                        .map_or_else(
-                            || ops::add_in(v, &Value::Int(k as i64), line, &self.memory),
-                            Ok,
-                        )?,
+                    Value::Int(x) => x.checked_add(k as i64).map(Value::Int).map_or_else(
+                        || ops::add_in(v, &Value::Int(k as i64), line, &self.memory),
+                        Ok,
+                    )?,
                     _ => ops::add_in(v, &Value::Int(k as i64), line, &self.memory)?,
                 };
                 self.push_value(result);
@@ -2122,13 +2106,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             .slots
                             .get_mut(slot.0 as usize)
                             .ok_or_else(|| error(line, "VM: local slot out of range"))?;
-                        let val = apply_in_place_assign(
-                            op,
-                            rhs,
-                            line,
-                            &memory,
-                            || ops::index_get_in(value, &idx, line, &memory),
-                        )?;
+                        let val = apply_in_place_assign(op, rhs, line, &memory, || {
+                            ops::index_get_in(value, &idx, line, &memory)
+                        })?;
                         ops::index_set_in(value, &idx, val, line, &memory)?;
                     }
                     crate::chunk::AssignBack::Name(name_idx) => {
@@ -2136,20 +2116,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         if self.lookup_var_mut_by_idx(name_idx).is_none() {
                             if let Some(module) = self.module_alias(&name).cloned() {
                                 let mut value = Value::Module(module);
-                                let val = apply_in_place_assign(
-                                    op,
-                                    rhs,
-                                    line,
-                                    &memory,
-                                    || ops::index_get_in(&value, &idx, line, &memory),
-                                )?;
-                                ops::index_set_in(
-                                    &mut value,
-                                    &idx,
-                                    val,
-                                    line,
-                                    &memory,
-                                )?;
+                                let val = apply_in_place_assign(op, rhs, line, &memory, || {
+                                    ops::index_get_in(&value, &idx, line, &memory)
+                                })?;
+                                ops::index_set_in(&mut value, &idx, val, line, &memory)?;
                                 return Ok(Next::Continue);
                             }
                             let hint = self.value_candidates_hint(&name).unwrap_or_else(|| {
@@ -2164,13 +2134,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         let value = self
                             .lookup_var_mut_by_idx(name_idx)
                             .expect("binding checked above");
-                        let val = apply_in_place_assign(
-                            op,
-                            rhs,
-                            line,
-                            &memory,
-                            || ops::index_get_in(value, &idx, line, &memory),
-                        )?;
+                        let val = apply_in_place_assign(op, rhs, line, &memory, || {
+                            ops::index_get_in(value, &idx, line, &memory)
+                        })?;
                         ops::index_set_in(value, &idx, val, line, &memory)?;
                     }
                 }
@@ -2245,13 +2211,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 assign_back_to,
                 nested_place,
             } => {
-                return self.call_method(
-                    method,
-                    argc as usize,
-                    assign_back_to,
-                    nested_place,
-                    line,
-                );
+                return self.call_method(method, argc as usize, assign_back_to, nested_place, line);
             }
             Instr::CallMethodInPlace {
                 target,
@@ -2559,13 +2519,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         if self.lookup_var_mut_by_idx(name_idx).is_none() {
                             if let Some(module) = self.module_alias(&name).cloned() {
                                 let value = Value::Module(module);
-                                let val = apply_in_place_assign(
-                                    op,
-                                    rhs,
-                                    line,
-                                    &memory,
-                                    || self.field_get(&value, &field, line),
-                                )?;
+                                let val = apply_in_place_assign(op, rhs, line, &memory, || {
+                                    self.field_get(&value, &field, line)
+                                })?;
                                 self.field_set(value, &field, val, line)?;
                                 return Ok(Next::Continue);
                             }
@@ -2585,23 +2541,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 match value {
                     Value::Struct(structure) => {
                         let type_name = structure.type_name().to_string();
-                        let val = apply_in_place_assign(
-                            op,
-                            rhs,
-                            line,
-                            &memory,
-                            || {
-                                structure.field(&field).cloned().ok_or_else(|| {
-                                    error(
-                                        line,
-                                        bop::error_messages::struct_has_no_field(
-                                            &type_name,
-                                            &field,
-                                        ),
-                                    )
-                                })
-                            },
-                        )?;
+                        let val = apply_in_place_assign(op, rhs, line, &memory, || {
+                            structure.field(&field).cloned().ok_or_else(|| {
+                                error(
+                                    line,
+                                    bop::error_messages::struct_has_no_field(&type_name, &field),
+                                )
+                            })
+                        })?;
                         if !structure.__try_set_field_in(&field, val, line, &memory)? {
                             return Err(error(
                                 line,
@@ -2654,12 +2601,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     fn binary_tracked(
         &mut self,
         line: u32,
-        op: fn(
-            &Value,
-            &Value,
-            u32,
-            &bop::memory::MemoryContext,
-        ) -> Result<Value, BopError>,
+        op: fn(&Value, &Value, u32, &bop::memory::MemoryContext) -> Result<Value, BopError>,
     ) -> Result<(), BopError> {
         let b = self.pop_value(line)?;
         let a = self.pop_value(line)?;
@@ -2700,10 +2642,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     } else if let Some(module) = self.module_alias(name) {
                         result.push_str(&format!("{}", Value::Module(Rc::clone(module))));
                     } else {
-                        return Err(error(
-                            line,
-                            bop::error_messages::variable_not_found(name),
-                        ));
+                        return Err(error(line, bop::error_messages::variable_not_found(name)));
                     }
                 }
             }
@@ -2744,9 +2683,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     ));
                 }
             }
-        } else if let Some(module) = self.frames.last().and_then(|frame| {
-            frame.lexical_context.module_aliases.get(&name).cloned()
-        }) {
+        } else if let Some(module) = self
+            .frames
+            .last()
+            .and_then(|frame| frame.lexical_context.module_aliases.get(&name).cloned())
+        {
             return Err(error(
                 line,
                 format!(
@@ -2763,12 +2704,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             match self
                 .frames
                 .first()
-                .and_then(|root| {
-                    root.scopes
-                        .iter()
-                        .rev()
-                        .find_map(|scope| scope.get(&name))
-                })
+                .and_then(|root| root.scopes.iter().rev().find_map(|scope| scope.get(&name)))
                 .cloned()
             {
                 Some(Value::Fn(function)) => PreparedCallable::Closure(function),
@@ -2800,12 +2736,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         match callee {
             Value::Fn(function) => {
                 let display = function.self_name.as_deref().unwrap_or("fn").to_string();
-                self.preflight_call(
-                    PreparedCallable::Closure(function),
-                    display,
-                    site,
-                    line,
-                )
+                self.preflight_call(PreparedCallable::Closure(function), display, site, line)
             }
             other => Err(error(
                 line,
@@ -2919,20 +2850,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     Some(value) => value,
                     None => {
                         if let Some(entry) = self.lookup_function_entry(&receiver_name) {
-                            let body: Rc<dyn core::any::Any + 'static> =
-                                entry.chunk.clone();
-                            let function =
-                                BopFn::try_new_compiled_in_module_with_origin_and_modes(
-                                    entry.params.clone(),
-                                    entry.param_modes.clone(),
-                                    Vec::new(),
-                                    body,
-                                    Some(receiver_name.clone()),
-                                    Some(entry.module_path.clone()),
-                                    self.function_origin.clone(),
-                                    0,
-                                    line,
-                                )?;
+                            let body: Rc<dyn core::any::Any + 'static> = entry.chunk.clone();
+                            let function = BopFn::try_new_compiled_in_module_with_origin_and_modes(
+                                entry.params.clone(),
+                                entry.param_modes.clone(),
+                                Vec::new(),
+                                body,
+                                Some(receiver_name.clone()),
+                                Some(entry.module_path.clone()),
+                                self.function_origin.clone(),
+                                0,
+                                line,
+                            )?;
                             return self.prepare_method_call(
                                 Value::Fn(function),
                                 None,
@@ -2952,9 +2881,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                                 line,
                             );
                         }
-                        let hint = self.value_candidates_hint(&receiver_name).unwrap_or_else(|| {
-                            "Did you forget to create it with `let`?".to_string()
-                        });
+                        let hint =
+                            self.value_candidates_hint(&receiver_name)
+                                .unwrap_or_else(|| {
+                                    "Did you forget to create it with `let`?".to_string()
+                                });
                         return Err(error_with_hint(
                             line,
                             bop::error_messages::variable_not_found(&receiver_name),
@@ -2967,7 +2898,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
 
         if matches!(receiver, Value::Array(_)) && methods::is_mutating_method(&method) {
             return self.preflight_call(
-                PreparedCallable::NamedMethodInPlace { target, method: method.clone() },
+                PreparedCallable::NamedMethodInPlace {
+                    target,
+                    method: method.clone(),
+                },
                 method,
                 site,
                 line,
@@ -3002,18 +2936,18 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         format!(
                             "`{display_name}` expects {} argument{} (including `self`), but got {}",
                             entry.param_modes.len(),
-                            if entry.param_modes.len() == 1 { "" } else { "s" },
+                            if entry.param_modes.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            },
                             actual_arity
                         ),
                     ));
                 }
-                if entry.param_modes.first() == Some(&ParamMode::Ref)
-                    && receiver_target.is_none()
-                {
-                    let mut error = BopError::runtime(
-                        "a `ref` method receiver must be a variable",
-                        line,
-                    );
+                if entry.param_modes.first() == Some(&ParamMode::Ref) && receiver_target.is_none() {
+                    let mut error =
+                        BopError::runtime("a `ref` method receiver must be a variable", line);
                     error.friendly_hint = Some(
                         "Store the value in a `let` binding before calling this method."
                             .to_string(),
@@ -3042,12 +2976,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 site.arg_modes.iter().zip(expected.iter()).enumerate()
             {
                 if actual != expected {
-                    return Err(call_mode_error(
-                        line,
-                        &display_name,
-                        index,
-                        *expected,
-                    ));
+                    return Err(call_mode_error(line, &display_name, index, *expected));
                 }
             }
         } else if let Some((index, _)) = site
@@ -3066,8 +2995,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
 
         if matches!(
             &callable,
-            PreparedCallable::DeferredMethod { .. }
-                | PreparedCallable::NamedMethodInPlace { .. }
+            PreparedCallable::DeferredMethod { .. } | PreparedCallable::NamedMethodInPlace { .. }
         ) {
             validate_builtin_method_arity(&display_name, site.arg_modes.len(), line)?;
         }
@@ -3175,11 +3103,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         Ok(())
     }
 
-    fn call_prepared(
-        &mut self,
-        site: CallSiteIdx,
-        line: u32,
-    ) -> Result<Next, BopError> {
+    fn call_prepared(&mut self, site: CallSiteIdx, line: u32) -> Result<Next, BopError> {
         let prepared = self
             .frames
             .last_mut()
@@ -3242,9 +3166,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             PreparedCallable::User(entry) => self.enter_user_fn_args(entry, args, line)?,
             PreparedCallable::Closure(function) => self.call_closure(&function, args, line)?,
             PreparedCallable::UserMethod {
-                entry,
-                receiver,
-                ..
+                entry, receiver, ..
             } => {
                 let mut method_args = Vec::with_capacity(args.len() + 1);
                 method_args.push(receiver_snapshot.unwrap_or(receiver));
@@ -3257,14 +3179,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 nested_place,
             } => {
                 debug_assert!(pending.is_empty());
-                return self.dispatch_method(
-                    receiver,
-                    &method,
-                    args,
-                    None,
-                    nested_place,
-                    line,
-                );
+                return self.dispatch_method(receiver, &method, args, None, nested_place, line);
             }
             PreparedCallable::NamedMethodInPlace { target, method } => {
                 debug_assert!(pending.is_empty());
@@ -3376,12 +3291,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     ) -> Result<Next, BopError> {
         match name {
             "range" => {
-                let value = builtins::builtin_range_in(
-                    &args,
-                    line,
-                    &mut self.rand_state,
-                    &self.memory,
-                )?;
+                let value =
+                    builtins::builtin_range_in(&args, line, &mut self.rand_state, &self.memory)?;
                 self.push_value(value);
                 return Ok(Next::Continue);
             }
@@ -3461,11 +3372,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 }
                 other => Err(error(
                     line,
-                    format!(
-                        "`{}` is a {}, not a function",
-                        name,
-                        other.type_name()
-                    ),
+                    format!("`{}` is a {}, not a function", name, other.type_name()),
                 )),
             };
         }
@@ -3584,12 +3491,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // `methods::numeric_method`.
         match name {
             "range" => {
-                let v = builtins::builtin_range_in(
-                    &args,
-                    line,
-                    &mut self.rand_state,
-                    &self.memory,
-                )?;
+                let v =
+                    builtins::builtin_range_in(&args, line, &mut self.rand_state, &self.memory)?;
                 self.push_value(v);
                 return Ok(Next::Continue);
             }
@@ -3688,10 +3591,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let mut slots = self.take_slots(slot_count);
         let start = self.stack.len() - argc;
         for i in 0..argc {
-            let slot = core::mem::replace(
-                &mut self.stack[start + i],
-                Slot::Value(Value::None),
-            );
+            let slot = core::mem::replace(&mut self.stack[start + i], Slot::Value(Value::None));
             match slot {
                 Slot::Value(v) => slots[i] = v,
                 _ => {
@@ -3817,20 +3717,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .ok_or_else(|| error(line, "VM: local slot out of range"))?;
                 if matches!(value, Value::Array(_)) {
                     methods::reject_constant_array_mutation(receiver_name, method, line)?;
-                    let result = methods::transactional_array_method_in(
-                        value,
-                        method,
-                        args,
-                        line,
-                        &memory,
-                    )?;
+                    let result =
+                        methods::transactional_array_method_in(value, method, args, line, &memory)?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
-                (
-                    value.clone(),
-                    crate::chunk::AssignBack::Slot(slot),
-                )
+                (value.clone(), crate::chunk::AssignBack::Slot(slot))
             }
             None => {
                 if self.lookup_var_mut_by_idx(receiver_idx).is_none() {
@@ -3844,9 +3736,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                             line,
                         );
                     }
-                    let hint = self.value_candidates_hint(receiver_name).unwrap_or_else(|| {
-                        "Did you forget to create it with `let`?".to_string()
-                    });
+                    let hint = self
+                        .value_candidates_hint(receiver_name)
+                        .unwrap_or_else(|| "Did you forget to create it with `let`?".to_string());
                     return Err(error_with_hint(
                         line,
                         bop::error_messages::variable_not_found(receiver_name),
@@ -3858,20 +3750,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .expect("binding checked above");
                 if matches!(value, Value::Array(_)) {
                     methods::reject_constant_array_mutation(receiver_name, method, line)?;
-                    let result = methods::transactional_array_method_in(
-                        value,
-                        method,
-                        args,
-                        line,
-                        &memory,
-                    )?;
+                    let result =
+                        methods::transactional_array_method_in(value, method, args, line, &memory)?;
                     self.push_value(result);
                     return Ok(Next::Continue);
                 }
-                (
-                    value.clone(),
-                    crate::chunk::AssignBack::Name(receiver_idx),
-                )
+                (value.clone(), crate::chunk::AssignBack::Name(receiver_idx))
             }
         };
 
@@ -3922,14 +3806,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // fires on `other.Color` even though the bare name is
         // the same.
         let user_type_key: Option<(String, String)> = match &obj {
-            Value::Struct(s) => Some((
-                s.module_path().to_string(),
-                s.type_name().to_string(),
-            )),
-            Value::EnumVariant(e) => Some((
-                e.module_path().to_string(),
-                e.type_name().to_string(),
-            )),
+            Value::Struct(s) => Some((s.module_path().to_string(), s.type_name().to_string())),
+            Value::EnumVariant(e) => Some((e.module_path().to_string(), e.type_name().to_string())),
             _ => None,
         };
         if let Some(type_key) = user_type_key {
@@ -3962,8 +3840,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 // User methods use the same slot-based frame
                 // layout as regular fn calls. `self` takes slot 0,
                 // remaining params take 1..entry.params.len().
-                let slot_count = (entry.chunk.slot_count as usize)
-                    .max(entry.params.len());
+                let slot_count = (entry.chunk.slot_count as usize).max(entry.params.len());
                 let mut slots = self.take_slots(slot_count);
                 slots[0] = obj;
                 for (i, a) in args.into_iter().enumerate() {
@@ -3994,8 +3871,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // `type` / `to_str` / `inspect` work on every value —
         // dispatch them ahead of the type-specific tables so
         // walker / VM / AOT agree on the common method surface.
-        if let Some((ret, _)) =
-            methods::common_method_in(&obj, method, &args, line, &self.memory)?
+        if let Some((ret, _)) = methods::common_method_in(&obj, method, &args, line, &self.memory)?
         {
             self.push_value(ret);
             return Ok(Next::Continue);
@@ -4017,24 +3893,16 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
 
         let (ret, mutated) = match &obj {
-            Value::Array(arr) => {
-                methods::array_method_in(arr, method, &args, line, &self.memory)?
-            }
+            Value::Array(arr) => methods::array_method_in(arr, method, &args, line, &self.memory)?,
             Value::Str(s) => {
                 methods::string_method_in(s.as_str(), method, &args, line, &self.memory)?
             }
             Value::Dict(entries) => {
                 methods::dict_method_in(entries, method, &args, line, &self.memory)?
             }
-            Value::Int(_) | Value::Number(_) => {
-                methods::numeric_method(&obj, method, &args, line)?
-            }
-            Value::Bool(_) => {
-                methods::bool_method(&obj, method, &args, line)?
-            }
-            Value::Iter(_) => {
-                methods::iter_method_in(&obj, method, &args, line, &self.memory)?
-            }
+            Value::Int(_) | Value::Number(_) => methods::numeric_method(&obj, method, &args, line)?,
+            Value::Bool(_) => methods::bool_method(&obj, method, &args, line)?,
+            Value::Iter(_) => methods::iter_method_in(&obj, method, &args, line, &self.memory)?,
             _ => {
                 return Err(error(
                     line,
@@ -4076,10 +3944,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if !seen.insert(field.clone()) {
                 return Err(error(
                     line,
-                    format!(
-                        "Struct `{}` has duplicate field `{}`",
-                        def.name, field
-                    ),
+                    format!("Struct `{}` has duplicate field `{}`", def.name, field),
                 ));
             }
         }
@@ -4126,16 +3991,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if !seen_variants.insert(variant.clone()) {
                 return Err(error(
                     line,
-                    format!(
-                        "Enum `{}` has duplicate variant `{}`",
-                        def.name, variant
-                    ),
+                    format!("Enum `{}` has duplicate variant `{}`", def.name, variant),
                 ));
             }
             let fields = match shape {
                 EnumVariantShape::Unit => continue,
-                EnumVariantShape::Tuple(fields)
-                | EnumVariantShape::Struct(fields) => fields,
+                EnumVariantShape::Tuple(fields) | EnumVariantShape::Struct(fields) => fields,
             };
             let mut seen_fields = BTreeSet::new();
             for field in fields {
@@ -4169,12 +4030,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
     }
 
-    fn define_method(
-        &mut self,
-        type_name: NameIdx,
-        method_name: NameIdx,
-        fn_idx: FnIdx,
-    ) {
+    fn define_method(&mut self, type_name: NameIdx, method_name: NameIdx, fn_idx: FnIdx) {
         let chunk = Rc::clone(&self.frames.last().expect("frame present").chunk);
         let type_name_s = chunk.name(type_name).to_string();
         let method_name_s = chunk.name(method_name).to_string();
@@ -4219,25 +4075,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // looks up `Type` in `type_bindings`.
         let module_path = match namespace {
             Some(namespace) => self.resolve_namespaced_type(namespace, &type_name_s, line)?,
-            None => self
-                .resolve_type_ref(None, &type_name_s)
-                .ok_or_else(|| {
-                    error(
-                        line,
-                        bop::error_messages::struct_not_declared(&type_name_s),
-                    )
-                })?,
+            None => self.resolve_type_ref(None, &type_name_s).ok_or_else(|| {
+                error(line, bop::error_messages::struct_not_declared(&type_name_s))
+            })?,
         };
         let key = (module_path.clone(), type_name_s.clone());
         let decl = self
             .struct_defs
             .get(&key)
-            .ok_or_else(|| {
-                error(
-                    line,
-                    bop::error_messages::struct_not_declared(&type_name_s),
-                )
-            })?
+            .ok_or_else(|| error(line, bop::error_messages::struct_not_declared(&type_name_s)))?
             .clone();
         let flat = self.pop_n_values(count * 2, line)?;
         let mut provided: BTreeMap<String, Value> = BTreeMap::new();
@@ -4266,17 +4112,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 ));
             }
             if !decl.iter().any(|d| d == &key_str) {
-                let msg = bop::error_messages::struct_has_no_field(
-                    &type_name_s,
-                    &key_str,
-                );
-                let err = match bop::suggest::did_you_mean(
-                    &key_str,
-                    decl.iter().map(|s| s.as_str()),
-                ) {
-                    Some(hint) => error_with_hint(line, msg, hint),
-                    None => error(line, msg),
-                };
+                let msg = bop::error_messages::struct_has_no_field(&type_name_s, &key_str);
+                let err =
+                    match bop::suggest::did_you_mean(&key_str, decl.iter().map(|s| s.as_str())) {
+                        Some(hint) => error_with_hint(line, msg, hint),
+                        None => error(line, msg),
+                    };
                 return Err(err);
             }
             provided.insert(key_str, val);
@@ -4288,10 +4129,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 None => {
                     return Err(error(
                         line,
-                        format!(
-                            "Missing field `{}` in `{}` construction",
-                            d, type_name_s
-                        ),
+                        format!("Missing field `{}` in `{}` construction", d, type_name_s),
                     ));
                 }
             }
@@ -4315,16 +4153,14 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     ) -> Result<(), BopError> {
         let module_path = match namespace {
             Some(namespace) => self.resolve_namespaced_type(namespace, type_name, line)?,
-            None => self.resolve_type_ref(None, type_name).ok_or_else(|| {
-                error(line, bop::error_messages::struct_not_declared(type_name))
-            })?,
+            None => self
+                .resolve_type_ref(None, type_name)
+                .ok_or_else(|| error(line, bop::error_messages::struct_not_declared(type_name)))?,
         };
         let declared = self
             .struct_defs
             .get(&(module_path, type_name.to_string()))
-            .ok_or_else(|| {
-                error(line, bop::error_messages::struct_not_declared(type_name))
-            })?;
+            .ok_or_else(|| error(line, bop::error_messages::struct_not_declared(type_name)))?;
         for (index, field) in provided.iter().enumerate() {
             if provided[..index].contains(field) {
                 return Err(error(
@@ -4350,10 +4186,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             if !provided.contains(field) {
                 return Err(error(
                     line,
-                    format!(
-                        "Missing field `{}` in `{}` construction",
-                        field, type_name
-                    ),
+                    format!("Missing field `{}` in `{}` construction", field, type_name),
                 ));
             }
         }
@@ -4371,9 +4204,9 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     ) -> Result<(), BopError> {
         let module_path = match namespace {
             Some(namespace) => self.resolve_namespaced_type(namespace, type_name, line)?,
-            None => self.resolve_type_ref(None, type_name).ok_or_else(|| {
-                error(line, bop::error_messages::enum_not_declared(type_name))
-            })?,
+            None => self
+                .resolve_type_ref(None, type_name)
+                .ok_or_else(|| error(line, bop::error_messages::enum_not_declared(type_name)))?,
         };
         let variants = self
             .enum_defs
@@ -4426,9 +4259,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     if !fields.contains(field) {
                         return Err(error(
                             line,
-                            bop::error_messages::variant_has_no_field(
-                                type_name, variant, field,
-                            ),
+                            bop::error_messages::variant_has_no_field(type_name, variant, field),
                         ));
                     }
                 }
@@ -4480,31 +4311,21 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Some(namespace) => self.resolve_namespaced_type(namespace, &type_name_s, line)?,
             None => self
                 .resolve_type_ref(None, &type_name_s)
-                .ok_or_else(|| {
-                    error(line, bop::error_messages::enum_not_declared(&type_name_s))
-                })?,
+                .ok_or_else(|| error(line, bop::error_messages::enum_not_declared(&type_name_s)))?,
         };
         let key = (module_path.clone(), type_name_s.clone());
         let decl = self
             .enum_defs
             .get(&key)
-            .ok_or_else(|| {
-                error(line, bop::error_messages::enum_not_declared(&type_name_s))
-            })?
+            .ok_or_else(|| error(line, bop::error_messages::enum_not_declared(&type_name_s)))?
             .clone();
         let variant_decl = decl
             .iter()
             .find(|(n, _)| n == &variant_s)
             .cloned()
             .ok_or_else(|| {
-                let msg = bop::error_messages::enum_has_no_variant(
-                    &type_name_s,
-                    &variant_s,
-                );
-                match bop::suggest::did_you_mean(
-                    &variant_s,
-                    decl.iter().map(|(n, _)| n.as_str()),
-                ) {
+                let msg = bop::error_messages::enum_has_no_variant(&type_name_s, &variant_s);
+                match bop::suggest::did_you_mean(&variant_s, decl.iter().map(|(n, _)| n.as_str())) {
                     Some(hint) => error_with_hint(line, msg, hint),
                     None => error(line, msg),
                 }
@@ -4578,8 +4399,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     }
                     provided.insert(key_str, val);
                 }
-                let mut fields: Vec<(String, Value)> =
-                    Vec::with_capacity(decl_fields.len());
+                let mut fields: Vec<(String, Value)> = Vec::with_capacity(decl_fields.len());
                 for d in decl_fields {
                     match provided.remove(d) {
                         Some(v) => fields.push((d.clone(), v)),
@@ -4634,10 +4454,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     fn field_get(&self, obj: &Value, field: &str, line: u32) -> Result<Value, BopError> {
         match obj {
             Value::Struct(s) => s.field(field).cloned().ok_or_else(|| {
-                let msg = bop::error_messages::struct_has_no_field(
-                    s.type_name(),
-                    field,
-                );
+                let msg = bop::error_messages::struct_has_no_field(s.type_name(), field);
                 let names = s.fields().iter().map(|(k, _)| k.as_str());
                 match bop::suggest::did_you_mean(field, names) {
                     Some(hint) => error_with_hint(line, msg, hint),
@@ -4647,11 +4464,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Value::EnumVariant(e) => e.field(field).cloned().ok_or_else(|| {
                 error(
                     line,
-                    bop::error_messages::variant_has_no_field(
-                        e.type_name(),
-                        e.variant(),
-                        field,
-                    ),
+                    bop::error_messages::variant_has_no_field(e.type_name(), e.variant(), field),
                 )
             }),
             Value::Module(m) => {
@@ -4742,21 +4555,12 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     .and_then(|namespace| namespace.slot_idx())
                 {
                     return match frame.slots.get(slot.0 as usize) {
-                        Some(Value::Module(module)) => {
-                            module.type_origin(tn).map(str::to_string)
-                        }
+                        Some(Value::Module(module)) => module.type_origin(tn).map(str::to_string),
                         _ => None,
                     };
                 }
             }
-            resolve_type_in_frame(
-                frame,
-                frame_scopes,
-                type_bindings,
-                module_aliases,
-                ns,
-                tn,
-            )
+            resolve_type_in_frame(frame, frame_scopes, type_bindings, module_aliases, ns, tn)
         };
         let matched = bop::pattern_matches_in(
             &recipe.pattern,
@@ -4816,11 +4620,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 Ok(Next::Continue)
             }
             Value::EnumVariant(ev) if ev.variant() == "Err" => {
-                let current_is_fn = self
-                    .frames
-                    .last()
-                    .map(|f| f.is_function)
-                    .unwrap_or(false);
+                let current_is_fn = self.frames.last().map(|f| f.is_function).unwrap_or(false);
                 if !current_is_fn {
                     return Err(bop::error_messages::top_level_try_error(line));
                 }
@@ -4858,9 +4658,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 .collect(),
         });
         self.functions.insert(name.clone(), Rc::clone(&entry));
-        if self.is_module_top_scope()
-            && self.current_module == bop::value::ROOT_MODULE_PATH
-        {
+        if self.is_module_top_scope() && self.current_module == bop::value::ROOT_MODULE_PATH {
             if let Some(visibility) = self.root_function_visibility.get(&idx.0).copied() {
                 self.abi_declarations
                     .retain(|(existing, _)| existing != &name);
@@ -4892,7 +4690,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             self.function_origin.clone(),
             0,
             line,
-        ).map(Value::Fn)?;
+        )
+        .map(Value::Fn)?;
         self.push_value(value);
         Ok(())
     }
@@ -4930,12 +4729,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     let mut found = None;
                     let defining_environment_floor =
                         usize::from(frame.defining_environment_module.is_some());
-                    for scope in frame
-                        .scopes
-                        .iter()
-                        .skip(defining_environment_floor)
-                        .rev()
-                    {
+                    for scope in frame.scopes.iter().skip(defining_environment_floor).rev() {
                         if let Some(v) = scope.get(look_name.as_str()) {
                             found = Some(v.clone());
                             break;
@@ -5038,11 +4832,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             FrameWrap::None,
         );
         if let Some(frame) = self.frames.last_mut() {
-            frame.captured_names = func
-                .captures
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
+            frame.captured_names = func.captures.iter().map(|(name, _)| name.clone()).collect();
         }
         Ok(Next::Continue)
     }
@@ -5061,7 +4851,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
 
         let is_plain_glob = items.is_none() && alias.is_none();
         if is_plain_glob
-            && self.imported_here.last().is_some_and(|imports| imports.contains(path))
+            && self
+                .imported_here
+                .last()
+                .is_some_and(|imports| imports.contains(path))
         {
             return Ok(());
         }
@@ -5125,7 +4918,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Vec::with_capacity(artifacts.fn_decls.len() + artifacts.bindings.len());
         let mut fn_entries: BTreeMap<String, Rc<FnEntry>> = BTreeMap::new();
         for (name, entry) in &artifacts.fn_decls {
-            if artifacts.bindings.iter().any(|(binding, _)| binding == name) {
+            if artifacts
+                .bindings
+                .iter()
+                .any(|(binding, _)| binding == name)
+            {
                 continue;
             }
             let chunk_rc: Rc<Chunk> = entry.chunk.clone();
@@ -5140,7 +4937,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 self.function_origin.clone(),
                 0,
                 line,
-            ).map(Value::Fn)?;
+            )
+            .map(Value::Fn)?;
             exports.push((name.clone(), value));
             fn_entries.insert(name.clone(), entry.clone());
         }
@@ -5155,8 +4953,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // Selective filter: ensure every listed name exists, then
         // retain only the listed exports.
         if let Some(list) = items {
-            let available: BTreeSet<&str> =
-                exports.iter().map(|(k, _)| k.as_str()).collect();
+            let available: BTreeSet<&str> = exports.iter().map(|(k, _)| k.as_str()).collect();
             for wanted in list {
                 if !available.contains(wanted.as_str())
                     && !artifacts.type_exports.contains_key(wanted)
@@ -5170,8 +4967,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     ));
                 }
             }
-            let listed: BTreeSet<String> =
-                list.iter().cloned().collect();
+            let listed: BTreeSet<String> = list.iter().cloned().collect();
             exports.retain(|(k, _)| listed.contains(k));
             fn_entries.retain(|name, _| listed.contains(name));
         }
@@ -5380,7 +5176,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let Some(slot) = namespace.slot_idx() else {
             self.validate_namespaced_type(name, type_name, line)?;
             return self.resolve_type_ref(Some(name), type_name).ok_or_else(|| {
-                error(line, format!("`{type_name}` isn't a type exported from `{name}`"))
+                error(
+                    line,
+                    format!("`{type_name}` isn't a type exported from `{name}`"),
+                )
             });
         };
         let value = self
@@ -5400,12 +5199,15 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 ));
             }
         };
-        module.type_origin(type_name).map(str::to_string).ok_or_else(|| {
-            error(
-                line,
-                format!("`{type_name}` isn't a type exported from `{}`", module.path),
-            )
-        })
+        module
+            .type_origin(type_name)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                error(
+                    line,
+                    format!("`{type_name}` isn't a type exported from `{}`", module.path),
+                )
+            })
     }
 
     fn validate_namespaced_type(
@@ -5419,9 +5221,10 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // alias map so namespaced references inside fn bodies
         // still resolve — the fn frame's value scopes don't
         // carry the caller's aliases.
-        let frame = self.frames.last().ok_or_else(|| {
-            error(line, "VM: no frame for namespaced type access")
-        })?;
+        let frame = self
+            .frames
+            .last()
+            .ok_or_else(|| error(line, "VM: no frame for namespaced type access"))?;
         for scope in frame.scopes.iter().rev() {
             if let Some(v) = scope.get(ns) {
                 let module = match v {
@@ -5484,11 +5287,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         )
     }
 
-    fn load_module(
-        &mut self,
-        path: &str,
-        line: u32,
-    ) -> Result<ModuleArtifacts, BopError> {
+    fn load_module(&mut self, path: &str, line: u32) -> Result<ModuleArtifacts, BopError> {
         {
             let cache = self.imports.borrow();
             if let Some(ImportSlot::Loaded(bindings)) = cache.get(path) {
@@ -5507,10 +5306,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(e),
             None => {
-                return Err(error(
-                    line,
-                    format!("Module `{}` not found", path),
-                ));
+                return Err(error(line, format!("Module `{}` not found", path)));
             }
         };
 
@@ -5596,13 +5392,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             .first()
             .and_then(|frame| frame.scopes.first())
             .map(|scope| {
-                snapshot_module_bindings(
-                    scope,
-                    &sub.binding_origins,
-                    module_path,
-                    &sub.imports,
-                    0,
-                )
+                snapshot_module_bindings(scope, &sub.binding_origins, module_path, &sub.imports, 0)
             })
             .transpose()
         {
@@ -5646,8 +5436,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // call resolution. Reified `Value::Fn`s for the same
         // fns are synthesised at the import site (see
         // `exec_import`).
-        let fn_decls: Vec<(String, Rc<FnEntry>)> =
-            sub.functions.into_iter().collect();
+        let fn_decls: Vec<(String, Rc<FnEntry>)> = sub.functions.into_iter().collect();
         // Type decls & methods come along for the ride — the
         // importer needs them so pattern-matching and
         // construction against the module's types works
@@ -5681,7 +5470,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let lexical_context = Rc::new(ModuleLexicalContext {
             type_bindings: sub.type_bindings.into_iter().next().unwrap_or_default(),
             module_aliases: module_exports.clone(),
-            imported_functions: sub.imported_functions.into_iter().next().unwrap_or_default(),
+            imported_functions: sub
+                .imported_functions
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
         });
         Ok(ModuleArtifacts {
             bindings,
@@ -5747,8 +5540,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         // Drop the function's protected type-binding scope plus any runtime
         // scopes skipped by an early return. Top-level return preserves the
         // builtin map while discarding any open runtime scopes.
-        self.type_bindings
-            .truncate(frame.caller_type_scope_depth());
+        self.type_bindings.truncate(frame.caller_type_scope_depth());
         self.module_aliases.truncate(frame.alias_scope_base);
         self.imported_functions.truncate(frame.alias_scope_base);
         self.imported_here.truncate(frame.alias_scope_base);
@@ -5816,9 +5608,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             FrameWrap::TryCall { line } => {
                 builtins::make_try_call_ok_in(value, line, &self.memory)?
             }
-            FrameWrap::ResultOk { line } => {
-                methods::make_result_ok_in(value, line, &self.memory)?
-            }
+            FrameWrap::ResultOk { line } => methods::make_result_ok_in(value, line, &self.memory)?,
             FrameWrap::ResultErr { line } => {
                 methods::make_result_err_in(value, line, &self.memory)?
             }
@@ -5854,11 +5644,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         }
     }
 
-    fn commit_frame_write_backs(
-        &mut self,
-        frame: &Frame,
-        line: u32,
-    ) -> Result<(), BopError> {
+    fn commit_frame_write_backs(&mut self, frame: &Frame, line: u32) -> Result<(), BopError> {
         if frame.pending_write_backs.is_empty() {
             return Ok(());
         }
@@ -5880,11 +5666,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                         return Err(error(line, "VM: ref write-back slot is no longer live"));
                     }
                 }
-                ResolvedRefTarget::Scope {
-                    frame,
-                    scope,
-                    name,
-                } => {
+                ResolvedRefTarget::Scope { frame, scope, name } => {
                     if !self
                         .frames
                         .get(*frame)
@@ -5902,11 +5684,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 ResolvedRefTarget::Slot { frame, slot } => {
                     self.frames[*frame].slots[slot.0 as usize] = value;
                 }
-                ResolvedRefTarget::Scope {
-                    frame,
-                    scope,
-                    name,
-                } => {
+                ResolvedRefTarget::Scope { frame, scope, name } => {
                     *self.frames[*frame].scopes[*scope]
                         .get_mut(name)
                         .expect("write-back target prevalidated") = value;
@@ -5922,18 +5700,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
     /// the outcome (whether a normal return or a non-fatal
     /// error) gets wrapped in a `Result::Ok`/`Result::Err`
     /// before returning to the original `try_call` caller.
-    fn builtin_try_call(
-        &mut self,
-        args: Vec<Value>,
-        line: u32,
-    ) -> Result<Next, BopError> {
+    fn builtin_try_call(&mut self, args: Vec<Value>, line: u32) -> Result<Next, BopError> {
         if args.len() != 1 {
             return Err(error(
                 line,
-                format!(
-                    "`try_call` expects 1 argument, but got {}",
-                    args.len()
-                ),
+                format!("`try_call` expects 1 argument, but got {}", args.len()),
             ));
         }
         let mut iter = args.into_iter();
@@ -5943,10 +5714,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
             other => {
                 return Err(error(
                     line,
-                    format!(
-                        "`try_call` expects a function, got {}",
-                        other.type_name()
-                    ),
+                    format!("`try_call` expects a function, got {}", other.type_name()),
                 ));
             }
         };
@@ -5988,14 +5756,8 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         line: u32,
     ) -> Result<(), BopError> {
         let type_key: Option<(String, String)> = match &receiver {
-            Value::Struct(s) => Some((
-                s.module_path().to_string(),
-                s.type_name().to_string(),
-            )),
-            Value::EnumVariant(e) => Some((
-                e.module_path().to_string(),
-                e.type_name().to_string(),
-            )),
+            Value::Struct(s) => Some((s.module_path().to_string(), s.type_name().to_string())),
+            Value::EnumVariant(e) => Some((e.module_path().to_string(), e.type_name().to_string())),
             _ => None,
         };
         let key = type_key.ok_or_else(|| {
@@ -6038,8 +5800,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 "Check that your recursive function has a base case that stops calling itself.",
             ));
         }
-        let slot_count =
-            (entry.chunk.slot_count as usize).max(entry.params.len());
+        let slot_count = (entry.chunk.slot_count as usize).max(entry.params.len());
         let mut slots = self.take_slots(slot_count);
         slots[0] = receiver;
         for (i, a) in extra_args.into_iter().enumerate() {
@@ -6072,15 +5833,11 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         args: Vec<Value>,
         line: u32,
     ) -> Result<Next, BopError> {
-        use methods::{make_result_err_in, make_result_ok_in, ResultCallableKind};
+        use methods::{ResultCallableKind, make_result_err_in, make_result_ok_in};
         if args.len() != 1 {
             return Err(error(
                 line,
-                format!(
-                    "`{}` expects 1 argument, but got {}",
-                    method,
-                    args.len()
-                ),
+                format!("`{}` expects 1 argument, but got {}", method, args.len()),
             ));
         }
         let mut args_iter = args.into_iter();
@@ -6089,9 +5846,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         let (is_ok, payload) = match &obj {
             Value::EnumVariant(e) => {
                 let payload = match e.payload() {
-                    bop::value::EnumPayload::Tuple(items) if items.len() == 1 => {
-                        items[0].clone()
-                    }
+                    bop::value::EnumPayload::Tuple(items) if items.len() == 1 => items[0].clone(),
                     _ => {
                         return Err(error(
                             line,
@@ -6154,10 +5909,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     other => {
                         return Err(error(
                             line,
-                            format!(
-                                "`map_err` expects a function, got {}",
-                                other.type_name()
-                            ),
+                            format!("`map_err` expects a function, got {}", other.type_name()),
                         ));
                     }
                 };
@@ -6186,10 +5938,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                     other => {
                         return Err(error(
                             line,
-                            format!(
-                                "`and_then` expects a function, got {}",
-                                other.type_name()
-                            ),
+                            format!("`and_then` expects a function, got {}", other.type_name()),
                         ));
                     }
                 };
@@ -6265,8 +6014,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
         while self.frames.len() > wrap_idx {
             let mut frame = self.frames.pop().expect("frame present");
             self.store_frame_defining_environment(&mut frame);
-            self.type_bindings
-                .truncate(frame.caller_type_scope_depth());
+            self.type_bindings.truncate(frame.caller_type_scope_depth());
             self.module_aliases.truncate(frame.alias_scope_base);
             self.imported_functions.truncate(frame.alias_scope_base);
             self.imported_here.truncate(frame.alias_scope_base);
@@ -6301,9 +6049,7 @@ fn resolve_type_in_frame(
         for scope in value_scopes.iter().rev() {
             if let Some(value) = scope.get(namespace) {
                 return match value {
-                    Value::Module(module) => {
-                        module.type_origin(type_name).map(str::to_string)
-                    }
+                    Value::Module(module) => module.type_origin(type_name).map(str::to_string),
                     _ => None,
                 };
             }
@@ -6324,7 +6070,9 @@ fn resolve_type_in_frame(
             .and_then(|module| module.type_origin(type_name).map(str::to_string));
     }
 
-    let floor = frame.is_function.then_some(frame.type_scope_base.saturating_sub(1));
+    let floor = frame
+        .is_function
+        .then_some(frame.type_scope_base.saturating_sub(1));
     for (index, bindings) in type_scopes.iter().enumerate().rev() {
         if floor.is_some_and(|floor| index < floor) {
             continue;
@@ -6443,12 +6191,7 @@ impl BopInstance {
             return Err(instance_memory_error());
         }
         let state = self.state.take().expect("instance state present");
-        let mut vm = Vm::from_state(
-            state,
-            host,
-            self.limits.clone(),
-            self.memory.clone(),
-        );
+        let mut vm = Vm::from_state(state, host, self.limits.clone(), self.memory.clone());
         let result = {
             for argument in args {
                 vm.push_value(argument.clone());
@@ -6514,12 +6257,7 @@ impl BopInstance {
             return Err(instance_memory_error());
         }
         let state = self.state.take().expect("instance state present");
-        let mut vm = Vm::from_state(
-            state,
-            host,
-            self.limits.clone(),
-            self.memory.clone(),
-        );
+        let mut vm = Vm::from_state(state, host, self.limits.clone(), self.memory.clone());
         let result = {
             let execution = vm
                 .call_closure(&function, args.to_vec(), 0)
@@ -6557,9 +6295,7 @@ fn call_mode_error(
         ),
         ParamMode::Value => error_with_hint(
             line,
-            format!(
-                "argument {position} to `{callable}` is a value parameter and can't use `ref`"
-            ),
+            format!("argument {position} to `{callable}` is a value parameter and can't use `ref`"),
             format!("Remove `ref` from argument {position}."),
         ),
     }
@@ -6584,11 +6320,7 @@ fn duplicate_ref_target_error(line: u32) -> BopError {
     )
 }
 
-fn validate_named_builtin_arity(
-    name: &str,
-    count: usize,
-    line: u32,
-) -> Result<(), BopError> {
+fn validate_named_builtin_arity(name: &str, count: usize, line: u32) -> Result<(), BopError> {
     let expected = match name {
         "rand" | "try_call" | "panic" => Some((1, 1)),
         "range" => Some((1, 3)),
@@ -6611,11 +6343,7 @@ fn validate_named_builtin_arity(
     Ok(())
 }
 
-fn validate_builtin_method_arity(
-    method: &str,
-    count: usize,
-    line: u32,
-) -> Result<(), BopError> {
+fn validate_builtin_method_arity(method: &str, count: usize, line: u32) -> Result<(), BopError> {
     let Some(expected) = methods::builtin_method_arity(method) else {
         return Ok(());
     };
@@ -6655,11 +6383,7 @@ impl Drop for VmOperationGuard<'_> {
 /// The chunk is structurally validated before the VM starts, so malformed
 /// hand-built or deserialized bytecode is reported as a [`BopError`] rather
 /// than panicking or silently jumping beyond the instruction stream.
-pub fn execute<H: BopHost>(
-    chunk: Chunk,
-    host: &mut H,
-    limits: &BopLimits,
-) -> Result<(), BopError> {
+pub fn execute<H: BopHost>(chunk: Chunk, host: &mut H, limits: &BopLimits) -> Result<(), BopError> {
     crate::validate_chunk(&chunk)?;
     let vm = Vm::new(chunk, host, limits.clone());
     vm.run()
@@ -6668,11 +6392,7 @@ pub fn execute<H: BopHost>(
 /// Parse, compile, and run Bop source.
 ///
 /// This mirrors [`bop::run`] but routes through the bytecode VM.
-pub fn run<H: BopHost>(
-    source: &str,
-    host: &mut H,
-    limits: &BopLimits,
-) -> Result<(), BopError> {
+pub fn run<H: BopHost>(source: &str, host: &mut H, limits: &BopLimits) -> Result<(), BopError> {
     let stmts = bop::parse(source)?;
     let chunk = crate::compile(&stmts)?;
     execute(chunk, host, limits)
@@ -6907,7 +6627,10 @@ let read = fn() { return [missing, present] }"#,
 
     #[test]
     fn instance_leaves_host_allocations_untracked_and_checks_final_returns() {
-        let limits = BopLimits { max_steps: 100, max_memory: 32 };
+        let limits = BopLimits {
+            max_steps: 100,
+            max_memory: 32,
+        };
         let mut host = RetainingHost { retained: None };
         let mut instance = BopInstance::load(
             "pub fn host_only() { retain_large() }\npub fn too_large() { return \"abcdefghijklmnopqrstuvwxyz0123456789\" }",
@@ -6943,8 +6666,13 @@ let read = fn() { return [missing, present] }"#,
     #[test]
     fn external_values_are_free_until_detach_and_memory_poison_is_fail_fast() {
         let external = Value::new_array((0..256).map(Value::Int).collect());
-        let limits = BopLimits { max_steps: 100, max_memory: 64 };
-        let mut host = ExternalValueHost { value: Some(external) };
+        let limits = BopLimits {
+            max_steps: 100,
+            max_memory: 64,
+        };
+        let mut host = ExternalValueHost {
+            value: Some(external),
+        };
         let mut instance = BopInstance::load(
             "let stored = none\npub fn keep() { stored = take_external() }\npub fn mutate() { stored.push(256) }\npub fn harmless() { return 1 }",
             &mut host,
@@ -7036,8 +6764,13 @@ let read = fn() { return [missing, present] }"#,
 
     #[test]
     fn every_instance_host_hook_leaves_accounting_unchanged() {
-        let limits = BopLimits { max_steps: 100, max_memory: 64 };
-        let mut host = HookAllocatingHost { retained: RefCell::new(Vec::new()) };
+        let limits = BopLimits {
+            max_steps: 100,
+            max_memory: 64,
+        };
+        let mut host = HookAllocatingHost {
+            retained: RefCell::new(Vec::new()),
+        };
         let mut instance = BopInstance::load(
             "use hook\npub fn print_it() { print(\"ok\") }\npub fn host_it() { host_value() }\npub fn hint_it() { missing() }",
             &mut host,
@@ -7049,10 +6782,12 @@ let read = fn() { return [missing, present] }"#,
         instance.call("host_it", &[], &mut host).unwrap();
         let error = instance.call("hint_it", &[], &mut host).unwrap_err();
         assert!(!error.is_fatal);
-        assert!(error
-            .friendly_hint
-            .as_deref()
-            .is_some_and(|hint| hint.contains("host hint")));
+        assert!(
+            error
+                .friendly_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("host hint"))
+        );
         assert_eq!(instance.memory.__used(), 0);
         assert!(host.retained.borrow().len() >= 8);
     }
@@ -7060,12 +6795,8 @@ let read = fn() { return [missing, present] }"#,
     #[test]
     fn same_instance_reentry_rejection_precedes_target_and_arity_checks() {
         let mut host = SilentHost;
-        let mut instance = BopInstance::load(
-            "pub fn entry() {}",
-            &mut host,
-            &BopLimits::standard(),
-        )
-        .unwrap();
+        let mut instance =
+            BopInstance::load("pub fn entry() {}", &mut host, &BopLimits::standard()).unwrap();
         instance.in_operation.set(true);
         let error = instance
             .call("missing", &[Value::None], &mut host)
@@ -7105,8 +6836,7 @@ let read = fn() { return [missing, present] }"#,
             ]),
         };
 
-        let error =
-            crate::run(root_source, &mut host, &BopLimits::standard()).unwrap_err();
+        let error = crate::run(root_source, &mut host, &BopLimits::standard()).unwrap_err();
         let context = error.source_context.as_ref().expect("module context");
 
         assert_eq!(context.module_path, "inner");
@@ -7177,8 +6907,7 @@ let read = fn() { return [missing, present] }"#,
             .unwrap()
             .1;
         for index in 0..FACADES {
-            let ImportSlot::Loaded(facade) = imports.get(&format!("facade{index}")).unwrap()
-            else {
+            let ImportSlot::Loaded(facade) = imports.get(&format!("facade{index}")).unwrap() else {
                 panic!("facade should be loaded")
             };
             let facade_items = &facade

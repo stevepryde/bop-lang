@@ -6,7 +6,11 @@
 //! functions are recursively rendered after the main body.
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
-use alloc::{format, string::{String, ToString}, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use crate::chunk::{Chunk, Constant, Instr, InterpPart, LoopStateKind, NamespaceIdx};
 
@@ -35,7 +39,12 @@ fn render_chunk(chunk: &Chunk, out: &mut String, indent: usize) {
     let width = chunk.code.len().saturating_sub(1).to_string().len().max(1);
     for (i, instr) in chunk.code.iter().enumerate() {
         out.push_str(&pad);
-        out.push_str(&format!("{:>width$}: {}\n", i, render_instr(chunk, instr), width = width));
+        out.push_str(&format!(
+            "{:>width$}: {}\n",
+            i,
+            render_instr(chunk, instr),
+            width = width
+        ));
     }
 
     for (i, f) in chunk.functions.iter().enumerate() {
@@ -207,10 +216,9 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
                     argc,
                     chunk.name(*var)
                 ),
-                Some(crate::chunk::AssignBack::Slot(slot)) => format!(
-                    "CallMethod .{}/{} (back to @{})",
-                    name, argc, slot.0
-                ),
+                Some(crate::chunk::AssignBack::Slot(slot)) => {
+                    format!("CallMethod .{}/{} (back to @{})", name, argc, slot.0)
+                }
                 None => format!("CallMethod .{}/{}", name, argc),
             }
         }
@@ -222,14 +230,8 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
             let name = chunk.name(*method);
             let receiver = chunk.name(target.name_idx());
             match target.slot_idx() {
-                None => format!(
-                    "CallMethodInPlace .{}/{} (target {})",
-                    name, argc, receiver
-                ),
-                Some(slot) => format!(
-                    "CallMethodInPlace .{}/{} (target @{})",
-                    name, argc, slot.0
-                ),
+                None => format!("CallMethodInPlace .{}/{} (target {})", name, argc, receiver),
+                Some(slot) => format!("CallMethodInPlace .{}/{} (target @{})", name, argc, slot.0),
             }
         }
 
@@ -246,9 +248,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         Instr::IterNext { target } => format!("IterNext -> {}", target.0),
         Instr::MakeRepeatCount => "MakeRepeatCount".to_string(),
         Instr::RepeatNext { target } => format!("RepeatNext -> {}", target.0),
-        Instr::PopLoopState(LoopStateKind::Iterator) => {
-            "PopLoopState iterator".to_string()
-        }
+        Instr::PopLoopState(LoopStateKind::Iterator) => "PopLoopState iterator".to_string(),
         Instr::PopLoopState(LoopStateKind::Repeat) => "PopLoopState repeat".to_string(),
 
         Instr::Jump(t) => format!("Jump -> {}", t.0),
@@ -275,11 +275,7 @@ fn render_instr(chunk: &Chunk, instr: &Instr) -> String {
         }
         Instr::DefineEnum(idx) => {
             let def = chunk.enum_def(*idx);
-            format!(
-                "DefineEnum {} [{} variants]",
-                def.name,
-                def.variants.len()
-            )
+            format!("DefineEnum {} [{} variants]", def.name, def.variants.len())
         }
         Instr::DefineMethod {
             type_name,

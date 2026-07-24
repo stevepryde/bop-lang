@@ -93,8 +93,8 @@ fn gather_variants(
             match target {
                 None => *target = Some((known.clone(), type_name.clone())),
                 Some((existing, _))
-                    if existing.runtime_id == known.runtime_id
-                        && existing.shape == known.shape => {}
+                    if existing.runtime_id == known.runtime_id && existing.shape == known.shape => {
+                }
                 _ => return false,
             }
             if contributes {
@@ -102,9 +102,9 @@ fn gather_variants(
             }
             true
         }
-        Pattern::Or(alternatives) => alternatives.iter().all(|alternative| {
-            gather_variants(alternative, env, target, covered, contributes)
-        }),
+        Pattern::Or(alternatives) => alternatives
+            .iter()
+            .all(|alternative| gather_variants(alternative, env, target, covered, contributes)),
         _ => false,
     }
 }

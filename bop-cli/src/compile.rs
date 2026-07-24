@@ -33,12 +33,7 @@ use bop_compile::{ModuleResolver, Options, transpile};
 const SCRATCH_CREATE_ATTEMPTS: usize = 128;
 static NEXT_SCRATCH_DIR: AtomicUsize = AtomicUsize::new(0);
 
-pub fn compile_file(
-    input: &str,
-    output: Option<&str>,
-    emit_rs: bool,
-    keep: bool,
-) -> ExitCode {
+pub fn compile_file(input: &str, output: Option<&str>, emit_rs: bool, keep: bool) -> ExitCode {
     let input_path = PathBuf::from(input);
     let source = match std::fs::read_to_string(&input_path) {
         Ok(s) => s,
@@ -198,7 +193,10 @@ fn build_native(
         }
     };
     if !status.success() {
-        eprintln!("cargo build failed — generated Rust source is under {}", scratch.display());
+        eprintln!(
+            "cargo build failed — generated Rust source is under {}",
+            scratch.display()
+        );
         return Err(ExitCode::from(1));
     }
 
@@ -303,9 +301,7 @@ fn claim_first_available_scratch_dir(
 
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
-        format!(
-            "couldn't claim a new scratch directory after {SCRATCH_CREATE_ATTEMPTS} attempts"
-        ),
+        format!("couldn't claim a new scratch directory after {SCRATCH_CREATE_ATTEMPTS} attempts"),
     ))
 }
 
@@ -485,8 +481,7 @@ mod tests {
         )
         .unwrap();
 
-        let scratch =
-            claim_first_available_scratch_dir([injected.clone(), fresh.clone()]).unwrap();
+        let scratch = claim_first_available_scratch_dir([injected.clone(), fresh.clone()]).unwrap();
 
         assert_eq!(scratch, fresh);
         assert!(!scratch.join("build.rs").exists());
@@ -504,8 +499,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let root = resolver_test_root("scratch_permissions");
-        let scratch =
-            claim_first_available_scratch_dir([root.join("bop-claimed")]).unwrap();
+        let scratch = claim_first_available_scratch_dir([root.join("bop-claimed")]).unwrap();
         let mode = std::fs::metadata(&scratch).unwrap().permissions().mode();
 
         assert_eq!(mode & 0o077, 0, "scratch mode was {mode:o}");

@@ -2,8 +2,8 @@
 //! bodies. See the crate root for the textual description of the
 //! instruction set.
 
-use core::num::{NonZeroU32, NonZeroU64};
 use bop::parser::ParamMode;
+use core::num::{NonZeroU32, NonZeroU64};
 
 #[cfg(all(feature = "no_std", not(feature = "std")))]
 use alloc::{rc::Rc, string::String, vec::Vec};
@@ -74,7 +74,6 @@ pub enum Instr {
     // them via peephole detection; the VM handles them with a
     // direct slot read + typed fast path, falling back to the
     // equivalent generic opcodes on type mismatch.
-
     /// Push `frame.slots[a] + frame.slots[b]` without touching
     /// the value stack for the operands — fuses `LoadLocal(a) +
     /// LoadLocal(b) + Add`. Fast path specialises on both
@@ -172,13 +171,18 @@ pub enum Instr {
     /// Call `name` with `argc` arguments popped from the stack.
     /// Resolution order: locally-bound closure → builtin → host →
     /// named user fn → error.
-    Call { name: NameIdx, argc: u32 },
+    Call {
+        name: NameIdx,
+        argc: u32,
+    },
     /// Call whatever sits on top of the `argc` args on the stack. The
     /// callee must be a `Value::Fn`; anything else is a runtime
     /// error. Emitted when the call's callee expression isn't a
     /// bare ident (e.g. `funcs[0](x)` or `make_adder(5)(3)`). Arguments
     /// are evaluated before the callee, matching the tree walker.
-    CallValue { argc: u32 },
+    CallValue {
+        argc: u32,
+    },
     /// Resolve a named callable exactly once and validate the call-site shape
     /// before any ordinary argument expression is evaluated.
     PrepareCall {
@@ -186,7 +190,9 @@ pub enum Instr {
         site: CallSiteIdx,
     },
     /// Pop and preflight an already-evaluated callable value.
-    PrepareCallValue { site: CallSiteIdx },
+    PrepareCallValue {
+        site: CallSiteIdx,
+    },
     /// Pop an already-evaluated method receiver and preflight its positional
     /// non-receiver arguments. Used when any explicit `ref` marker is present.
     PrepareMethodValue {
@@ -205,7 +211,9 @@ pub enum Instr {
     },
     /// Snapshot the prepared call's `ref` targets, interleave them with the
     /// ordinary argument values, and enter the callable.
-    CallPrepared { site: CallSiteIdx },
+    CallPrepared {
+        site: CallSiteIdx,
+    },
     /// Method call: `[.., args..., obj]` → `[.., ret]`, and if the
     /// method is mutating and `obj` came from a variable, the VM
     /// writes the mutated value back to the original binding. The
@@ -254,12 +262,16 @@ pub enum Instr {
     MakeIter,
     /// If the iterator at the top of stack has another item, push
     /// it. Otherwise pop the iterator and jump to `target`.
-    IterNext { target: CodeOffset },
+    IterNext {
+        target: CodeOffset,
+    },
     /// Pop a number, validate it, push an internal repeat counter.
     MakeRepeatCount,
     /// If the repeat counter at the top is non-zero, decrement it
     /// and fall through. Otherwise pop it and jump to `target`.
-    RepeatNext { target: CodeOffset },
+    RepeatNext {
+        target: CodeOffset,
+    },
     /// Discard the sidecar owned by a loop exited through `break`.
     /// The VM checks the kind so broken compiler bookkeeping cannot
     /// silently consume an enclosing loop's state.
