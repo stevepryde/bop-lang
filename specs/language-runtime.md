@@ -16,7 +16,10 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
 - **RUN-003 — Resource accounting.** Walker and VM execution, plus AOT output
   emitted with sandboxing enabled, must enforce their applicable step,
   tracked-memory, and call-depth boundaries. AOT sandboxing is opt-in; the CLI's
-  compiled binaries are currently emitted without runtime limits.
+  compiled binaries are currently emitted without runtime limits. Operations
+  that can amplify shared values into formatted strings or substring
+  collections must preflight their exact bytes/cardinality before
+  materialization and before exposing host output.
 - **RUN-004 — Engine parity.** For the same source and host behaviour, the three
   engines must agree on language-visible values, output, mutations, errors, and
   module semantics, except for explicitly documented engine API differences.

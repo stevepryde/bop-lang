@@ -1212,6 +1212,16 @@ impl Value {
         Ok(Value::Array(BopArray(Rc::new(data))))
     }
 
+    /// Tracked storage required by an array whose children are all flat
+    /// values, such as the String `.split()` result.
+    #[doc(hidden)]
+    pub fn __flat_array_tracked_bytes(item_capacity: usize, item_count: usize) -> Option<usize> {
+        item_capacity
+            .checked_mul(core::mem::size_of::<Value>())?
+            .checked_add(core::mem::size_of::<OrderedDepthCounts>())?
+            .checked_add(item_count.checked_mul(core::mem::size_of::<u16>())?)
+    }
+
     /// Trusted compatibility constructor for a dictionary.
     ///
     /// # Panics
@@ -2022,7 +2032,7 @@ impl core::fmt::Display for Value {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", item.inspect())?;
+                    write!(f, "{}", Inspected(item))?;
                 }
                 write!(f, "]")
             }
@@ -2032,7 +2042,7 @@ impl core::fmt::Display for Value {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "\"{}\": {}", k, v.inspect())?;
+                    write!(f, "\"{}\": {}", k, Inspected(v))?;
                 }
                 write!(f, "}}")
             }
@@ -2068,7 +2078,7 @@ impl core::fmt::Display for Value {
                     if i > 0 {
                         write!(f, ",")?;
                     }
-                    write!(f, " {}: {}", k, v.inspect())?;
+                    write!(f, " {}: {}", k, Inspected(v))?;
                 }
                 if !s.fields().is_empty() {
                     write!(f, " ")?;
@@ -2083,7 +2093,7 @@ impl core::fmt::Display for Value {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}", v.inspect())?;
+                        write!(f, "{}", Inspected(v))?;
                     }
                     write!(f, ")")
                 }
@@ -2093,7 +2103,7 @@ impl core::fmt::Display for Value {
                         if i > 0 {
                             write!(f, ",")?;
                         }
-                        write!(f, " {}: {}", k, v.inspect())?;
+                        write!(f, " {}: {}", k, Inspected(v))?;
                     }
                     if !fields.is_empty() {
                         write!(f, " ")?;
@@ -2111,14 +2121,22 @@ impl core::fmt::Display for BopStr {
     }
 }
 
+struct Inspected<'a>(&'a Value);
+
+impl core::fmt::Display for Inspected<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Value::Str(value) => write!(f, "\"{}\"", value.0.text),
+            value => core::fmt::Display::fmt(value, f),
+        }
+    }
+}
+
 // ─── Value helpers ─────────────────────────────────────────────────────────
 
 impl Value {
     pub fn inspect(&self) -> String {
-        match self {
-            Value::Str(s) => format!("\"{}\"", s.0.text),
-            other => format!("{other}"),
-        }
+        format!("{}", Inspected(self))
     }
 
     pub fn type_name(&self) -> &'static str {

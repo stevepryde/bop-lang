@@ -3347,11 +3347,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 return Ok(Next::Continue);
             }
             "print" => {
-                let message = args
-                    .iter()
-                    .map(|arg| format!("{arg}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let message = bop::formatting::__format_values_in(&args, " ", line, &self.memory)?;
                 self.host.on_print(&message);
                 if let Some(error) = self.host.print_error(line) {
                     return Err(error);
@@ -3550,11 +3546,7 @@ impl<'h, H: BopHost + ?Sized> Vm<'h, H> {
                 return Ok(Next::Continue);
             }
             "print" => {
-                let message = args
-                    .iter()
-                    .map(|a| format!("{a}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let message = bop::formatting::__format_values_in(&args, " ", line, &self.memory)?;
                 self.host.on_print(&message);
                 if let Some(error) = self.host.print_error(line) {
                     return Err(error);

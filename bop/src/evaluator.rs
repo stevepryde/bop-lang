@@ -3931,11 +3931,8 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
             }
             "rand" => return builtins::builtin_rand(&args, line, &mut self.rand_state),
             "print" => {
-                let message = args
-                    .iter()
-                    .map(|a| format!("{a}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let message =
+                    crate::formatting::__format_values_in(&args, " ", line, &self.memory)?;
                 self.host.on_print(&message);
                 if let Some(error) = self.host.print_error(line) {
                     return Err(error);

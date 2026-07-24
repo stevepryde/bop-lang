@@ -150,14 +150,15 @@ fn empty_program_still_produces_runnable_shell() {
 #[test]
 fn print_42_emits_on_print_call() {
     let out = compile("print(42)");
-    // The body must format args via __bop_format_print and use the fallible
+    // The body must preflight bounded formatting and then use the fallible
     // host-print helper so generated programs propagate output failures.
     // `42` is an int literal in phase 6, so the emitted value is
     // `Value::Int`.
     contains_all(
         &out,
         &[
-            "__bop_host_print(ctx, &__bop_format_print(",
+            "::bop::formatting::__format_values_in(",
+            "__bop_host_print(ctx, &__bop_message",
             "::bop::value::Value::Int(42",
         ],
     );
