@@ -92,6 +92,17 @@ pub fn compile_file(input: &str, output: Option<&str>, emit_rs: bool, keep: bool
         return ExitCode::SUCCESS;
     }
 
+    // Cargo config discovery is rooted at its working directory. Capture the
+    // directory the user selected before creating scratch work so private
+    // scratch storage cannot contribute configuration through its ancestors.
+    let invocation_dir = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("error reading the current directory: {error}");
+            return ExitCode::from(1);
+        }
+    };
+
     // Cargo is the build driver — it's what ships with rustup,
     // and it handles the `bop-lang` / `bop-sys` deps that the
     // transpiled code needs. Check for its presence before
@@ -106,7 +117,7 @@ pub fn compile_file(input: &str, output: Option<&str>, emit_rs: bool, keep: bool
         return ExitCode::from(1);
     }
 
-    let scratch = match build_native(&rust_src, &input_path, &output_path) {
+    let scratch = match build_native(&rust_src, &input_path, &output_path, &invocation_dir) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -143,6 +154,7 @@ fn build_native(
     rust_src: &str,
     input_path: &Path,
     output_path: &Path,
+    invocation_dir: &Path,
 ) -> Result<PathBuf, ExitCode> {
     let stem = input_path
         .file_stem()
@@ -185,7 +197,7 @@ fn build_native(
     // Stdout goes through and stderr prints cargo's own diagnostics
     // if the build fails. We don't try to suppress or reformat them;
     // they're generally the right thing for a user to see.
-    let status = cargo_build_command(&scratch).status();
+    let status = cargo_build_command(&scratch, invocation_dir).status();
     let status = match status {
         Ok(s) => s,
         Err(e) => {
@@ -248,14 +260,19 @@ fn build_native(
     Ok(scratch)
 }
 
-fn cargo_build_command(scratch: &Path) -> Command {
+fn cargo_build_command(scratch: &Path, invocation_dir: &Path) -> Command {
+    debug_assert!(scratch.is_absolute());
+    debug_assert!(invocation_dir.is_absolute());
+
     let mut command = Command::new("cargo");
     command
         .arg("build")
         .arg("--release")
+        .arg("--manifest-path")
+        .arg(scratch.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(scratch.join("target"))
-        .current_dir(scratch)
+        .current_dir(invocation_dir)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     command
@@ -410,7 +427,10 @@ fn create_scratch_dir(stem: &str) -> std::io::Result<PathBuf> {
             .wrapping_add(attempt as u128);
         parent.join(format!("bop-compile-{stem}-{pid}-{nonce:032x}"))
     });
-    claim_first_available_scratch_dir(candidates)
+    // `std::env::temp_dir` is normally absolute, but canonicalizing the
+    // directory we just created makes the paths passed to Cargo absolute even
+    // when a platform or test-specific temp setting is relative.
+    claim_first_available_scratch_dir(candidates).and_then(std::fs::canonicalize)
 }
 
 fn claim_first_available_scratch_dir(
@@ -627,9 +647,15 @@ mod tests {
     }
 
     #[test]
-    fn cargo_build_command_uses_the_scratch_target_directory() {
-        let scratch = PathBuf::from("scratch-project");
-        let command = cargo_build_command(&scratch);
+    fn cargo_build_command_isolates_scratch_config_discovery() {
+        let root = resolver_test_root("cargo_command");
+        let scratch = root.join("scratch-project");
+        let invocation_dir = root.join("user-project");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::create_dir_all(&invocation_dir).unwrap();
+        let scratch = std::fs::canonicalize(scratch).unwrap();
+        let invocation_dir = std::fs::canonicalize(invocation_dir).unwrap();
+        let command = cargo_build_command(&scratch, &invocation_dir);
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -640,11 +666,21 @@ mod tests {
             vec![
                 "build".to_string(),
                 "--release".to_string(),
+                "--manifest-path".to_string(),
+                scratch.join("Cargo.toml").to_string_lossy().into_owned(),
                 "--target-dir".to_string(),
                 scratch.join("target").to_string_lossy().into_owned(),
             ]
         );
-        assert_eq!(command.get_current_dir(), Some(scratch.as_path()));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(invocation_dir.as_path()),
+            "Cargo config discovery must start from the user's directory"
+        );
+        assert!(scratch.join("Cargo.toml").is_absolute());
+        assert!(scratch.join("target").is_absolute());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn write_test_binary(profile_dir: &Path, file_name: &str) -> PathBuf {
