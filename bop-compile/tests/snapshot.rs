@@ -1395,7 +1395,7 @@ let after = build()"#,
             "let mut __bop_type_bindings = __bop_callable_type_bindings(ctx, \"<root>\")",
             "__bop_resolve_bare_type(&__bop_type_bindings, \"Point\", true, 1)",
             "__bop_bind_type(&mut __bop_type_bindings, \"Point\", \"<root>\")",
-            "__bop_publish_type_bindings(ctx, \"<root>\", &__bop_type_bindings)",
+            "__bop_publish_type_binding(ctx, \"<root>\", \"Point\", \"<root>\")",
             "(::std::option::Option::None, __tn) => __bop_type_bindings.iter().rev()",
         ],
     );
@@ -1416,9 +1416,44 @@ let after = build()"#,
         &output,
         &[
             "__bop_bind_imported_type(&mut __bop_type_bindings, \"Point\", \"types\")",
-            "__bop_publish_type_bindings(ctx, \"<root>\", &__bop_type_bindings)",
+            "__bop_publish_imported_type_binding(ctx, \"<root>\", \"Point\", \"types\")",
         ],
     );
+}
+
+#[test]
+fn type_publication_emits_one_incremental_update_per_declaration() {
+    const DECLARATIONS: usize = 256;
+    let source = (0..DECLARATIONS)
+        .map(|index| format!("struct Type{index} {{}}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for sandbox in [false, true] {
+        let output = transpile(
+            &source,
+            &Options {
+                sandbox,
+                ..Options::default()
+            },
+        )
+        .expect("transpile type-heavy source");
+        let run_program = output.split_once("fn run_program").expect("run program").1;
+        assert_eq!(
+            run_program
+                .matches("__bop_publish_type_binding(ctx, \"<root>\"")
+                .count(),
+            DECLARATIONS,
+        );
+        assert!(!output.contains("__bop_flatten_type_bindings"));
+        assert!(!output.contains("__bop_publish_type_bindings"));
+        assert!(
+            output.contains(
+                "type __BopTypeBindings = ::std::vec::Vec<::std::rc::Rc<__BopTypeFrame>>"
+            )
+        );
+        assert!(output.contains("::std::rc::Rc::make_mut(bindings)"));
+    }
 }
 
 #[test]

@@ -2003,7 +2003,7 @@ impl Emitter {
 
     fn emit_runtime_type_scope(&mut self) {
         self.line("let mut __bop_type_bindings = __bop_type_bindings.clone();");
-        self.line("__bop_type_bindings.push(__BopTypeFrame::new());");
+        self.line("__bop_type_bindings.push(::std::rc::Rc::new(__BopTypeFrame::new()));");
     }
 
     fn statements_bind_runtime_types(&self, stmts: &[Stmt]) -> bool {
@@ -2087,13 +2087,20 @@ impl Emitter {
         }
     }
 
-    fn emit_type_context_publish(&mut self) {
+    fn emit_type_context_publish(&mut self, name: &str, origin: &str, imported: bool) {
         if !self.is_module_top_scope() {
             return;
         }
+        let helper = if imported {
+            "__bop_publish_imported_type_binding"
+        } else {
+            "__bop_publish_type_binding"
+        };
         self.line(&format!(
-            "__bop_publish_type_bindings(ctx, {}, &__bop_type_bindings);",
+            "{helper}(ctx, {}, {}, {});",
             rust_string_literal(&self.current_module),
+            rust_string_literal(name),
+            rust_string_literal(origin),
         ));
     }
 
@@ -3498,9 +3505,7 @@ impl Emitter {
                         rust_string_literal(origin),
                     ));
                     self.bind_imported_type(type_name, origin);
-                }
-                if !expose_types.is_empty() {
-                    self.emit_type_context_publish();
+                    self.emit_type_context_publish(type_name, origin, true);
                 }
                 if items.is_none() {
                     self.scope_stack
@@ -3611,7 +3616,7 @@ impl Emitter {
         ));
         self.line("let mut __bop_type_bindings = __bop_fresh_module_type_bindings();");
         self.line(&format!(
-            "__bop_publish_type_bindings(ctx, {}, &__bop_type_bindings);",
+            "__bop_reset_type_bindings(ctx, {});",
             rust_string_literal(name)
         ));
         self.line(&format!(
@@ -5284,7 +5289,7 @@ fn __bop_function_site_value(
         self.emit_tick(0);
         self.line("let mut __bop_type_bindings = __bop_fresh_module_type_bindings();");
         self.line(&format!(
-            "__bop_publish_type_bindings(ctx, {}, &__bop_type_bindings);",
+            "__bop_reset_type_bindings(ctx, {});",
             rust_string_literal(bop::value::ROOT_MODULE_PATH),
         ));
         self.callable_mutations
@@ -5552,7 +5557,7 @@ fn __bop_function_site_value(
                     rust_string_literal(&mp),
                 ));
                 self.bind_type(name, &mp);
-                self.emit_type_context_publish();
+                self.emit_type_context_publish(name, &mp, false);
             }
             StmtKind::EnumDecl { name, variants } => {
                 let site = self.type_site_counter;
@@ -5598,7 +5603,7 @@ fn __bop_function_site_value(
                     rust_string_literal(&mp),
                 ));
                 self.bind_type(name, &mp);
-                self.emit_type_context_publish();
+                self.emit_type_context_publish(name, &mp, false);
             }
             StmtKind::MethodDecl {
                 type_name,

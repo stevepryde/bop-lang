@@ -169,6 +169,61 @@ fn standard() -> BopLimits {
     BopLimits::standard()
 }
 
+#[test]
+#[ignore = "bounded release-mode scaling probe; run explicitly before releases"]
+fn type_publication_scaling_stays_below_quadratic_growth() {
+    use std::time::{Duration, Instant};
+
+    fn source(count: usize) -> String {
+        (0..count)
+            .map(|index| format!("struct Type{index} {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn best_of(
+        source: &str,
+        run: impl Fn(&str, &mut RecordHost, &BopLimits) -> Result<(), BopError>,
+    ) -> Duration {
+        let limits = BopLimits {
+            max_steps: 100_000,
+            max_memory: 64 * 1024 * 1024,
+        };
+        (0..3)
+            .map(|_| {
+                let mut host = RecordHost::new();
+                let started = Instant::now();
+                run(source, &mut host, &limits).expect("type-heavy program should run");
+                started.elapsed()
+            })
+            .min()
+            .expect("at least one sample")
+    }
+
+    let mut walker = Vec::new();
+    let mut vm = Vec::new();
+    for count in [1_000, 2_000, 4_000] {
+        let source = source(count);
+        walker.push(best_of(&source, |source, host, limits| {
+            bop::run(source, host, limits)
+        }));
+        vm.push(best_of(&source, |source, host, limits| {
+            bop_vm::run(source, host, limits)
+        }));
+    }
+    eprintln!("type publication walker 1k/2k/4k: {walker:?}");
+    eprintln!("type publication VM     1k/2k/4k: {vm:?}");
+
+    for (engine, samples) in [("walker", walker), ("VM", vm)] {
+        for pair in samples.windows(2) {
+            assert!(
+                pair[1].as_nanos() < pair[0].as_nanos().saturating_mul(7) / 2,
+                "{engine} type publication grew too quickly: {samples:?}"
+            );
+        }
+    }
+}
+
 fn tight() -> BopLimits {
     BopLimits {
         max_steps: 500,
