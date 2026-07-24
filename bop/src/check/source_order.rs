@@ -338,10 +338,10 @@ where
             StmtKind::Assign { target, value, .. } => {
                 self.check_expr(value, env, callable_base, module_path, sites, warnings);
                 self.check_target(target, env, callable_base, module_path, sites, warnings);
-                if let AssignTarget::Variable(name) = target {
-                    if let Some(frame) = env.invalidate_visible_namespace(name) {
-                        effects.invalidated_namespaces.insert(name.clone(), frame);
-                    }
+                if let AssignTarget::Variable(name) = target
+                    && let Some(frame) = env.invalidate_visible_namespace(name)
+                {
+                    effects.invalidated_namespaces.insert(name.clone(), frame);
                 }
             }
             StmtKind::ExprStmt(expr) => {

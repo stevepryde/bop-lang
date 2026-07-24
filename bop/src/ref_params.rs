@@ -29,23 +29,19 @@ pub fn validate_call_modes(
         return Err(match (expected, actual) {
             (ParamMode::Ref, ParamMode::Value) => with_hint(
                 BopError::runtime(
-                    format!(
-                        "argument {} to `{}` must be passed with `ref`",
-                        position, callable
-                    ),
+                    format!("argument {position} to `{callable}` must be passed with `ref`"),
                     line,
                 ),
-                format!("Write `ref` before argument {}.", position),
+                format!("Write `ref` before argument {position}."),
             ),
             (ParamMode::Value, ParamMode::Ref) => with_hint(
                 BopError::runtime(
                     format!(
-                        "argument {} to `{}` is a value parameter and can't use `ref`",
-                        position, callable
+                        "argument {position} to `{callable}` is a value parameter and can't use `ref`"
                     ),
                     line,
                 ),
-                format!("Remove `ref` from argument {}.", position),
+                format!("Remove `ref` from argument {position}."),
             ),
             _ => unreachable!("equal modes were handled above"),
         });
@@ -66,7 +62,7 @@ pub fn validate_value_only_call_modes(
 pub fn invalid_ref_target(position: usize, line: u32) -> BopError {
     with_hint(
         BopError::runtime(
-            format!("`ref` argument {} must name a mutable variable", position),
+            format!("`ref` argument {position} must name a mutable variable"),
             line,
         ),
         "Assign the value to a `let` variable, then pass that variable with `ref`.",
@@ -86,10 +82,7 @@ pub fn duplicate_ref_target(line: u32) -> BopError {
 pub fn captured_ref_target(position: usize, line: u32) -> BopError {
     with_hint(
         BopError::runtime(
-            format!(
-                "`ref` argument {} can't target a closure-captured binding",
-                position
-            ),
+            format!("`ref` argument {position} can't target a closure-captured binding"),
             line,
         ),
         "Pass the binding through an explicit `ref` parameter instead.",

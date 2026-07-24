@@ -57,7 +57,7 @@ impl BopHost for BufHost {
 fn run(code: &str) -> BufHost {
     let mut host = BufHost::new();
     bop::run(code, &mut host, &BopLimits::standard())
-        .unwrap_or_else(|e| panic!("program errored: {}\n\n{}", e, code));
+        .unwrap_or_else(|e| panic!("program errored: {e}\n\n{code}"));
     host
 }
 
@@ -446,7 +446,7 @@ fn for_in_on_primitive_raises_cant_iterate_error() {
     )
     .expect_err("expected for-loop over int to fail");
     let msg = err.to_string();
-    assert!(msg.contains("Can't iterate over int"), "got: {}", msg);
+    assert!(msg.contains("Can't iterate over int"), "got: {msg}");
 }
 
 // ─── panic builtin ─────────────────────────────────────────────
@@ -474,8 +474,7 @@ fn panic_propagates_when_not_caught() {
         .expect_err("expected panic to surface as an error");
     assert!(
         err.to_string().contains("top-level"),
-        "panic message should appear verbatim in the error: {}",
-        err
+        "panic message should appear verbatim in the error: {err}"
     );
 }
 

@@ -7,7 +7,7 @@ pub(crate) const I64_MIN_MAGNITUDE: u64 = (i64::MAX as u64) + 1;
 pub(crate) const I64_MIN_MAGNITUDE_TEXT: &str = "9223372036854775808";
 
 pub(crate) fn integer_literal_out_of_range(digits: &str) -> String {
-    format!("Integer literal out of range for i64: {}", digits)
+    format!("Integer literal out of range for i64: {digits}")
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -784,7 +784,7 @@ impl<'source> Lexer<'source> {
                 }
 
                 _ => {
-                    return Err(self.error(format!("I don't understand the character `{}`", ch)));
+                    return Err(self.error(format!("I don't understand the character `{ch}`")));
                 }
             }
         }
@@ -825,7 +825,7 @@ impl<'source> Lexer<'source> {
         if is_float {
             let n: f64 = s
                 .parse()
-                .map_err(|_| self.error_at(line, column, format!("Invalid number: {}", s)))?;
+                .map_err(|_| self.error_at(line, column, format!("Invalid number: {s}")))?;
             Ok(Token::Number(n))
         } else {
             // Preserve one otherwise-unrepresentable magnitude
@@ -906,7 +906,7 @@ impl<'source> Lexer<'source> {
                             self.advance();
                         }
                         Some(c) => {
-                            return Err(self.error(format!("Unknown escape sequence `\\{}`", c)));
+                            return Err(self.error(format!("Unknown escape sequence `\\{c}`")));
                         }
                         None => {
                             return Err(self.error("Unexpected end of string after `\\`"));
@@ -931,7 +931,7 @@ impl<'source> Lexer<'source> {
                     }
                     if self.peek() != Some('}') {
                         return Err(self.error_with_hint(
-                            format!("Missing `}}` after `{{{}`", var),
+                            format!("Missing `}}` after `{{{var}`"),
                             "String interpolation needs a closing `}`, like: \"{name}\"",
                         ));
                     }

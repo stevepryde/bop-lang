@@ -49,14 +49,11 @@ pub(super) fn check_match_exhaustive(
         display_name,
         missing
             .iter()
-            .map(|variant| format!("`{}::{}`", display_name, variant))
+            .map(|variant| format!("`{display_name}::{variant}`"))
             .collect::<Vec<_>>()
             .join(", "),
     );
-    let hint = format!(
-        "add an arm for each missing variant, or a `_` catch-all. Missing: {}",
-        list
-    );
+    let hint = format!("add an arm for each missing variant, or a `_` catch-all. Missing: {list}");
     warnings.push(BopWarning::at(msg, match_line).with_hint(hint));
 }
 

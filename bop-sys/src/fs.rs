@@ -12,7 +12,7 @@ pub(crate) fn read_file(args: &[Value], line: u32) -> Result<Value, BopError> {
 
     std::fs::read_to_string(path)
         .map(Value::new_str)
-        .map_err(|e| runtime(line, format!("read_file failed for `{}`: {}", path, e)))
+        .map_err(|e| runtime(line, format!("read_file failed for `{path}`: {e}")))
 }
 
 pub(crate) fn write_file(args: &[Value], line: u32) -> Result<Value, BopError> {
@@ -22,7 +22,7 @@ pub(crate) fn write_file(args: &[Value], line: u32) -> Result<Value, BopError> {
 
     std::fs::write(path, contents)
         .map(|_| Value::None)
-        .map_err(|e| runtime(line, format!("write_file failed for `{}`: {}", path, e)))
+        .map_err(|e| runtime(line, format!("write_file failed for `{path}`: {e}")))
 }
 
 pub(crate) fn append_file(args: &[Value], line: u32) -> Result<Value, BopError> {
@@ -34,11 +34,11 @@ pub(crate) fn append_file(args: &[Value], line: u32) -> Result<Value, BopError> 
         .create(true)
         .append(true)
         .open(path)
-        .map_err(|e| runtime(line, format!("append_file failed for `{}`: {}", path, e)))?;
+        .map_err(|e| runtime(line, format!("append_file failed for `{path}`: {e}")))?;
 
     file.write_all(contents.as_bytes())
         .map(|_| Value::None)
-        .map_err(|e| runtime(line, format!("append_file failed for `{}`: {}", path, e)))
+        .map_err(|e| runtime(line, format!("append_file failed for `{path}`: {e}")))
 }
 
 pub(crate) fn file_exists(args: &[Value], line: u32) -> Result<Value, BopError> {

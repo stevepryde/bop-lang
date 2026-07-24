@@ -122,8 +122,7 @@ pub fn hint_for(expected_kind: &str, actual: &str) -> String {
             if is_all_upper && actual.chars().any(|c| c.is_ascii_alphabetic()) {
                 return format!(
                     "names bound by `let` / `fn` / params start with a lowercase letter. \
-                     Did you mean to declare a constant? (`const {} = ...`)",
-                    actual
+                     Did you mean to declare a constant? (`const {actual} = ...`)"
                 );
             }
             format!(

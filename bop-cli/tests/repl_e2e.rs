@@ -46,9 +46,9 @@ fn run_repl(stdin_source: &str) -> (String, String, i32) {
 #[test]
 fn bare_expression_result_lands_on_stdout() {
     let (stdout, stderr, code) = run_repl("1 + 2\n");
-    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim_end(), "3");
-    assert!(stderr.is_empty(), "unexpected stderr: {}", stderr);
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
 #[test]
@@ -80,18 +80,15 @@ fn runtime_error_prints_to_stderr_with_carat() {
     assert_ne!(code, 0, "expected non-zero exit on runtime error");
     assert!(
         stderr.contains("--> line 1:"),
-        "expected line+col header in stderr, got: {}",
-        stderr
+        "expected line+col header in stderr, got: {stderr}"
     );
     assert!(
         stderr.contains("^"),
-        "expected carat in stderr, got: {}",
-        stderr
+        "expected carat in stderr, got: {stderr}"
     );
     assert!(
         stdout.is_empty(),
-        "error path shouldn't have stdout output, got: {}",
-        stdout
+        "error path shouldn't have stdout output, got: {stdout}"
     );
 }
 
@@ -153,8 +150,7 @@ fn error_in_one_line_does_not_abort_the_rest() {
     assert_eq!(stdout.trim_end(), "1");
     assert!(
         stderr.contains("undefined"),
-        "expected error to name undefined, got: {}",
-        stderr
+        "expected error to name undefined, got: {stderr}"
     );
 }
 
@@ -167,8 +163,7 @@ fn reset_meta_command_clears_session() {
     assert_eq!(code, 1);
     assert!(
         stderr.contains("Variable `x` not found") || stderr.to_lowercase().contains("not found"),
-        "expected 'x not found' error after :reset, got: {}",
-        stderr
+        "expected 'x not found' error after :reset, got: {stderr}"
     );
 }
 
@@ -190,16 +185,14 @@ fn quit_meta_exits_early_and_ignores_remaining_input() {
     // quit that would fail loudly if it ran.
     let src = "let x = 42\n:quit\nprint(does_not_exist)\n";
     let (stdout, stderr, code) = run_repl(src);
-    assert_eq!(code, 0, "quit should succeed, stderr: {}", stderr);
+    assert_eq!(code, 0, "quit should succeed, stderr: {stderr}");
     assert!(
         !stdout.contains("does_not_exist"),
-        "expected no output after :quit, got: {}",
-        stdout
+        "expected no output after :quit, got: {stdout}"
     );
     assert!(
         stderr.is_empty(),
-        "expected no errors after :quit, got: {}",
-        stderr
+        "expected no errors after :quit, got: {stderr}"
     );
 }
 
@@ -210,7 +203,7 @@ fn Point.sum(self) { return self.x + self.y }
 print(Point { x: 3, y: 4 }.sum())
 "#;
     let (stdout, stderr, code) = run_repl(src);
-    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim_end(), "7");
 }
 
@@ -220,6 +213,6 @@ fn use_statement_imports_stay_live_across_lines() {
     // resolves it through bop-std.
     let src = "use std.math\nprint(9.sqrt())\n";
     let (stdout, stderr, code) = run_repl(src);
-    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim_end(), "3");
 }

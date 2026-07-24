@@ -101,8 +101,7 @@ mod tests {
         for name in MODULES {
             assert!(
                 resolve(name).is_some(),
-                "stdlib module {} should resolve",
-                name
+                "stdlib module {name} should resolve"
             );
         }
     }

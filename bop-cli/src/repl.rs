@@ -285,7 +285,7 @@ fn handle_meta(session: &mut ReplSession, cmd: &str) -> StepOutcome {
         ":help" | ":h" | ":?" => {
             let mut out = String::from("REPL commands:\n");
             for (name, desc) in META_HELP {
-                out.push_str(&format!("  {:<22} {}\n", name, desc));
+                out.push_str(&format!("  {name:<22} {desc}\n"));
             }
             StepOutcome::Note(out)
         }
@@ -302,7 +302,7 @@ fn handle_meta(session: &mut ReplSession, cmd: &str) -> StepOutcome {
             StepOutcome::Note(String::from("session cleared.\n"))
         }
         ":quit" | ":q" | ":exit" => StepOutcome::Quit,
-        other => StepOutcome::Note(format!("unknown command `{}` — try `:help`\n", other)),
+        other => StepOutcome::Note(format!("unknown command `{other}` — try `:help`\n")),
     }
 }
 
@@ -321,13 +321,13 @@ fn render_outcome<W: std::io::Write, E: std::io::Write>(
             // `writeln!` failures are terminal-detached — if
             // stdout is closed the REPL is probably ending
             // soon anyway. Ignore rather than panic.
-            let _ = writeln!(out, "{}", v);
+            let _ = writeln!(out, "{v}");
         }
         StepOutcome::Err(e) => {
             let _ = write!(err, "{}", e.render(source));
         }
         StepOutcome::Note(s) => {
-            let _ = write!(out, "{}", s);
+            let _ = write!(out, "{s}");
         }
     }
 }
@@ -361,7 +361,7 @@ pub fn run() -> ExitCode {
     let mut rl = match Editor::<BopHelper, rustyline::history::FileHistory>::new() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: couldn't initialise line editor: {}", e);
+            eprintln!("error: couldn't initialise line editor: {e}");
             return ExitCode::from(1);
         }
     };
@@ -402,7 +402,7 @@ pub fn run() -> ExitCode {
             Err(ReadlineError::Interrupted) => continue, // Ctrl-C
             Err(ReadlineError::Eof) => break,            // Ctrl-D
             Err(e) => {
-                eprintln!("readline error: {}", e);
+                eprintln!("readline error: {e}");
                 break;
             }
         }
@@ -446,7 +446,7 @@ fn run_non_tty() -> ExitCode {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("error reading stdin: {}", e);
+                eprintln!("error reading stdin: {e}");
                 return ExitCode::from(1);
             }
         };
@@ -627,8 +627,7 @@ mod tests {
         let disp: Vec<String> = cands.iter().map(|p| p.display.clone()).collect();
         assert!(
             disp.contains(&"my_binding".to_string()),
-            "expected session binding to surface in completions, got: {:?}",
-            disp,
+            "expected session binding to surface in completions, got: {disp:?}",
         );
     }
 
@@ -668,7 +667,7 @@ mod tests {
         let (_prints, stdout, _) = drive(&["let x = 5"]);
         // `let` returns `Ok(None)` and nothing should have
         // gone to stdout — the REPL should not print "none".
-        assert!(stdout.is_empty(), "got unexpected stdout: {:?}", stdout);
+        assert!(stdout.is_empty(), "got unexpected stdout: {stdout:?}");
     }
 
     #[test]
@@ -682,8 +681,7 @@ mod tests {
         assert_eq!(prints, vec!["42"]);
         assert!(
             stdout.is_empty(),
-            "expected no echo after print(), got: {:?}",
-            stdout
+            "expected no echo after print(), got: {stdout:?}"
         );
     }
 

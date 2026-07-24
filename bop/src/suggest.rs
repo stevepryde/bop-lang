@@ -136,7 +136,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    closest_match(target, candidates).map(|m| format!("Did you mean `{}`?", m))
+    closest_match(target, candidates).map(|m| format!("Did you mean `{m}`?"))
 }
 
 #[cfg(test)]

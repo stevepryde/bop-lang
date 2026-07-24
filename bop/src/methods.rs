@@ -82,7 +82,7 @@ pub fn array_method_in(
             }
             let i = expect_method_index("insert", &args[0], line)?;
             let actual = normalize_insert_index(i, arr.len())
-                .ok_or_else(|| error(line, format!("Insert index {} is out of bounds", i)))?;
+                .ok_or_else(|| error(line, format!("Insert index {i} is out of bounds")))?;
             let mut new_arr = arr.to_vec();
             new_arr.insert(actual, args[1].clone());
             Ok((
@@ -96,7 +96,7 @@ pub fn array_method_in(
             }
             let i = expect_method_index("remove", &args[0], line)?;
             let actual = normalize_element_index(i, arr.len())
-                .ok_or_else(|| error(line, format!("Remove index {} is out of bounds", i)))?;
+                .ok_or_else(|| error(line, format!("Remove index {i} is out of bounds")))?;
             let mut new_arr = arr.to_vec();
             let removed = new_arr.remove(actual);
             Ok((
@@ -141,7 +141,7 @@ pub fn array_method_in(
             };
             let result = arr
                 .iter()
-                .map(|v| format!("{}", v))
+                .map(|v| format!("{v}"))
                 .collect::<Vec<_>>()
                 .join(sep);
             Ok((Value::__new_str_in(result, memory), None))
@@ -159,7 +159,7 @@ pub fn array_method_in(
         }
         _ => Err(error(
             line,
-            format!("Array doesn't have a .{}() method", method),
+            format!("Array doesn't have a .{method}() method"),
         )),
     }
 }
@@ -204,7 +204,7 @@ pub fn array_method_mut_in(
             let value = args.next().expect("length checked");
             let index = expect_method_index("insert", &index, line)?;
             let actual = normalize_insert_index(index, arr.len())
-                .ok_or_else(|| error(line, format!("Insert index {} is out of bounds", index)))?;
+                .ok_or_else(|| error(line, format!("Insert index {index} is out of bounds")))?;
             arr.__try_insert_in(actual, value, line, memory)?;
             Ok(Value::None)
         }
@@ -215,7 +215,7 @@ pub fn array_method_mut_in(
             let index = args.into_iter().next().expect("length checked");
             let index = expect_method_index("remove", &index, line)?;
             let actual = normalize_element_index(index, arr.len())
-                .ok_or_else(|| error(line, format!("Remove index {} is out of bounds", index)))?;
+                .ok_or_else(|| error(line, format!("Remove index {index} is out of bounds")))?;
             Ok(arr.__remove_in(actual, memory))
         }
         "reverse" => {
@@ -228,7 +228,7 @@ pub fn array_method_mut_in(
         }
         _ => Err(error(
             line,
-            format!("Array doesn't have a .{}() method", method),
+            format!("Array doesn't have a .{method}() method"),
         )),
     }
 }
@@ -450,7 +450,7 @@ pub fn string_method_in(
             }
             let n: f64 = s
                 .parse()
-                .map_err(|_| error(line, format!("Can't convert \"{}\" to a number", s)))?;
+                .map_err(|_| error(line, format!("Can't convert \"{s}\" to a number")))?;
             Ok((Value::Int(n as i64), None))
         }
         "to_float" => {
@@ -459,7 +459,7 @@ pub fn string_method_in(
             }
             let n: f64 = s
                 .parse()
-                .map_err(|_| error(line, format!("Can't convert \"{}\" to a number", s)))?;
+                .map_err(|_| error(line, format!("Can't convert \"{s}\" to a number")))?;
             Ok((Value::Number(n), None))
         }
         "iter" => {
@@ -469,7 +469,7 @@ pub fn string_method_in(
         }
         _ => Err(error(
             line,
-            format!("String doesn't have a .{}() method", method),
+            format!("String doesn't have a .{method}() method"),
         )),
     }
 }
@@ -536,7 +536,7 @@ mod tests {
                 .expect_err("out-of-range insertion should fail");
             assert_eq!(
                 err.message,
-                format!("Insert index {} is out of bounds", index)
+                format!("Insert index {index} is out of bounds")
             );
         }
     }
@@ -652,7 +652,7 @@ pub fn dict_method_in(
         }
         _ => Err(error(
             line,
-            format!("Dict doesn't have a .{}() method", method),
+            format!("Dict doesn't have a .{method}() method"),
         )),
     }
 }
@@ -699,7 +699,7 @@ pub fn common_method_in(
         "to_str" => {
             crate::builtins::expect_args("to_str", args, 0, line)?;
             Ok(Some((
-                Value::__new_str_in(format!("{}", receiver), memory),
+                Value::__new_str_in(format!("{receiver}"), memory),
                 None,
             )))
         }
@@ -1116,7 +1116,7 @@ pub fn result_method(
             }
             let message = match &args[0] {
                 Value::Str(s) => s.as_str().to_string(),
-                other => format!("{}", other),
+                other => format!("{other}"),
             };
             Err(error(line, message))
         }
