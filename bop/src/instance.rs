@@ -691,6 +691,8 @@ mod tests {
         let error = instance.call("too_large", &[], &mut host).unwrap_err();
         assert!(error.is_fatal);
         assert!(error.message.contains("Memory limit"));
+        assert_eq!(instance.memory.used(), 0);
+        instance.call("host_only", &[], &mut host).unwrap();
     }
 
     struct ExternalValueHost {

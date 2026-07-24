@@ -87,7 +87,10 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
   reset for each instance operation, while tracked memory belongs to the
   instance across calls. Errors unwind transient frames but do not roll back
   completed mutations. Step/depth failures leave an instance reusable; memory
-  exhaustion remains fatal while retained charged storage is over budget.
+  exhaustion leaves an instance reusable when unwinding releases the transient
+  peak, but calls fail fast while retained charged storage remains over budget.
+  Releasing enough charged storage to return to budget makes the instance
+  callable again.
 - **RUN-019 — Executed declarations.** Struct, enum, and method declarations
   take effect when execution reaches their source site. Dead sites have no
   runtime effect, nested type declarations obey lexical scope, and the last
@@ -170,7 +173,9 @@ bytecode VM, AOT compiler, CLI, and embedding APIs.
 - **AC-RUN-012:** Instance tests prove that hosts are borrowed per operation,
   different instances can nest safely, step/call-depth budgets restart,
   memory accounts remain independent and persistent, transient frames unwind,
-  and mutations before ordinary or fatal failures remain visible.
+  transient memory peaks do not poison later calls, retained over-budget
+  receipts fail fast until released, and mutations before ordinary or fatal
+  failures remain visible.
 - **AC-RUN-013:** Parser and cross-engine tests cover root-only `pub fn`, final
   public/private redeclaration rules, top-level early return, and immunity of
   the public entry table to ordinary-name reassignment.
