@@ -24,6 +24,15 @@ fn temp_project() -> PathBuf {
     path
 }
 
+fn path_with_fake_bin(fake_bin: &std::path::Path) -> std::ffi::OsString {
+    std::env::join_paths(
+        std::iter::once(fake_bin.to_path_buf()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .unwrap()
+}
+
 #[test]
 fn compile_finds_target_triple_artifact_with_external_target_dir() {
     let project = temp_project();
@@ -75,16 +84,12 @@ chmod +x "$artifact_dir/bop_entry"
     permissions.set_mode(0o700);
     std::fs::set_permissions(&fake_cargo, permissions).unwrap();
 
-    let path = std::env::join_paths(std::iter::once(fake_bin.clone()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-    ))
-    .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_bop"))
         .arg("compile")
         .arg(&input)
         .arg("-o")
         .arg(&output_path)
-        .env("PATH", path)
+        .env("PATH", path_with_fake_bin(&fake_bin))
         .env("CARGO_TARGET_DIR", &external_target)
         .env("CARGO_BUILD_TARGET", build_target)
         .env("FAKE_CARGO_LOG", &cargo_log)
@@ -125,6 +130,116 @@ chmod +x "$artifact_dir/bop_entry"
             .next()
             .is_none(),
         "ambient target directory should not receive build artifacts"
+    );
+
+    std::fs::remove_dir_all(project).expect("remove temporary project");
+}
+
+#[test]
+fn extensionless_source_uses_distinct_default_binary_name() {
+    let project = temp_project();
+    let fake_bin = project.join("fake-bin");
+    let input = project.join("program");
+    let output = project.join("program-bin");
+    let original_source = "print(\"source remains intact\")";
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    std::fs::write(&input, original_source).unwrap();
+
+    let fake_cargo = fake_bin.join("cargo");
+    std::fs::write(
+        &fake_cargo,
+        r#"#!/bin/sh
+set -eu
+if [ "${1-}" = "--version" ]; then
+    echo "cargo 1.88.0"
+    exit 0
+fi
+
+target_dir=""
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--target-dir" ]; then
+        shift
+        target_dir="$1"
+    fi
+    shift
+done
+
+test -n "$target_dir"
+mkdir -p "$target_dir/release"
+printf '#!/bin/sh\nexit 0\n' > "$target_dir/release/bop_program"
+chmod +x "$target_dir/release/bop_program"
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_cargo).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&fake_cargo, permissions).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_bop"))
+        .arg("compile")
+        .arg("program")
+        .current_dir(&project)
+        .env("PATH", path_with_fake_bin(&fake_bin))
+        .output()
+        .expect("compile extensionless source");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+
+    assert_eq!(result.status.code(), Some(0), "stderr:\n{stderr}");
+    assert_eq!(std::fs::read_to_string(&input).unwrap(), original_source);
+    assert!(output.is_file(), "default output should be `program-bin`");
+    assert!(
+        stderr.contains("built program-bin"),
+        "unexpected stderr:\n{stderr}"
+    );
+
+    std::fs::remove_dir_all(project).expect("remove temporary project");
+}
+
+#[test]
+fn explicit_output_resolving_to_input_is_rejected_before_cargo() {
+    let project = temp_project();
+    let fake_bin = project.join("fake-bin");
+    let cargo_marker = project.join("cargo-was-called");
+    let input = project.join("program.bop");
+    let original_source = "print(\"source remains intact\")";
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    std::fs::write(&input, original_source).unwrap();
+
+    let fake_cargo = fake_bin.join("cargo");
+    std::fs::write(
+        &fake_cargo,
+        "#!/bin/sh\nprintf called > \"$FAKE_CARGO_MARKER\"\nexit 0\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_cargo).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&fake_cargo, permissions).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_bop"))
+        .arg("compile")
+        .arg("program.bop")
+        .arg("-o")
+        .arg("./program.bop")
+        .current_dir(&project)
+        .env("PATH", path_with_fake_bin(&fake_bin))
+        .env("FAKE_CARGO_MARKER", &cargo_marker)
+        .output()
+        .expect("reject colliding output");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+
+    assert_eq!(result.status.code(), Some(1), "stderr:\n{stderr}");
+    assert_eq!(std::fs::read_to_string(&input).unwrap(), original_source);
+    assert!(
+        !cargo_marker.exists(),
+        "output collision must be rejected before Cargo is invoked"
+    );
+    assert!(
+        stderr.contains("refusing to overwrite the source"),
+        "unexpected stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("choose a different output path with `-o <path>`"),
+        "unexpected stderr:\n{stderr}"
     );
 
     std::fs::remove_dir_all(project).expect("remove temporary project");

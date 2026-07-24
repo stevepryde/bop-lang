@@ -140,7 +140,8 @@ USAGE:
 
 COMPILE OPTIONS:
     -o, --output PATH   Output path (default: script name with no extension,
-                        or .rs path when --emit-rs is set)
+                        `-bin` for extensionless scripts, or .rs path when
+                        --emit-rs is set)
     --emit-rs           Emit transpiled Rust source only; don't invoke cargo
     --keep              Keep the scratch cargo project after building
                         (useful for inspecting the generated code)

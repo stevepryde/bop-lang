@@ -51,6 +51,10 @@ bop compile fib.bop
 ./fib
 ```
 
+An extensionless source such as `fib` builds `./fib-bin` by default
+(`fib-bin.exe` on Windows). Explicit output paths that resolve to the source
+file are rejected before Cargo runs, preventing accidental source overwrite.
+
 Flags:
 
 - `-o PATH` / `--output PATH` — where to put the output
