@@ -2,9 +2,9 @@
 use alloc::{boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
 
 #[cfg(feature = "no_std")]
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "no_std"))]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::BopError;
 use crate::lexer::{
@@ -723,11 +723,11 @@ pub fn parse(tokens: Vec<SpannedToken>) -> Result<Vec<Stmt>, BopError> {
 }
 
 #[derive(Default)]
-struct ParsedMethodCollector {
-    methods: Vec<(String, String, Vec<Parameter>, Vec<Stmt>)>,
+struct ParsedRefMethodCollector {
+    methods_by_type: BTreeMap<String, BTreeSet<String>>,
 }
 
-impl crate::ast_visit::DeclarationSiteVisitor for ParsedMethodCollector {
+impl crate::ast_visit::DeclarationSiteVisitor for ParsedRefMethodCollector {
     fn visit_struct(&mut self, _name: &str, _fields: &[String], _stmt: &Stmt) {}
 
     fn visit_enum(&mut self, _name: &str, _variants: &[VariantDecl], _stmt: &Stmt) {}
@@ -737,47 +737,124 @@ impl crate::ast_visit::DeclarationSiteVisitor for ParsedMethodCollector {
         type_name: &str,
         method_name: &str,
         params: &[Parameter],
-        body: &[Stmt],
+        _body: &[Stmt],
         _stmt: &Stmt,
     ) {
-        self.methods.push((
-            type_name.to_string(),
-            method_name.to_string(),
-            params.to_vec(),
-            body.to_vec(),
-        ));
+        if params
+            .first()
+            .is_some_and(|param| param.mode == ParamMode::Ref)
+        {
+            self.methods_by_type
+                .entry(type_name.to_string())
+                .or_default()
+                .insert(method_name.to_string());
+        }
     }
 }
 
-fn reject_value_receivers_calling_ref_methods(program: &[Stmt]) -> Result<(), BopError> {
-    let mut collector = ParsedMethodCollector::default();
-    crate::ast_visit::visit_declaration_sites(program, &mut collector);
-    for (type_name, _, params, body) in &collector.methods {
+struct ParsedValueReceiverValidator<'methods> {
+    ref_methods_by_type: &'methods BTreeMap<String, BTreeSet<String>>,
+    error: Option<BopError>,
+}
+
+impl crate::ast_visit::DeclarationSiteVisitor for ParsedValueReceiverValidator<'_> {
+    fn visit_struct(&mut self, _name: &str, _fields: &[String], _stmt: &Stmt) {}
+
+    fn visit_enum(&mut self, _name: &str, _variants: &[VariantDecl], _stmt: &Stmt) {}
+
+    fn visit_method(
+        &mut self,
+        type_name: &str,
+        _method_name: &str,
+        params: &[Parameter],
+        body: &[Stmt],
+        _stmt: &Stmt,
+    ) {
+        if self.error.is_some() {
+            return;
+        }
         let Some(receiver) = params
             .first()
             .filter(|param| param.mode == ParamMode::Value)
             .map(|param| param.name.as_str())
         else {
-            continue;
+            return;
         };
-        let ref_methods = collector
-            .methods
-            .iter()
-            .filter(|(candidate_type, _, params, _)| {
-                candidate_type == type_name
-                    && params
-                        .first()
-                        .is_some_and(|param| param.mode == ParamMode::Ref)
-            })
-            .map(|(_, method_name, _, _)| method_name.clone())
-            .collect::<BTreeSet<_>>();
-        if let Some(line) =
-            value_receiver_mutation_line(body, receiver, false, &ref_methods)
-        {
-            return Err(value_receiver_mutation_error(receiver, line));
+        let Some(ref_methods) = self.ref_methods_by_type.get(type_name) else {
+            return;
+        };
+        if let Some(line) = value_receiver_mutation_line(body, receiver, false, ref_methods) {
+            self.error = Some(value_receiver_mutation_error(receiver, line));
         }
     }
+}
+
+fn reject_value_receivers_calling_ref_methods(program: &[Stmt]) -> Result<(), BopError> {
+    let mut collector = ParsedRefMethodCollector::default();
+    crate::ast_visit::visit_declaration_sites(program, &mut collector);
+
+    let mut validator = ParsedValueReceiverValidator {
+        ref_methods_by_type: &collector.methods_by_type,
+        error: None,
+    };
+    crate::ast_visit::visit_declaration_sites(program, &mut validator);
+    if let Some(error) = validator.error {
+        return Err(error);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod ref_method_validation_tests {
+    use core::fmt::Write;
+
+    use super::*;
+
+    fn parse_source(source: &str) -> Result<Vec<Stmt>, BopError> {
+        parse(crate::lexer::lex(source).expect("source should lex"))
+    }
+
+    #[test]
+    fn value_receiver_cannot_call_later_declared_ref_method() {
+        let error = parse_source(
+            r#"struct Counter { n }
+fn Counter.call_bump(self) { self.bump() }
+fn Counter.bump(ref self) { self.n = self.n + 1 }"#,
+        )
+        .expect_err("the value receiver should be rejected");
+
+        assert_eq!(error.message, "can't mutate value receiver `self`");
+        assert_eq!(error.line, Some(2));
+    }
+
+    #[test]
+    fn ref_method_names_are_scoped_to_their_declaring_type() {
+        parse_source(
+            r#"struct Counter { n }
+struct Other { n }
+fn Counter.call_bump(self) { self.bump() }
+fn Other.bump(ref self) { self.n = self.n + 1 }"#,
+        )
+        .expect("a ref method on another type must not taint this receiver");
+    }
+
+    #[test]
+    fn validates_thousands_of_method_declarations() {
+        const METHOD_PAIRS: usize = 2_048;
+
+        let mut source = String::from("struct Counter { n }\n");
+        for index in 0..METHOD_PAIRS {
+            writeln!(source, "fn Counter.value_{index}(self) {{ return self.n }}").unwrap();
+            writeln!(
+                source,
+                "fn Counter.ref_{index}(ref self) {{ self.n = self.n + 1 }}"
+            )
+            .unwrap();
+        }
+
+        parse_source(&source)
+            .expect("method-heavy source should validate without quadratic rescans");
+    }
 }
 
 struct Parser {
