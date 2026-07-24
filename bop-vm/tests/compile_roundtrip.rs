@@ -9,7 +9,7 @@
 
 use bop::parse;
 use bop_vm::chunk::SlotIdx;
-use bop_vm::{Instr, LoopStateKind, compile, disassemble};
+use bop_vm::{Constant, Instr, LoopStateKind, compile, disassemble};
 use std::rc::Rc;
 
 fn disasm(source: &str) -> String {
@@ -955,6 +955,50 @@ print(x)"#,
     assert_eq!(x_count, 1, "expected deduplicated name entry");
     // But `y` is its own name.
     assert!(chunk.names.iter().any(|n| n == "y"));
+}
+
+#[test]
+fn nested_function_pool_indexes_remain_chunk_local() {
+    let ast = parse(
+        r#"let outer_before = "shared"
+fn nested() {
+    let inner_first = "shared"
+    let inner_second = "inner"
+    print(inner_first, inner_second, external_inner, external_inner)
+}
+let outer_after = "outer"
+print(outer_before, outer_after, external_outer, external_outer)"#,
+    )
+    .expect("parse");
+    let chunk = compile(&ast).expect("compile");
+    let nested = &chunk.functions[0].chunk;
+
+    assert!(matches!(
+        chunk.constants.as_slice(),
+        [Constant::Str(first), Constant::Str(second)]
+            if first == "shared" && second == "outer"
+    ));
+    assert!(matches!(
+        nested.constants.as_slice(),
+        [Constant::Str(first), Constant::Str(second)]
+            if first == "shared" && second == "inner"
+    ));
+    assert_eq!(
+        chunk
+            .names
+            .iter()
+            .filter(|name| name.as_str() == "external_outer")
+            .count(),
+        1
+    );
+    assert_eq!(
+        nested
+            .names
+            .iter()
+            .filter(|name| name.as_str() == "external_inner")
+            .count(),
+        1
+    );
 }
 
 #[test]
