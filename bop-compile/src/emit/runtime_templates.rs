@@ -63,6 +63,16 @@ pub(super) const CTX_BASE: &str = r#"pub struct Ctx<'h> {
         ::std::string::String,
         ::std::collections::HashSet<::std::string::String>,
     >,
+    pub active_function_sites: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        usize,
+    >,
+    pub reached_function_sites: ::std::vec::Vec<bool>,
+    pub module_imported_function_sites: ::std::collections::HashMap<
+        (::std::string::String, ::std::string::String),
+        usize,
+    >,
+    pub abi_declarations: ::std::vec::Vec<usize>,
     pub module_type_bindings: ::std::collections::HashMap<
         ::std::string::String,
         ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
@@ -83,25 +93,7 @@ pub(super) const CTX_BASE: &str = r#"pub struct Ctx<'h> {
 
 "#;
 
-pub(super) const CTX_SANDBOX: &str = r#"#[derive(Clone, Copy)]
-struct __BopFunctionSite {
-    id: usize,
-    module_path: &'static str,
-    name: &'static str,
-    params: &'static [&'static str],
-    param_modes: &'static [::bop::parser::ParamMode],
-    is_public: bool,
-    abi_eligible: bool,
-    line: u32,
-}
-
-#[derive(Clone)]
-enum __BopExport {
-    Value(::bop::value::Value),
-    Function(usize),
-}
-
-/// Opaque generated program state. This type and its fields are implementation
+pub(super) const CTX_SANDBOX: &str = r#"/// Opaque generated program state. This type and its fields are implementation
 /// details; sandbox embedders should use `run` and the generated `BopInstance`.
 struct __BopState {
     function_origin: ::bop::value::BopFnOrigin,
@@ -273,7 +265,25 @@ fn __bop_host_function_hint(ctx: &mut Ctx<'_>) -> String {
 
 "#;
 
-pub(super) const RUNTIME_SHARED: &str = r#"/*__BOP_MEMORY_HELPER__*/
+pub(super) const RUNTIME_SHARED: &str = r#"#[derive(Clone, Copy)]
+struct __BopFunctionSite {
+    id: usize,
+    module_path: &'static str,
+    name: &'static str,
+    params: &'static [&'static str],
+    param_modes: &'static [::bop::parser::ParamMode],
+    is_public: bool,
+    abi_eligible: bool,
+    line: u32,
+}
+
+#[derive(Clone)]
+enum __BopExport {
+    Value(::bop::value::Value),
+    Function(usize),
+}
+
+/*__BOP_MEMORY_HELPER__*/
 /// Sentinel type inserted into `module_cache` while a module's
 /// body is evaluating. If a load fn hits its own entry in this
 /// state it means a circular import — the runtime returns a clear
@@ -1736,6 +1746,10 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
         bindings: ::std::collections::HashMap::new(),
         binding_origins: ::std::collections::HashMap::new(),
         binding_claims: ::std::collections::HashMap::new(),
+        active_function_sites: ::std::collections::HashMap::new(),
+        reached_function_sites: ::std::vec![false; __BOP_FUNCTION_SITES.len()],
+        module_imported_function_sites: ::std::collections::HashMap::new(),
+        abi_declarations: ::std::vec::Vec::new(),
         module_type_bindings: ::std::collections::HashMap::new(),
         struct_defs: ::std::collections::HashMap::new(),
         enum_defs: ::std::collections::HashMap::new(),

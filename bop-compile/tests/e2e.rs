@@ -3425,6 +3425,55 @@ print(f(7))"#,
 
 #[test]
 #[ignore]
+fn e2e_native_nested_named_functions_are_first_class_values() {
+    assert_aot_matches(
+        "native_nested_named_functions_are_first_class_values",
+        r#"fn apply(callable, value) { return callable(value) }
+fn build(flag) {
+    fn transform(value) { return value + 1 }
+    let assigned = transform
+    if flag {
+        fn transform(value) { return value * 10 }
+    }
+    return [assigned, transform]
+}
+let functions = build(true)
+let stored = {"first": functions[0], "second": functions[1]}
+print(stored["first"](4))
+print(apply(stored["second"], 4))"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_native_nested_function_sites_are_reached_in_source_order() {
+    assert_aot_matches(
+        "native_nested_function_sites_are_reached_in_source_order",
+        r#"fn read_before_declaration() {
+    return missing
+    fn missing() { return 1 }
+}
+fn read_dead_declaration() {
+    if false {
+        fn missing() { return 2 }
+    }
+    return missing
+}
+print(try_call(read_before_declaration))
+print(try_call(read_dead_declaration))
+if true {
+    fn selected() { return 3 }
+}
+let retained = selected
+if true {
+    fn selected() { return 4 }
+}
+print(retained(), selected())"#,
+    );
+}
+
+#[test]
+#[ignore]
 fn e2e_higher_order_apply() {
     assert_aot_matches(
         "higher_order",

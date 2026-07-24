@@ -1371,6 +1371,55 @@ let f = double
 print(f(7))"#,
     ),
     (
+        "nested_named_fn_assigned_and_called",
+        r#"fn make() {
+    fn increment(value) { return value + 1 }
+    let assigned = increment
+    return assigned
+}
+let callable = make()
+print(callable(41))"#,
+    ),
+    (
+        "nested_named_fn_returned_passed_stored_and_redeclared",
+        r#"fn apply(callable, value) { return callable(value) }
+fn build(flag) {
+    fn transform(value) { return value + 1 }
+    let original = transform
+    if flag {
+        fn transform(value) { return value * 10 }
+    }
+    return [original, transform]
+}
+let functions = build(true)
+let stored = {"first": functions[0], "second": functions[1]}
+print(stored["first"](4))
+print(apply(stored["second"], 4))"#,
+    ),
+    (
+        "nested_named_fn_reached_source_order",
+        r#"fn before() {
+    return missing
+    fn missing() { return 1 }
+}
+fn dead() {
+    if false {
+        fn missing() { return 2 }
+    }
+    return missing
+}
+print(try_call(before))
+print(try_call(dead))
+if true {
+    fn selected() { return 3 }
+}
+let retained = selected
+if true {
+    fn selected() { return 4 }
+}
+print(retained(), selected())"#,
+    ),
+    (
         "higher_order_apply",
         r#"fn apply(f, x) { return f(x) }
 fn square(n) { return n * n }
@@ -3578,18 +3627,21 @@ fn three_way_diff() {
             modules,
         });
     }
+    assert_three_way(&entries);
+}
 
+fn assert_three_way(entries: &[CorpusEntry]) {
     // Step 1: compute walker + VM outcomes up-front so we can
     // compare against AOT after the slow compile.
     let mut walker = std::collections::HashMap::new();
     let mut vm = std::collections::HashMap::new();
-    for e in &entries {
+    for e in entries {
         walker.insert(e.name, walker_outcome(e.source, e.modules));
         vm.insert(e.name, vm_outcome(e.source, e.modules));
     }
 
     // Step 2: run both AOT modes in one batched native process.
-    let aot_results = run_aot_batch(&entries);
+    let aot_results = run_aot_batch(entries);
     let expected_aot_results = entries.len() * AotMode::ALL.len();
     let mut aot = std::collections::HashMap::with_capacity(expected_aot_results);
     for (key, outcome) in aot_results {
@@ -3607,7 +3659,7 @@ fn three_way_diff() {
     // Step 3: every program's outcome must agree across the walker,
     // VM, native AOT, and sandboxed AOT.
     let mut failures: Vec<String> = Vec::new();
-    for e in &entries {
+    for e in entries {
         let w = &walker[e.name];
         let v = &vm[e.name];
         for mode in AotMode::ALL {
@@ -3635,4 +3687,25 @@ fn three_way_diff() {
         "three-way differential failures:\n{}",
         failures.join("")
     );
+}
+
+#[test]
+#[ignore]
+fn three_way_nested_named_function_values() {
+    const NAMES: &[&str] = &[
+        "nested_named_fn_assigned_and_called",
+        "nested_named_fn_returned_passed_stored_and_redeclared",
+        "nested_named_fn_reached_source_order",
+    ];
+    let entries = CORPUS
+        .iter()
+        .filter(|(name, _)| NAMES.contains(name))
+        .map(|(name, source)| CorpusEntry {
+            name,
+            source,
+            modules: &[],
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), NAMES.len());
+    assert_three_way(&entries);
 }

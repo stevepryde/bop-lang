@@ -208,7 +208,7 @@ fn non_sandbox_lifted_fn_reads_its_root_module_binding() {
     contains_all(
         &out,
         &[
-            "fn __bop_user_fn_n72656164(ctx: &mut Ctx<'_>)",
+            "fn __bop_function_site_0(ctx: &mut Ctx<'_>)",
             "__bop_read_binding(ctx, \"<root>\", \"value\", 2)?",
         ],
     );
@@ -240,8 +240,8 @@ fn non_sandbox_named_functions_claim_first_win_before_flat_imports() {
     )
     .expect("transpile first-win named function");
     assert!(
-        out.contains("__bop_claim_binding(ctx, \"<root>\", \"pick\")"),
-        "root function claim missing:\n{out}"
+        out.contains("__bop_activate_function(ctx, 0);"),
+        "root function activation missing:\n{out}"
     );
     assert!(
         !out.contains("__bop_import_binding_value(ctx, \"<root>\", \"pick\""),
@@ -252,6 +252,7 @@ fn non_sandbox_named_functions_claim_first_win_before_flat_imports() {
         &[
             "__bop_has_binding(ctx, module_path, name)",
             "__bop_binding_value(ctx, \"<root>\", \"pick\")",
+            "ctx.active_function_sites",
         ],
     );
 }
@@ -364,10 +365,10 @@ fn fn_decl_emits_bop_prefixed_fn() {
     contains_all(
         &out,
         &[
-            "fn __bop_user_fn_n646f75626c65(ctx: &mut Ctx<'_>, __bop_param_0: ::bop::value::Value)",
+            "fn __bop_function_site_0(ctx: &mut Ctx<'_>, __bop_param_0: ::bop::value::Value)",
             "let mut __bop_user_value_78: ::bop::value::Value = __bop_param_0;",
             "Result<::bop::value::Value, ::bop::error::BopError>",
-            "__bop_user_fn_n646f75626c65(ctx,",
+            "__bop_guarded_function_site_0(ctx,",
         ],
     );
 }
@@ -604,7 +605,7 @@ print(yield(crate, super, ctx, bop_self), __t0, __l, __bop_user_value_5f5f7430)"
     contains_all(
         &out,
         &[
-            "fn __bop_user_fn_n7969656c64(",
+            "fn __bop_function_site_0(",
             "mut __bop_user_value_6372617465:",
             "mut __bop_user_value_7375706572:",
             "mut __bop_user_value_637478:",
@@ -639,8 +640,8 @@ fn module_paths_that_only_differ_by_dot_and_underscore_do_not_collide() {
             "fn __mod_615f62_load(",
             "struct BopModule612e62Exports {",
             "struct BopModule615f62Exports {",
-            "fn __bop_user_fn_m612e62_n68656c706572(",
-            "fn __bop_user_fn_m615f62_n68656c706572(",
+            "module_path: \"a.b\", name: \"helper\"",
+            "module_path: \"a_b\", name: \"helper\"",
         ],
     );
     assert!(!out.contains("fn __mod_a_b_load("));
@@ -944,15 +945,17 @@ fn sandbox_state_is_persistent_while_operation_context_is_ephemeral() {
     }
     let unsandboxed = compile("print(1)");
     assert!(!unsandboxed.contains("__BopState"));
-    assert!(!unsandboxed.contains("__BOP_FUNCTION_SITES"));
     contains_all(
         &unsandboxed,
         &[
             "pub struct Ctx<'h>",
             "pub struct AotClosure",
             "pub callable:",
+            "pub reached_function_sites: ::std::vec::Vec<bool>",
+            "const __BOP_FUNCTION_SITES: &[__BopFunctionSite]",
         ],
     );
+    assert!(!sandbox.contains("pub reached_function_sites"));
 }
 
 #[test]
@@ -1312,7 +1315,7 @@ fn build(t) { return t.Point { value: 42 } }"#,
     )
     .expect("transpile declaration alias shadowed by a parameter");
     let function = output
-        .split_once("fn __bop_user_fn_n6275696c64(")
+        .split_once("fn __bop_function_site_0(")
         .expect("lifted build function")
         .1;
     let parameter_binding = function
