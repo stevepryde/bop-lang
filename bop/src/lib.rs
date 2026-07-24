@@ -282,6 +282,19 @@ pub trait BopHost {
         let _ = message;
     }
 
+    /// Report a failure from the most recent [`Self::on_print`] call.
+    ///
+    /// `on_print` predates fallible host output, so changing its return type
+    /// would break every existing host implementation. Hosts that write to a
+    /// fallible destination can instead retain the error in `on_print` and
+    /// return it here. Engines call this hook immediately after `on_print`.
+    ///
+    /// The default keeps existing in-memory and infallible hosts unchanged.
+    fn print_error(&self, line: u32) -> Option<BopError> {
+        let _ = line;
+        None
+    }
+
     /// Hint text for "function not found" errors.
     fn function_hint(&self) -> &str {
         ""

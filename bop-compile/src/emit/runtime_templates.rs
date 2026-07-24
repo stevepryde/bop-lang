@@ -246,10 +246,6 @@ fn __bop_leave_aot_call(ctx: &mut Ctx<'_>) {
     ctx.call_depth = ctx.call_depth.saturating_sub(1);
 }
 
-fn __bop_host_print(ctx: &mut Ctx<'_>, message: &str) {
-    ctx.host.on_print(message);
-}
-
 fn __bop_host_call(
     ctx: &mut Ctx<'_>,
     name: &str,
@@ -265,7 +261,19 @@ fn __bop_host_function_hint(ctx: &mut Ctx<'_>) -> String {
 
 "#;
 
-pub(super) const RUNTIME_SHARED: &str = r#"#[derive(Clone, Copy)]
+pub(super) const RUNTIME_SHARED: &str = r#"fn __bop_host_print(
+    ctx: &mut Ctx<'_>,
+    message: &str,
+    line: u32,
+) -> Result<(), ::bop::error::BopError> {
+    ctx.host.on_print(message);
+    if let Some(error) = ctx.host.print_error(line) {
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
 struct __BopFunctionSite {
     id: usize,
     module_path: &'static str,
@@ -1775,7 +1783,11 @@ pub fn run<H: ::bop::BopHost>(host: &mut H) -> Result<(), ::bop::error::BopError
 
 pub(super) const MAIN_FN: &str = r#"fn main() {
     let mut host = ::bop_sys::StandardHost::new();
-    if let Err(err) = run(&mut host) {
+    let result = run(&mut host);
+    if host.is_broken_pipe() {
+        return;
+    }
+    if let Err(err) = result {
         eprintln!("{}", err);
         if let Some(hint) = &err.friendly_hint {
             eprintln!("hint: {}", hint);
@@ -2033,7 +2045,11 @@ pub fn run<H: ::bop::BopHost>(
 pub(super) const MAIN_FN_SANDBOX: &str = r#"fn main() {
     let mut host = ::bop_sys::StandardHost::new();
     let limits = ::bop::BopLimits::standard();
-    if let Err(err) = run(&mut host, &limits) {
+    let result = run(&mut host, &limits);
+    if host.is_broken_pipe() {
+        return;
+    }
+    if let Err(err) = result {
         eprintln!("{}", err);
         if let Some(hint) = &err.friendly_hint {
             eprintln!("hint: {}", hint);

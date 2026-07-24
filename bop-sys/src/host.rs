@@ -1,6 +1,13 @@
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use bop::{BopError, BopHost, Value};
+
+#[derive(Debug, Clone)]
+struct PrintFailure {
+    kind: io::ErrorKind,
+    message: String,
+}
 
 /// Standard host for running Bop programs in a normal OS process.
 #[derive(Debug, Clone, Default)]
@@ -8,6 +15,7 @@ pub struct StandardHost {
     /// Root directory used to resolve `use` paths. When `None`
     /// the current working directory at resolve time is used.
     module_root: Option<PathBuf>,
+    print_failure: Option<PrintFailure>,
 }
 
 /// Short name for the standard host.
@@ -60,6 +68,32 @@ impl StandardHost {
         self.module_root = Some(root.into());
         self
     }
+
+    /// Whether stdout's reader closed while this host was printing.
+    ///
+    /// Command-line entry points use this to distinguish normal pipeline
+    /// termination from other stdout failures after the runtime unwinds.
+    pub fn is_broken_pipe(&self) -> bool {
+        self.print_failure
+            .as_ref()
+            .is_some_and(|failure| failure.kind == io::ErrorKind::BrokenPipe)
+    }
+
+    fn write_stdout_line(message: &str) -> io::Result<()> {
+        let stdout = io::stdout();
+        let mut output = stdout.lock();
+        writeln!(output, "{message}")?;
+        output.flush()
+    }
+
+    fn record_print_failure(&mut self, error: io::Error) {
+        if self.print_failure.is_none() {
+            self.print_failure = Some(PrintFailure {
+                kind: error.kind(),
+                message: error.to_string(),
+            });
+        }
+    }
 }
 
 impl BopHost for StandardHost {
@@ -78,7 +112,23 @@ impl BopHost for StandardHost {
     }
 
     fn on_print(&mut self, message: &str) {
-        println!("{message}");
+        if self.print_failure.is_some() {
+            return;
+        }
+        if let Err(error) = Self::write_stdout_line(message) {
+            self.record_print_failure(error);
+        }
+    }
+
+    fn print_error(&self, line: u32) -> Option<BopError> {
+        self.print_failure.as_ref().map(|failure| {
+            let message = if failure.kind == io::ErrorKind::BrokenPipe {
+                "stdout pipe closed".to_string()
+            } else {
+                format!("failed to write to stdout: {}", failure.message)
+            };
+            BopError::fatal(message, line)
+        })
     }
 
     fn function_hint(&self) -> &str {
@@ -234,6 +284,33 @@ mod tests {
             Value::Number(n) => assert!(n > 0.0),
             other => panic!("expected number, got {}", other.type_name()),
         }
+    }
+
+    #[test]
+    fn standard_host_classifies_broken_pipe_as_a_fatal_print_error() {
+        let mut host = StandardHost::new();
+        host.record_print_failure(io::Error::new(io::ErrorKind::BrokenPipe, "reader closed"));
+
+        assert!(host.is_broken_pipe());
+        let error = host.print_error(7).expect("print failure");
+        assert_eq!(error.message, "stdout pipe closed");
+        assert_eq!(error.line, Some(7));
+        assert!(error.is_fatal);
+    }
+
+    #[test]
+    fn standard_host_surfaces_unrelated_stdout_failures() {
+        let mut host = StandardHost::new();
+        host.record_print_failure(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "write denied",
+        ));
+
+        assert!(!host.is_broken_pipe());
+        let error = host.print_error(11).expect("print failure");
+        assert_eq!(error.message, "failed to write to stdout: write denied",);
+        assert_eq!(error.line, Some(11));
+        assert!(error.is_fatal);
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {

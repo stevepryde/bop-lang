@@ -156,6 +156,49 @@ fn run_generated_source(test_name: &str, rust_src: String) -> AotRun {
     }
 }
 
+#[cfg(unix)]
+fn run_aot_with_closed_stdout(code: &str, test_name: &str, opts: &Options) -> AotRun {
+    use std::io::Write;
+
+    let rust_src = transpile(code, opts).expect("transpile");
+    let dir = write_scratch_project(test_name, &rust_src);
+    let build = Command::new("cargo")
+        .arg("build")
+        .arg("--quiet")
+        .arg("--release")
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("build generated program");
+    assert!(
+        build.status.success(),
+        "generated program failed to build:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let mut child = Command::new(dir.join("target/release/program"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn generated program");
+    drop(child.stdout.take().expect("generated stdout"));
+    let mut stdin = child.stdin.take().expect("generated stdin");
+    stdin.write_all(b"\n").expect("release generated program");
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .expect("wait for generated program");
+
+    AotRun {
+        status: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        rust_src,
+    }
+}
+
 fn run_aot_with_modules_and_opts(
     code: &str,
     test_name: &str,
@@ -1867,6 +1910,40 @@ fn e2e_hello_world() {
         return;
     }
     assert_aot_matches("hello_world", r#"print("hello, world")"#);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn e2e_generated_binary_handles_closed_stdout_without_panicking() {
+    if !cargo_available() {
+        eprintln!("cargo not available — skipping");
+        return;
+    }
+
+    for sandbox in [false, true] {
+        let mode = if sandbox { "sandbox" } else { "native" };
+        let run = run_aot_with_closed_stdout(
+            "readline()\nprint(\"reader closed\")",
+            &format!("broken_pipe_{mode}"),
+            &Options {
+                sandbox,
+                ..Options::default()
+            },
+        );
+        assert_eq!(
+            run.status,
+            Some(0),
+            "{mode} generated program did not terminate gracefully:\n{}",
+            run.stderr
+        );
+        assert_ne!(run.status, Some(101));
+        assert!(
+            !run.stderr.contains("panicked at") && !run.stderr.contains("stack backtrace"),
+            "{mode} generated program leaked a panic/backtrace:\n{}",
+            run.stderr
+        );
+    }
 }
 
 #[test]

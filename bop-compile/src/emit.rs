@@ -6773,15 +6773,9 @@ fn __bop_function_site_value(
         let mut body = match name {
             "print" => {
                 let args_expr = build_arg_array(&arg_names);
-                if self.opts.sandbox {
-                    format!(
-                        "__bop_host_print(ctx, &__bop_format_print(&{args_expr})); ::bop::value::Value::None"
-                    )
-                } else {
-                    format!(
-                        "ctx.host.on_print(&__bop_format_print(&{args_expr})); ::bop::value::Value::None"
-                    )
-                }
+                format!(
+                    "__bop_host_print(ctx, &__bop_format_print(&{args_expr}), {line})?; ::bop::value::Value::None"
+                )
             }
             "range" => format!(
                 "{{ let __bop_memory = ctx.memory.clone(); ::bop::builtins::builtin_range_in(&{}, {}, &mut ctx.rand_state, &__bop_memory)? }}",

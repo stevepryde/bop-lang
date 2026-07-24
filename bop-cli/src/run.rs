@@ -55,6 +55,10 @@ pub fn run_file(path: &str, no_vm: bool) -> ExitCode {
         bop_vm::run(&source, &mut host, &BopLimits::standard())
     };
 
+    if host.is_broken_pipe() {
+        return ExitCode::SUCCESS;
+    }
+
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

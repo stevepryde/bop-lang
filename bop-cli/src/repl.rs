@@ -388,6 +388,9 @@ pub fn run() -> ExitCode {
                     h.absorb_names(&line);
                 }
                 let outcome = step(&mut session, &mut host, &line);
+                if host.is_broken_pipe() {
+                    break;
+                }
                 let mut out = stdout.lock();
                 let mut err = stderr.lock();
                 render_outcome(&outcome, &line, &mut out, &mut err);
@@ -464,6 +467,9 @@ fn run_non_tty() -> ExitCode {
         // rendering, then clear for the next one.
         let submission = std::mem::take(&mut buffer);
         let outcome = step(&mut session, &mut host, &submission);
+        if host.is_broken_pipe() {
+            return ExitCode::SUCCESS;
+        }
         let mut out = stdout.lock();
         let mut err = stderr.lock();
         render_outcome(&outcome, &submission, &mut out, &mut err);
@@ -478,6 +484,9 @@ fn run_non_tty() -> ExitCode {
     // than silent truncation.
     if !buffer.trim().is_empty() {
         let outcome = step(&mut session, &mut host, &buffer);
+        if host.is_broken_pipe() {
+            return ExitCode::SUCCESS;
+        }
         let mut out = stdout.lock();
         let mut err = stderr.lock();
         render_outcome(&outcome, &buffer, &mut out, &mut err);

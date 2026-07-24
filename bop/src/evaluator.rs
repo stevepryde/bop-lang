@@ -3937,6 +3937,9 @@ impl<'h, H: BopHost + ?Sized> Evaluator<'h, H> {
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.host.on_print(&message);
+                if let Some(error) = self.host.print_error(line) {
+                    return Err(error);
+                }
                 return Ok(Value::None);
             }
             "try_call" => return self.builtin_try_call(args, line),
