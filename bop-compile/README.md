@@ -2,7 +2,12 @@
 
 Ahead-of-time [Bop](https://github.com/stevepryde/bop-lang) → Rust transpiler.
 
-Given Bop source, `bop-compile::transpile` produces a human-readable Rust source file that links against [`bop-lang`](https://crates.io/crates/bop-lang) and [`bop-sys`](https://crates.io/crates/bop-sys) and compiles via `cargo` to a native binary. The fastest of Bop's three engines.
+Given Bop source, `bop-compile::transpile` produces human-readable Rust source
+that links against [`bop-lang`](https://crates.io/crates/bop-lang) and compiles
+via `cargo` to native code. Standalone generated binaries also use
+[`bop-sys`](https://crates.io/crates/bop-sys); library-shaped output can use
+your own host without that dependency. This is the fastest of Bop's three
+engines.
 
 ## When to reach for the AOT
 

@@ -37,3 +37,17 @@ jobs:
             - run: cargo check -p bop-lang --target wasm32-unknown-unknown
             # Same no_std feature requirement on wasm.
             - run: cargo check -p bop-lang --target wasm32-unknown-unknown --no-default-features --features no_std
+
+    check-docs:
+        name: Check docs and LLM exports
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: zola@0.22.1
+            - run: bun install --frozen-lockfile
+            - run: bun run site:check

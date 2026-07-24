@@ -60,7 +60,9 @@ fn main() {
 | `unix_time()` | Seconds since the epoch |
 | `unix_time_ms()` | Milliseconds since the epoch |
 
-Call `StandardHost::new().with_module_root(<path>)` to enable filesystem module resolution: `use foo.bar.baz` maps to `<root>/foo/bar/baz.bop` with path-traversal guards.
+`StandardHost::new()` resolves filesystem modules from the current working
+directory. Call `.with_module_root(<path>)` to choose a different guarded root:
+`use foo.bar.baz` then maps to `<root>/foo/bar/baz.bop`.
 
 ## Three engines, same host
 
@@ -72,7 +74,10 @@ Bop ships three execution engines — all of them share the `BopHost` trait, `Bo
 | Bytecode VM | `bop_vm::run(src, host, limits)` | `bop_vm::BopInstance` | 2–3× faster than the walker on hot loops. Same program, no compilation to disk. |
 | AOT transpiler | `bop_compile::transpile(src, opts)` → `cargo build` | Generated `BopInstance` in sandbox mode | Bop → Rust source, compiled to a native binary. Maximum throughput, at the cost of a `cargo build` step. |
 
-All three obey the same `BopLimits` and surface errors as `BopError` — the engine choice is an implementation detail from the host's perspective.
+The walker and VM always obey `BopLimits`. Generated AOT code obeys the same
+limits only when `Options::sandbox` is enabled; default AOT output and
+`bop compile` are unsandboxed and must not run untrusted source. All three
+surface failures as `BopError` and use the same host boundary.
 
 Use the one-shot functions when a program should start from scratch on every
 run. For plugin-style programs whose globals, imports, callbacks, types, and
@@ -96,6 +101,11 @@ pub trait BopHost {
     /// Called by `print()`. Default: drops the message.
     fn on_print(&mut self, message: &str) { let _ = message; }
 
+    /// Report a failure retained by the most recent `on_print`.
+    /// Engines call this immediately after `on_print`.
+    fn print_error(&self, line: u32) -> Option<BopError>
+    { let _ = line; None }
+
     /// Appended to "function not found" errors as a
     /// friendly hint (e.g. "Available functions: ...").
     fn function_hint(&self) -> &str { "" }
@@ -115,7 +125,14 @@ pub trait BopHost {
 
 ### `call` — Custom functions
 
-The primary extension point. When Bop encounters a function call that isn't a built-in or user-defined fn, it asks the host. Return `None` if you don't handle the name — Bop then surfaces "function not found" with the optional `function_hint`. Return `Some(Ok(v))` on success or `Some(Err(e))` to raise a runtime error.
+The primary extension point. Lexical callable values dispatch directly. For a
+direct value-only function name, fallback resolution is built-in, host, then
+user-defined function, so a host can deliberately override that declaration.
+Ref-aware Bop functions also dispatch directly so their reference metadata is
+preserved. Return `None` when you do not handle a fallback name; Bop then tries
+the user-defined function and finally surfaces "function not found" with the
+optional `function_hint`. Return `Some(Ok(v))` on success or `Some(Err(e))` to
+raise a runtime error.
 
 ```rust
 use bop::{BopError, BopHost, Value};
@@ -131,7 +148,13 @@ impl BopHost for MyHost {
     ) -> Option<Result<Value, BopError>> {
         match name {
             "square" => match args {
-                [Value::Int(n)]    => Some(Ok(Value::Int(n * n))),
+                [Value::Int(n)] => Some(
+                    n.checked_mul(*n)
+                        .map(Value::Int)
+                        .ok_or_else(|| BopError::runtime(
+                            "square(n) overflowed", line
+                        ))
+                ),
                 [Value::Number(n)] => Some(Ok(Value::Number(n * n))),
                 _ => Some(Err(BopError::runtime(
                     "square(n) expects one number", line
@@ -203,7 +226,6 @@ let request = bop_value!({
     "scores": [10, 20, 30],
     "nickname": none,
 })?;
-# Ok::<(), bop::ValueConversionError>(())
 ```
 
 `Result<T, E>` maps to the engine's canonical built-in `Result::Ok(value)` or

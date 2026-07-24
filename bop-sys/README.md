@@ -9,7 +9,9 @@ If you're writing a command-line tool or a desktop / server app that runs Bop sc
 ### Import resolution
 
 - `use std.math` / `std.json` / `std.collections` / … → resolved via `bop-lang`'s bundled stdlib (the `bop-std` feature, forwarded by default)
-- `use my_module` / `my.nested.module` → resolved from the filesystem relative to the script
+- `use my_module` / `my.nested.module` → resolved from the filesystem beneath
+  the host's module root (the current working directory by default; the CLI
+  sets it to the script's parent)
 
 ### Host functions (available to Bop code as `fn_name(...)`)
 

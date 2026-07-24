@@ -16,15 +16,20 @@
   unifies it with `no_std`; genuine no_std builds use
   `--no-default-features --features no_std`.
 - **Workspace:** Cargo workspace containing `bop`, `bop-vm`, `bop-compile`,
-  `bop-sys`, and `bop-cli`; manifests and `Cargo.lock` own exact versions.
+  `bop-sys`, and `bop-cli`, plus the non-published
+  `bop-rust-embedding-examples` integration fixture; manifests and
+  `Cargo.lock` own exact versions.
 - **Testing:** Cargo unit/integration tests plus VM differential and AOT
   three-way suites. `cargo clippy --workspace --all-targets` is the code-health
   target, and the explicit Rust 1.88 command above is the release MSRV gate.
 - **AOT runtime mode:** `bop-compile` supports opt-in sandbox emission, while
   `bop-cli compile` currently emits unsandboxed binaries.
 - **Website and documentation:** Zola templates, Tailwind CSS v4, and Markdown
-  content live under `docs/`; generated `docs/public/` output is derived rather
-  than normative and is published through Cloudflare Pages.
+  content live under `docs/`. The root `llms.txt` is the canonical LLM index;
+  `scripts/llm-docs.ts` derives clean per-page Markdown and `llms-full.txt`
+  from the curated navigation and documentation sources. Generated
+  `docs/static/docs/`, LLM site artifacts, and `docs/public/` output are
+  derived rather than normative and are published through Cloudflare Pages.
 
 ## Constraints
 

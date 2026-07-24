@@ -6,6 +6,9 @@
 /docs/public
 /docs/static/fonts
 /docs/static/site.css
+/docs/static/docs
+/docs/static/llms.txt
+/docs/static/llms-full.txt
 .claude/
 *.swp
 *.swo
